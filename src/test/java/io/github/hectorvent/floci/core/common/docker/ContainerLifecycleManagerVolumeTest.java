@@ -166,27 +166,6 @@ class ContainerLifecycleManagerVolumeTest {
     }
 
     @Test
-    void bestEffortContainerCleanupReportsAFailedRemoval() {
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
-        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
-        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
-
-        assertFalse(manager.stopAndRemove("container-id", null));
-    }
-
-    @Test
-    void bestEffortContainerCleanupReportsAConfirmedRemoval() {
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
-        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
-
-        assertTrue(manager.stopAndRemove("container-id", null));
-    }
-
-    @Test
     void strictContainerCleanupPropagatesRemovalFailure() {
         StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
         RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);

@@ -138,7 +138,7 @@ class BatchDockerRunnerTest {
         when(dockerClient.inspectContainerCmd("container-id").exec().getState().getExitCodeLong()).thenReturn(137L);
         doAnswer(invocation -> {
             stopped.set(true);
-            return true;
+            return null;
         }).when(lifecycleManager).stopAndRemove(eq("container-id"), isNull());
 
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);

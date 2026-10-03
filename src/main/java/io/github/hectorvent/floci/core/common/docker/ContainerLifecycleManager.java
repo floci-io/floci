@@ -370,8 +370,8 @@ public class ContainerLifecycleManager {
      * @param containerId the container ID to stop and remove
      * @param logStream optional log stream to close (may be null)
      */
-    public boolean stopAndRemove(String containerId, Closeable logStream) {
-        return stopAndRemove(containerId, logStream, 5);
+    public void stopAndRemove(String containerId, Closeable logStream) {
+        stopAndRemove(containerId, logStream, 5);
     }
 
     /**
@@ -381,9 +381,8 @@ public class ContainerLifecycleManager {
      * @param logStream optional log stream to close (may be null)
      * @param stopTimeoutSeconds seconds to wait for the container to stop cleanly after
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
-     * @return whether Docker confirmed the container is gone (removed, or already missing)
      */
-    public boolean stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
+    public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
         LOG.infov("Stopping container {0}", containerId);
 
         boolean stoppedOrMissing = false;
@@ -414,7 +413,6 @@ public class ContainerLifecycleManager {
         if (logStream != null && (stoppedOrMissing || removedOrMissing)) {
             closeLogStreamAfterContainerStop(logStream);
         }
-        return removedOrMissing;
     }
 
     /**
