@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -82,7 +83,7 @@ public class ResourceArnBuilder {
             case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "kms"            -> List.of(buildKmsArn(path, region, accountId));
-            case "iam"            -> List.of(buildIamArn(ctx, region, accountId));
+            case "iam"            -> buildIamArns(ctx, region, accountId);
             default               -> List.of("*");
         };
     }
@@ -104,34 +105,72 @@ public class ResourceArnBuilder {
      *
      * <p>The path is taken from the stored certificate when one exists: a policy names the full
      * ARN, path included, and only the store knows the path.
+     *
+     * <p>A rename names two resources rather than one; see {@link #renameTargetArn}.
      */
-    private String buildIamArn(ContainerRequestContext ctx, String region, String accountId) {
+    private List<String> buildIamArns(ContainerRequestContext ctx, String region,
+                                      String accountId) {
         String action = AwsQueryServiceResolver.action(
                 RequestBodyReader.formField(ctx, "Action"),
                 RequestBodyReader.formField(ctx, "Operation"));
         if (action == null || !SERVER_CERTIFICATE_ACTIONS.contains(action)) {
-            return "*";
+            return List.of("*");
         }
         String name = RequestBodyReader.formField(ctx, "ServerCertificateName");
         if (name == null || name.isBlank()) {
-            return "*";
+            return List.of("*");
         }
-        // Every operation but the upload acts on a certificate that already exists, so the check
-        // uses that certificate's own stored ARN instead of deriving one again. The stored ARN
-        // carries the path and, more to the point, the partition the certificate was created in:
-        // a resource stays in its partition, so re-minting from the caller's signing region would
-        // name an ARN that no resource has and leave a deny on the real one unmatched.
-        if (!"UploadServerCertificate".equals(action)) {
-            return storedServerCertificateArn(name);
+        if ("UploadServerCertificate".equals(action)) {
+            // An upload names a certificate that does not exist yet, so its ARN is minted from
+            // the request: the path it asks for, in the partition it is being created in. Reading
+            // a stored path here would authorize an upload to /team/ against the root path.
+            // IAM is global, so the ARN carries no region. Minted in the request's partition
+            // rather than through a blank-region Arn.of, which would silently mean the
+            // commercial one.
+            String path = normalizeArnPath(RequestBodyReader.formField(ctx, "Path"));
+            return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam",
+                    accountId, "server-certificate" + path + name).toString());
         }
-        // An upload names a certificate that does not exist yet, so its ARN is minted from the
-        // request: the path it asks for, in the partition it is being created in. Reading a stored
-        // path here would authorize an upload to /team/ against the root path.
-        String path = normalizeArnPath(RequestBodyReader.formField(ctx, "Path"));
-        // IAM is global, so the ARN carries no region. Minted in the request's partition rather
-        // than through a blank-region Arn.of, which would silently mean the commercial one.
-        return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
-                "server-certificate" + path + name).toString();
+        // Every other operation acts on a certificate that already exists, so the check uses that
+        // certificate's own stored ARN instead of deriving one again. The stored ARN carries the
+        // path and, more to the point, the partition the certificate was created in: a resource
+        // stays in its partition, so re-minting from the caller's signing region would name an
+        // ARN that no resource has and leave a deny on the real one unmatched.
+        Optional<ServerCertificate> stored = storedServerCertificate(name);
+        if (stored.isEmpty()) {
+            return List.of("*");
+        }
+        String storedArn = stored.get().getArn();
+        if (!"UpdateServerCertificate".equals(action)) {
+            return List.of(storedArn);
+        }
+        String target = renameTargetArn(ctx, stored.get(), name, region, accountId);
+        return storedArn.equals(target) ? List.of(storedArn) : List.of(storedArn, target);
+    }
+
+    /**
+     * The ARN a rename or a move would produce. AWS requires the principal to be allowed on both
+     * the old and the new name, so that a rename into a name they cannot write fails: naming both
+     * resources is what enforces it, because the filter authorizes a request once per resource.
+     *
+     * <p>Built beside the stored ARN so it keeps the certificate's partition and account. Only
+     * the path and the name change, and taking the partition from the caller's signing region
+     * instead would name a resource in a partition the certificate does not live in. Returns the
+     * stored ARN unchanged when the request renames and moves nothing.
+     */
+    private String renameTargetArn(ContainerRequestContext ctx, ServerCertificate stored,
+                                   String name, String region, String accountId) {
+        String newName = RequestBodyReader.formField(ctx, "NewServerCertificateName");
+        String newPath = RequestBodyReader.formField(ctx, "NewPath");
+        String targetName = newName == null || newName.isBlank() ? name : newName;
+        String targetPath = newPath == null || newPath.isBlank()
+                ? normalizeArnPath(stored.getPath())
+                : normalizeArnPath(newPath);
+        String partition = AwsArnUtils.partitionOrDefault(stored.getArn(),
+                AwsRegions.partitionFor(region));
+        String account = AwsArnUtils.accountOrDefault(stored.getArn(), accountId);
+        return AwsArnUtils.Arn.global(partition, "iam", account,
+                "server-certificate" + targetPath + targetName).toString();
     }
 
     /** A request's Path as it appears in an ARN: slash-delimited, defaulting to a bare slash. */
@@ -144,18 +183,18 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The certificate's own ARN as stored, or {@code *} when this account has no certificate of
-     * that name: the operation fails as NoSuchEntity either way, and minting an ARN for a resource
-     * that is not there would only offer a policy something to match.
+     * The stored certificate of that name in this account, carrying its own ARN. Empty when the
+     * account has none, or when the stored record has no ARN to read: the operation fails as
+     * NoSuchEntity either way, and minting an ARN for a resource that is not there would only
+     * offer a policy something to match.
      */
-    private String storedServerCertificateArn(String name) {
+    private Optional<ServerCertificate> storedServerCertificate(String name) {
         if (iamService == null) {
-            return "*";
+            return Optional.empty();
         }
         return iamService.get().findServerCertificate(name)
-                .map(ServerCertificate::getArn)
-                .filter(arn -> !arn.isBlank())
-                .orElse("*");
+                .filter(certificate -> certificate.getArn() != null
+                        && !certificate.getArn().isBlank());
     }
 
     // ── S3 ──────────────────────────────────────────────────────────────────────

@@ -25,8 +25,19 @@ public final class MultipartFormParser {
     /** One named field's value, or the one file part carrying a {@code filename} parameter. */
     public record FilePart(String fieldName, String filename, String contentType, byte[] content) {}
 
-    /** {@code fields} excludes the file part; {@code file} is empty when the body carried none. */
-    public record ParsedForm(Map<String, String> fields, Optional<FilePart> file) {}
+    /**
+     * {@code fields} excludes the file part. {@code fileOrNull} is the raw, possibly-absent
+     * backing value; {@link #file()} is the public accessor and is never {@code null} itself.
+     * The component can't be named {@code file} and still have an {@code Optional}-returning
+     * accessor of that name: a record's generated accessor must return exactly the component's
+     * declared type, so an {@code Optional<FilePart>} component would make {@code file()} itself
+     * return {@code Optional<FilePart>} directly, which is the field AGENTS.md forbids.
+     */
+    public record ParsedForm(Map<String, String> fields, FilePart fileOrNull) {
+        public Optional<FilePart> file() {
+            return Optional.ofNullable(fileOrNull);
+        }
+    }
 
     /** The {@code boundary} parameter of a {@code multipart/form-data} Content-Type, if present. */
     public static Optional<String> extractBoundary(String contentType) {
@@ -85,7 +96,7 @@ public final class MultipartFormParser {
                 fields.put(fieldName, new String(partBody, StandardCharsets.UTF_8));
             }
         }
-        return new ParsedForm(fields, Optional.ofNullable(file));
+        return new ParsedForm(fields, file);
     }
 
     private static List<byte[]> splitParts(byte[] body, byte[] boundary) {
