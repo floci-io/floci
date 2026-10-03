@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -309,5 +310,78 @@ class PartitionProjectionTest {
                 "SELECT * FROM audit_events WHERE tenant >= 'abc'", List.of(injectedTenantTable())));
         assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
                 "SELECT * FROM audit_events WHERE tenant = other_tenant", List.of(injectedTenantTable())));
+    }
+
+    @Test
+    void commaSeparatedSourceAfterJoinConditionIsChecked() {
+        Table orders = table("orders", Map.of(), List.of());
+        Table payments = table("payments", Map.of(), List.of());
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM orders o JOIN payments p ON o.id = p.id, audit_events a WHERE o.id = 1",
+                List.of(injectedTenantTable(), orders, payments)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM orders o JOIN payments p ON o.id = p.id, audit_events a WHERE a.tenant = 'abc'",
+                List.of(injectedTenantTable(), orders, payments)));
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM orders o JOIN payments p USING (id), audit_events a WHERE o.id = 1",
+                List.of(injectedTenantTable(), orders, payments)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM orders o JOIN payments p USING (id), audit_events a WHERE a.tenant = 'abc'",
+                List.of(injectedTenantTable(), orders, payments)));
+    }
+
+    @Test
+    void nestedQueryDeclaringSameColumnDoesNotCreateAmbiguityInOuterFilter() {
+        Table other = table("other_table", Map.of(), List.of());
+        other.getStorageDescriptor().setColumns(List.of(column("tenant")));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = 'abc' AND id IN (SELECT id FROM other_table WHERE foo = 1)",
+                List.of(injectedTenantTable(), other)));
+    }
+
+    @Test
+    void quotedAliasIsPreservedAndMatched() {
+        Table orders = table("orders", Map.of(), List.of());
+        orders.getStorageDescriptor().setColumns(List.of(column("tenant")));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events AS \"order\" JOIN orders o ON \"order\".id = o.id "
+                        + "WHERE \"order\".tenant = 'abc'",
+                List.of(injectedTenantTable(), orders)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events \"order\" JOIN orders o ON \"order\".id = o.id "
+                        + "WHERE \"order\".tenant = 'abc'",
+                List.of(injectedTenantTable(), orders)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events AS `order` JOIN orders o ON `order`.id = o.id "
+                        + "WHERE `order`.tenant = 'abc'",
+                List.of(injectedTenantTable(), orders)));
+    }
+
+    @Test
+    void arbitraryParenthesesDepthAroundConstantIsAccepted() {
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = ((('abc')))", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = (((('abc'))))", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE ((('abc'))) = tenant", List.of(injectedTenantTable())));
+    }
+
+    @Test
+    void inListBoundaryEnforcesOneThousandItemLimit() {
+        List<String> thousandItems = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            thousandItems.add("'val" + i + "'");
+        }
+        String validInListQuery = "SELECT * FROM audit_events WHERE tenant IN ("
+                + String.join(", ", thousandItems) + ")";
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                validInListQuery, List.of(injectedTenantTable())));
+
+        thousandItems.add("'val1000'");
+        String exceededInListQuery = "SELECT * FROM audit_events WHERE tenant IN ("
+                + String.join(", ", thousandItems) + ")";
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                exceededInListQuery, List.of(injectedTenantTable())));
     }
 }

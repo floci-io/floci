@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Table;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -42,6 +43,15 @@ public final class PartitionProjection {
     private static final Pattern CLAUSE_AFTER_WHERE = Pattern.compile(
             KEYWORD_BOUNDS.formatted(
                     "(?:GROUP|HAVING|ORDER|WINDOW|LIMIT|OFFSET|FETCH|UNION|INTERSECT|EXCEPT)"),
+            Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern CLAUSE_KEYWORD = Pattern.compile(
+            KEYWORD_BOUNDS.formatted(
+                    "(?:SELECT|FROM|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|JOIN|ON|USING|WINDOW|QUALIFY|FETCH)"),
+            Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern CONSTANT = Pattern.compile(
+            "^(?:'(?:''|[^'])*'|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?|TRUE|FALSE)$",
             Pattern.CASE_INSENSITIVE);
 
     private static final Set<String> TABLE_ALIAS_KEYWORDS = Set.of("where", "join", "inner", "left", "right",
@@ -130,7 +140,7 @@ public final class PartitionProjection {
         }
         // Literals and comments are not code: a column name inside either constrains nothing.
         String code = maskLiteralsAndComments(query);
-        List<String> whereClauses = null;
+        List<WhereScope> scopes = null;
         for (Table table : tables) {
             if (!enabled(table) || table.getName() == null || table.getPartitionKeys() == null) {
                 continue;
@@ -148,17 +158,15 @@ public final class PartitionProjection {
                 if (!"injected".equalsIgnoreCase(type)) {
                     continue;
                 }
-                if (whereClauses == null) {
-                    whereClauses = whereClauses(code);
+                if (scopes == null) {
+                    scopes = whereScopes(code);
                 }
-                // an unqualified column is unambiguous only when exactly one source in the query declares it
-                long declaringSources = tables.stream()
-                        .filter(other -> other != null && other.getName() != null && declaresColumn(other, key.getName()))
-                        .mapToLong(other -> tableAliases(code, other.getName()).size()).sum();
-                boolean unqualifiedAllowed = declaringSources == 1;
-                List<String> clauses = whereClauses;
-                if (aliases.stream().allMatch(alias -> clauses.stream()
-                        .anyMatch(clause -> hasStaticEquality(clause, alias, key.getName(), unqualifiedAllowed)))) {
+                List<WhereScope> currentScopes = scopes;
+                boolean allFiltered = !aliases.isEmpty() && aliases.stream().allMatch(alias ->
+                        currentScopes.stream().anyMatch(scope ->
+                                isAliasFiltered(scope, table, alias, key.getName(), tables))
+                );
+                if (allFiltered) {
                     continue;
                 }
                 throw new AwsException("InvalidRequestException",
@@ -169,24 +177,40 @@ public final class PartitionProjection {
         }
     }
 
+    private static boolean isAliasFiltered(WhereScope scope, Table table, String alias, String column,
+                                           List<Table> tables) {
+        if (hasStaticEquality(scope.whereClause(), alias, column, false)) {
+            return true;
+        }
+        if (tableAliases(scope.fromClause(), table.getName()).contains(alias)) {
+            long declaringSources = tables.stream()
+                    .filter(other -> other != null && other.getName() != null && declaresColumn(other, column))
+                    .mapToLong(other -> tableAliases(scope.fromClause(), other.getName()).size())
+                    .sum();
+            if (declaringSources == 1 && hasStaticEquality(scope.whereClause(), alias, column, true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private record WhereScope(String fromClause, String whereClause) {
+    }
+
     /**
-     * The text of every {@code WHERE} clause in {@code code}, a subquery's included.
-     *
-     * <p>A clause runs from the keyword to whatever ends it: a following clause keyword, the
-     * {@code )} closing the subquery that holds it, a statement terminator, or the end of the
-     * query. Parentheses opened inside the clause are part of it, so a predicate with its own
-     * subquery is not cut short.
+     * Extracts every {@code WHERE} clause in {@code code} together with its preceding {@code FROM} clause.
      */
-    private static List<String> whereClauses(String code) {
+    private static List<WhereScope> whereScopes(String code) {
         Set<Integer> clauseStarts = new HashSet<>();
         Matcher boundaries = CLAUSE_AFTER_WHERE.matcher(code);
         while (boundaries.find()) {
             clauseStarts.add(boundaries.start());
         }
 
-        List<String> clauses = new ArrayList<>();
+        List<WhereScope> scopes = new ArrayList<>();
         Matcher where = WHERE_KEYWORD.matcher(code);
         while (where.find()) {
+            int whereStart = where.start();
             int start = where.end();
             int depth = 0;
             int i = start;
@@ -204,9 +228,40 @@ public final class PartitionProjection {
                 }
                 i++;
             }
-            clauses.add(code.substring(start, i));
+            String whereClause = code.substring(start, i);
+            String fromClause = findPrecedingFromClause(code, whereStart);
+            scopes.add(new WhereScope(fromClause, whereClause));
         }
-        return clauses;
+        return scopes;
+    }
+
+    private static String findPrecedingFromClause(String code, int whereStart) {
+        int depth = 0;
+        for (int i = whereStart - 1; i >= 0; i--) {
+            char c = code.charAt(i);
+            if (c == ')') {
+                depth++;
+            } else if (c == '(') {
+                if (depth == 0) {
+                    break;
+                }
+                depth--;
+            } else if (depth == 0) {
+                if (c == ';') {
+                    break;
+                }
+                if (code.regionMatches(true, i, "FROM", 0, 4) && isWordBoundary(code, i, 4)) {
+                    return code.substring(i, whereStart);
+                }
+                if ((code.regionMatches(true, i, "SELECT", 0, 6) && isWordBoundary(code, i, 6))
+                        || (code.regionMatches(true, i, "UNION", 0, 5) && isWordBoundary(code, i, 5))
+                        || (code.regionMatches(true, i, "INTERSECT", 0, 9) && isWordBoundary(code, i, 9))
+                        || (code.regionMatches(true, i, "EXCEPT", 0, 6) && isWordBoundary(code, i, 6))) {
+                    break;
+                }
+            }
+        }
+        return "";
     }
 
     /**
@@ -276,40 +331,85 @@ public final class PartitionProjection {
     private static List<String> tableAliases(String code, String tableName) {
         String identifier = identifierPattern(tableName);
         String qualifiedName = "(?:" + IDENTIFIER + "\\s*\\.\\s*)*" + identifier + "(?![A-Za-z0-9_$])";
-        String aliasPart = "(?:\\s+(?:AS\\s+)?(" + IDENTIFIER + "))?";
+        String aliasPart = "(?:\\s+(?:(AS)\\s+)?(" + IDENTIFIER + "))?";
         Pattern keywordSource = Pattern.compile("(?i)" + KEYWORD_BOUNDS.formatted("(?:FROM|JOIN)") + "\\s+"
                 + qualifiedName + aliasPart);
         Pattern commaSource = Pattern.compile("(?i),\\s*" + qualifiedName + aliasPart);
         List<String> aliases = new ArrayList<>();
         Matcher matcher = keywordSource.matcher(code);
         while (matcher.find()) {
-            aliases.add(sourceName(matcher.group(1), tableName));
+            boolean hasAs = matcher.group(1) != null;
+            aliases.add(sourceName(matcher.group(2), hasAs, tableName));
         }
         matcher = commaSource.matcher(code);
         while (matcher.find()) {
             if (inFromList(code, matcher.start())) {
-                aliases.add(sourceName(matcher.group(1), tableName));
+                boolean hasAs = matcher.group(1) != null;
+                aliases.add(sourceName(matcher.group(2), hasAs, tableName));
             }
         }
         return aliases;
     }
 
-    private static String sourceName(String alias, String tableName) {
-        boolean noAlias = alias == null
-                || TABLE_ALIAS_KEYWORDS.contains(unquoteIdentifier(alias).toLowerCase(Locale.ROOT));
-        return unquoteIdentifier(noAlias ? tableName : alias).toLowerCase(Locale.ROOT);
+    private static String sourceName(String alias, boolean hasAs, String tableName) {
+        if (alias == null) {
+            return unquoteIdentifier(tableName).toLowerCase(Locale.ROOT);
+        }
+        boolean quoted = isQuoted(alias);
+        if (quoted || hasAs) {
+            return unquoteIdentifier(alias).toLowerCase(Locale.ROOT);
+        }
+        if (TABLE_ALIAS_KEYWORDS.contains(alias.toLowerCase(Locale.ROOT))) {
+            return unquoteIdentifier(tableName).toLowerCase(Locale.ROOT);
+        }
+        return unquoteIdentifier(alias).toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean isQuoted(String identifier) {
+        return identifier != null && identifier.length() >= 2
+                && ((identifier.startsWith("\"") && identifier.endsWith("\""))
+                || (identifier.startsWith("`") && identifier.endsWith("`")));
     }
 
     /** True when the nearest clause keyword before {@code position} is {@code FROM} or {@code JOIN}. */
     private static boolean inFromList(String code, int position) {
-        Matcher keyword = Pattern.compile("(?i)" + KEYWORD_BOUNDS.formatted(
-                "(?:SELECT|FROM|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|JOIN|ON|USING|WINDOW"
-                        + "|QUALIFY|FETCH)")).matcher(code.substring(0, position));
-        String last = null;
-        while (keyword.find()) {
-            last = keyword.group().trim().toUpperCase(Locale.ROOT);
+        int depth = 0;
+        Map<Integer, String> clauseAtDepth = new HashMap<>();
+        Matcher kwMatcher = CLAUSE_KEYWORD.matcher(code);
+        int cursor = 0;
+        while (kwMatcher.find() && kwMatcher.start() < position) {
+            for (int i = cursor; i < kwMatcher.start(); i++) {
+                char c = code.charAt(i);
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')' && depth > 0) {
+                    clauseAtDepth.remove(depth);
+                    depth--;
+                } else if (c == ';' && depth == 0) {
+                    clauseAtDepth.clear();
+                }
+            }
+            cursor = kwMatcher.start();
+            String kw = kwMatcher.group().toUpperCase(Locale.ROOT);
+            if ("FROM".equals(kw) || "JOIN".equals(kw) || "ON".equals(kw) || "USING".equals(kw)) {
+                clauseAtDepth.put(depth, "FROM");
+            } else {
+                clauseAtDepth.put(depth, kw);
+            }
+            cursor = kwMatcher.end();
         }
-        return "FROM".equals(last) || "JOIN".equals(last);
+        for (int i = cursor; i < position; i++) {
+            char c = code.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')' && depth > 0) {
+                clauseAtDepth.remove(depth);
+                depth--;
+            } else if (c == ';' && depth == 0) {
+                clauseAtDepth.clear();
+            }
+        }
+        return "FROM".equals(clauseAtDepth.get(depth));
     }
 
     private static final String IDENTIFIER = "(?:[A-Za-z_][A-Za-z0-9_$]*|\"(?:\"\"|[^\"])+\"|`[^`]+`)";
@@ -336,17 +436,125 @@ public final class PartitionProjection {
         String qualified = identifierPattern(alias) + "\\s*\\.\\s*" + identifierPattern(column);
         String left = allowUnqualified ? "(?:" + qualified + "|" + identifierPattern(column) + ")" : qualified;
         String constant = "(?:'(?:''|[^'])*'|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?|TRUE|FALSE)";
-        // a constant may be wrapped in balanced parentheses, two deep at most: tenant = (('abc'))
-        String wrapped = "\\(\\s*" + constant + "\\s*\\)";
-        String literal = "(?:\\(\\s*(?:" + wrapped + "|" + constant + ")\\s*\\)|" + wrapped + "|" + constant + ")";
-        // Athena accepts an IN list of literals for an injected column, up to 1,000 values
-        String literalList = "\\(\\s*" + literal + "(?:\\s*,\\s*" + literal + ")*\\s*\\)";
-        // A constant that an operator continues is a computed value: tenant = 'abc' || suffix
         String notContinued = "(?!\\s*(?:\\|\\||::|[-+*/%]))";
-        Pattern equality = Pattern.compile("(?i)(?<![A-Za-z0-9_$])(?:" + left + "\\s*(?<![<>=!])=(?!=)\\s*"
-                + literal + notContinued + "|" + literal + "\\s*(?<![<>=!])=(?!=)\\s*" + left
-                + "|" + left + "\\s+IN\\s*" + literalList + ")(?![A-Za-z0-9_$])");
-        return equality.matcher(clause).find();
+        String parenLiteral = "(?:\\(\\s*)*" + constant + "(?:\\s*\\))*" + notContinued;
+
+        // 1. left = literal or literal = left
+        Pattern eqPattern = Pattern.compile("(?i)(?<![A-Za-z0-9_$])(?:"
+                + left + "\\s*(?<![<>=!])=(?!=)\\s*(" + parenLiteral + ")"
+                + "|(" + parenLiteral + ")\\s*(?<![<>=!])=(?!=)\\s*" + left
+                + ")(?![A-Za-z0-9_$])");
+        Matcher eqMatcher = eqPattern.matcher(clause);
+        while (eqMatcher.find()) {
+            String expr = eqMatcher.group(1) != null ? eqMatcher.group(1) : eqMatcher.group(2);
+            if (isStaticLiteral(expr)) {
+                return true;
+            }
+        }
+
+        // 2. left IN (...)
+        Pattern inPattern = Pattern.compile("(?i)(?<!NOT\\s+)(?<![A-Za-z0-9_$])" + left + "\\s+IN\\s*\\(");
+        Matcher inMatcher = inPattern.matcher(clause);
+        while (inMatcher.find()) {
+            String before = clause.substring(0, inMatcher.start()).trim();
+            if (before.toUpperCase(Locale.ROOT).endsWith("NOT")) {
+                continue;
+            }
+            int parenStart = inMatcher.end() - 1;
+            int depth = 1;
+            int k = parenStart + 1;
+            while (k < clause.length() && depth > 0) {
+                char c = clause.charAt(k);
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')') {
+                    depth--;
+                }
+                k++;
+            }
+            if (depth == 0) {
+                int parenEnd = k - 1;
+                String listContent = clause.substring(parenStart + 1, parenEnd);
+                List<String> items = splitList(listContent);
+                if (!items.isEmpty() && items.size() <= 1000
+                        && items.stream().allMatch(PartitionProjection::isStaticLiteral)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isStaticLiteral(String expr) {
+        if (expr == null) {
+            return false;
+        }
+        String trimmed = expr.trim();
+        while (trimmed.startsWith("(") && trimmed.endsWith(")")) {
+            int depth = 0;
+            boolean matching = false;
+            for (int i = 0; i < trimmed.length(); i++) {
+                char c = trimmed.charAt(i);
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')') {
+                    depth--;
+                    if (depth == 0) {
+                        matching = (i == trimmed.length() - 1);
+                        break;
+                    }
+                }
+            }
+            if (!matching) {
+                break;
+            }
+            trimmed = trimmed.substring(1, trimmed.length() - 1).trim();
+        }
+        return CONSTANT.matcher(trimmed).matches();
+    }
+
+    private static List<String> splitList(String content) {
+        List<String> items = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < content.length(); i++) {
+            char c = content.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                if (depth > 0) {
+                    depth--;
+                }
+            } else if (c == ',' && depth == 0) {
+                String item = content.substring(start, i).trim();
+                if (!item.isEmpty()) {
+                    items.add(item);
+                }
+                start = i + 1;
+            }
+        }
+        String last = content.substring(start).trim();
+        if (!last.isEmpty()) {
+            items.add(last);
+        }
+        return items;
+    }
+
+    private static boolean isWordBoundary(String text, int start, int length) {
+        if (start > 0) {
+            char before = text.charAt(start - 1);
+            if (Character.isLetterOrDigit(before) || before == '_' || before == '$' || before == '"' || before == '`') {
+                return false;
+            }
+        }
+        int end = start + length;
+        if (end < text.length()) {
+            char after = text.charAt(end);
+            if (Character.isLetterOrDigit(after) || after == '_' || after == '$' || after == '"' || after == '`') {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String stripTrailingSlash(String value) {
