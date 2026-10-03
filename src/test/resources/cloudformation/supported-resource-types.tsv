@@ -84,6 +84,7 @@ AWS::ElasticLoadBalancingV2::Listener	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::ListenerRule	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::LoadBalancer	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::TargetGroup	ElbV2CfnProvisioner
+AWS::Events::Archive	EventsArchiveCfnProvisioner
 AWS::Events::EventBus	EventsCfnProvisioner
 AWS::Events::EventBusPolicy	EventsCfnProvisioner
 AWS::Events::Rule	EventsCfnProvisioner

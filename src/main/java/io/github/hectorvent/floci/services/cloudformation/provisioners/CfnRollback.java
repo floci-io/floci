@@ -79,6 +79,14 @@ public final class CfnRollback {
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
     /**
+     * Holds the description, event pattern and retention an EventBridge archive carried before an
+     * in-place update changed them, so a failed stack update can put them back. Written by
+     * {@code EventsArchiveCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String ARCHIVE_UPDATE_SNAPSHOT_ATTR = "__FlociArchiveUpdateSnapshot";
+
+    /**
      * Holds the name, description and endpoint configuration a REST API had before an in-place
      * update patched them, and whether the update also re-applied an OpenAPI document, so a failed
      * stack update can put them back. Written by {@code ApiGatewayRestApiCfnProvisioner} before its
