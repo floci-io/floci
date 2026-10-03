@@ -976,7 +976,7 @@ public class CodePipelineService {
         CodePipelineExecution execution = requireExecution(
                 account, region, pipelineName, text(request, "pipelineExecutionId"));
         if (!Objects.equals(execution.getPipelineVersion(), pipeline.getVersion())) {
-            throw new AwsException("StageNotRetryableException",
+            throw new AwsException("ConditionNotOverridableException",
                     "The pipeline structure changed after this execution started", 400);
         }
         // A run that failed on this very condition resumes from the overridden stage, skipping the

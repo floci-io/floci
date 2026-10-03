@@ -361,7 +361,7 @@ class CodePipelineV2ConditionsTest {
                 mapper.createObjectNode().put("pipelineName", "versioned")
                         .put("pipelineExecutionId", executionId).put("stageName", "Deploy")
                         .put("conditionType", "ON_SUCCESS"), REGION, ACCOUNT));
-        assertEquals("StageNotRetryableException", thrown.getErrorCode());
+        assertEquals("ConditionNotOverridableException", thrown.getErrorCode());
     }
 
     @Test
