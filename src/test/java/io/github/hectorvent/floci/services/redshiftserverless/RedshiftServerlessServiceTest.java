@@ -580,6 +580,18 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void aFailedPersistAfterTheRuntimeStartedStopsTheRuntimeAndReleasesTheEndpoint() {
+        create("persist-ns");
+        doThrow(new IllegalStateException("disk full")).when(workgroupStore)
+                .put(eq(REGION + "::persist-wg"), any(Workgroup.class));
+
+        assertThrows(IllegalStateException.class, () -> createWorkgroup("persist-wg", "persist-ns"));
+
+        verify(runtime).stop(ACCOUNT_ID, REGION, "persist-wg");
+        verify(endpoints).release(any(Endpoint.class));
+    }
+
+    @Test
     void deleteWorkgroupStopsTheRuntimeFirstAndKeepsTheWorkgroupWhenThatFails() {
         create("stop-ns");
         createWorkgroup("stop-wg", "stop-ns");
