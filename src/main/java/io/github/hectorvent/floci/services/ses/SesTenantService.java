@@ -419,9 +419,13 @@ public class SesTenantService {
                 ref.arn(), tenant.tenantName(), region);
     }
 
-    public PaginatedResult<TenantResourceAssociation> listTenantResources(Tenant tenant, String typeFilter,
+    // Probe-confirmed order: the tenant is resolved first and the filter is checked next, so a bad page
+    // on a missing tenant is the 404; the page size and token come last.
+    public PaginatedResult<TenantResourceAssociation> listTenantResources(String tenantName, String typeFilter,
                                                                           String region, SesListPaging paging,
                                                                           Integer pageSize, String nextToken) {
+        Tenant tenant = tenantForAssociation(tenantName, region);
+        validateResourceTypeFilter(typeFilter);
         return paging.page(region, tenant.tenantId() + "/" + Objects.toString(typeFilter, ""),
                 listTenantResources(tenant, typeFilter, region), TenantResourceAssociation::resourceArn,
                 pageSize, nextToken);

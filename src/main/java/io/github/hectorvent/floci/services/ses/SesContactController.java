@@ -34,12 +34,15 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.structureMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.typedStringMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.unexpectedStartError;
 
 /**
@@ -237,9 +240,6 @@ public class SesContactController {
     @Path("/contact-lists/{contactListName}/contacts/list")
     public Response listContacts(@Context HttpHeaders headers,
                                  @PathParam("contactListName") String contactListName, String body) {
-        // AWS uses POST .../contacts/list with Filter/PageSize/NextToken in the body; Floci pages
-        // the contacts (filtering not yet implemented) and rejects a malformed or non-object body
-        // like the other v2 endpoints.
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode request = (body == null || body.isBlank())
@@ -249,7 +249,7 @@ public class SesContactController {
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = stringMemberOrAbsent(request, "NextToken");
             SesContactService.ContactPage listed = contactService.listContacts(contactListName, region,
-                    SesListPaging.V2_LIST_CONTACTS, pageSize, nextToken);
+                    SesListPaging.V2_LIST_CONTACTS, pageSize, nextToken, parseContactFilter(request));
             ObjectNode result = objectMapper.createObjectNode();
             ArrayNode arr = result.putArray("Contacts");
             for (Contact c : listed.contacts().items()) {
@@ -262,6 +262,21 @@ public class SesContactController {
         } catch (JsonProcessingException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
+    }
+
+    private static SesContactService.ContactFilter parseContactFilter(JsonNode request) {
+        JsonNode filterNode = structureMemberOrAbsent(request, "Filter");
+        if (filterNode.isMissingNode() || filterNode.isNull()) {
+            return null;
+        }
+        JsonNode topicNode = structureMemberOrAbsent(filterNode, "TopicFilter");
+        SesContactService.TopicFilter topicFilter = null;
+        if (!topicNode.isMissingNode() && !topicNode.isNull()) {
+            topicFilter = new SesContactService.TopicFilter(typedStringMemberOrAbsent(topicNode, "TopicName"),
+                    coerceBooleanOrFalse(topicNode.path("UseDefaultIfPreferenceUnavailable")));
+        }
+        return new SesContactService.ContactFilter(typedStringMemberOrAbsent(filterNode, "FilteredStatus"),
+                topicFilter);
     }
 
     @GET

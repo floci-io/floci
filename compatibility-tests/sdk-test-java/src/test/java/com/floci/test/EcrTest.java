@@ -115,6 +115,29 @@ class EcrTest {
 
     @Test
     @Order(7)
+    @DisplayName("PutImageScanningConfiguration supports enabling and disabling scan on push")
+    void imageScanningConfigurationCanBeEnabledAndDisabled() {
+        PutImageScanningConfigurationResponse enabled = ecr.putImageScanningConfiguration(builder -> builder
+                .repositoryName(REPO_NAME)
+                .imageScanningConfiguration(ImageScanningConfiguration.builder().scanOnPush(true).build()));
+        assertThat(enabled.imageScanningConfiguration().scanOnPush()).isTrue();
+
+        BatchGetRepositoryScanningConfigurationResponse enabledReadback =
+                ecr.batchGetRepositoryScanningConfiguration(builder -> builder.repositoryNames(REPO_NAME));
+        assertThat(enabledReadback.scanningConfigurations().get(0).scanOnPush()).isTrue();
+
+        PutImageScanningConfigurationResponse disabled = ecr.putImageScanningConfiguration(builder -> builder
+                .repositoryName(REPO_NAME)
+                .imageScanningConfiguration(ImageScanningConfiguration.builder().scanOnPush(false).build()));
+        assertThat(disabled.imageScanningConfiguration().scanOnPush()).isFalse();
+
+        BatchGetRepositoryScanningConfigurationResponse disabledReadback =
+                ecr.batchGetRepositoryScanningConfiguration(builder -> builder.repositoryNames(REPO_NAME));
+        assertThat(disabledReadback.scanningConfigurations().get(0).scanOnPush()).isFalse();
+    }
+
+    @Test
+    @Order(8)
     @DisplayName("PutLifecyclePolicy round-trips the policy text")
     void lifecyclePolicyRoundTrip() {
         String policy = "{\"rules\":[{\"rulePriority\":1,\"selection\":{\"tagStatus\":\"untagged\",\"countType\":\"imageCountMoreThan\",\"countNumber\":5},\"action\":{\"type\":\"expire\"}}]}";
@@ -124,7 +147,7 @@ class EcrTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     @DisplayName("SetRepositoryPolicy round-trips the policy text")
     void repositoryPolicyRoundTrip() {
         String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"AllowAll\",\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"ecr:*\"}]}";
@@ -134,7 +157,7 @@ class EcrTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     @DisplayName("DeleteRepository force=true removes the repository")
     void deleteRepositoryForce() {
         ecr.deleteRepository(b -> b.repositoryName(REPO_NAME).force(true));
@@ -144,7 +167,7 @@ class EcrTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     @DisplayName("DescribeRepositories on a missing name returns RepositoryNotFoundException")
     void describeMissing() {
         assertThatThrownBy(() -> ecr.describeRepositories(
@@ -153,7 +176,7 @@ class EcrTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     @DisplayName("Pull through cache rules round-trip through the AWS SDK")
     void pullThroughCacheRuleLifecycle() {
         String firstPrefix = "sdk-docker-hub";

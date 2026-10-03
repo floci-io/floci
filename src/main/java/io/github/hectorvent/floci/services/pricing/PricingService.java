@@ -42,6 +42,8 @@ public class PricingService {
     private static final String ATTRIBUTE_VALUES_DIR = "attribute-values";
     private static final String PRODUCTS_DIR = "products";
     private static final String PRICE_LISTS_DIR = "price-lists";
+    /** The products snapshot Floci bundles; a request without a region code reads it. */
+    private static final String SNAPSHOT_REGION = "us-east-1"; // partition-literal: names the bundled snapshot file
 
     private final ObjectMapper objectMapper;
     private final SnapshotLoader loader;
@@ -295,7 +297,7 @@ public class PricingService {
     }
 
     private List<JsonNode> loadProducts(String serviceCode, String region) {
-        String resolvedRegion = (region == null || region.isEmpty()) ? "us-east-1" : region; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+        String resolvedRegion = (region == null || region.isEmpty()) ? SNAPSHOT_REGION : region;
         requireSafePathSegment(resolvedRegion, "regionCode");
         String resource = PRODUCTS_DIR + "/" + serviceCode + "/" + resolvedRegion + ".json";
         JsonNode node;

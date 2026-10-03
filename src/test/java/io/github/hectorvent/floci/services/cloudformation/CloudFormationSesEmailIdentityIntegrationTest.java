@@ -8,11 +8,13 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.ses.SesIdentityService;
 import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -29,11 +31,14 @@ import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -55,6 +60,9 @@ class CloudFormationSesEmailIdentityIntegrationTest {
 
     @InjectSpy
     SesIdentityService identityService;
+
+    @Inject
+    MutableClock clock;
 
     @BeforeAll
     static void configureContentTypes() {
@@ -133,11 +141,77 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         assertEquals(200, identity.statusCode(), identity.asString());
         assertEquals("EMAIL_ADDRESS", identity.jsonPath().getString("IdentityType"));
         assertEquals(List.of(), identity.jsonPath().getList("DkimAttributes.Tokens", String.class));
+        assertEquals(null, identity.jsonPath().getString("DkimAttributes.SigningHostedZone"));
 
         cfn("DeleteStack", null).then().statusCode(200);
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
                 assertEquals(404, sesIdentity(address).statusCode()));
         stack = null;
+    }
+
+    @Test
+    void domainSigningHostedZoneDrivesGetAttInheritanceRotationAndDnsDetection() throws Exception {
+        String domain = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String signingZone = "dkim.identity-specific.floci.test";
+        String email = "user@" + domain;
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        createStackWithSigningHostedZone(domain, signingZone);
+        List<String> originalTokens = sesIdentity(domain).jsonPath().getList("DkimAttributes.Tokens", String.class);
+        cfn("UpdateStack", template(domain, true)).then().statusCode(200);
+        String updated = awaitStatus("UPDATE_COMPLETE");
+        Response identity = sesIdentity(domain);
+        assertEquals(signingZone, identity.jsonPath().getString("DkimAttributes.SigningHostedZone"));
+        List<String> tokens = identity.jsonPath().getList("DkimAttributes.Tokens", String.class);
+        assertNotEquals(originalTokens, tokens);
+        Map<String, String> outputs = XmlParser.extractPairs(updated, "Outputs", "OutputKey", "OutputValue");
+        StringBuilder changes = new StringBuilder();
+        for (int index = 1; index <= 3; index++) {
+            String token = tokens.get(index - 1);
+            assertEquals(token + "._domainkey." + domain, outputs.get("DkimName" + index));
+            assertEquals(token + "." + signingZone, outputs.get("DkimValue" + index));
+            changes.append("<Change><Action>CREATE</Action><ResourceRecordSet><Name>")
+                    .append(outputs.get("DkimName" + index)).append("</Name><Type>CNAME</Type><TTL>60</TTL>")
+                    .append("<ResourceRecords><ResourceRecord><Value>").append(outputs.get("DkimValue" + index))
+                    .append("</Value></ResourceRecord></ResourceRecords></ResourceRecordSet></Change>");
+        }
+        String zoneId = null;
+        boolean recordsCreated = false;
+        try {
+            given().header("Authorization", SES_AUTH).contentType("application/json")
+                    .body(MAPPER.writeValueAsString(Map.of("EmailIdentity", email)))
+                    .post("/v2/email/identities").then().statusCode(200)
+                    .body("DkimAttributes.SigningHostedZone", is(signingZone));
+            String zone = given().contentType("application/xml").body("""
+                    <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                    <Name>%s</Name><CallerReference>%s</CallerReference></CreateHostedZoneRequest>
+                    """.formatted(domain, stack)).post("/2013-04-01/hostedzone")
+                    .then().statusCode(201).extract().asString();
+            zoneId = XmlParser.extractFirst(zone, "Id", null);
+            String recordPath = "/2013-04-01" + zoneId + "/rrset";
+            given().contentType("application/xml").body(dnsChanges(changes.toString()))
+                    .post(recordPath).then().statusCode(200);
+            recordsCreated = true;
+            String published = given().get(recordPath).then().statusCode(200).extract().asString();
+            for (int index = 1; index <= 3; index++) {
+                assertTrue(XmlParser.containsValue(published, "Name", outputs.get("DkimName" + index) + "."));
+                assertTrue(XmlParser.containsValue(published, "Value", outputs.get("DkimValue" + index)));
+            }
+            clock.advance(Duration.ofSeconds(5));
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertEquals("SUCCESS", sesIdentity(domain).jsonPath().getString("DkimAttributes.Status")));
+            assertEquals(signingZone, sesIdentity(email).jsonPath().getString("DkimAttributes.SigningHostedZone"));
+        } finally {
+            if (zoneId != null) {
+                if (recordsCreated) {
+                    given().contentType("application/xml")
+                            .body(dnsChanges(changes.toString().replace("<Action>CREATE</Action>", "<Action>DELETE</Action>")))
+                            .post("/2013-04-01" + zoneId + "/rrset").then().statusCode(200);
+                }
+                given().delete("/2013-04-01" + zoneId).then().statusCode(200);
+            }
+            given().header("Authorization", SES_AUTH).delete("/v2/email/identities/{identity}", email)
+                    .then().statusCode(anyOf(is(200), is(404)));
+        }
     }
 
     @ParameterizedTest
@@ -374,8 +448,8 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     void failedLaterResourceRestoresIdentitySettingsAndTags() throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
-        cfn("CreateStack", template(identityName, false)).then().statusCode(200);
-        awaitStatus("CREATE_COMPLETE");
+        String signingZone = "dkim.rollback.floci.test";
+        createStackWithSigningHostedZone(identityName, signingZone);
         List<String> originalTokens = sesIdentity(identityName).jsonPath()
                 .getList("DkimAttributes.Tokens", String.class);
 
@@ -393,10 +467,11 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         assertEquals(true, identity.jsonPath().getBoolean("DkimAttributes.SigningEnabled"));
         assertEquals("RSA_2048_BIT", identity.jsonPath().getString("DkimAttributes.NextSigningKeyLength"));
         assertEquals(originalTokens, identity.jsonPath().getList("DkimAttributes.Tokens", String.class));
+        assertEquals(signingZone, identity.jsonPath().getString("DkimAttributes.SigningHostedZone"));
         assertEquals(null, identity.jsonPath().getString("MailFromAttributes.MailFromDomain"));
         assertEquals("old", identity.jsonPath().getString("Tags.find { it.Key == 'purpose' }.Value"));
         String restored = cfn("DescribeStacks", null).then().statusCode(200).extract().asString();
-        assertEquals(originalTokens.getFirst() + ".dkim.amazonses.com",
+        assertEquals(originalTokens.getFirst() + "." + signingZone,
                 XmlParser.extractPairs(restored, "Outputs", "OutputKey", "OutputValue").get("DkimValue1"));
     }
 
@@ -818,6 +893,27 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         if (members) {
             assertEquals("", identity.jsonPath().getString("Tags.find { it.Key == 'stable' }.Value"));
         }
+    }
+
+    private void createStackWithSigningHostedZone(String identityName, String signingZone) throws Exception {
+        doAnswer(call -> {
+            Identity created = (Identity) call.callRealMethod();
+            created.setDkimSigningHostedZone(signingZone);
+            identityService.save(created, "us-east-1");
+            return created;
+        }).when(sesService).createEmailIdentity(eq(identityName), any(), any(), eq("us-east-1"));
+        try {
+            cfn("CreateStack", template(identityName, false)).then().statusCode(200);
+            awaitStatus("CREATE_COMPLETE");
+        } finally {
+            doCallRealMethod().when(sesService).createEmailIdentity(eq(identityName), any(), any(), eq("us-east-1"));
+        }
+    }
+
+    private String dnsChanges(String changes) {
+        return "<ChangeResourceRecordSetsRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\">"
+                + "<ChangeBatch><Changes>" + changes
+                + "</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>";
     }
 
     private String template(String identity, boolean updated) throws Exception {

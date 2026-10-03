@@ -125,7 +125,7 @@ public class MwaaEnvironmentManager {
                 .withExposedPort(POSTGRES_PORT)
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "mwaa", name, environmentAccount(environment), environmentRegion(environment)))
+                        "mwaa", name, environmentAccount(environment), regionOf(environment)))
                 .build();
 
         String dbContainerId = lifecycleManager.create(dbSpec);
@@ -162,7 +162,7 @@ public class MwaaEnvironmentManager {
         // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
         // Lambda/ECS containers already do via LaunchedContainerAwsEnv — otherwise a real DAG's
         // boto3.client("s3") etc. would target real AWS instead of this emulator.
-        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(environmentRegion(environment), Optional.empty()));
+        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(regionOf(environment), Optional.empty()));
         env.addAll(List.of(
                 "AIRFLOW__CORE__EXECUTOR=LocalExecutor",
                 "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=" + sqlAlchemyConn,
@@ -189,7 +189,7 @@ public class MwaaEnvironmentManager {
                 .withDockerNetwork(config.services().mwaa().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "mwaa", name, environmentAccount(environment), environmentRegion(environment)));
+                        "mwaa", name, environmentAccount(environment), regionOf(environment)));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(AIRFLOW_WEBSERVER_PORT);
@@ -486,16 +486,18 @@ public class MwaaEnvironmentManager {
      *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
      *  that as "no namespace configured" and applies only the {@code floci-aws-} prefix. */
     static String dbContainerName(EmulatorConfig config, Environment environment) {
-        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(environment) + "-db");
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(config, environment) + "-db");
     }
 
     static String airflowContainerName(EmulatorConfig config, Environment environment) {
         return ContainerStorageHelper.dockerName(config,
-                "mwaa-" + environmentIdentity(environment) + "-airflow");
+                "mwaa-" + environmentIdentity(config, environment) + "-airflow");
     }
 
-    private static String environmentIdentity(Environment environment) {
-        return environmentAccount(environment) + "." + environmentRegion(environment) + "." + environment.getName();
+    private static String environmentIdentity(EmulatorConfig config, Environment environment) {
+        String defaultRegion = config != null ? config.defaultRegion() : null;
+        return environmentAccount(environment) + "." + environmentRegion(environment, defaultRegion) + "."
+                + environment.getName();
     }
 
     static String environmentAccount(Environment environment) {
@@ -504,8 +506,13 @@ public class MwaaEnvironmentManager {
                 : AwsArnUtils.accountOrDefault(environment.getArn(), "000000000000");
     }
 
-    static String environmentRegion(Environment environment) {
-        return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+    private String regionOf(Environment environment) {
+        return environmentRegion(environment, config.defaultRegion());
+    }
+
+    /** The region the environment's ARN names; {@code defaultRegion} answers for one without an ARN. */
+    static String environmentRegion(Environment environment, String defaultRegion) {
+        return AwsArnUtils.regionOrDefault(environment.getArn(), defaultRegion);
     }
 
     /**

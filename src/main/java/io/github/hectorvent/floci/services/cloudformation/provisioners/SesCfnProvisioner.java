@@ -329,7 +329,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         for (int index = 0; index < 3; index++) {
             String token = index < tokens.size() ? tokens.get(index) : null;
             names[index] = token == null ? "" : token + "._domainkey." + identity.getIdentity();
-            values[index] = token == null ? "" : token + ".dkim.amazonses.com"; // partition-literal: SES DKIM target
+            values[index] = token == null ? "" : token + "." + identity.getDkimSigningHostedZone();
         }
         resource.getAttributes().put("DkimDNSTokenName1", names[0]);
         resource.getAttributes().put("DkimDNSTokenName2", names[1]);
@@ -356,7 +356,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
                 Set.of("DomainSigningSelector", "DomainSigningPrivateKey", "NextSigningKeyLength"), ctx);
         if (optionalText(signing, "DomainSigningSelector", ctx) != null
                 || optionalText(signing, "DomainSigningPrivateKey", ctx) != null) {
-            throw invalid("BYODKIM is not supported by Floci's SES implementation.");
+            throw invalid("BYODKIM is not supported by this CloudFormation resource.");
         }
         String keyLength = optionalText(signing, "NextSigningKeyLength", ctx);
         if (keyLength != null && !Set.of("RSA_1024_BIT", DEFAULT_KEY_LENGTH).contains(keyLength)) {

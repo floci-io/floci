@@ -50,6 +50,7 @@ public class PipesPoller implements Resettable {
     private final PipesFilterMatcher filterMatcher;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
+    private final String defaultRegion;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> kinesisIterators = new ConcurrentHashMap<>();
@@ -80,6 +81,7 @@ public class PipesPoller implements Resettable {
         this.filterMatcher = filterMatcher;
         this.objectMapper = objectMapper;
         this.baseUrl = config.effectiveBaseUrl();
+        this.defaultRegion = config.defaultRegion();
     }
 
     @PreDestroy
@@ -906,8 +908,9 @@ public class PipesPoller implements Resettable {
         return pipe.getArn() + "@" + pipe.getCreationTime();
     }
 
-    private static String extractRegionFromArn(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+    /** The region a source ARN names; a source with none, such as a self-managed Kafka URI, polls in the default. */
+    String extractRegionFromArn(String arn) {
+        return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 
     private static String extractResourceName(String arn) {

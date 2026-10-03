@@ -31,7 +31,7 @@ import java.util.TreeSet;
  * rather than splitting one off, both stores move together into this service and the helper becomes
  * a private detail of it. The send path keeps its cross-domain orchestration
  * ({@code getEffectiveSuppressedReasons} reads a configuration set's options or falls back here;
- * {@code collectSuppressedReasons}/{@code resolveSuppressionReason} filter a send) in the
+ * {@code collectSuppressedReasons} filters a send) in the
  * {@link SesService} facade, which reads entries back through {@link #findSuppressedDestination}.
  */
 @ApplicationScoped
@@ -136,9 +136,9 @@ public class SesSuppressionService {
     }
 
     /**
-     * Reads a suppression entry without throwing, so the facade's send-path filters
-     * ({@code collectSuppressedReasons} / {@code resolveSuppressionReason}) can look one up by raw
-     * address and share this service's normalization and legacy-key fallback.
+     * Reads a suppression entry without throwing, so the facade's send-path filter
+     * ({@code collectSuppressedReasons}) can look one up by raw address and share this service's
+     * normalization and legacy-key fallback.
      */
     public Optional<SuppressedDestination> findSuppressedDestination(String region, String rawEmail) {
         if (rawEmail == null || rawEmail.isBlank()) {

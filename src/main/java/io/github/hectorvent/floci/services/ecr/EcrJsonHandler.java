@@ -50,6 +50,7 @@ public class EcrJsonHandler {
             case "ValidatePullThroughCacheRule" -> handleValidatePullThroughCacheRule(request, region);
             case "DeletePullThroughCacheRule" -> handleDeletePullThroughCacheRule(request, region);
             case "DescribeRepositories" -> handleDescribeRepositories(request, region);
+            case "PutImageScanningConfiguration" -> handlePutImageScanningConfiguration(request, region);
             case "BatchGetRepositoryScanningConfiguration" ->
                     handleBatchGetRepositoryScanningConfiguration(request, region);
             case "DeleteRepository" -> handleDeleteRepository(request, region);
@@ -223,6 +224,35 @@ public class EcrJsonHandler {
         }
         response.set("scanningConfigurations", configs);
         response.set("failures", objectMapper.createArrayNode());
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutImageScanningConfiguration(JsonNode request, String region) {
+        JsonNode scanningConfiguration = request.path("imageScanningConfiguration");
+        if (!scanningConfiguration.isObject()) {
+            throw new AwsException("InvalidParameterException",
+                    "imageScanningConfiguration is required", 400);
+        }
+
+        String repositoryName = request.path("repositoryName").asText(null);
+        String registryId = request.path("registryId").asText(null);
+        JsonNode scanOnPushNode = scanningConfiguration.path("scanOnPush");
+        if (!scanOnPushNode.isMissingNode()
+                && !scanOnPushNode.isNull()
+                && !scanOnPushNode.isBoolean()) {
+            throw new AwsException("InvalidParameterException",
+                    "scanOnPush must be a boolean", 400);
+        }
+        boolean scanOnPush = scanOnPushNode.asBoolean(false);
+        Repository updated = service.putImageScanningConfiguration(
+                repositoryName, registryId, scanOnPush, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", updated.getRegistryId());
+        response.put("repositoryName", updated.getRepositoryName());
+        ObjectNode imageScanningConfiguration = objectMapper.createObjectNode();
+        imageScanningConfiguration.put("scanOnPush", updated.isScanOnPush());
+        response.set("imageScanningConfiguration", imageScanningConfiguration);
         return Response.ok(response).build();
     }
 

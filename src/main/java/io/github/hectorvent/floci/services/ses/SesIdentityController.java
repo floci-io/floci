@@ -490,6 +490,10 @@ public class SesIdentityController {
                 tokens.add(token);
             }
         }
+        if ("Domain".equals(src.getIdentityType()) && "AWS_SES".equals(src.getDkimSigningAttributesOrigin())
+                && !tokens.isEmpty()) {
+            dkim.put("SigningHostedZone", src.getDkimSigningHostedZone());
+        }
         dkim.put("SigningAttributesOrigin", src.getDkimSigningAttributesOrigin());
         dkim.put("NextSigningKeyLength", src.getDkimNextSigningKeyLength());
         dkim.put("CurrentSigningKeyLength", src.getDkimCurrentSigningKeyLength());
