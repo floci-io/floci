@@ -166,6 +166,39 @@ class ContainerLifecycleManagerVolumeTest {
     }
 
     @Test
+    void strictContainerCleanupStopsContainerBeforeClosingItsLogStream() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        List<String> operations = new ArrayList<>();
+        doAnswer(invocation -> {
+            operations.add("stop");
+            return null;
+        }).when(stop).exec();
+        doAnswer(invocation -> {
+            operations.add("remove");
+            return null;
+        }).when(remove).exec();
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+
+        manager.stopAndRemoveStrict("container-id", () -> operations.add("logs"));
+
+        assertEquals(List.of("stop", "remove", "logs"), operations);
+    }
+
+    @Test
+    void strictContainerCleanupClosesTheLogStreamOfAnAlreadyMissingContainer() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new NotFoundException("gone"));
+        List<String> operations = new ArrayList<>();
+
+        manager.stopAndRemoveStrict("container-id", () -> operations.add("logs"));
+
+        assertEquals(List.of("logs"), operations);
+    }
+
+    @Test
     void strictContainerCleanupPropagatesRemovalFailure() {
         StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
         RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);

@@ -436,15 +436,17 @@ public class ContainerLifecycleManager {
      */
     public void stopAndRemoveStrict(String containerId, Closeable logStream) {
         LOG.infov("Stopping container {0}", containerId);
-
-        if (logStream != null) {
-            try {
-                logStream.close();
-            } catch (Exception e) {
-                LOG.debugv("Error closing log stream: {0}", e.getMessage());
+        try {
+            stopAndRemoveStrictOrThrow(containerId);
+        } finally {
+            // Closed after the stop, as in stopAndRemove, so the follower can drain the final tail.
+            if (logStream != null) {
+                closeLogStreamAfterContainerStop(logStream);
             }
         }
+    }
 
+    private void stopAndRemoveStrictOrThrow(String containerId) {
         Exception stopFailure = null;
         try {
             dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
