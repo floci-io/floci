@@ -24,6 +24,7 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String STACK = "cfn-sqs-queue-properties";
     private static final String NO_VALUE_STACK = "cfn-sqs-queue-no-value";
+    private static final String SSE_STACK = "cfn-sqs-queue-sse";
 
     @Test
     void declaredPropertiesReachTheQueueAndDroppedOnesReturnToTheirDefaults() {
@@ -116,6 +117,55 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
         assertFalse(queueAttributes(queueUrl).containsKey("RedriveAllowPolicy"));
 
         cloudFormation(NO_VALUE_STACK, "DeleteStack", null);
+    }
+
+    /**
+     * Replays the AWS-recorded parity case behind the SqsManagedSseEnabled exception (LocalStack
+     * {@code test_update_fifo_queue_remove_all_properties_except_queuename}): an in-place update
+     * that drops {@code SqsManagedSseEnabled: false} and the KMS key resets the other properties,
+     * clears the key, and leaves SSE-SQS reported as false.
+     */
+    @Test
+    void droppingSqsManagedSseEnabledKeepsTheStoredValueAsAwsDoes() {
+        String declared = """
+                {
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {
+                        "QueueName": "cfn-sqs-sse-%s",
+                        "DelaySeconds": 13,
+                        "SqsManagedSseEnabled": false,
+                        "KmsMasterKeyId": "alias/aws/sqs"
+                      }
+                    }
+                  },
+                  "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
+                }
+                """;
+        String nameOnly = """
+                {
+                  "Resources": {
+                    "Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cfn-sqs-sse-%s"}}
+                  },
+                  "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
+                }
+                """;
+        String suffix = Long.toString(System.nanoTime(), 36);
+        cloudFormation(SSE_STACK, "CreateStack", declared.formatted(suffix));
+        String queueUrl = XmlParser.extractPairs(describeStacks(SSE_STACK, "CREATE_COMPLETE"), "Outputs",
+                "OutputKey", "OutputValue").get("QueueUrl");
+        assertEquals("false", queueAttributes(queueUrl).get("SqsManagedSseEnabled"));
+
+        cloudFormation(SSE_STACK, "UpdateStack", nameOnly.formatted(suffix));
+        describeStacks(SSE_STACK, "UPDATE_COMPLETE");
+
+        Map<String, String> updated = queueAttributes(queueUrl);
+        assertEquals("0", updated.get("DelaySeconds"));
+        assertFalse(updated.containsKey("KmsMasterKeyId"), "the dropped KMS key is cleared");
+        assertEquals("false", updated.get("SqsManagedSseEnabled"), "AWS keeps the stored value");
+
+        cloudFormation(SSE_STACK, "DeleteStack", null);
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {
