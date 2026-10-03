@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -15,6 +16,8 @@ import io.github.hectorvent.floci.services.lambda.launcher.ImageResolver;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaRuntimeLauncher;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
+import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -22,6 +25,7 @@ import jakarta.enterprise.inject.Typed;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -145,35 +149,35 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                     + "kubernetes executor; pods receive placeholder credentials instead");
         }
 
-        var namespace = namespace();
+        String namespace = namespace();
         sweepOrphansOnce(namespace);
         LOG.infov("Launching pod for function: {0}", fn.getFunctionName());
 
-        var runtimeApiServer = runtimeApiServerFactory.create();
+        RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
 
         // Mirrors ContainerLauncher: any failure after the runtime-api server is allocated
         // must release its port and delete a half-created pod, or cold-start bursts leak
         // ports until the pool is exhausted.
         String podName = null;
         try {
-            var imagePackage = "Image".equals(fn.getPackageType()) && fn.getImageUri() != null;
+            boolean imagePackage = "Image".equals(fn.getPackageType()) && fn.getImageUri() != null;
             // No emulated-ECR rewrite here: the kubelet pulls images, and Floci's loopback
             // registry is not reachable from cluster nodes. URIs pass through unchanged.
-            var image = imagePackage ? fn.getImageUri() : imageResolver.resolve(fn.getRuntime());
+            String image = imagePackage ? fn.getImageUri() : imageResolver.resolve(fn.getRuntime());
 
-            var shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+            String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
             podName = LambdaPodSpecFactory.podName(fn.getFunctionName(), shortId);
-            var region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), config.defaultRegion());
+            String region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), config.defaultRegion());
             String accountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
-            var cwLogGroup = "/aws/lambda/" + fn.getFunctionName();
-            var cwLogStream = logStreamer.logStreamName(shortId);
+            String cwLogGroup = "/aws/lambda/" + fn.getFunctionName();
+            String cwLogStream = logStreamer.logStreamName(shortId);
 
-            var codeDownloadUrl = imagePackage ? null : codeDownloadUrl(fn, region);
-            var layerUrls = imagePackage ? List.<String>of() : layerDownloadUrls(fn, region);
+            String codeDownloadUrl = imagePackage ? null : codeDownloadUrl(fn, region);
+            List<String> layerUrls = imagePackage ? List.of() : layerDownloadUrls(fn, region);
 
-            var caConfigMap = ContainerCaBundle.hostPath(config).map(bundle -> ensureCaConfigMap(namespace, bundle));
+            Optional<String> caConfigMap = ContainerCaBundle.hostPath(config).map(bundle -> ensureCaConfigMap(namespace, bundle));
 
-            var env = new ArrayList<String>();
+            ArrayList<String> env = new ArrayList<>();
             env.add("AWS_LAMBDA_RUNTIME_API=" + addressResolver.resolve() + ":" + runtimeApiServer.getPort());
             env.add("AWS_LAMBDA_FUNCTION_NAME=" + fn.getFunctionName());
             env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + fn.getMemorySize());
@@ -200,14 +204,14 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                 });
             }
 
-            var imageConfig = imagePackage
+            LambdaPodSpecFactory.ImageConfig imageConfig = imagePackage
                     ? new LambdaPodSpecFactory.ImageConfig(fn.getImageConfigEntryPoint(),
                             fn.getImageConfigCommand(), fn.getImageConfigWorkingDirectory())
                     : null;
 
             // After the function's own variables, so a value it sets wins, as in the docker launcher.
-            var podEnv = caConfigMap.isPresent() ? ContainerCaBundle.appendEnv(env) : env;
-            var pod = podSpecFactory.buildPod(podName, fn.getFunctionName(), image, podEnv,
+            List<String> podEnv = caConfigMap.isPresent() ? ContainerCaBundle.appendEnv(env) : env;
+            ObjectNode pod = podSpecFactory.buildPod(podName, fn.getFunctionName(), image, podEnv,
                     codeDownloadUrl, layerUrls, isProvidedRuntime(fn.getRuntime()),
                     imagePackage ? null : fn.getHandler(), imageConfig, fn.getMemorySize(), caConfigMap);
 
@@ -217,13 +221,13 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
 
             awaitRunning(namespace, podName, fn.getFunctionName());
 
-            var handle = new ContainerHandle(podName, fn.getFunctionName(),
+            ContainerHandle handle = new ContainerHandle(podName, fn.getFunctionName(),
                     runtimeApiServer, ContainerState.WARM, false);
             // Log streaming is non-essential and runs after the pod is already Running,
             // so a failure here (e.g. a missing pods/log RBAC verb) must not tear down a
             // healthy execution environment.
             try {
-                var logHandle = logStreamer.attachForAccount(accountId, namespace, podName,
+                Closeable logHandle = logStreamer.attachForAccount(accountId, namespace, podName,
                         cwLogGroup, cwLogStream, region, "lambda:" + fn.getFunctionName());
                 handle.setLogStream(logHandle);
             } catch (Exception logFailure) {
@@ -304,7 +308,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     @Override
     public boolean isAlive(ContainerHandle handle) {
         try {
-            var pod = client.getPod(namespace(), handle.getContainerId()).orElse(null);
+            JsonNode pod = client.getPod(namespace(), handle.getContainerId()).orElse(null);
             return pod != null
                     && "Running".equals(pod.path("status").path("phase").asText(null))
                     && isAbsent(pod.path("metadata").path("deletionTimestamp"));
@@ -343,13 +347,13 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                 return;
             }
             try {
-                var orphans = client.listPods(namespace, LambdaPodSpecFactory.managedPodSelector()).stream()
+                List<JsonNode> orphans = client.listPods(namespace, LambdaPodSpecFactory.managedPodSelector()).stream()
                         .filter(pod -> !ownPodNames.contains(pod.path("metadata").path("name").asText()))
                         .toList();
                 if (!orphans.isEmpty()) {
                     LOG.infov("Deleting {0} orphaned Lambda pod(s) from a previous run in namespace {1}",
                             orphans.size(), namespace);
-                    for (var orphan : orphans) {
+                    for (JsonNode orphan : orphans) {
                         client.deletePod(namespace, orphan.path("metadata").path("name").asText());
                     }
                 }
@@ -374,8 +378,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     }
 
     private String codeDownloadUrl(LambdaFunction fn, String region) {
-        var bucket = LambdaService.tasksBucketName(region);
-        var key = LambdaService.codeObjectKey(fn);
+        String bucket = LambdaService.tasksBucketName(region);
+        String key = LambdaService.codeObjectKey(fn);
         try {
             s3Service.headObject(bucket, key);
         } catch (AwsException e) {
@@ -384,7 +388,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                     + " — the kubernetes executor downloads code from Floci's S3, and the copy "
                     + "stored at deploy time is missing. Re-deploy the function code.", e);
         }
-        var account = fn.getAccountId() != null ? fn.getAccountId() : config.defaultAccountId();
+        String account = fn.getAccountId() != null ? fn.getAccountId() : config.defaultAccountId();
         return downloadUrl(bucket, key, account, region);
     }
 
@@ -392,20 +396,20 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         if (fn.getLayers() == null || fn.getLayers().isEmpty()) {
             return List.of();
         }
-        var urls = new ArrayList<String>();
-        for (var layerArn : fn.getLayers()) {
-            var layer = layerService.resolveLayerByArn(layerArn);
+        ArrayList<String> urls = new ArrayList<>();
+        for (String layerArn : fn.getLayers()) {
+            LambdaLayerVersion layer = layerService.resolveLayerByArn(layerArn);
             if (layer == null) {
                 LOG.warnv("Could not resolve layer ARN {0} for function {1}", layerArn, fn.getFunctionName());
                 continue;
             }
             // The archive lives under the layer's own region and account (the canonical
             // ARN assigned at publish), which may differ from the function's.
-            var arn = layer.getLayerVersionArn();
-            var layerRegion = AwsArnUtils.regionOrDefault(arn, functionRegion);
-            var account = AwsArnUtils.accountOrDefault(arn, config.defaultAccountId());
-            var bucket = LambdaService.tasksBucketName(layerRegion);
-            var key = LambdaService.layerObjectKey(account, layer.getLayerName(), layer.getVersion());
+            String arn = layer.getLayerVersionArn();
+            String layerRegion = AwsArnUtils.regionOrDefault(arn, functionRegion);
+            String account = AwsArnUtils.accountOrDefault(arn, config.defaultAccountId());
+            String bucket = LambdaService.tasksBucketName(layerRegion);
+            String key = LambdaService.layerObjectKey(account, layer.getLayerName(), layer.getVersion());
             try {
                 s3Service.headObject(bucket, key);
             } catch (AwsException e) {
@@ -432,7 +436,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     }
 
     private void awaitRunning(String namespace, String podName, String functionName) {
-        var timeoutSeconds = POD_STARTUP_TIMEOUT_SECONDS;
+        int timeoutSeconds = POD_STARTUP_TIMEOUT_SECONDS;
         JsonNode pod;
         try {
             // A missing pod (deleted out-of-band) is terminal too, otherwise the wait
@@ -454,7 +458,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     }
 
     private static boolean hasTerminalFailure(JsonNode pod) {
-        var phase = pod.path("status").path("phase").asText(null);
+        String phase = pod.path("status").path("phase").asText(null);
         // Succeeded means the runtime exited before serving — terminal for a server pod.
         if ("Failed".equals(phase) || "Succeeded".equals(phase)) {
             return true;
@@ -463,7 +467,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     }
 
     private static String unschedulableReason(JsonNode pod) {
-        for (var condition : pod.path("status").path("conditions")) {
+        for (JsonNode condition : pod.path("status").path("conditions")) {
             // A pod the scheduler cannot place — e.g. a memory request above every node's
             // capacity — stays Pending with no container statuses; fail the cold start
             // instead of blocking the invoker for the full startup timeout.
@@ -477,18 +481,18 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     }
 
     private static String describeTerminalReason(JsonNode pod) {
-        for (var statuses : List.of(pod.path("status").path("initContainerStatuses"),
+        for (JsonNode statuses : List.of(pod.path("status").path("initContainerStatuses"),
                 pod.path("status").path("containerStatuses"))) {
-            for (var status : statuses) {
-                var waiting = status.path("state").path("waiting");
-                var waitingReason = waiting.path("reason").asText(null);
+            for (JsonNode status : statuses) {
+                JsonNode waiting = status.path("state").path("waiting");
+                String waitingReason = waiting.path("reason").asText(null);
                 // A missing reason must never match; Set.of(...).contains(null) throws,
                 // which would abort an otherwise healthy cold start.
                 if (waitingReason != null && TERMINAL_WAITING_REASONS.contains(waitingReason)) {
                     return status.path("name").asText() + ": " + waitingReason
                             + " (" + waiting.path("message").asText("") + ")";
                 }
-                var exitCode = status.path("state").path("terminated").path("exitCode");
+                JsonNode exitCode = status.path("state").path("terminated").path("exitCode");
                 if (!exitCode.isMissingNode() && exitCode.asInt() != 0) {
                     return status.path("name").asText() + ": exited with code " + exitCode.asInt();
                 }
@@ -501,7 +505,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         if (pod == null || pod.path("status").isMissingNode()) {
             return "pod no longer exists";
         }
-        var reason = describeTerminalReason(pod);
+        String reason = describeTerminalReason(pod);
         if (reason == null) {
             reason = unschedulableReason(pod);
         }
@@ -522,13 +526,13 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             return CA_CONFIG_MAP_NAME;
         }
         try {
-            var pem = Files.readString(bundle);
-            var nodes = JsonNodeFactory.instance;
-            var labels = nodes.objectNode();
+            String pem = Files.readString(bundle);
+            JsonNodeFactory nodes = JsonNodeFactory.instance;
+            ObjectNode labels = nodes.objectNode();
             LambdaPodSpecFactory.managedPodSelector().forEach(labels::put);
-            var metadata = nodes.objectNode().put("name", CA_CONFIG_MAP_NAME);
+            ObjectNode metadata = nodes.objectNode().put("name", CA_CONFIG_MAP_NAME);
             metadata.set("labels", labels);
-            var configMap = nodes.objectNode().put("apiVersion", "v1").put("kind", "ConfigMap");
+            ObjectNode configMap = nodes.objectNode().put("apiVersion", "v1").put("kind", "ConfigMap");
             configMap.set("metadata", metadata);
             configMap.set("data", nodes.objectNode().put(CA_CONFIG_MAP_KEY, pem));
             client.createOrUpdateConfigMap(namespace, configMap);

@@ -375,6 +375,8 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
 | `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` | `60` | Wait before the first retry of a failed asynchronous invocation (seconds); the second waits twice this, `0` retries back to back |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION` | `max(4, cpus)` | Maximum idle (warm) containers kept per function |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `0` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent executions per region |
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved capacity `PutFunctionConcurrency` must leave |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
@@ -422,6 +424,30 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
     Only first-time populates are gated. Warm containers, already-populated volumes, and
     functions under 32 MB are never serialised by this.
+
+!!! note "Bounding warm containers"
+    After an invocation the container stays warm so the next call skips the cold start, and is
+    reaped only after `container-idle-timeout-seconds` of inactivity. Each function keeps up to
+    `warm-pool-max-per-function` idle containers, but nothing limits the sum: a stack of many
+    functions that fan out through streams and triggers can accumulate one warm container per
+    function touched, and each runtime container holds its own memory. On a Docker Desktop with
+    a modest memory allocation that is enough to have Floci OOM-killed. `ephemeral: true` avoids
+    it by cold-starting every invocation, at a large latency cost.
+
+    `warm-pool-max-total` bounds the idle containers across all functions. When a release
+    would exceed it, the least-recently-used idle container of any function is stopped first,
+    so the function that just ran (the most likely to run again) keeps its container:
+
+    ```bash
+    FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL=24
+    ```
+
+    This bounds idle containers only, emulator-wide. Busy containers do not count toward it;
+    their ceiling is `region-concurrency-limit`, which applies independently in each region, so
+    peak container count is `warm-pool-max-total` plus the in-flight invocations across every
+    active region. A cap that is smaller than the number of functions invoked in a tight loop
+    trades some warm hits for the memory bound. A negative value is ignored with a warning and
+    leaves the total unbounded, like `0`.
 
 ### Runtime API host override
 

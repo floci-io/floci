@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
+import com.github.dockerjava.api.model.Ports;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -27,6 +28,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ManagedAgent;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
@@ -42,6 +44,7 @@ import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.Lau
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
@@ -53,6 +56,7 @@ import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.StatisticNetworksConfig;
 import com.github.dockerjava.api.model.Statistics;
+import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -1809,7 +1813,7 @@ public class EcsContainerManager {
      */
     public Integer getExitCodeIfStopped(String dockerId) {
         try {
-            var inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
             if (Boolean.TRUE.equals(inspect.getState().getRunning())) {
                 return null;
             }
@@ -1852,7 +1856,7 @@ public class EcsContainerManager {
             envMap.put("ECS_CONTAINER_METADATA_URI_V4", flociEndpoint + "/v4/" + metadataId);
         }
         if (def.getEnvironment() != null) {
-            for (var kv : def.getEnvironment()) {
+            for (KeyValuePair kv : def.getEnvironment()) {
                 envMap.put(kv.name(), kv.value());
             }
         }
@@ -1862,12 +1866,12 @@ public class EcsContainerManager {
             }
         }
         if (override != null && override.getEnvironment() != null) {
-            for (var kv : override.getEnvironment()) {
+            for (KeyValuePair kv : override.getEnvironment()) {
                 envMap.put(kv.name(), kv.value());
             }
         }
         List<String> envVars = new ArrayList<>();
-        for (var entry : envMap.entrySet()) {
+        for (Map.Entry<String, String> entry : envMap.entrySet()) {
             envVars.add(entry.getKey() + "=" + entry.getValue());
         }
         return envVars;
@@ -1898,14 +1902,14 @@ public class EcsContainerManager {
                 // The valueFrom may carry the ECS selector suffix
                 // (:json-key:version-stage:version-id); the parser strips it so the base ARN
                 // reaches SecretsManagerService intact, keeping its partial-ARN fallback working.
-                var selector = SecretsManagerSelector.parse(valueFrom);
+                SecretsManagerSelector selector = SecretsManagerSelector.parse(valueFrom);
                 jsonKey = selector.jsonKey();
-                var secret = secretsManagerService.getSecretValue(selector.secretId(),
+                SecretVersion secret = secretsManagerService.getSecretValue(selector.secretId(),
                         selector.versionId(), selector.versionStage(), secretRegion);
                 value = secret == null ? null : secret.getSecretString();
             } else {
                 String parameterName = ssmParameterName(valueFrom);
-                var parameter = ssmService.getParameter(parameterName, secretRegion);
+                Parameter parameter = ssmService.getParameter(parameterName, secretRegion);
                 value = parameter == null ? null : parameter.getValue();
             }
         } catch (AwsException e) {
@@ -2053,12 +2057,12 @@ public class EcsContainerManager {
         }
 
         DockerClient dockerClient = lifecycleManager.getDockerClient();
-        var inspect = dockerClient.inspectContainerCmd(dockerId).exec();
-        var portBindingsMap = inspect.getNetworkSettings().getPorts().getBindings();
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(dockerId).exec();
+        Map<ExposedPort, Ports.Binding[]> portBindingsMap = inspect.getNetworkSettings().getPorts().getBindings();
 
         for (PortMapping pm : def.getPortMappings()) {
             ExposedPort ep = ExposedPort.tcp(pm.containerPort());
-            var binding = portBindingsMap.get(ep);
+            Ports.Binding[] binding = portBindingsMap.get(ep);
             int hostPort = pm.containerPort();
             String bindIp = "0.0.0.0";
 
@@ -2172,7 +2176,7 @@ public class EcsContainerManager {
      */
     private void mountEfsVolume(ContainerBuilder.Builder specBuilder, EfsVolumeConfiguration efs, MountPoint mp) {
         String efsVolumeName = efsVolumeName(efs.fileSystemId(), efs.accessPointId(), efs.rootDirectory());
-        var efsCfg = config.storage().efs();
+        EmulatorConfig.EfsSharingConfig efsCfg = config.storage().efs();
         lifecycleManager.ensureSharedVolume(efsVolumeName,
                 efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
                 efsCfg.initImage());

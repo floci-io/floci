@@ -38,8 +38,8 @@ class AmazonMqEngineTypeCaseTest {
                 .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
-        var mqConfig = Mockito.mock(EmulatorConfig.AmazonMqServiceConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.AmazonMqServiceConfig mqConfig = Mockito.mock(EmulatorConfig.AmazonMqServiceConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.amazonmq()).thenReturn(mqConfig);
         when(mqConfig.mock()).thenReturn(true);

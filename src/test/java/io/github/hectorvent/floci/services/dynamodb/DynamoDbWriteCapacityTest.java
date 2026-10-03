@@ -65,7 +65,7 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void insertChargesTableAndEveryIndexTheItemEnters() {
-        var cost = DynamoDbWriteCapacity.forWrite(table, null, fullItem());
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, null, fullItem());
         assertEquals(1.0, cost.table());
         assertEquals(Map.of("gsi-inc", 1.0), cost.gsi());
         assertEquals(Map.of("lsi1", 1.0), cost.lsi());
@@ -74,10 +74,10 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void sparseInsertChargesNothingForTheIndexesItMisses() {
-        var sparse = item("""
+        ObjectNode sparse = item("""
                 {"pk": {"S": "p1"}, "sk": {"S": "1"}, "other": {"S": "o"}}
                 """);
-        var cost = DynamoDbWriteCapacity.forWrite(table, null, sparse);
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, null, sparse);
         assertEquals(1.0, cost.total());
         assertTrue(cost.gsi().isEmpty(), "an item without gsiPk never enters the GSI");
         assertTrue(cost.lsi().isEmpty(), "an item without lsiSk never enters the LSI");
@@ -85,7 +85,7 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void identicalOverwriteChargesNoIndexWritesAtAll() {
-        var cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), fullItem());
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), fullItem());
         assertEquals(1.0, cost.table(), "the table write is still charged");
         assertTrue(cost.gsi().isEmpty());
         assertTrue(cost.lsi().isEmpty());
@@ -93,11 +93,11 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void nonProjectedAttributeChangeChargesNothingOnTheIncludeIndex() {
-        var updated = fullItem();
+        ObjectNode updated = fullItem();
         updated.set("other", item("""
                 {"S": "o2"}
                 """));
-        var cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), updated);
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), updated);
         assertTrue(cost.gsi().isEmpty(), "other is outside the INCLUDE projection");
         assertEquals(Map.of("lsi1", 1.0), cost.lsi());
         assertEquals(2.0, cost.total());
@@ -105,11 +105,11 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void projectedAttributeChangeChargesOneIndexWrite() {
-        var updated = fullItem();
+        ObjectNode updated = fullItem();
         updated.set("proj", item("""
                 {"S": "p2"}
                 """));
-        var cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), updated);
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), updated);
         assertEquals(Map.of("gsi-inc", 1.0), cost.gsi());
         assertEquals(Map.of("lsi1", 1.0), cost.lsi());
         assertEquals(3.0, cost.total());
@@ -117,11 +117,11 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void indexKeyChangeChargesDeletePlusInsert() {
-        var moved = fullItem();
+        ObjectNode moved = fullItem();
         moved.set("gsiPk", item("""
                 {"S": "g-moved"}
                 """));
-        var cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), moved);
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), moved);
         assertEquals(Map.of("gsi-inc", 2.0), cost.gsi());
         assertEquals(Map.of("lsi1", 1.0), cost.lsi());
         assertEquals(4.0, cost.total());
@@ -129,9 +129,9 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void removingTheIndexKeyChargesDeleteOnly() {
-        var removed = fullItem();
+        ObjectNode removed = fullItem();
         removed.remove("gsiPk");
-        var cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), removed);
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), removed);
         assertEquals(Map.of("gsi-inc", 1.0), cost.gsi());
         assertEquals(Map.of("lsi1", 1.0), cost.lsi());
         assertEquals(3.0, cost.total());
@@ -139,11 +139,11 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void lsiKeyChangeWalksTheSameLadder() {
-        var moved = fullItem();
+        ObjectNode moved = fullItem();
         moved.set("lsiSk", item("""
                 {"S": "L2"}
                 """));
-        var cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), moved);
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), moved);
         assertTrue(cost.gsi().isEmpty(), "lsiSk is outside the GSI projection, its view never changed");
         assertEquals(Map.of("lsi1", 2.0), cost.lsi());
         assertEquals(3.0, cost.total());
@@ -151,7 +151,7 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void deleteChargesOneWritePerIndexTheItemOccupied() {
-        var cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), null);
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, fullItem(), null);
         assertEquals(1.0, cost.table());
         assertEquals(Map.of("gsi-inc", 1.0), cost.gsi());
         assertEquals(Map.of("lsi1", 1.0), cost.lsi());
@@ -160,17 +160,17 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void deleteOfAMissingItemStillChargesOneTableUnit() {
-        var cost = DynamoDbWriteCapacity.forWrite(table, null, null);
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, null, null);
         assertEquals(1.0, cost.total());
     }
 
     @Test
     void costPlusSumsTheTableAndMergesIndexArms() {
-        var indexed = DynamoDbWriteCapacity.forWrite(table, null, fullItem());
-        var sparse = DynamoDbWriteCapacity.forWrite(table, null, item("""
+        DynamoDbWriteCapacity.Cost indexed = DynamoDbWriteCapacity.forWrite(table, null, fullItem());
+        DynamoDbWriteCapacity.Cost sparse = DynamoDbWriteCapacity.forWrite(table, null, item("""
                 {"pk": {"S": "p2"}, "sk": {"S": "1"}, "other": {"S": "o"}}
                 """));
-        var sum = DynamoDbWriteCapacity.Cost.zero().plus(indexed).plus(sparse);
+        DynamoDbWriteCapacity.Cost sum = DynamoDbWriteCapacity.Cost.zero().plus(indexed).plus(sparse);
         assertEquals(2.0, sum.table());
         assertEquals(Map.of("gsi-inc", 1.0), sum.gsi());
         assertEquals(Map.of("lsi1", 1.0), sum.lsi());
@@ -179,13 +179,13 @@ class DynamoDbWriteCapacityTest {
 
     @Test
     void tableUnitsFollowTheLargerImagePerKilobyte() {
-        var big = item("""
+        ObjectNode big = item("""
                 {"pk": {"S": "p1"}, "sk": {"S": "1"}}
                 """);
         big.set("filler", item("""
                 {"S": "%s"}
                 """.formatted("x".repeat(2500))));
-        var cost = DynamoDbWriteCapacity.forWrite(table, big, fullItem());
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, big, fullItem());
         assertEquals(3.0, cost.table(), "the larger of the two images rounds up per 1KB");
     }
 

@@ -330,7 +330,7 @@ class AcmTest {
                 .expiryEvents(e -> e.daysBeforeExpiry(45))
                 .idempotencyToken(TestFixtures.uniqueName()));
 
-        var response = acm.getAccountConfiguration(b -> b.build());
+        GetAccountConfigurationResponse response = acm.getAccountConfiguration(b -> b.build());
 
         assertThat(response.expiryEvents()).isNotNull();
         assertThat(response.expiryEvents().daysBeforeExpiry()).isEqualTo(45);

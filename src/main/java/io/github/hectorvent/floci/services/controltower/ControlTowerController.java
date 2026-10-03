@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.controltower;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -84,7 +85,7 @@ public class ControlTowerController {
         List<LandingZone> landingZones = service.listLandingZones(
                 requestContext.getAccountId(), regionResolver.resolveRegion(headers));
         ObjectNode response = objectMapper.createObjectNode();
-        var array = response.putArray("landingZones");
+        ArrayNode array = response.putArray("landingZones");
         for (LandingZone lz : landingZones) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("arn", lz.getArn());
@@ -163,7 +164,7 @@ public class ControlTowerController {
         ControlTowerService.ListLandingZoneOperationsResult result = service.listLandingZoneOperations(
                 requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
         ObjectNode response = objectMapper.createObjectNode();
-        var array = response.putArray("landingZoneOperations");
+        ArrayNode array = response.putArray("landingZoneOperations");
         for (ControlTowerService.LandingZoneOperationSummary operation : result.landingZoneOperations()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("operationIdentifier", operation.operationIdentifier());
@@ -183,7 +184,7 @@ public class ControlTowerController {
     public Response listBaselines(@Context HttpHeaders headers) {
         List<ObjectNode> baselines = service.listBaselines(regionResolver.resolveRegion(headers));
         ObjectNode response = objectMapper.createObjectNode();
-        var array = response.putArray("baselines");
+        ArrayNode array = response.putArray("baselines");
         array.addAll(baselines);
         return Response.ok(response).build();
     }
@@ -195,7 +196,7 @@ public class ControlTowerController {
         ControlTowerService.ListEnabledBaselinesResult result = service.listEnabledBaselines(
                 requestContext.getAccountId(), regionResolver.resolveRegion(headers), parse(body));
         ObjectNode response = objectMapper.createObjectNode();
-        var array = response.putArray("enabledBaselines");
+        ArrayNode array = response.putArray("enabledBaselines");
         for (EnabledBaseline entry : result.enabledBaselines()) {
             array.add(enabledBaselineNode(entry));
         }
@@ -274,7 +275,7 @@ public class ControlTowerController {
         node.set("driftStatus", driftStatus);
         node.set("manifest", lz.getManifest());
         if (lz.getRemediationTypes() != null) {
-            var remediationTypes = node.putArray("remediationTypes");
+            ArrayNode remediationTypes = node.putArray("remediationTypes");
             lz.getRemediationTypes().forEach(remediationTypes::add);
         }
         return node;

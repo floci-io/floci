@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
@@ -58,7 +59,7 @@ abstract class TlsCertificateManagerFixture {
         forgetBootstrapTlsDir();
         tlsDir = Files.createDirectories(tempDir.resolve("tls"));
         ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
-        var leaf = ca.issueServerCertificate("localhost", CONFIGURED, KeyAlgorithm.RSA_2048, null);
+        CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", CONFIGURED, KeyAlgorithm.RSA_2048, null);
         Files.writeString(tlsDir.resolve("floci-server.crt"), leaf.certificatePem());
         Files.writeString(tlsDir.resolve("floci-server.key"), leaf.privateKeyPem());
         Files.writeString(tlsDir.resolve("floci-server.metadata.json"),

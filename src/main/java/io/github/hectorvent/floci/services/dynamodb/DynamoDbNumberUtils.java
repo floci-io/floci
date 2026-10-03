@@ -70,7 +70,7 @@ final class DynamoDbNumberUtils {
         if (attributes == null || !attributes.isObject()) {
             return;
         }
-        for (var value : attributes) {
+        for (JsonNode value : attributes) {
             requireStorableValue(value, inValidationEnvelope ? "1 validation error detected: " : "");
         }
     }
@@ -82,13 +82,13 @@ final class DynamoDbNumberUtils {
         if (value.has("N")) {
             requireStorableNumber(value.get("N").asText(), prefix);
         }
-        for (var n : value.path("NS")) {
+        for (JsonNode n : value.path("NS")) {
             requireStorableNumber(n.asText(), prefix);
         }
-        for (var element : value.path("L")) {
+        for (JsonNode element : value.path("L")) {
             requireStorableValue(element, prefix);
         }
-        for (var entry : value.path("M")) {
+        for (JsonNode entry : value.path("M")) {
             requireStorableValue(entry, prefix);
         }
     }
@@ -101,12 +101,12 @@ final class DynamoDbNumberUtils {
             throw new AwsException("ValidationException",
                     "The parameter cannot be converted to a numeric value: " + numStr, 400);
         }
-        var stripped = bd.stripTrailingZeros();
+        BigDecimal stripped = bd.stripTrailingZeros();
         if (stripped.precision() > 38) {
             throw new AwsException("ValidationException",
                     prefix + "Attempting to store more than 38 significant digits in a Number", 400);
         }
-        var abs = stripped.abs();
+        BigDecimal abs = stripped.abs();
         if (abs.compareTo(MAX_ABS) >= 0) {
             throw new AwsException("ValidationException",
                     prefix + "Number overflow. Attempting to store a number with magnitude larger than supported range", 400);
@@ -120,8 +120,8 @@ final class DynamoDbNumberUtils {
     // AWS answers with the overflow wording for any arithmetic result it cannot store,
     // a magnitude too small or too many significant digits included.
     static void checkArithmeticResult(BigDecimal result) {
-        var stripped = result.stripTrailingZeros();
-        var abs = stripped.abs();
+        BigDecimal stripped = result.stripTrailingZeros();
+        BigDecimal abs = stripped.abs();
         if (stripped.precision() > 38 || abs.compareTo(MAX_ABS) >= 0
                 || (abs.signum() > 0 && abs.compareTo(MIN_ABS_NONZERO) < 0)) {
             throw new AwsException("ValidationException",

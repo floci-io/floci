@@ -25,12 +25,16 @@
 When `floci.services.scheduler.invocation-enabled` is `true` (the default), a
 background dispatcher fires schedule targets on time. Supported expressions:
 
-- `at(YYYY-MM-DDTHH:mm:ss)` — one-time fire; honors `ScheduleExpressionTimezone`
+- `at(YYYY-MM-DDTHH:mm:ss)`: one-time fire; honors `ScheduleExpressionTimezone`
   (default UTC) and `ActionAfterCompletion=DELETE`.
-- `rate(N unit)` — repeating fire (`minutes`, `hours`, `days`, `weeks`).
-- `cron(minute hour day-of-month month day-of-week year)` — AWS 6-field cron;
+- `rate(N unit)`: repeating fire (`minutes`, `hours`, `days`).
+- `cron(minute hour day-of-month month day-of-week year)`: AWS 6-field cron;
   honors `ScheduleExpressionTimezone`. Day-of-week is `1-7` or `SUN-SAT`, so
   `2` is Monday and `cron(30 2 ? * 2#1 *)` is the first Monday of the month.
+
+`CreateSchedule` and `UpdateSchedule` validate expression syntax and require
+`Target.RoleArn` to be an IAM role ARN. Invalid values return HTTP 400 with
+`ValidationException`, including when a Step Functions task calls Scheduler.
 
 `State=DISABLED` schedules and schedules outside their `StartDate`/`EndDate`
 window are skipped. The dispatcher ticks every

@@ -29,8 +29,10 @@ import org.jboss.logging.Logger;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
@@ -266,13 +268,8 @@ public class SesIdentityController {
                                                     String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = objectMapper.readTree(body);
-            JsonNode signingEnabledNode = request.get("SigningEnabled");
-            if (signingEnabledNode == null || !signingEnabledNode.isBoolean()) {
-                throw new AwsException("BadRequestException",
-                        "SigningEnabled must be present and must be a boolean", 400);
-            }
-            boolean signingEnabled = signingEnabledNode.booleanValue();
+            JsonNode request = readOptionBody(objectMapper, body);
+            boolean signingEnabled = coerceBooleanOrFalse(request.path("SigningEnabled"));
             identityService.setDkimAttributes(emailIdentity, signingEnabled, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
@@ -376,13 +373,8 @@ public class SesIdentityController {
                                                         String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = objectMapper.readTree(body);
-            JsonNode emailForwardingEnabledNode = request.get("EmailForwardingEnabled");
-            if (emailForwardingEnabledNode == null || !emailForwardingEnabledNode.isBoolean()) {
-                throw new AwsException("BadRequestException",
-                        "EmailForwardingEnabled must be present and must be a boolean", 400);
-            }
-            boolean emailForwardingEnabled = emailForwardingEnabledNode.booleanValue();
+            JsonNode request = readOptionBody(objectMapper, body);
+            boolean emailForwardingEnabled = coerceBooleanOrFalse(request.path("EmailForwardingEnabled"));
             identityService.setFeedbackForwardingEnabled(emailIdentity, emailForwardingEnabled,
                     region);
             return Response.ok(objectMapper.createObjectNode()).build();

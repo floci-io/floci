@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -128,12 +129,19 @@ public class SesReceiptRuleService {
                 .orElseThrow(() -> ruleSetDoesNotExist(name));
     }
 
+    public PaginatedResult<ReceiptRuleSet> listReceiptRuleSets(String region, SesListPaging paging,
+                                                               String nextToken) {
+        return paging.page(region, listReceiptRuleSets(region), SesReceiptRuleService::cursor, null, nextToken);
+    }
+
+    private static String cursor(ReceiptRuleSet ruleSet) {
+        return SesListPaging.oldestFirst(ruleSet.getCreatedTimestamp(), ruleSet.getName());
+    }
+
     public List<ReceiptRuleSet> listReceiptRuleSets(String region) {
         String prefix = "receiptRuleSet::" + region + "::";
         List<ReceiptRuleSet> all = new ArrayList<>(receiptRuleSetStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(ReceiptRuleSet::getCreatedTimestamp,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(ReceiptRuleSet::getName, Comparator.nullsLast(Comparator.naturalOrder())));
+        all.sort(Comparator.comparing(SesReceiptRuleService::cursor));
         return all;
     }
 

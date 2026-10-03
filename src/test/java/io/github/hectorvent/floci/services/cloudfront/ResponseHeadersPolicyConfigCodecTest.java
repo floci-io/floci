@@ -84,7 +84,7 @@ class ResponseHeadersPolicyConfigCodecTest {
 
     @Test
     void removeHeadersConfigIsCaptured() {
-        var directives = ResponseHeadersPolicyConfigCodec.directives(
+        ResponseHeadersPolicyConfigCodec.Directives directives = ResponseHeadersPolicyConfigCodec.directives(
                 ResponseHeadersPolicyConfigCodec.parse(XML));
         assertEquals(List.of("Server"), directives.remove());
     }
@@ -163,7 +163,7 @@ class ResponseHeadersPolicyConfigCodecTest {
         cors.put("OriginOverride", "false");
         Map<String, Object> config = Map.of("CorsConfig", cors);
 
-        var simple = ResponseHeadersPolicyConfigCodec.directives(
+        ResponseHeadersPolicyConfigCodec.Directives simple = ResponseHeadersPolicyConfigCodec.directives(
                 config, "https://viewer.example", false, true, null);
         Map<String, String> simpleHeaders = simple.add().stream().collect(
                 java.util.stream.Collectors.toMap(
@@ -171,7 +171,7 @@ class ResponseHeadersPolicyConfigCodecTest {
                         ResponseHeadersPolicyConfigCodec.PolicyHeader::value));
         assertEquals(Map.of("Access-Control-Allow-Origin", "*"), simpleHeaders);
 
-        var preflight = ResponseHeadersPolicyConfigCodec.directives(
+        ResponseHeadersPolicyConfigCodec.Directives preflight = ResponseHeadersPolicyConfigCodec.directives(
                 config, "https://viewer.example", true, true, null);
         Map<String, String> preflightHeaders = preflight.add().stream().collect(
                 java.util.stream.Collectors.toMap(

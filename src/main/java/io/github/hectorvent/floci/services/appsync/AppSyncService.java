@@ -1265,7 +1265,7 @@ public class AppSyncService {
     private Map<String, String> castStringMap(Object value) {
         if (value instanceof Map) {
             Map<String, String> result = new HashMap<>();
-            for (var entry : ((Map<Object, Object>) value).entrySet()) {
+            for (Map.Entry<Object, Object> entry : ((Map<Object, Object>) value).entrySet()) {
                 result.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
             }
             return result;

@@ -23,11 +23,11 @@ class HistoryChainTest {
     @Test
     void publishingAfterTheExecutionEndedRecordsNothingAndDoesNotCountTowardsTheLimit() {
         List<HistoryEvent> history = new ArrayList<>();
-        var chain = HistoryChain.of(history);
+        HistoryChain chain = HistoryChain.of(history);
         chain.end("ExecutionSucceeded", Map.of());
 
         assertDoesNotThrow(() -> {
-            for (var i = 0; i < MAX_HISTORY_EVENTS; i++) {
+            for (int i = 0; i < MAX_HISTORY_EVENTS; i++) {
                 assertEquals(0L, chain.publish("PassStateEntered", null));
                 chain.publishAside("PassStateSucceeded", null);
             }
@@ -37,13 +37,13 @@ class HistoryChainTest {
 
     @Test
     void publishingIntoAHistorySealedByStopExecutionStopsCountingAsWell() {
-        var history = new StepFunctionsService.ExecutionHistory();
-        var chain = HistoryChain.of(history);
-        var branch = chain.fork();
+        StepFunctionsService.ExecutionHistory history = new StepFunctionsService.ExecutionHistory();
+        HistoryChain chain = HistoryChain.of(history);
+        HistoryChain branch = chain.fork();
         history.sealWith("ExecutionAborted", Map.of());
 
         assertDoesNotThrow(() -> {
-            for (var i = 0; i < MAX_HISTORY_EVENTS; i++) {
+            for (int i = 0; i < MAX_HISTORY_EVENTS; i++) {
                 assertEquals(0L, chain.publish("PassStateEntered", null));
                 assertEquals(0L, branch.publish("PassStateEntered", null));
             }

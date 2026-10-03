@@ -2,6 +2,7 @@ package com.floci.test;
 
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.marketplacedeployment.MarketplaceDeploymentClient;
+import software.amazon.awssdk.services.marketplacedeployment.model.PutDeploymentParameterResponse;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -11,7 +12,7 @@ class MarketplaceDeploymentTest {
     @Test
     void usesAwsSdkWireContract() {
         try (MarketplaceDeploymentClient client = TestFixtures.marketplaceDeploymentClient()) {
-            var response = client.putDeploymentParameter(r -> r
+            PutDeploymentParameterResponse response = client.putDeploymentParameter(r -> r
                     .catalog("AWSMarketplace")
                     .productId("prod-sdk-compat")
                     .agreementId("agr-sdk-compat")

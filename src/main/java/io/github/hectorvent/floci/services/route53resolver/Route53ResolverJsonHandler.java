@@ -10,6 +10,8 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.Optional;
+
 /**
  * JSON 1.1 handler for Route 53 Resolver operations.
  * Dispatches {@code X-Amz-Target: Route53Resolver.*} actions to {@link Route53ResolverService}.
@@ -106,7 +108,7 @@ public class Route53ResolverJsonHandler {
 
     private Response handleGetFirewallDomainList(JsonNode request, String region) {
         String id = text(request, "FirewallDomainListId");
-        var custom = service.getCustomFirewallDomainList(id);
+        Optional<ObjectNode> custom = service.getCustomFirewallDomainList(id);
         if (custom.isPresent()) {
             return firewallDomainListResponse(custom.get());
         }

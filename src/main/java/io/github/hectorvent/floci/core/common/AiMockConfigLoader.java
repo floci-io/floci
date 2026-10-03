@@ -90,7 +90,7 @@ public class AiMockConfigLoader {
         }
     }
     private JsonNode loadOrThrow(String path) {
-        var file = Path.of(path);
+        Path file = Path.of(path);
         long lastModified;
         try {
             lastModified = Files.getLastModifiedTime(file).toMillis();
@@ -101,7 +101,7 @@ public class AiMockConfigLoader {
             }
             return null;
         }
-        var cached = cache;
+        CachedMockFile cached = cache;
         if (cached != null && cached.path().equals(path) && cached.lastModified() == lastModified) {
             return cached.root();
         }

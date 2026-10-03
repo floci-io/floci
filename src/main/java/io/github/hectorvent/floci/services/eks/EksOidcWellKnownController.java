@@ -14,6 +14,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.math.BigInteger;
+import java.security.interfaces.RSAPublicKey;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -73,7 +74,7 @@ public class EksOidcWellKnownController {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No OIDC signing key for cluster: " + clusterName, 404));
 
-        var publicKey = oidcService.toPublicKey(key.getPublicKey());
+        RSAPublicKey publicKey = oidcService.toPublicKey(key.getPublicKey());
         Map<String, Object> jwk = new LinkedHashMap<>();
         jwk.put("kty", "RSA");
         jwk.put("alg", "RS256");

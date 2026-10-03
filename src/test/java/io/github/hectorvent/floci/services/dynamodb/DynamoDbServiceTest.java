@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -627,7 +628,7 @@ class DynamoDbServiceTest {
         ObjectNode keyConditions = mapper.createObjectNode();
         ObjectNode pkCondition = mapper.createObjectNode();
         pkCondition.put("ComparisonOperator", "EQ");
-        var attrList = mapper.createArrayNode();
+        ArrayNode attrList = mapper.createArrayNode();
         ObjectNode pkVal = mapper.createObjectNode();
         pkVal.put("S", "c1");
         attrList.add(pkVal);
@@ -658,12 +659,12 @@ class DynamoDbServiceTest {
 
     @Test
     void queryWithTheSortKeyValueOnTheLeft() {
-        var region = "eu-west-1";
+        String region = "eu-west-1";
         createOrdersTable(region);
         service.putItem("Orders", item("customerId", "c1", "orderId", "o1"), region);
         service.putItem("Orders", item("customerId", "c1", "orderId", "o3"), region);
 
-        var exprValues = mapper.createObjectNode();
+        ObjectNode exprValues = mapper.createObjectNode();
         exprValues.set(":pk", mapper.createObjectNode().put("S", "c1"));
         exprValues.set(":lo", mapper.createObjectNode().put("S", "o2"));
 
@@ -890,7 +891,7 @@ class DynamoDbServiceTest {
     private ObjectNode legacyEqCondition(String value) {
         ObjectNode condition = mapper.createObjectNode();
         condition.put("ComparisonOperator", "EQ");
-        var attrList = mapper.createArrayNode();
+        ArrayNode attrList = mapper.createArrayNode();
         attrList.add(attributeValue("S", value));
         condition.set("AttributeValueList", attrList);
         return condition;
@@ -989,7 +990,7 @@ class DynamoDbServiceTest {
         ObjectNode scanFilter = mapper.createObjectNode();
         ObjectNode condition = mapper.createObjectNode();
         condition.put("ComparisonOperator", "EQ");
-        var attrList = mapper.createArrayNode();
+        ArrayNode attrList = mapper.createArrayNode();
         ObjectNode val = mapper.createObjectNode();
         val.put("S", "Alice");
         attrList.add(val);
@@ -1012,7 +1013,7 @@ class DynamoDbServiceTest {
         ObjectNode scanFilter = mapper.createObjectNode();
         ObjectNode condition = mapper.createObjectNode();
         condition.put("ComparisonOperator", "GE");
-        var attrList = mapper.createArrayNode();
+        ArrayNode attrList = mapper.createArrayNode();
         ObjectNode val = mapper.createObjectNode();
         val.put("S", "Bob");
         attrList.add(val);
@@ -1503,7 +1504,7 @@ class DynamoDbServiceTest {
 
     private ObjectNode listAttributeValue(String... values) {
         ObjectNode node = mapper.createObjectNode();
-        var arrayNode = mapper.createArrayNode();
+        ArrayNode arrayNode = mapper.createArrayNode();
         for (String v : values) {
             arrayNode.add(attributeValue("S", v));
         }
@@ -1513,7 +1514,7 @@ class DynamoDbServiceTest {
 
     private ObjectNode stringSetAttributeValue(String... values) {
         ObjectNode node = mapper.createObjectNode();
-        var arrayNode = mapper.createArrayNode();
+        ArrayNode arrayNode = mapper.createArrayNode();
         for (String v : values) {
             arrayNode.add(v);
         }
@@ -1535,7 +1536,7 @@ class DynamoDbServiceTest {
 
     private ObjectNode numberSetAttributeValue(String... values) {
         ObjectNode node = mapper.createObjectNode();
-        var arrayNode = mapper.createArrayNode();
+        ArrayNode arrayNode = mapper.createArrayNode();
         for (String v : values) {
             arrayNode.add(v);
         }
@@ -1545,7 +1546,7 @@ class DynamoDbServiceTest {
 
     private ObjectNode binarySetAttributeValue(String... base64Values) {
         ObjectNode node = mapper.createObjectNode();
-        var arrayNode = mapper.createArrayNode();
+        ArrayNode arrayNode = mapper.createArrayNode();
         for (String v : base64Values) {
             arrayNode.add(v);
         }
@@ -1699,7 +1700,7 @@ class DynamoDbServiceTest {
         String region = "eu-west-1";
         createUsersTable(region);
         ObjectNode u1 = item("userId", "u1");
-        var list = mapper.createArrayNode();
+        ArrayNode list = mapper.createArrayNode();
         list.add(attributeValue("N", "10"));
         list.add(attributeValue("N", "20"));
         ObjectNode listNode = mapper.createObjectNode();
@@ -1708,7 +1709,7 @@ class DynamoDbServiceTest {
         service.putItem("Users", u1, region);
 
         ObjectNode u2 = item("userId", "u2");
-        var list2 = mapper.createArrayNode();
+        ArrayNode list2 = mapper.createArrayNode();
         list2.add(attributeValue("N", "30"));
         ObjectNode listNode2 = mapper.createObjectNode();
         listNode2.set("L", list2);
@@ -1739,7 +1740,7 @@ class DynamoDbServiceTest {
 
         // Use SS (String Set) type for ADD operation
         ObjectNode tagVal = mapper.createObjectNode();
-        var tagArray = tagVal.putArray("SS");
+        ArrayNode tagArray = tagVal.putArray("SS");
         tagArray.add("a");
         exprValues.set(":val", priceVal);
         exprValues.set(":newTag", tagVal);
@@ -1750,7 +1751,7 @@ class DynamoDbServiceTest {
 
         // And add another tag to the same item, to verify that the ADD works on existing items as well
         ObjectNode tagVal2 = mapper.createObjectNode();
-        var tagArray2 = tagVal2.putArray("SS");
+        ArrayNode tagArray2 = tagVal2.putArray("SS");
         tagArray2.add("b");
         exprValues.set(":newTag", tagVal2);
         DynamoDbService.UpdateResult updateResult = service.updateItem("Orders", key, null,
@@ -1847,7 +1848,7 @@ class DynamoDbServiceTest {
 
         ObjectNode initialItem = item("userId", "list-test");
         ObjectNode listValue = mapper.createObjectNode();
-        var list = listValue.putArray("L");
+        ArrayNode list = listValue.putArray("L");
 
         list.add(attributeValue("S", "a"));
         list.add(attributeValue("S", "b"));
@@ -1884,7 +1885,7 @@ class DynamoDbServiceTest {
 
         ObjectNode initialItem = item("userId", "huge-index-test");
         ObjectNode listValue = mapper.createObjectNode();
-        var list = listValue.putArray("L");
+        ArrayNode list = listValue.putArray("L");
 
         list.add(attributeValue("S", "a"));
         list.add(attributeValue("S", "b"));
@@ -1919,7 +1920,7 @@ class DynamoDbServiceTest {
 
         ObjectNode initialItem = item("userId", "max-index-test");
         ObjectNode listValue = mapper.createObjectNode();
-        var list = listValue.putArray("L");
+        ArrayNode list = listValue.putArray("L");
 
         list.add(attributeValue("S", "a"));
         list.add(attributeValue("S", "b"));
@@ -1954,7 +1955,7 @@ class DynamoDbServiceTest {
 
         ObjectNode initialItem = item("userId", "invalid-index-test");
         ObjectNode listValue = mapper.createObjectNode();
-        var list = listValue.putArray("L");
+        ArrayNode list = listValue.putArray("L");
 
         list.add(attributeValue("S", "a"));
         list.add(attributeValue("S", "b"));
@@ -2658,7 +2659,7 @@ class DynamoDbServiceTest {
     }
 
     private void createBinaryIndexedTable(String region) {
-        var gsi = new GlobalSecondaryIndex("gsib",
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex("gsib",
                 List.of(new KeySchemaElement("bidx", "HASH")), null, "ALL", null);
         service.createTable("BinaryIndexed",
                 List.of(new KeySchemaElement("pk", "HASH")),
@@ -2670,13 +2671,13 @@ class DynamoDbServiceTest {
 
     @Test
     void putItemEmptyBinaryGsiKeyThrowsValidationException() {
-        var region = "eu-west-1";
+        String region = "eu-west-1";
         createBinaryIndexedTable(region);
 
-        var item = item("pk", "p1");
+        ObjectNode item = item("pk", "p1");
         item.set("bidx", attributeValue("B", ""));
 
-        var ex = assertThrows(AwsException.class, () ->
+        AwsException ex = assertThrows(AwsException.class, () ->
                 service.putItem("BinaryIndexed", item, region));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("One or more parameter values are not valid. A value specified for a secondary "
@@ -2686,13 +2687,13 @@ class DynamoDbServiceTest {
 
     @Test
     void updateItemSettingEmptyBinaryGsiKeyThrowsValidationException() {
-        var region = "eu-west-1";
+        String region = "eu-west-1";
         createBinaryIndexedTable(region);
 
-        var exprValues = mapper.createObjectNode();
+        ObjectNode exprValues = mapper.createObjectNode();
         exprValues.set(":v", attributeValue("B", ""));
 
-        var ex = assertThrows(AwsException.class, () ->
+        AwsException ex = assertThrows(AwsException.class, () ->
                 service.updateItem("BinaryIndexed", item("pk", "p1"), null,
                         "SET bidx = :v", null, exprValues, null, region));
         assertEquals("ValidationException", ex.getErrorCode());
@@ -3085,7 +3086,7 @@ class DynamoDbServiceTest {
         exprValues.set(":start", attributeValue("S", "2026-01-01Z#"));
         exprValues.set(":end", attributeValue("S", "2026-12-31Z#z"));
 
-        var result = service.query("Orders", null, exprValues,
+        DynamoDbService.QueryResult result = service.query("Orders", null, exprValues,
                 "customerId = :pk AND (orderId BETWEEN :start AND :end)", null, null, region);
         assertEquals(3, result.items().size(), "parenthesized BETWEEN should work");
     }
@@ -3104,7 +3105,7 @@ class DynamoDbServiceTest {
         exprValues.set(":v1", attributeValue("S", "2026-01-01Z#"));
         exprValues.set(":v2", attributeValue("S", "2026-12-31Z#z"));
 
-        var result = service.query("Orders", null, exprValues,
+        DynamoDbService.QueryResult result = service.query("Orders", null, exprValues,
                 "(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)", null, null, null, null, null, exprNames, "us-east-1");
         assertEquals(2, result.items().size(), "compact AND with BETWEEN should work");
     }
@@ -3112,10 +3113,10 @@ class DynamoDbServiceTest {
     @Test
     void batchWriteItemReportsAKeySchemaMismatchTheWayAwsDoes() {
         createUsersTable("us-east-1");
-        var wrongType = mapper.createObjectNode();
+        ObjectNode wrongType = mapper.createObjectNode();
         wrongType.set("userId", attributeValue("N", "5"));
 
-        var error = assertThrows(AwsException.class, () -> service.batchWriteItem(
+        AwsException error = assertThrows(AwsException.class, () -> service.batchWriteItem(
                 Map.of("Users", List.of(putRequest(wrongType))), "us-east-1"));
         assertEquals("The provided key element does not match the schema", error.getMessage());
     }
@@ -3123,14 +3124,14 @@ class DynamoDbServiceTest {
     @Test
     void batchWriteItemReportsAMissingKeyAsASchemaMismatch() {
         createUsersTable("us-east-1");
-        var noKey = mapper.createObjectNode();
+        ObjectNode noKey = mapper.createObjectNode();
         noKey.set("name", attributeValue("S", "x"));
 
-        var putError = assertThrows(AwsException.class, () -> service.batchWriteItem(
+        AwsException putError = assertThrows(AwsException.class, () -> service.batchWriteItem(
                 Map.of("Users", List.of(putRequest(noKey))), "us-east-1"));
         assertEquals("The provided key element does not match the schema", putError.getMessage());
 
-        var deleteError = assertThrows(AwsException.class, () -> service.batchWriteItem(
+        AwsException deleteError = assertThrows(AwsException.class, () -> service.batchWriteItem(
                 Map.of("Users", List.of(deleteRequest(noKey))), "us-east-1"));
         assertEquals("The provided key element does not match the schema", deleteError.getMessage());
     }
@@ -3138,10 +3139,10 @@ class DynamoDbServiceTest {
     @Test
     void putItemStillNamesTheMismatchedKeyTypes() {
         createUsersTable("us-east-1");
-        var wrongType = mapper.createObjectNode();
+        ObjectNode wrongType = mapper.createObjectNode();
         wrongType.set("userId", attributeValue("N", "5"));
 
-        var error = assertThrows(AwsException.class,
+        AwsException error = assertThrows(AwsException.class,
                 () -> service.putItem("Users", wrongType, "us-east-1"));
         assertEquals("One or more parameter values were invalid: Type mismatch for key userId "
                 + "expected: S actual: N", error.getMessage());
@@ -3209,7 +3210,7 @@ class DynamoDbServiceTest {
         key.set("customerId", attributeValue("S", "c9"));
         key.set("orderId", attributeValue("S", "o9"));
 
-        var ex = assertThrows(AwsException.class, () -> service.updateItem("Orders", key, null,
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Orders", key, null,
                 "SET #missing.subkey = :val", exprNames, exprValues, "NONE", null, "us-east-1", "NONE"));
         assertEquals("The document path provided in the update expression is invalid for update", ex.getMessage());
     }
@@ -3236,7 +3237,7 @@ class DynamoDbServiceTest {
         key.set("customerId", attributeValue("S", "c1"));
         key.set("orderId", attributeValue("S", "o1"));
 
-        var result = service.updateItem("Orders", key, null,
+        DynamoDbService.UpdateResult result = service.updateItem("Orders", key, null,
                 "SET #details.subkey = :val, #status = :s", exprNames, exprValues, "ALL_NEW", null, "us-east-1", "NONE");
 
         JsonNode updated = result.newItem();
@@ -3285,7 +3286,7 @@ class DynamoDbServiceTest {
                 "SET #a = :v1, #b = :v1, #c = :v1, #d = :v1", exprNames, exprValues, "NONE", null, "us-east-1", "NONE");
 
         // SET last two assignments, then REMOVE two fields (comma-separated)
-        var result = service.updateItem("Orders", key, null,
+        DynamoDbService.UpdateResult result = service.updateItem("Orders", key, null,
                 "SET #a = :v1, #b = :v2 REMOVE #c, #d", exprNames, exprValues, "ALL_NEW", null, "us-east-1", "NONE");
 
         JsonNode updated = result.newItem();
@@ -3529,13 +3530,13 @@ class DynamoDbServiceTest {
 
     @Test
     void updateItemSetArithmeticOverflowThrowsValidationException() {
-        var region = "eu-west-1";
+        String region = "eu-west-1";
         createUsersTable(region);
-        var exprValues = mapper.createObjectNode();
+        ObjectNode exprValues = mapper.createObjectNode();
         exprValues.set(":a", attributeValue("N", "9.9e125"));
         exprValues.set(":b", attributeValue("N", "9.9e125"));
 
-        var ex = assertThrows(AwsException.class, () ->
+        AwsException ex = assertThrows(AwsException.class, () ->
                 service.updateItem("Users", item("userId", "u1"), null,
                         "SET n = :a + :b", null, exprValues, null, region));
         assertEquals("ValidationException", ex.getErrorCode());
@@ -3546,15 +3547,15 @@ class DynamoDbServiceTest {
 
     @Test
     void updateItemAddOverflowThrowsValidationException() {
-        var region = "eu-west-1";
+        String region = "eu-west-1";
         createUsersTable(region);
-        var existing = item("userId", "u1");
+        ObjectNode existing = item("userId", "u1");
         existing.set("n", attributeValue("N", "9.9e125"));
         service.putItem("Users", existing, region);
-        var exprValues = mapper.createObjectNode();
+        ObjectNode exprValues = mapper.createObjectNode();
         exprValues.set(":a", attributeValue("N", "9.9e125"));
 
-        var ex = assertThrows(AwsException.class, () ->
+        AwsException ex = assertThrows(AwsException.class, () ->
                 service.updateItem("Users", item("userId", "u1"), null,
                         "ADD n :a", null, exprValues, null, region));
         assertEquals("ValidationException", ex.getErrorCode());
@@ -4081,9 +4082,9 @@ class DynamoDbServiceTest {
     }
 
     private ImportTableDescription importDescription(String bucket, String prefix, String compression) {
-        var desc = new ImportTableDescription();
+        ImportTableDescription desc = new ImportTableDescription();
         desc.setImportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/import/1-abc");
-        var source = mapper.createObjectNode();
+        ObjectNode source = mapper.createObjectNode();
         source.put("S3Bucket", bucket);
         source.put("S3KeyPrefix", prefix);
         desc.setS3BucketSource(source);
@@ -4092,7 +4093,7 @@ class DynamoDbServiceTest {
     }
 
     private ObjectNode importRequest(String tableName, String inputFormat) {
-        var request = mapper.createObjectNode();
+        ObjectNode request = mapper.createObjectNode();
         request.putObject("S3BucketSource").put("S3Bucket", "bucket").put("S3KeyPrefix", "imp/");
         request.put("InputFormat", inputFormat);
         request.putObject("TableCreationParameters").put("TableName", tableName);
@@ -4100,8 +4101,8 @@ class DynamoDbServiceTest {
     }
 
     private static byte[] gzip(String text) throws Exception {
-        var out = new ByteArrayOutputStream();
-        try (var gz = new GZIPOutputStream(out)) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (GZIPOutputStream gz = new GZIPOutputStream(out)) {
             gz.write(text.getBytes(StandardCharsets.UTF_8));
         }
         return out.toByteArray();
@@ -4112,9 +4113,9 @@ class DynamoDbServiceTest {
     }
 
     private static S3Service s3With(S3Object... objects) {
-        var s3 = mock(S3Service.class);
+        S3Service s3 = mock(S3Service.class);
         when(s3.listObjects("bucket", "imp/", null, Integer.MAX_VALUE)).thenReturn(List.of(objects));
-        for (var object : objects) {
+        for (S3Object object : objects) {
             when(s3.getObjectMetadata("bucket", object.getKey(), null)).thenReturn(object);
             when(s3.openObjectStream("bucket", object.getKey(), null))
                     .thenAnswer(invocation -> new ByteArrayInputStream(object.getData()));
@@ -4161,17 +4162,17 @@ class DynamoDbServiceTest {
     /** Checked against real DynamoDB: every item call on a CREATING table fails this way, DescribeTable still works. */
     @Test
     void itemCalls_creatingTable_returnResourceNotFoundWithoutTableName() {
-        var svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
         createUsersTableInCreating(svc);
-        var region = "us-east-1";
-        var key = item("userId", "u1");
-        var keys = mapper.createObjectNode();
+        String region = "us-east-1";
+        ObjectNode key = item("userId", "u1");
+        ObjectNode keys = mapper.createObjectNode();
         keys.set("Keys", mapper.createArrayNode().add(key));
-        var putRequest = mapper.createObjectNode();
+        ObjectNode putRequest = mapper.createObjectNode();
         putRequest.putObject("PutRequest").set("Item", key);
-        var transactPut = mapper.createObjectNode();
+        ObjectNode transactPut = mapper.createObjectNode();
         transactPut.putObject("Put").put("TableName", "Users").set("Item", key);
-        var transactGet = mapper.createObjectNode();
+        ObjectNode transactGet = mapper.createObjectNode();
         transactGet.putObject("Get").put("TableName", "Users").set("Key", key);
 
         List<org.junit.jupiter.api.function.Executable> itemCalls = List.of(
@@ -4185,8 +4186,8 @@ class DynamoDbServiceTest {
                 () -> svc.batchWriteItem(Map.of("Users", List.of(putRequest)), region),
                 () -> svc.transactWriteItems(List.of(transactPut), region, null, null),
                 () -> svc.transactGetItems(List.of(transactGet), region));
-        for (var call : itemCalls) {
-            var e = assertThrows(AwsException.class, call);
+        for (Executable call : itemCalls) {
+            AwsException e = assertThrows(AwsException.class, call);
             assertEquals("ResourceNotFoundException", e.getErrorCode());
             assertEquals("Requested resource not found", e.getMessage());
         }
@@ -4195,12 +4196,12 @@ class DynamoDbServiceTest {
 
     @Test
     void runImport_loadsGzipLinesAndCountsBadOnes() throws Exception {
-        var object = s3Object("imp/part-0.json.gz",
+        S3Object object = s3Object("imp/part-0.json.gz",
                 gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\nnot json\n{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n"));
-        var importStore = new InMemoryStorage<String, ImportTableDescription>();
-        var svc = serviceWithS3(s3With(object), importStore);
+        InMemoryStorage<String, ImportTableDescription> importStore = new InMemoryStorage<>();
+        DynamoDbService svc = serviceWithS3(s3With(object), importStore);
         createUsersTableInCreating(svc);
-        var desc = importDescription("bucket", "imp/", "GZIP");
+        ImportTableDescription desc = importDescription("bucket", "imp/", "GZIP");
 
         svc.runImport(desc, "Users", "us-east-1");
 
@@ -4218,10 +4219,10 @@ class DynamoDbServiceTest {
     /** Checked against real DynamoDB: another account's bucket fails this way when no policy grants access. */
     @Test
     void runImport_bucketOfAnotherAccount_failsWithS3AccessDeniedWithoutReadingS3() {
-        var s3 = mock(S3Service.class);
-        var svc = serviceWithS3(s3, new InMemoryStorage<>());
+        S3Service s3 = mock(S3Service.class);
+        DynamoDbService svc = serviceWithS3(s3, new InMemoryStorage<>());
         createUsersTableInCreating(svc);
-        var desc = importDescription("bucket", "imp/", "NONE");
+        ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
         ((ObjectNode) desc.getS3BucketSource()).put("S3BucketOwner", "111111111111");
 
         svc.runImport(desc, "Users", "us-east-1");
@@ -4235,10 +4236,10 @@ class DynamoDbServiceTest {
 
     @Test
     void runImport_bucketOwnerIsTheCaller_readsTheBucket() {
-        var object = s3Object("imp/data.json", "{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n".getBytes(StandardCharsets.UTF_8));
-        var svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
+        S3Object object = s3Object("imp/data.json", "{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n".getBytes(StandardCharsets.UTF_8));
+        DynamoDbService svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
         createUsersTableInCreating(svc);
-        var desc = importDescription("bucket", "imp/", "NONE");
+        ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
         ((ObjectNode) desc.getS3BucketSource()).put("S3BucketOwner", "000000000000");
 
         svc.runImport(desc, "Users", "us-east-1");
@@ -4249,10 +4250,10 @@ class DynamoDbServiceTest {
 
     @Test
     void runImport_persistsLoadedItems() {
-        var object = s3Object("imp/data.json",
+        S3Object object = s3Object("imp/data.json",
                 "{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n".getBytes(StandardCharsets.UTF_8));
-        var itemStore = new InMemoryStorage<String, Map<String, JsonNode>>();
-        var svc = new DynamoDbService(new InMemoryStorage<>(), itemStore, null, new InMemoryStorage<>(),
+        InMemoryStorage<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>();
+        DynamoDbService svc = new DynamoDbService(new InMemoryStorage<>(), itemStore, null, new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), null, null, s3With(object), mapper);
         createUsersTableInCreating(svc);
 
@@ -4264,11 +4265,11 @@ class DynamoDbServiceTest {
 
     @Test
     void runImport_unreadableObject_isCountedAndTheRestIsLoaded() throws Exception {
-        var data = s3Object("imp/data.json.gz", gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n"));
-        var manifest = s3Object("imp/manifest-summary.json", "{}".getBytes(StandardCharsets.UTF_8));
-        var svc = serviceWithS3(s3With(data, manifest), new InMemoryStorage<>());
+        S3Object data = s3Object("imp/data.json.gz", gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n"));
+        S3Object manifest = s3Object("imp/manifest-summary.json", "{}".getBytes(StandardCharsets.UTF_8));
+        DynamoDbService svc = serviceWithS3(s3With(data, manifest), new InMemoryStorage<>());
         createUsersTableInCreating(svc);
-        var desc = importDescription("bucket", "imp/", "GZIP");
+        ImportTableDescription desc = importDescription("bucket", "imp/", "GZIP");
 
         svc.runImport(desc, "Users", "us-east-1");
 
@@ -4280,12 +4281,12 @@ class DynamoDbServiceTest {
 
     @Test
     void runImport_malformedAttributeValue_isCountedNotFatal() {
-        var object = s3Object("imp/data.json",
+        S3Object object = s3Object("imp/data.json",
                 ("{\"Item\":{\"userId\":{\"S\":\"u1\"},\"m\":{\"M\":\"not a map\"}}}\n"
                 + "{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n").getBytes(StandardCharsets.UTF_8));
-        var svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
+        DynamoDbService svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
         createUsersTableInCreating(svc);
-        var desc = importDescription("bucket", "imp/", "NONE");
+        ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
 
         svc.runImport(desc, "Users", "us-east-1");
 
@@ -4296,12 +4297,12 @@ class DynamoDbServiceTest {
 
     @Test
     void runImport_missingBucket_failsWithS3NoSuchBucket() {
-        var s3 = mock(S3Service.class);
+        S3Service s3 = mock(S3Service.class);
         when(s3.listObjects("missing", "imp/", null, Integer.MAX_VALUE))
                 .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        var svc = serviceWithS3(s3, new InMemoryStorage<>());
+        DynamoDbService svc = serviceWithS3(s3, new InMemoryStorage<>());
         createUsersTableInCreating(svc);
-        var desc = importDescription("missing", "imp/", "NONE");
+        ImportTableDescription desc = importDescription("missing", "imp/", "NONE");
 
         svc.runImport(desc, "Users", "us-east-1");
 
@@ -4313,12 +4314,12 @@ class DynamoDbServiceTest {
 
     @Test
     void runImport_otherS3Error_reportsAnS3FailureCode() {
-        var s3 = mock(S3Service.class);
+        S3Service s3 = mock(S3Service.class);
         when(s3.listObjects("bucket", "imp/", null, Integer.MAX_VALUE))
                 .thenThrow(new AwsException("AccessDenied", "Access Denied", 403));
-        var svc = serviceWithS3(s3, new InMemoryStorage<>());
+        DynamoDbService svc = serviceWithS3(s3, new InMemoryStorage<>());
         createUsersTableInCreating(svc);
-        var desc = importDescription("bucket", "imp/", "NONE");
+        ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
 
         svc.runImport(desc, "Users", "us-east-1");
 
@@ -4330,7 +4331,7 @@ class DynamoDbServiceTest {
     void deleteTable_whileCreating_returnsResourceInUseException() {
         createUsersTableInCreating(service);
 
-        var e = assertThrows(AwsException.class, () -> service.deleteTable("Users", "us-east-1"));
+        AwsException e = assertThrows(AwsException.class, () -> service.deleteTable("Users", "us-east-1"));
 
         assertEquals("ResourceInUseException", e.getErrorCode());
         assertEquals("CREATING", service.describeTable("Users", "us-east-1").getTableStatus());
@@ -4340,14 +4341,14 @@ class DynamoDbServiceTest {
     void updateTable_whileCreating_returnsResourceInUseException() {
         createUsersTableInCreating(service);
 
-        var e = assertThrows(AwsException.class, () -> service.updateTable("Users", 10L, 10L, "us-east-1"));
+        AwsException e = assertThrows(AwsException.class, () -> service.updateTable("Users", 10L, 10L, "us-east-1"));
 
         assertEquals("ResourceInUseException", e.getErrorCode());
     }
 
     @Test
     void validateImportRequest_rejectsUnsupportedFormatWithoutUnsupportedOperationWording() {
-        var e = assertThrows(AwsException.class,
+        AwsException e = assertThrows(AwsException.class,
                 () -> service.validateImportRequest(importRequest("Users", "CSV")));
 
         assertEquals("ValidationException", e.getErrorCode());
@@ -4357,67 +4358,67 @@ class DynamoDbServiceTest {
 
     @Test
     void validateImportRequest_blankClientToken_returnsValidationException() {
-        var request = importRequest("Users", "DYNAMODB_JSON");
+        ObjectNode request = importRequest("Users", "DYNAMODB_JSON");
         request.put("ClientToken", "");
 
-        var e = assertThrows(AwsException.class, () -> service.validateImportRequest(request));
+        AwsException e = assertThrows(AwsException.class, () -> service.validateImportRequest(request));
 
         assertEquals("ValidationException", e.getErrorCode());
     }
 
     @Test
     void validateImportRequest_sameClientToken_returnsExistingImport() {
-        var importStore = new InMemoryStorage<String, ImportTableDescription>();
-        var request = importRequest("Users", "DYNAMODB_JSON");
+        InMemoryStorage<String, ImportTableDescription> importStore = new InMemoryStorage<>();
+        ObjectNode request = importRequest("Users", "DYNAMODB_JSON");
         request.put("ClientToken", "token-1");
-        var existing = importDescription("bucket", "imp/", "NONE");
+        ImportTableDescription existing = importDescription("bucket", "imp/", "NONE");
         existing.setClientToken("token-1");
         existing.setInputFormat("DYNAMODB_JSON");
         existing.setTableCreationParameters(request.get("TableCreationParameters"));
         importStore.put(existing.getImportArn(), existing);
-        var svc = serviceWithS3(mock(S3Service.class), importStore);
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), importStore);
 
         assertSame(existing, svc.validateImportRequest(request));
     }
 
     @Test
     void validateImportRequest_sameClientTokenDifferentParameters_returnsImportConflictException() {
-        var importStore = new InMemoryStorage<String, ImportTableDescription>();
-        var existing = importDescription("bucket", "imp/", "NONE");
+        InMemoryStorage<String, ImportTableDescription> importStore = new InMemoryStorage<>();
+        ImportTableDescription existing = importDescription("bucket", "imp/", "NONE");
         existing.setClientToken("token-1");
         existing.setInputFormat("DYNAMODB_JSON");
         existing.setTableCreationParameters(mapper.createObjectNode().put("TableName", "Users"));
         importStore.put(existing.getImportArn(), existing);
-        var svc = serviceWithS3(mock(S3Service.class), importStore);
-        var request = importRequest("Other", "DYNAMODB_JSON");
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), importStore);
+        ObjectNode request = importRequest("Other", "DYNAMODB_JSON");
         request.put("ClientToken", "token-1");
 
-        var e = assertThrows(AwsException.class, () -> svc.validateImportRequest(request));
+        AwsException e = assertThrows(AwsException.class, () -> svc.validateImportRequest(request));
 
         assertEquals("ImportConflictException", e.getErrorCode());
     }
 
     @Test
     void listImports_pageSizeBelowOne_returnsValidationException() {
-        var svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
 
-        var e = assertThrows(AwsException.class, () -> svc.listImports(null, 0, null));
+        AwsException e = assertThrows(AwsException.class, () -> svc.listImports(null, 0, null));
 
         assertEquals("ValidationException", e.getErrorCode());
     }
 
     @Test
     void listImports_walksPagesByNextToken() {
-        var importStore = new InMemoryStorage<String, ImportTableDescription>();
-        for (var i = 1; i <= 3; i++) {
-            var desc = importDescription("bucket", "imp/", "NONE");
+        InMemoryStorage<String, ImportTableDescription> importStore = new InMemoryStorage<>();
+        for (int i = 1; i <= 3; i++) {
+            ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
             desc.setImportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/import/" + i + "-abc");
             importStore.put(desc.getImportArn(), desc);
         }
-        var svc = serviceWithS3(mock(S3Service.class), importStore);
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), importStore);
 
-        var first = svc.listImports(null, 2, null);
-        var second = svc.listImports(null, 2, first.nextToken());
+        DynamoDbService.ListImportsResult first = svc.listImports(null, 2, null);
+        DynamoDbService.ListImportsResult second = svc.listImports(null, 2, first.nextToken());
 
         assertEquals(2, first.importSummaryList().size());
         assertNotNull(first.nextToken());
@@ -4427,22 +4428,22 @@ class DynamoDbServiceTest {
 
     @Test
     void constructor_failsInterruptedJobsAndActivatesCreatingTables() {
-        var resolver = new RegionResolver("us-east-1", "000000000000");
-        var tables = new AccountAwareStorageBackend<TableDefinition>(new InMemoryStorage<>(), null, "000000000000");
-        var exports = new AccountAwareStorageBackend<ExportDescription>(new InMemoryStorage<>(), null, "000000000000");
-        var imports = new AccountAwareStorageBackend<ImportTableDescription>(new InMemoryStorage<>(), null, "000000000000");
-        var before = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
+        RegionResolver resolver = new RegionResolver("us-east-1", "000000000000");
+        AccountAwareStorageBackend<TableDefinition> tables = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        AccountAwareStorageBackend<ExportDescription> exports = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        AccountAwareStorageBackend<ImportTableDescription> imports = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        DynamoDbService before = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
                 resolver, null, null, mock(S3Service.class), mapper);
         createUsersTableInCreating(before);
-        var importDesc = importDescription("bucket", "imp/", "NONE");
+        ImportTableDescription importDesc = importDescription("bucket", "imp/", "NONE");
         importDesc.setImportStatus("IN_PROGRESS");
         imports.put(importDesc.getImportArn(), importDesc);
-        var exportDesc = new ExportDescription();
+        ExportDescription exportDesc = new ExportDescription();
         exportDesc.setExportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/export/1-abc");
         exportDesc.setExportStatus("IN_PROGRESS");
         exports.put(exportDesc.getExportArn(), exportDesc);
 
-        var restarted = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
+        DynamoDbService restarted = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
                 resolver, null, null, mock(S3Service.class), mapper);
 
         assertEquals("ACTIVE", restarted.describeTable("Users", "us-east-1").getTableStatus());

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.container.ContainerResponseFilter;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
 
 import java.util.UUID;
@@ -31,7 +32,7 @@ public class AwsRequestIdFilter implements ContainerResponseFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext, ContainerResponseContext responseContext) {
-        var headers = responseContext.getHeaders();
+        MultivaluedMap<String, Object> headers = responseContext.getHeaders();
 
         // Reuse the same ID across all header variants for this response
         String requestId = UUID.randomUUID().toString();

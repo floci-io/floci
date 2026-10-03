@@ -5,6 +5,7 @@ import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static java.util.stream.StreamSupport.stream;
@@ -59,7 +60,7 @@ class FlociConfigRelocationsInterceptorTest {
     void nameIterationPresentsOnlyTheRelocatedKey() {
         SmallRyeConfig config = config(Map.of("floci.max-request-size", "4096"));
 
-        var names = stream(config.getPropertyNames().spliterator(), false).toList();
+        List<String> names = stream(config.getPropertyNames().spliterator(), false).toList();
         assertTrue(names.contains("floci.protocols.max-request-size"));
         assertFalse(names.contains("floci.max-request-size"));
     }

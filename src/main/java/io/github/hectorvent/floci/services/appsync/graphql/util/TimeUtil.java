@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql.util;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -41,14 +42,14 @@ public class TimeUtil {
 
     public long parseFormattedToEpochMilliSeconds(String timestamp, String format) {
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern(format);
-        var parsed = java.time.LocalDateTime.parse(timestamp, formatter);
+        LocalDateTime parsed = LocalDateTime.parse(timestamp, formatter);
         return parsed.toInstant(ZoneOffset.UTC).toEpochMilli();
     }
 
     public long parseFormattedToEpochMilliSeconds(String timestamp, String format, String timezone) {
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern(format);
         ZoneOffset zoneOffset = ZoneOffset.of(timezone);
-        var parsed = java.time.LocalDateTime.parse(timestamp, formatter);
+        LocalDateTime parsed = LocalDateTime.parse(timestamp, formatter);
         return parsed.toInstant(zoneOffset).toEpochMilli();
     }
 

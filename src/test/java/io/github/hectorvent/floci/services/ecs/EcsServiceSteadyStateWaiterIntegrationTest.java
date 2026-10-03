@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.ecs;
 
+import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -42,6 +45,12 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 @QuarkusTest
 class EcsServiceSteadyStateWaiterIntegrationTest {
+
+    @Inject
+    EcsService ecsService;
+
+    @Inject
+    CloudWatchMetricsService cloudWatchMetricsService;
 
     private static final String TARGET = "AmazonEC2ContainerServiceV20141113.";
     private static final String CT = "application/x-amz-json-1.1";
@@ -202,5 +211,44 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
             return;
         }
         fail("the reconciler converged the service before every one of five updates");
+    }
+
+    @Test
+    void anAlarmFailureBecomesTerminalAndMarksTheServiceRolloutFailed() {
+        String alarmName = "waiter-alarm-failure";
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName(alarmName);
+        alarm.setStateValue("ALARM");
+        cloudWatchMetricsService.putMetricAlarm(alarm, "us-east-1");
+
+        call("CreateCluster", "{\"clusterName\":\"" + CLUSTER + "\"}");
+        call("RegisterTaskDefinition", "{\"family\":\"waiter-alarm-td\",\"networkMode\":\"awsvpc\","
+                + "\"containerDefinitions\":[{\"name\":\"app\",\"image\":\"nginx\",\"memory\":128}]}");
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"waiter-alarm-svc\","
+                + "\"taskDefinition\":\"waiter-alarm-td\",\"desiredCount\":1,"
+                + "\"launchType\":\"FARGATE\",\"deploymentConfiguration\":{\"alarms\":{"
+                + "\"alarmNames\":[\"" + alarmName + "\"],\"enable\":true,\"rollback\":false}},"
+                + NETWORK + "}");
+
+        ecsService.reconcileServices();
+        Response listed = call("ListServiceDeployments", "{\"cluster\":\"" + CLUSTER
+                + "\",\"service\":\"waiter-alarm-svc\",\"status\":[\"STOP_REQUESTED\"]}");
+        listed.then().body("serviceDeployments", hasSize(1));
+        String deploymentArn = listed.jsonPath().getString("serviceDeployments[0].serviceDeploymentArn");
+        call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
+                .then()
+                .body("serviceDeployments[0].status", equalTo("STOP_REQUESTED"))
+                .body("serviceDeployments[0].statusReason", startsWith(
+                        "A deployment alarm entered the ALARM state."));
+
+        ecsService.reconcileServices();
+        call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
+                .then()
+                .body("serviceDeployments[0].status", equalTo("STOPPED"))
+                .body("serviceDeployments[0].stoppedAt", notNullValue());
+        call("DescribeServices", "{\"cluster\":\"" + CLUSTER
+                + "\",\"services\":[\"waiter-alarm-svc\"]}")
+                .then()
+                .body("services[0].deployments[0].rolloutState", equalTo("FAILED"));
     }
 }

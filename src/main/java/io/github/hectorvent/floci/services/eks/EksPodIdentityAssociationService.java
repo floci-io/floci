@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
@@ -37,17 +39,20 @@ public class EksPodIdentityAssociationService {
 
     private final StorageBackend<String, StoredAssociation> associations;
     private final IamService iam;
+    private final RegionResolver regionResolver;
     private final SecureRandom random = new SecureRandom();
 
     @Inject
-    public EksPodIdentityAssociationService(StorageFactory factory, IamService iam) {
+    public EksPodIdentityAssociationService(StorageFactory factory, IamService iam, RegionResolver regionResolver) {
         this(factory.create("eks", "eks-pod-identity-associations.json",
-                new TypeReference<Map<String, StoredAssociation>>() {}), iam);
+                new TypeReference<Map<String, StoredAssociation>>() {}), iam, regionResolver);
     }
 
-    EksPodIdentityAssociationService(StorageBackend<String, StoredAssociation> associations, IamService iam) {
+    EksPodIdentityAssociationService(StorageBackend<String, StoredAssociation> associations, IamService iam,
+                                     RegionResolver regionResolver) {
         this.associations = associations;
         this.iam = iam;
+        this.regionResolver = regionResolver;
     }
 
     @RegisterForReflection
@@ -118,19 +123,12 @@ public class EksPodIdentityAssociationService {
         }
 
         String associationId = generateAssociationId();
-        String partition = "aws";
-        String region = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
-        String accountId = cluster.getAccountId() != null ? cluster.getAccountId() : "000000000000";
-        if (cluster.getArn() != null) {
-            String[] clusterArn = cluster.getArn().split(":", 6);
-            if (clusterArn.length == 6) {
-                partition = clusterArn[1];
-                region = clusterArn[3];
-                accountId = clusterArn[4];
-            }
-        }
-        String associationArn = "arn:" + partition + ":eks:" + region + ":"
-                + accountId + ":podidentityassociation/" + cluster.getName() + "/" + associationId;
+        // The association lives in the cluster's region and account, which its ARN names.
+        String region = AwsArnUtils.regionOrDefault(cluster.getArn(), regionResolver.getDefaultRegion());
+        String accountId = AwsArnUtils.accountOrDefault(cluster.getArn(),
+                cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getDefaultAccountId());
+        String associationArn = AwsArnUtils.Arn.of("eks", region, accountId,
+                "podidentityassociation/" + cluster.getName() + "/" + associationId).toString();
         double now = Instant.now().toEpochMilli() / 1000.0;
         String externalId = UUID.randomUUID().toString();
 
@@ -315,15 +313,15 @@ public class EksPodIdentityAssociationService {
         }
     }
 
+    /** The partition role ARNs must share with the cluster: its own, or the deployment's without an ARN. */
+    private String clusterPartition(Cluster cluster) {
+        return AwsArnUtils.partitionOrDefault(cluster != null ? cluster.getArn() : null,
+                regionResolver.getDefaultPartition());
+    }
+
     private void validateRoleArn(Cluster cluster, String roleArn, String fieldName) {
         String[] arn = roleArn.split(":", 6);
-        String expectedPartition = "aws";
-        if (cluster != null && cluster.getArn() != null) {
-            String[] clusterArn = cluster.getArn().split(":", 6);
-            if (clusterArn.length > 1) {
-                expectedPartition = clusterArn[1];
-            }
-        }
+        String expectedPartition = clusterPartition(cluster);
         if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(expectedPartition)
                 || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
                 || !arn[5].startsWith("role/") || arn[5].startsWith("role/aws-service-role/")
@@ -336,15 +334,9 @@ public class EksPodIdentityAssociationService {
                 .orElseThrow(() -> invalid("IAM role does not exist"));
     }
 
-    private static void validateTargetRoleArn(Cluster cluster, String targetRoleArn) {
+    private void validateTargetRoleArn(Cluster cluster, String targetRoleArn) {
         String[] arn = targetRoleArn.split(":", 6);
-        String expectedPartition = "aws";
-        if (cluster != null && cluster.getArn() != null) {
-            String[] clusterArn = cluster.getArn().split(":", 6);
-            if (clusterArn.length > 1) {
-                expectedPartition = clusterArn[1];
-            }
-        }
+        String expectedPartition = clusterPartition(cluster);
         if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(expectedPartition)
                 || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
                 || !arn[5].startsWith("role/") || targetRoleArn.endsWith("/")) {

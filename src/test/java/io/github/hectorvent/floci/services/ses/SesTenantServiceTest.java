@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
+import io.github.hectorvent.floci.services.ses.model.TenantSuppressionAttributes;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -323,10 +324,10 @@ class SesTenantServiceTest {
         service.associate(tenant, SesTenantService.parseResourceArn(
                 "arn:aws:ses:" + REGION + ":" + ACCOUNT + ":configuration-set/cs", ACCOUNT, REGION),
                 REGION, () -> {});
-        var all = service.listTenantResources(tenant, null, REGION);
+        List<TenantResourceAssociation> all = service.listTenantResources(tenant, null, REGION);
         assertEquals(List.of("configuration-set", "identity", "template"),
                 all.stream().map(a -> a.resourceType()).toList());
-        var filtered = service.listTenantResources(tenant, "identity", REGION);
+        List<TenantResourceAssociation> filtered = service.listTenantResources(tenant, "identity", REGION);
         assertEquals(1, filtered.size());
         assertEquals("identity", filtered.get(0).resourceType());
     }
@@ -337,7 +338,7 @@ class SesTenantServiceTest {
         Tenant b = service.createTenant("beta", List.of(), ACCOUNT, REGION);
         service.associate(a, identityRef("example.com"), REGION, () -> {});
         service.associate(b, identityRef("example.com"), REGION, () -> {});
-        var tenants = service.listResourceTenants(identityRef("example.com"), REGION);
+        List<TenantResourceAssociation> tenants = service.listResourceTenants(identityRef("example.com"), REGION);
         assertEquals(2, tenants.size());
         assertEquals("acme", tenants.get(0).tenantName());
         assertEquals(a.tenantId(), tenants.get(0).tenantId());
@@ -413,7 +414,7 @@ class SesTenantServiceTest {
     void putSuppressionAttributes_setsAndClears() {
         service.createTenant("acme", List.of(), ACCOUNT, REGION);
         service.putSuppressionAttributes("acme", List.of("BOUNCE", "COMPLAINT"), "TENANT", REGION);
-        var attrs = service.getTenant("acme", REGION).suppressionAttributes();
+        TenantSuppressionAttributes attrs = service.getTenant("acme", REGION).suppressionAttributes();
         assertEquals(List.of("BOUNCE", "COMPLAINT"), attrs.suppressedReasons());
         assertEquals("TENANT", attrs.suppressionScope());
 
@@ -426,7 +427,7 @@ class SesTenantServiceTest {
     void putSuppressionAttributes_emptyReasonListWithScope_isValidState() {
         service.createTenant("acme", List.of(), ACCOUNT, REGION);
         service.putSuppressionAttributes("acme", List.of(), "TENANT", REGION);
-        var attrs = service.getTenant("acme", REGION).suppressionAttributes();
+        TenantSuppressionAttributes attrs = service.getTenant("acme", REGION).suppressionAttributes();
         assertEquals(List.of(), attrs.suppressedReasons());
         assertEquals("TENANT", attrs.suppressionScope());
     }
@@ -597,11 +598,11 @@ class SesTenantServiceTest {
             service.associate(tenant, identityRef(domain), REGION, () -> {});
         }
 
-        PaginatedResult<TenantResourceAssociation> first = service.listTenantResources(tenant, null, REGION,
+        PaginatedResult<TenantResourceAssociation> first = service.listTenantResources("acme", null, REGION,
                 SesListPaging.V2_LIST_TENANT_RESOURCES, 2, null);
         assertEquals(List.of(identityRef("a.example.com").arn(), identityRef("b.example.com").arn()),
                 first.items().stream().map(TenantResourceAssociation::resourceArn).toList());
-        PaginatedResult<TenantResourceAssociation> rest = service.listTenantResources(tenant, null, REGION,
+        PaginatedResult<TenantResourceAssociation> rest = service.listTenantResources("acme", null, REGION,
                 SesListPaging.V2_LIST_TENANT_RESOURCES, 2, first.nextToken());
         assertEquals(List.of(identityRef("c.example.com").arn()),
                 rest.items().stream().map(TenantResourceAssociation::resourceArn).toList());

@@ -29,6 +29,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1112,8 +1113,8 @@ public class FisService implements TagHandler {
     private Set<String> persistResolvedTargets(String region, String experimentId, JsonNode targets) {
         Set<String> unresolvedTargets = new HashSet<>();
         int index = 0;
-        for (var iterator = targets.fields(); iterator.hasNext();) {
-            var entry = iterator.next();
+        for (Iterator<Map.Entry<String, JsonNode>> iterator = targets.fields(); iterator.hasNext();) {
+            Map.Entry<String, JsonNode> entry = iterator.next();
             String targetName = entry.getKey();
             JsonNode target = entry.getValue();
             String resourceType = target.path("resourceType").asText();

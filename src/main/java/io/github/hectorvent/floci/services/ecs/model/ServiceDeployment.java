@@ -28,6 +28,13 @@ public class ServiceDeployment {
     private Instant updatedAt;
     private String targetServiceRevisionArn;
     private List<String> sourceServiceRevisionArns;
+    /** Internal revision restored if this deployment rolls back. */
+    private String rollbackTargetServiceRevisionArn;
+    private Instant rollbackStartedAt;
+    private String rollbackReason;
+    private List<String> alarmNames;
+    private List<String> triggeredAlarmNames;
+    private String alarmStatus;
     /** Tasks the circuit breaker has counted as failing to start. */
     private int failedTasks;
 
@@ -52,6 +59,28 @@ public class ServiceDeployment {
     public void setSourceServiceRevisionArns(List<String> sourceServiceRevisionArns) {
         this.sourceServiceRevisionArns = sourceServiceRevisionArns;
     }
+
+    public String getRollbackTargetServiceRevisionArn() { return rollbackTargetServiceRevisionArn; }
+    public void setRollbackTargetServiceRevisionArn(String rollbackTargetServiceRevisionArn) {
+        this.rollbackTargetServiceRevisionArn = rollbackTargetServiceRevisionArn;
+    }
+
+    public Instant getRollbackStartedAt() { return rollbackStartedAt; }
+    public void setRollbackStartedAt(Instant rollbackStartedAt) { this.rollbackStartedAt = rollbackStartedAt; }
+
+    public String getRollbackReason() { return rollbackReason; }
+    public void setRollbackReason(String rollbackReason) { this.rollbackReason = rollbackReason; }
+
+    public List<String> getAlarmNames() { return alarmNames; }
+    public void setAlarmNames(List<String> alarmNames) { this.alarmNames = alarmNames; }
+
+    public List<String> getTriggeredAlarmNames() { return triggeredAlarmNames; }
+    public void setTriggeredAlarmNames(List<String> triggeredAlarmNames) {
+        this.triggeredAlarmNames = triggeredAlarmNames;
+    }
+
+    public String getAlarmStatus() { return alarmStatus; }
+    public void setAlarmStatus(String alarmStatus) { this.alarmStatus = alarmStatus; }
 
     public int getFailedTasks() { return failedTasks; }
     public void setFailedTasks(int failedTasks) { this.failedTasks = failedTasks; }

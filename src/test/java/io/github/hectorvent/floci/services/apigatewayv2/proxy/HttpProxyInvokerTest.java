@@ -358,7 +358,7 @@ class HttpProxyInvokerTest {
         backend.createContext("/", exchange -> {
             exchange.sendResponseHeaders(200, chunked ? 0 : size);
             byte[] block = new byte[64 * 1024];
-            try (var out = exchange.getResponseBody()) {
+            try (OutputStream out = exchange.getResponseBody()) {
                 for (int written = 0; written < size; written += block.length) {
                     out.write(block, 0, Math.min(block.length, size - written));
                 }

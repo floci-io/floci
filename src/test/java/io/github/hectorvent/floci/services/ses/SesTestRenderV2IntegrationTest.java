@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -116,7 +117,7 @@ class SesTestRenderV2IntegrationTest {
     @MethodSource("malformedRenderBodies")
     @Order(7)
     void testRenderEmailTemplate_malformedBody_returns400(String label, String body) {
-        var spec = given()
+        RequestSpecification spec = given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER);
         if (body != null) {

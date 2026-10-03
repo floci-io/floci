@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.firehose;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
@@ -115,7 +116,7 @@ public class FirehoseJsonHandler {
             }
             case "DescribeDeliveryStream" -> {
                 String name = getDeliveryStreamName(request);
-                var desc = firehoseService.describeDeliveryStream(name);
+                DeliveryStreamDescription desc = firehoseService.describeDeliveryStream(name);
                 yield Response.ok(Map.of("DeliveryStreamDescription", desc)).build();
             }
             case "ListDeliveryStreams" -> {
@@ -174,7 +175,7 @@ public class FirehoseJsonHandler {
 
                 List<io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Tag> tags = firehoseService.listTagsForDeliveryStream(name, exclusiveStartTagKey, limit);
                 boolean hasMore = false;
-                var allTags = firehoseService.describeDeliveryStream(name).getTags();
+                List<DeliveryStreamDescription.Tag> allTags = firehoseService.describeDeliveryStream(name).getTags();
                 if (!tags.isEmpty() && !allTags.isEmpty()) {
                     String lastKey = tags.get(tags.size() - 1).getKey();
                     int idx = -1;

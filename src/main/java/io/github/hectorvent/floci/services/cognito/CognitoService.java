@@ -193,7 +193,7 @@ public class CognitoService implements ResourceProvider {
                 lambdaService,
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
-                new CognitoMessageDispatcher(sesService, snsService),
+                new CognitoMessageDispatcher(sesService, snsService, regionResolver.getDefaultRegion()),
                 certificateManager,
                 clock
         );

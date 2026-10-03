@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -80,7 +81,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
     @Test
     @Order(1)
     void succeedingChildReturnsPascalCaseEnvelopeWithOutputAsJsonString() throws Exception {
-        var parentArn = createStateMachine("sync-exec-parent-ok", null, callChild("""
+        String parentArn = createStateMachine("sync-exec-parent-ok", null, callChild("""
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "CallChild",
@@ -104,10 +105,10 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
                 }
                 """, succeedingChildArn));
 
-        var describe = waitForTerminalState(startExecution(parentArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(parentArn, "{}"));
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
 
-        var output = mapper.readTree(describe.jsonPath().getString("output"));
+        JsonNode output = mapper.readTree(describe.jsonPath().getString("output"));
         assertEquals("SUCCEEDED", output.path("status").asText());
         assertEquals(succeedingChildArn, output.path("childArn").asText());
 
@@ -117,7 +118,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
                 "StartDate is not the SDK's ISO-8601 rendering: " + output.path("startDate"));
 
         // Output arrives as a JSON string, the way the AWS SDK integration returns it.
-        var childOutput = mapper.readTree(output.path("childOutput").asText());
+        JsonNode childOutput = mapper.readTree(output.path("childOutput").asText());
         assertTrue(childOutput.path("approved").asBoolean());
         assertEquals(1200, childOutput.path("echoedAmount").asInt());
     }
@@ -125,7 +126,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
     @Test
     @Order(2)
     void failingChildIsReportedThroughStatusWithoutFailingTheTask() throws Exception {
-        var parentArn = createStateMachine("sync-exec-parent-fail", null, callChild("""
+        String parentArn = createStateMachine("sync-exec-parent-fail", null, callChild("""
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "CallChild",
@@ -148,10 +149,10 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
                 }
                 """, failingChildArn));
 
-        var describe = waitForTerminalState(startExecution(parentArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(parentArn, "{}"));
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
 
-        var output = mapper.readTree(describe.jsonPath().getString("output"));
+        JsonNode output = mapper.readTree(describe.jsonPath().getString("output"));
         assertEquals("FAILED", output.path("status").asText());
         assertEquals("PoolClosed", output.path("error").asText());
         assertEquals("the pool is already closed", output.path("cause").asText());
@@ -160,7 +161,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
     @Test
     @Order(3)
     void standardChildFailsTheTaskWithTheServicePrefixedError() {
-        var parentArn = createStateMachine("sync-exec-parent-standard-child", null, """
+        String parentArn = createStateMachine("sync-exec-parent-standard-child", null, """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "CallChild",
@@ -178,7 +179,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
                 }
                 """.formatted(RESOURCE, standardChildArn));
 
-        var describe = waitForTerminalState(startExecution(parentArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(parentArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("Sfn.StateMachineTypeNotSupportedException", describe.jsonPath().getString("error"));
         assertTrue(describe.jsonPath().getString("cause").contains("only supported for EXPRESS"));
@@ -187,7 +188,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
     @Test
     @Order(4)
     void missingStateMachineArnFailsTheTask() {
-        var parentArn = createStateMachine("sync-exec-parent-no-arn", null, """
+        String parentArn = createStateMachine("sync-exec-parent-no-arn", null, """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "CallChild",
@@ -202,7 +203,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
                 }
                 """.formatted(RESOURCE));
 
-        var describe = waitForTerminalState(startExecution(parentArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(parentArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("Sfn.InvalidArnException", describe.jsonPath().getString("error"));
     }
@@ -218,8 +219,8 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
     }
 
     private static String createStateMachine(String name, String type, String definition) {
-        var typeField = type != null ? "\"type\": \"%s\",".formatted(type) : "";
-        var resp = given()
+        String typeField = type != null ? "\"type\": \"%s\",".formatted(type) : "";
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -236,7 +237,7 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
     }
 
     private static String startExecution(String smArn, String input) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -248,15 +249,15 @@ class StepFunctionsStartSyncExecutionIntegrationTest {
     }
 
     private static Response waitForTerminalState(String execArn) {
-        for (var i = 0; i < 100; i++) {
-            var resp = given()
+        for (int i = 0; i < 100; i++) {
+            Response resp = given()
                     .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
                     .contentType(SFN_CONTENT_TYPE)
                     .body("""
                             {"executionArn": "%s"}
                             """.formatted(execArn))
                     .when().post("/");
-            var status = resp.jsonPath().getString("status");
+            String status = resp.jsonPath().getString("status");
             if (!"RUNNING".equals(status)) {
                 return resp;
             }

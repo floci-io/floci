@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sns.model.Subscription;
+import io.github.hectorvent.floci.services.sns.model.Topic;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.HashMap;
@@ -88,7 +90,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             attributes.put("MaximumMessageSize", maximumMessageSize);
         }
 
-        var topic = snsService.createTopic(topicName, attributes, Map.of(), ctx.region());
+        Topic topic = snsService.createTopic(topicName, attributes, Map.of(), ctx.region());
         // createTopic leaves an existing topic untouched, so an update writes the mutable
         // attributes itself. A property the template dropped is reset, not left standing.
         if (ctx.isUpdate()) {
@@ -139,7 +141,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             attributes.put("RedrivePolicy", ctx.engine().resolveJsonAttribute(props.path("RedrivePolicy")));
         }
 
-        var sub = snsService.subscribe(topicArn, protocol, endpoint, ctx.region(), attributes);
+        Subscription sub = snsService.subscribe(topicArn, protocol, endpoint, ctx.region(), attributes);
         r.setPhysicalId(sub.getSubscriptionArn());
         r.getAttributes().put("Arn", sub.getSubscriptionArn());
     }

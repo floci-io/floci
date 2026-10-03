@@ -205,6 +205,23 @@ class ScheduleDispatcherTest {
     }
 
     @Test
+    void firesPreviouslyPersistedWeekRateSchedule() {
+        Schedule schedule = newSchedule("legacy-weekly", "rate(1 week)", "ENABLED");
+        when(schedulerService.listAllSchedules()).thenReturn(List.of(schedule));
+
+        dispatcher.tick(Instant.parse("2026-04-28T08:59:59Z"));
+        verify(invoker, never()).invoke(any(), any());
+
+        Instant firstFire = Instant.parse("2026-04-28T09:00:00Z");
+        dispatcher.tick(firstFire);
+        verify(invoker).invoke(schedule, firstFire);
+
+        Instant secondFire = firstFire.plusSeconds(7 * 24 * 60 * 60);
+        dispatcher.tick(secondFire);
+        verify(invoker).invoke(schedule, secondFire);
+    }
+
+    @Test
     void rateWithTimezoneStillUsesElapsedHoursAcrossSpringForward() {
         Schedule s = newSchedule("rate-dst", "rate(1 day)", "ENABLED");
         s.setScheduleExpressionTimezone("America/Los_Angeles");

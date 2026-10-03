@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.verifiedpermissions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.verifiedpermissions.model.EntityIdentifier;
 import io.github.hectorvent.floci.services.verifiedpermissions.model.IdentitySource;
@@ -13,6 +14,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class VerifiedPermissionsTokenService {
@@ -200,11 +202,11 @@ public class VerifiedPermissionsTokenService {
         if (!union.isObject() || union.size() != 1) {
             throw VerifiedPermissionsService.validation("Context attributes must contain one union member.");
         }
-        var entry = union.fields().next();
+        Map.Entry<String, JsonNode> entry = union.fields().next();
         return switch (entry.getKey()) {
             case "boolean", "long", "string" -> entry.getValue().deepCopy();
             case "set" -> {
-                var array = objectMapper.createArrayNode();
+                ArrayNode array = objectMapper.createArrayNode();
                 entry.getValue().forEach(v -> array.add(rawAttribute(v)));
                 yield array;
             }

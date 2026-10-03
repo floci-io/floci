@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -539,6 +540,18 @@ public class EksService implements TagHandler, ResourceProvider {
         }
 
         cluster.setRoleArn(request.getRoleArn());
+
+        List<String> clusterArgs;
+        try {
+            clusterArgs = EksClusterArgs.parseAndValidateClusterArgs(request.getTags(), name);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterException", e.getMessage(), 400);
+        }
+        if (!clusterArgs.isEmpty()) {
+            cluster.setClusterArgs(clusterArgs);
+        }
+        cluster.setTags(request.getTags() != null ? ReservedTags.stripReservedTags(request.getTags()) : new HashMap<>());
+
         ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
         SecurityGroup clusterSg = null;
         if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
@@ -560,7 +573,6 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setLogging(buildLogging(request.getLogging()));
         cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
-        cluster.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
@@ -998,6 +1010,7 @@ public class EksService implements TagHandler, ResourceProvider {
 
     @Override
     public void tagResource(String region, String resourceArn, Map<String, String> tags) {
+        ReservedTags.rejectReservedTagsOnUpdate(tags);
         String clusterName = extractClusterName(resourceArn);
         Cluster cluster = storage.get(clusterName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",

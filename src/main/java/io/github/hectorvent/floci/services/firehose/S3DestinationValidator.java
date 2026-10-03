@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.OpenXJsonSerDe;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.OrcSerDe;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ParquetSerDe;
@@ -128,7 +129,7 @@ final class S3DestinationValidator {
      */
     private static void collectSchemaViolations(S3Destination config, String shapeName,
                                                 List<String> violations) {
-        var conversion = config.getDataFormatConversionConfiguration();
+        DeliveryStreamDescription.DataFormatConversionConfiguration conversion = config.getDataFormatConversionConfiguration();
         if (conversion == null || conversion.getSchemaConfiguration() == null) {
             return;
         }
@@ -168,7 +169,7 @@ final class S3DestinationValidator {
      */
     private static void collectOpenXMappingViolations(S3Destination config, String shapeName,
                                                       List<String> violations) {
-        var conversion = config.getDataFormatConversionConfiguration();
+        DeliveryStreamDescription.DataFormatConversionConfiguration conversion = config.getDataFormatConversionConfiguration();
         if (conversion == null || conversion.getInputFormatConfiguration() == null
                 || conversion.getInputFormatConfiguration().getDeserializer() == null) {
             return;
@@ -214,7 +215,7 @@ final class S3DestinationValidator {
     }
 
     private static Serializer serializer(S3Destination config) {
-        var conversion = config.getDataFormatConversionConfiguration();
+        DeliveryStreamDescription.DataFormatConversionConfiguration conversion = config.getDataFormatConversionConfiguration();
         if (conversion == null || conversion.getOutputFormatConfiguration() == null) {
             return null;
         }
