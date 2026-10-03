@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -140,6 +141,31 @@ public class SesConfigurationSetService {
         return configSetStore.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(ConfigurationSet::getName))
                 .toList();
+    }
+
+    /**
+     * ListConfigurationSets with a name filter, probed 2026-10-03: SES checks the page size, the
+     * name, then the token. The name is not trimmed and is found anywhere in a set's name without
+     * regard to case, and a token is bound to it. A null name lists every set.
+     */
+    public PaginatedResult<ConfigurationSet> listV2(String region, String nameContains, Integer pageSize,
+                                                    String nextToken) {
+        SesListPaging paging = SesListPaging.V2_LIST_CONFIGURATION_SETS;
+        if (nameContains == null) {
+            return list(region, paging, pageSize, nextToken);
+        }
+        // Validated here as well as in page() so the size error wins over the name's length.
+        paging.pageSize(pageSize);
+        int length = nameContains.codePointCount(0, nameContains.length());
+        if (length < 3 || length > 64) {
+            throw new AwsException("BadRequestException",
+                    "CONFIGURATION_SET_NAME_CONTAINS must be between 3 and 64 characters", 400);
+        }
+        String name = nameContains.toLowerCase(Locale.ROOT);
+        List<ConfigurationSet> matching = list(region).stream()
+                .filter(cs -> cs.getName().toLowerCase(Locale.ROOT).contains(name))
+                .toList();
+        return paging.page(region, name, matching, ConfigurationSet::getName, pageSize, nextToken);
     }
 
     /** The raw removal; existence and the tenant delete-guard are the facade's orchestration. */
