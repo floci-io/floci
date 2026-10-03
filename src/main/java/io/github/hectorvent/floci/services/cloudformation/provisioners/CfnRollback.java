@@ -142,6 +142,12 @@ public final class CfnRollback {
     public static final String ASG_UPDATE_SNAPSHOT_ATTR = "__FlociAsgUpdateSnapshot";
 
     /**
+     * Holds the settings an ECS cluster carried before an in-place update changed its
+     * {@code ClusterSettings}, so a failed stack update can restore them.
+     */
+    public static final String ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR = "__FlociEcsClusterSettingsSnapshot";
+
+    /**
      * Holds the version a launch template created during an in-place update and the prior version,
      * so a failed stack update can roll it back.
      */

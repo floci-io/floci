@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
@@ -404,6 +405,93 @@ class EcsCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r));
         assertEquals("web", r.getPhysicalId());
         verify(ecs, never()).deleteCluster(anyString(), anyString());
+    }
+
+    @Test
+    void clusterSettingsAreAppliedOnCreate() {
+        when(ecs.createCluster("web", REGION)).thenReturn(cluster("web"));
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+
+        provisioner.provision(r, clusterWithInsights("enabled"), ctx());
+
+        verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enabled")), REGION);
+        assertEquals(Set.of("Arn"), r.getAttributes().keySet());
+    }
+
+    @Test
+    void aFailedStackUpdateRestoresThePriorClusterSettings() {
+        EcsCluster prior = cluster("web");
+        prior.setSettings(List.of(new ClusterSetting("containerInsights", "disabled")));
+        when(ecs.createCluster("web", REGION)).thenReturn(prior);
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+
+        provisioner.provision(r, clusterWithInsights("enhanced"), ctx("web"));
+        verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enhanced")), REGION);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "disabled")), REGION);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void anUnchangedSettingIsNotReappliedAndDropsAnEarlierSnapshot() {
+        EcsCluster current = cluster("web");
+        current.setSettings(List.of(new ClusterSetting("containerInsights", "enabled")));
+        when(ecs.createCluster("web", REGION)).thenReturn(current);
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+        r.getAttributes().put(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR,
+                "{\"region\":\"us-east-1\",\"settings\":null}");
+
+        provisioner.provision(r, clusterWithInsights("enabled"), ctx("web"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(ecs, never()).updateClusterSettings(anyString(), any(), anyString());
+    }
+
+    @Test
+    void conditionalClusterSettingsAreResolvedBeforeTheyAreRead() {
+        when(ecs.createCluster("web", REGION)).thenReturn(cluster("web"));
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+        ObjectNode props = clusterWithInsights("enabled");
+        JsonNode resolved = props.get("ClusterSettings");
+        ObjectNode conditional = mapper.createObjectNode();
+        conditional.putArray("Fn::If").add("Insights").add(resolved).addObject().put("Ref", "AWS::NoValue");
+        props.set("ClusterSettings", conditional);
+        ProvisionContext ctx = ctx();
+        when(ctx.engine().resolveNode(conditional)).thenReturn(resolved);
+
+        provisioner.provision(r, props, ctx);
+
+        verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enabled")), REGION);
+    }
+
+    @Test
+    void clusterSettingsThatFailToResolveCreateNoCluster() {
+        ObjectNode props = clusterWithInsights("enabled");
+        ProvisionContext ctx = ctx();
+        when(ctx.engine().resolveNode(props.get("ClusterSettings"))).thenThrow(new IllegalStateException("unresolvable"));
+
+        assertThrows(IllegalStateException.class,
+                () -> provisioner.provision(resource("AWS::ECS::Cluster", "Cluster"), props, ctx));
+
+        verify(ecs, never()).createCluster(anyString(), anyString());
+    }
+
+    @Test
+    void aClusterSettingResolvedToNoValueIsDropped() {
+        when(ecs.createCluster("web", REGION)).thenReturn(cluster("web"));
+        ObjectNode props = clusterWithInsights("enabled");
+        ((ArrayNode) props.get("ClusterSettings")).add("");
+
+        provisioner.provision(resource("AWS::ECS::Cluster", "Cluster"), props, ctx());
+
+        verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enabled")), REGION);
+    }
+
+    private ObjectNode clusterWithInsights(String value) {
+        ObjectNode props = mapper.createObjectNode().put("ClusterName", "web");
+        props.putArray("ClusterSettings").addObject().put("Name", "containerInsights").put("Value", value);
+        return props;
     }
 
     @Test
