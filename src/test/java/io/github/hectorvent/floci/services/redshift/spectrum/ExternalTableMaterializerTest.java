@@ -36,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -372,9 +373,26 @@ class ExternalTableMaterializerTest {
     }
 
     @Test
-    void aLoadInsideATransactionIsNotTrustedForTheNextInPlaceReload() {
+    void aLoadInsideATransactionThatKeepsTheColumnsStillRefillsInPlaceAfterwards() {
         when(glue.getTable("lake", "events")).thenReturn(csvTable());
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        materializer.ensureCurrent(backend, session(true), BINDING, "events");
+        backend.statements.clear();
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        assertThat(backend.statements.getLast(), containsString("CREATE TABLE IF NOT EXISTS \"analytics\".\"events\""));
+        assertThat(backend.statements.getLast(), not(containsString("DROP TABLE IF EXISTS \"analytics\"")));
+    }
+
+    @Test
+    void aTransactionalLoadThatReplacesTheTableIsNotTrustedAsItsCommittedColumns() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        Table changed = csvTable();
+        changed.setVersionId("2");
+        changed.getStorageDescriptor().setColumns(List.of(new Column("id", "bigint")));
+        when(glue.getTable("lake", "events")).thenReturn(changed);
         materializer.ensureCurrent(backend, session(true), BINDING, "events");
         backend.statements.clear();
 
@@ -472,6 +490,103 @@ class ExternalTableMaterializerTest {
         verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/events/p1.csv")
                 && !sql.contains("_SUCCESS") && !sql.contains(".hidden") && !sql.contains("#draft")
                 && !sql.contains("old.csv~") && !sql.contains("nested/")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void ignoresFilesUnderAHiddenFolderBelowThePrefix() {
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(
+                        new S3Object("bucket", "events/p1.csv", new byte[]{1}, "text/csv", "etag1"),
+                        new S3Object("bucket", "events/_temporary/0/part.csv", new byte[]{1}, "text/csv", "etag2"),
+                        new S3Object("bucket", "events/.staging/part.csv", new byte[]{1}, "text/csv", "etag3"),
+                        new S3Object("bucket", "events/day=1/part.csv", new byte[]{1}, "text/csv", "etag4")),
+                        List.of(), false, null));
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/events/p1.csv")
+                && sql.contains("s3://bucket/events/day=1/part.csv")
+                && !sql.contains("_temporary") && !sql.contains(".staging")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void reloadsWhenAPartitionChangesItsDelimiterOrColumnsAtTheSameLocationAndFormat() {
+        Table table = csvTable();
+        table.setPartitionKeys(List.of(new Column("day", "string")));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("bucket", "events/p1.csv", new byte[]{1}, "text/csv", "etag1")),
+                        List.of(), false, null));
+        Partition partition = partitionAt("org.apache.hadoop.mapred.TextInputFormat", table);
+        partition.getStorageDescriptor().setSerdeInfo(serdeWith(Map.of("field.delim", ",")));
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+
+        Partition delimiterChanged = partitionAt("org.apache.hadoop.mapred.TextInputFormat", table);
+        delimiterChanged.getStorageDescriptor().setSerdeInfo(serdeWith(Map.of("field.delim", "|")));
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(delimiterChanged));
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        Partition columnsChanged = partitionAt("org.apache.hadoop.mapred.TextInputFormat", table);
+        columnsChanged.getStorageDescriptor().setSerdeInfo(serdeWith(Map.of("field.delim", "|")));
+        columnsChanged.getStorageDescriptor().setColumns(List.of(new Column("id", "bigint")));
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(columnsChanged));
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    private static StorageDescriptor.SerDeInfo serdeWith(Map<String, String> parameters) {
+        StorageDescriptor.SerDeInfo serde = new StorageDescriptor.SerDeInfo();
+        serde.setSerializationLibrary("org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe");
+        serde.setParameters(parameters);
+        return serde;
+    }
+
+    @Test
+    void readsAnIcebergTableOnEveryQueryBecauseItsSnapshotCanChangeUnseen() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.metadata.json"));
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void refusesToUseAScratchBucketNameThatBelongsToAUserBucket() {
+        when(s3.createBucket(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString()))
+                .thenThrow(new AwsException("BucketAlreadyOwnedByYou", "owned", 409));
+        when(s3.getBucketTagging(ExternalTableMaterializer.SCRATCH_BUCKET)).thenReturn(Map.of());
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.getMessage(), containsString("not the Spectrum scratch bucket"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+        verify(s3, never()).deleteObject(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString());
+    }
+
+    @Test
+    void tagsTheScratchBucketItCreatesAndReusesATaggedOne() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        verify(s3).putBucketTagging(ExternalTableMaterializer.SCRATCH_BUCKET, Map.of(
+                S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE));
+
+        when(s3.createBucket(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString()))
+                .thenThrow(new AwsException("BucketAlreadyOwnedByYou", "owned", 409));
+        when(s3.getBucketTagging(ExternalTableMaterializer.SCRATCH_BUCKET)).thenReturn(Map.of(
+                S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE));
+        forceReload();
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
     }
 
     @Test

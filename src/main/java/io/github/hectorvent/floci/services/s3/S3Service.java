@@ -102,6 +102,8 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String INTERNAL_BUCKET_PREFIX = "floci-internal-";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_BUCKET =
             INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
+    public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
+    public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
@@ -513,7 +515,19 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public List<Bucket> listBuckets() {
-        return bucketStore.scan(key -> !REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(key));
+        return bucketStore.scan(key -> true).stream()
+                .filter(bucket -> !isSpectrumScratchBucket(bucket))
+                .toList();
+    }
+
+    /**
+     * The Spectrum scratch bucket is told apart from a user bucket of the same name by the tag the
+     * materializer puts on it, so a user's own bucket is never hidden or treated as scratch space.
+     */
+    private static boolean isSpectrumScratchBucket(Bucket bucket) {
+        return REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())
+                && bucket.getTags() != null
+                && REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE.equals(bucket.getTags().get(INTERNAL_BUCKET_TAG_KEY));
     }
 
     public String getBucketOwnerAccountId(String bucketName) {
