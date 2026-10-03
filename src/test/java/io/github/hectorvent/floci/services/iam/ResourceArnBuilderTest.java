@@ -145,6 +145,58 @@ class ResourceArnBuilderTest {
     }
 
     /**
+     * A rename is authorized against both names. The model requires the principal to be allowed on
+     * the old and the new one, and the filter authorizes a request once per resource, so naming
+     * both is what stops a rename into a name the caller may not write.
+     */
+    @Test
+    void iamNamesBothTheOldAndTheNewNameOnARename() {
+        String stored = "arn:aws:iam::000000000000:server-certificate/old";
+        setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old"
+                + "&NewServerCertificateName=new");
+        assertEquals(
+                List.of(stored, "arn:aws:iam::000000000000:server-certificate/new"),
+                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /** A move renames the path, so the destination path is named the same way. */
+    @Test
+    void iamNamesTheDestinationPathOnAMove() {
+        String stored = "arn:aws:iam::000000000000:server-certificate/old";
+        setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old&NewPath=/team/");
+        assertEquals(
+                List.of(stored, "arn:aws:iam::000000000000:server-certificate/team/old"),
+                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
+     * An update that renames and moves nothing acts on one resource, so it names one. Repeating
+     * the same ARN would make the request look like it touches two.
+     */
+    @Test
+    void iamNamesOneResourceWhenAnUpdateChangesNeitherNameNorPath() {
+        String stored = "arn:aws:iam::000000000000:server-certificate/old";
+        setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old");
+        assertEquals(List.of(stored),
+                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
+     * The destination is built beside the stored ARN, so it keeps the certificate's partition. A
+     * rename does not move a resource between partitions, and taking the partition from the
+     * caller's signing region would name one that does not exist.
+     */
+    @Test
+    void iamBuildsTheRenameDestinationInTheStoredPartition() {
+        String stored = "arn:aws-cn:iam::000000000000:server-certificate/old";
+        setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old"
+                + "&NewServerCertificateName=new");
+        assertEquals(
+                List.of(stored, "arn:aws-cn:iam::000000000000:server-certificate/new"),
+                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
      * Nothing stored under that name means nothing to name: the operation fails as NoSuchEntity
      * regardless, and minting an ARN for an absent resource would hand a policy something to match.
      */

@@ -15,6 +15,7 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 
 /**
  * A policy statement naming a single server certificate has to bind to that certificate and no
@@ -190,6 +191,99 @@ class ServerCertificateIamEnforcementIntegrationTest {
                 .formatted(arn(name)));
 
         userIam(akid, "ListServerCertificates", Map.of()).statusCode(200);
+    }
+
+    /**
+     * The model is explicit that a rename needs permission on both names, so that a principal
+     * allowed on the old one cannot rename a certificate into a name they may not write: "to
+     * change the certificate named ProductionCert to ProdCert, the principal must have a policy
+     * that allows them to update both certificates".
+     */
+    @Test
+    void aRenameIsDeniedWhenOnlyTheDestinationNameIsDenied() {
+        String suffix = suffix();
+        String from = "rename-from-" + suffix;
+        String reserved = "rename-reserved-" + suffix;
+        upload(from, null);
+
+        String akid = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"iam:*","Resource":"*"},
+                  {"Effect":"Deny","Action":"iam:UpdateServerCertificate","Resource":"%s"}]}"""
+                .formatted(arn(reserved)));
+
+        userIam(akid, "UpdateServerCertificate", Map.of("ServerCertificateName", from,
+                "NewServerCertificateName", reserved))
+                .statusCode(403).body(containsString("AccessDenied"));
+
+        // The rename did not happen: the certificate is still reachable under its old name, and
+        // the denied name holds nothing.
+        adminIam("GetServerCertificate", Map.of("ServerCertificateName", from)).statusCode(200);
+        adminIam("GetServerCertificate", Map.of("ServerCertificateName", reserved)).statusCode(404);
+    }
+
+    /** A move is a rename of the path, so the destination path is checked the same way. */
+    @Test
+    void aMoveIsDeniedWhenOnlyTheDestinationPathIsDenied() {
+        String name = "moved-" + suffix();
+        upload(name, null);
+
+        String akid = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"iam:*","Resource":"*"},
+                  {"Effect":"Deny","Action":"iam:UpdateServerCertificate","Resource":"%s"}]}"""
+                .formatted(arn("reserved/" + name)));
+
+        userIam(akid, "UpdateServerCertificate", Map.of("ServerCertificateName", name,
+                "NewPath", "/reserved/"))
+                .statusCode(403).body(containsString("AccessDenied"));
+
+        // The name alone proves nothing here: a moved certificate is still reachable by name, so
+        // the path and the ARN are what show the move did not happen.
+        adminIam("GetServerCertificate", Map.of("ServerCertificateName", name))
+                .statusCode(200)
+                .body("GetServerCertificateResponse.GetServerCertificateResult.ServerCertificate"
+                        + ".ServerCertificateMetadata.Path", equalTo("/"))
+                .body("GetServerCertificateResponse.GetServerCertificateResult.ServerCertificate"
+                        + ".ServerCertificateMetadata.Arn", equalTo(arn(name)));
+    }
+
+    /**
+     * The old name still has to be allowed. Naming the destination must not become a way to
+     * rename a certificate the principal cannot otherwise touch.
+     */
+    @Test
+    void aRenameIsDeniedWhenOnlyTheSourceNameIsDenied() {
+        String suffix = suffix();
+        String from = "source-denied-" + suffix;
+        upload(from, null);
+
+        String akid = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"iam:*","Resource":"*"},
+                  {"Effect":"Deny","Action":"iam:UpdateServerCertificate","Resource":"%s"}]}"""
+                .formatted(arn(from)));
+
+        userIam(akid, "UpdateServerCertificate", Map.of("ServerCertificateName", from,
+                "NewServerCertificateName", "source-denied-target-" + suffix))
+                .statusCode(403).body(containsString("AccessDenied"));
+    }
+
+    /** With both names allowed the rename goes through, so the extra resource is not a blanket no. */
+    @Test
+    void aRenameSucceedsWhenBothNamesAreAllowed() {
+        String suffix = suffix();
+        String from = "both-from-" + suffix;
+        String to = "both-to-" + suffix;
+        upload(from, null);
+
+        String akid = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"iam:*","Resource":"*"}]}""");
+
+        userIam(akid, "UpdateServerCertificate", Map.of("ServerCertificateName", from,
+                "NewServerCertificateName", to)).statusCode(200);
+        adminIam("GetServerCertificate", Map.of("ServerCertificateName", to)).statusCode(200);
     }
 
     private static String suffix() {

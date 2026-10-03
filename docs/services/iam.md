@@ -742,6 +742,16 @@ every dispatched IAM action, which is tracked in
 [#4979](https://github.com/floci-io/floci/issues/4979) rather than bundled into the
 server-certificate work that mapped the first few.
 
+**A certificate rename names two resources.** `UpdateServerCertificate` is evaluated against both
+the certificate's current ARN and the ARN that `NewServerCertificateName` or `NewPath` would
+produce, because AWS requires the principal to hold permission on the old name and the new one: a
+principal allowed to update `ProductionCert` but not `ProdCert` cannot rename the first into the
+second. A request naming several resources is authorized once per resource, so a `Deny` on either
+name refuses the rename, and the certificate keeps its original name and path. An update that
+changes neither the name nor the path names a single resource. The destination ARN is built beside
+the stored one, keeping the certificate's own partition and account, since a rename moves a
+certificate within an account rather than between partitions.
+
 **Exception:** a bare 12-digit account-id key that equals its own account and sits under
 an effective SCP ceiling is **not** treated as an unknown key — it is evaluated against
 the SCP chain as the account root (see [Service control policies](#service-control-policies-scps)
