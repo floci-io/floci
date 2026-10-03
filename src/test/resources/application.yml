@@ -120,6 +120,19 @@ floci:
     strict-claiming: false
     reject-unknown-service-scope: true
 
+  chaos:
+    enabled: false
+    har:
+      enabled: false
+    fault:
+      fault-probability: 0.0
+      throttle-probability: 0.0
+      access-denied-probability: 0.0
+    network:
+      latency-probability: 0.0
+      latency-ms: 0
+      no-response-probability: 0.0
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"
