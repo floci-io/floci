@@ -161,6 +161,18 @@ public class CfnResourceDispatcher {
     }
 
     /**
+     * Deletes the managed entity after the stack engine has processed historical cleanup.
+     */
+    public void deleteAfterCleanup(StackResource resource, String region) {
+        CfnResourceProvisioner owner = registry.forType(resource.getResourceType()).orElse(null);
+        if (owner != null) {
+            owner.deleteAfterCleanup(resource, region);
+            return;
+        }
+        delete(resource, region);
+    }
+
+    /**
      * Deletes a provisioned resource. The owning provisioner gets the whole resource, so an
      * attribute-aware delete can read its create-time attributes, and an exact type match always
      * beats the {@code Custom::} fallback the registry applies.

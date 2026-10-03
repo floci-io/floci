@@ -38,6 +38,15 @@ public interface CfnResourceProvisioner {
     }
 
     /**
+     * Deletes the managed entity after the stack engine has already processed historical cleanup.
+     * Override when normal deletion also attempts that cleanup, so its recorded failure and pending
+     * tracking survive until a later operation. Other deletion paths still use {@code delete}.
+     */
+    default void deleteAfterCleanup(StackResource resource, String region) {
+        delete(resource, region);
+    }
+
+    /**
      * Puts the physical entity back to the configuration it had before the failed stack update
      * that is now rolling back, and returns whether it did. Only a provisioner that snapshots
      * that configuration before it mutates can answer true; {@code CloudFormationService} reports

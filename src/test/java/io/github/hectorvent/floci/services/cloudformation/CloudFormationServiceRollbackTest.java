@@ -141,11 +141,11 @@ class CloudFormationServiceRollbackTest {
         assertEquals("DELETE_COMPLETE", stack.getStatus());
         verify(provisioner).completeDeleteCleanup(role);
         verify(provisioner, never()).completeUpdate(any());
-        verify(provisioner).delete(role, REGION);
-        verify(provisioner).delete(logGroup, REGION);
-        verify(provisioner).delete(owned, REGION);
-        verify(provisioner, never()).delete(eq(alreadyDeleted), anyString());
-        verify(provisioner, never()).delete(eq(adopted), anyString());
+        verify(provisioner).deleteAfterCleanup(role, REGION);
+        verify(provisioner).deleteAfterCleanup(logGroup, REGION);
+        verify(provisioner).deleteAfterCleanup(owned, REGION);
+        verify(provisioner, never()).deleteAfterCleanup(eq(alreadyDeleted), anyString());
+        verify(provisioner, never()).deleteAfterCleanup(eq(adopted), anyString());
         assertEquals("DELETE_COMPLETE", role.getStatus());
         assertNull(role.getStatusReason());
         assertEquals("DELETE_COMPLETE", logGroup.getStatus());
@@ -164,7 +164,7 @@ class CloudFormationServiceRollbackTest {
         stack.getResources().put(bucket.getLogicalId(), bucket);
         when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
         doThrow(new AwsException("BucketNotEmpty", "The bucket you tried to delete is not empty", 409))
-                .when(provisioner).delete(eq(bucket), eq(REGION));
+                .when(provisioner).deleteAfterCleanup(eq(bucket), eq(REGION));
 
         assertThrows(IllegalStateException.class, () -> service.deleteStackResources(stack, REGION, ACCOUNT));
 

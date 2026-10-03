@@ -1972,6 +1972,15 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
+    private void deleteResourceAfterCleanup(StackResource resource, String region, String accountId)
+            throws Exception {
+        if ("AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
+            deleteResourcePhysically(resource, region, accountId);
+        } else {
+            dispatcher.deleteAfterCleanup(resource, region);
+        }
+    }
+
     private void rollbackFailedUpdate(
             Stack stack,
             String region,
@@ -2347,7 +2356,7 @@ public class CloudFormationService implements ResourceProvider {
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_IN_PROGRESS", null);
                 try {
-                    deleteResourcePhysically(resource, region, accountId);
+                    deleteResourceAfterCleanup(resource, region, accountId);
                     completeResourceDeletion(stack, resource);
                 } catch (Exception e) {
                     if (isAlreadyDeleted(e)) {

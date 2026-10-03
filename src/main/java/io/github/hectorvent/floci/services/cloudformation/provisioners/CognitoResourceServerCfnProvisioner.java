@@ -174,6 +174,11 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     @Override
     public void delete(StackResource resource, String region) {
         deletePending(resource);
+        deleteAfterCleanup(resource, region);
+    }
+
+    @Override
+    public void deleteAfterCleanup(StackResource resource, String region) {
         if (resource.getPhysicalId() != null) {
             delete(identity(resource, resource.getPhysicalId()));
         }
