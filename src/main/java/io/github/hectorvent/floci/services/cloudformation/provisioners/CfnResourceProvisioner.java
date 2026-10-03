@@ -37,6 +37,19 @@ public interface CfnResourceProvisioner {
         delete(resource.getResourceType(), resource.getPhysicalId(), region);
     }
 
+    default void delete(StackResource resource, String region, CfnResourceContext context) {
+        delete(resource, region);
+    }
+
+    /**
+     * Deletes the managed entity after the stack engine has already processed historical cleanup.
+     * Override when normal deletion also attempts that cleanup, so its recorded failure and pending
+     * tracking survive until a later operation. Other deletion paths still use {@code delete}.
+     */
+    default void deleteAfterCleanup(StackResource resource, String region) {
+        delete(resource, region);
+    }
+
     /**
      * Puts the physical entity back to the configuration it had before the failed stack update
      * that is now rolling back, and returns whether it did. Only a provisioner that snapshots
@@ -49,6 +62,11 @@ public interface CfnResourceProvisioner {
 
     default boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
         return rollbackUpdate(resource);
+    }
+
+    default boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress,
+                                   CfnResourceContext context) {
+        return rollbackUpdate(resource, progress);
     }
 
     /**
@@ -78,6 +96,23 @@ public interface CfnResourceProvisioner {
         return UpdateCleanupResult.notApplicable();
     }
 
+    default UpdateCleanupResult completeUpdate(StackResource resource, CfnResourceContext context) {
+        return completeUpdate(resource);
+    }
+
+    /**
+     * Deletes entities displaced by an unfinished update before the stack itself is deleted.
+     * The default uses normal replacement cleanup. A provisioner may distinguish this operation
+     * from committing an update when it still carries configuration needed for rollback.
+     */
+    default UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return completeUpdate(resource);
+    }
+
+    default UpdateCleanupResult completeDeleteCleanup(StackResource resource, CfnResourceContext context) {
+        return completeDeleteCleanup(resource);
+    }
+
     /**
      * Whether this update replaced the physical entity, so the stack has cleanup pending and enters
      * UPDATE_COMPLETE_CLEANUP_IN_PROGRESS. The default reports no replacement.
@@ -92,6 +127,15 @@ public interface CfnResourceProvisioner {
      */
     default void clearUpdate(StackResource resource) {
         // no-op by default: a type with no replacement cleanup records nothing to clear
+    }
+
+    /**
+     * Drops completed replacement cleanup during stack deletion. The default preserves the normal
+     * cleanup behavior; an override may keep rollback configuration until the managed entity is
+     * successfully deleted.
+     */
+    default void clearDeleteCleanup(StackResource resource) {
+        clearUpdate(resource);
     }
 
     /**

@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceContext;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
@@ -162,6 +163,40 @@ public class CloudFormationService implements ResourceProvider {
 
     private String currentAccount() {
         return regionResolver.getAccountId();
+    }
+
+    CfnResourceContext resourceContext(Stack owner) {
+        String accountId = ownerAccount(owner);
+        String stackId = owner.getStackId();
+        return new CfnResourceContext(() -> {
+            List<StackResource> resources = new ArrayList<>();
+            for (Stack stack : stacks.values()) {
+                if (!accountId.equals(ownerAccount(stack)) || Objects.equals(stackId, stack.getStackId())
+                        || "DELETE_COMPLETE".equals(stack.getStatus())) {
+                    continue;
+                }
+                for (StackResource resource : stack.resourcesSnapshot().values()) {
+                    StackResource snapshot = copyResource(resource);
+                    if (isManagedResource(snapshot)) {
+                        resources.add(snapshot);
+                    }
+                }
+            }
+            return resources;
+        });
+    }
+
+    private static boolean isManagedResource(StackResource resource) {
+        if (resource.getPhysicalId() == null || resource.getPhysicalId().isBlank()) {
+            return false;
+        }
+        return switch (Objects.toString(resource.getStatus(), "")) {
+            case "CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_FAILED", "DELETE_FAILED",
+                    "UPDATE_IN_PROGRESS", "DELETE_IN_PROGRESS" -> true;
+            case "CREATE_FAILED", "CREATE_IN_PROGRESS" -> "true".equals(
+                    resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+            default -> false;
+        };
     }
 
     /**
@@ -1522,7 +1557,7 @@ public class CloudFormationService implements ResourceProvider {
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
-                                        event.getResourceStatus(), event.getResourceStatusReason()));
+                                        event.getResourceStatus(), event.getResourceStatusReason()), resourceContext(stack));
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));
@@ -1836,6 +1871,10 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack, String region) {
+        return finishCommittedResourceCleanup(stack, region, false);
+    }
+
+    private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack, String region, boolean deleting) {
         List<UpdateCleanupFailure> failures = new ArrayList<>();
         // Dependents go before what they depend on, as when the stack is deleted: a displaced
         // listener has to go before the displaced target group it still forwards to, or that
@@ -1856,7 +1895,8 @@ public class CloudFormationService implements ResourceProvider {
                         null);
             }
             while (true) {
-                UpdateCleanupResult result = dispatcher.completeUpdate(resource);
+                UpdateCleanupResult result = deleting ? dispatcher.completeDeleteCleanup(resource, resourceContext(stack))
+                        : dispatcher.completeUpdate(resource, resourceContext(stack));
                 if (!result.applicable()) {
                     break;
                 }
@@ -1867,10 +1907,14 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getLogicalId(),
                                 cleanupPhysicalId,
                                 resource.getResourceType(),
-                                "DELETE_COMPLETE",
-                                null);
+                                result.skippedReason() == null ? "DELETE_COMPLETE" : "DELETE_SKIPPED",
+                                result.skippedReason());
                     }
-                    dispatcher.clearUpdate(resource);
+                    if (deleting) {
+                        dispatcher.clearDeleteCleanup(resource);
+                    } else {
+                        dispatcher.clearUpdate(resource);
+                    }
                     break;
                 }
                 if (result.attempts() < 3) {
@@ -1889,7 +1933,11 @@ public class CloudFormationService implements ResourceProvider {
                         resource.getResourceType(),
                         "DELETE_FAILED",
                         reason);
-                dispatcher.clearUpdate(resource);
+                if (deleting) {
+                    dispatcher.clearDeleteCleanup(resource);
+                } else {
+                    dispatcher.clearUpdate(resource);
+                }
                 break;
             }
         }
@@ -1938,7 +1986,7 @@ public class CloudFormationService implements ResourceProvider {
         return false;
     }
 
-    private void deleteResourcePhysically(StackResource resource, String region, String accountId)
+    private void deleteResourcePhysically(Stack stack, StackResource resource, String region, String accountId)
             throws Exception {
         if ("AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
             Stack child = resolveStack(resource.getPhysicalId(), region, accountId);
@@ -1955,7 +2003,16 @@ public class CloudFormationService implements ResourceProvider {
                     "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
             deleteStackResources(child, region, accountId);
         } else {
-            dispatcher.delete(resource, region);
+            dispatcher.delete(resource, region, resourceContext(stack));
+        }
+    }
+
+    private void deleteResourceAfterCleanup(Stack stack, StackResource resource, String region, String accountId)
+            throws Exception {
+        if ("AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
+            deleteResourcePhysically(stack, resource, region, accountId);
+        } else {
+            dispatcher.deleteAfterCleanup(resource, region);
         }
     }
 
@@ -2036,7 +2093,7 @@ public class CloudFormationService implements ResourceProvider {
                         addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                                 resource.getResourceType(), "DELETE_IN_PROGRESS",
                                 "Resource creation cancelled during update rollback");
-                        deleteResourcePhysically(resource, region, ownerAccount(stack));
+                        deleteResourcePhysically(stack, resource, region, ownerAccount(stack));
                     }
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE",
@@ -2055,7 +2112,8 @@ public class CloudFormationService implements ResourceProvider {
                         CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR))
                         || dispatcher.rollbackUpdate(resource,
                                 event -> addEvent(stack, resource.getLogicalId(), event.getPhysicalResourceId(),
-                                        resource.getResourceType(), event.getResourceStatus(), event.getResourceStatusReason()))) {
+                                        resource.getResourceType(), event.getResourceStatus(), event.getResourceStatusReason()),
+                                resourceContext(stack))) {
                     resource.setStatus(previous.getStatus());
                     resource.setStatusReason(previous.getStatusReason());
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
@@ -2195,7 +2253,7 @@ public class CloudFormationService implements ResourceProvider {
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
-                deleteResourcePhysically(resource, region, ownerAccount(stack));
+                deleteResourcePhysically(stack, resource, region, ownerAccount(stack));
                 completeResourceDeletion(stack, resource);
             } catch (Exception e) {
                 if (isAlreadyDeleted(e)) {
@@ -2253,7 +2311,7 @@ public class CloudFormationService implements ResourceProvider {
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
-                deleteResourcePhysically(resource, region, ownerAccount(stack));
+                deleteResourcePhysically(stack, resource, region, ownerAccount(stack));
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_COMPLETE", null);
                 stack.getResources().remove(resource.getLogicalId());
@@ -2321,7 +2379,7 @@ public class CloudFormationService implements ResourceProvider {
             // last update left in place. An entity displaced by a replacement whose cleanup phase
             // never ended is named only by the cleanup the resource still carries, so the stack
             // deletes that one too: nothing else ever will.
-            for (UpdateCleanupFailure displacedFailure : finishCommittedResourceCleanup(stack, region)) {
+            for (UpdateCleanupFailure displacedFailure : finishCommittedResourceCleanup(stack, region, true)) {
                 failedResources.add(displacedFailure.logicalId());
             }
             for (StackResource resource : resources) {
@@ -2334,7 +2392,7 @@ public class CloudFormationService implements ResourceProvider {
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_IN_PROGRESS", null);
                 try {
-                    deleteResourcePhysically(resource, region, accountId);
+                    deleteResourceAfterCleanup(stack, resource, region, accountId);
                     completeResourceDeletion(stack, resource);
                 } catch (Exception e) {
                     if (isAlreadyDeleted(e)) {

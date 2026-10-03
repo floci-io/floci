@@ -111,6 +111,29 @@ filter pattern) can fail after deletion and trigger restoration. The CFN schema 
 256-character metric namespace, but Floci's Logs API validation currently accepts at most 255:
 passing model validation does not imply provider acceptance.
 
+## Cognito user pool resource servers
+
+`AWS::Cognito::UserPoolResourceServer` returns its `Identifier` for `Ref`. Changing `Identifier`
+or `UserPoolId` replaces the server; changing `Name` or `Scopes` updates it in place. Optional
+`Scopes` or individual scope entries can be omitted by `Fn::If` selecting `AWS::NoValue`.
+Changed-template updates and `DeleteStack` address the currently present server by `UserPoolId`
+and `Identifier`, including a server recreated outside the stack at the same address.
+
+Failed in-place restoration keeps the prior name and scopes for retry while the stack still
+allows `UpdateStack`. If a later update skips that resource, pending restoration can leave the
+stack in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, which blocks another update. `DeleteStack` removes
+the managed server and retains its tracking if deletion fails. Committed replacements honor
+`UpdateReplacePolicy: Retain`. Otherwise, old-server deletion uses at most three attempts; after
+three failures the old server leaves stack management and must be deleted through Cognito.
+Failed rollback replacements remain tracked for deletion retries. The committed server stays current.
+Before retrying historical cleanup, Floci checks live resources managed by other stacks in the same
+account, including stacks in another region. If one manages the same pool and identifier, Floci
+skips deletion and permanently drops that cleanup record. A later deletion of the other stack does
+not reactivate the record. This lookup and the subsequent Cognito deletion are not atomic: a
+concurrent stack create can claim the address after the lookup. Direct Cognito API writers are not
+tracked as stack claims and remain subject to address-based deletion.
+`ContinueUpdateRollback` remains unsupported.
+
 ## Supported Resource Types
 
 Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
@@ -151,7 +174,7 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup` |
+| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |

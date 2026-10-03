@@ -79,14 +79,14 @@ class CloudFormationServiceRollbackTest {
         stack.getResources().put(failed.getLogicalId(), failed);
 
         doThrow(new AwsException("NotFoundException", "Invalid API id specified", 404))
-                .when(provisioner).delete(eq(created), eq(REGION));
+                .when(provisioner).delete(eq(created), eq(REGION), any());
 
         service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
 
         assertEquals("ROLLBACK_COMPLETE", stack.getStatus());
         assertEquals("DELETE_COMPLETE", created.getStatus());
         assertNull(created.getStatusReason());
-        verify(provisioner).delete(created, REGION);
+        verify(provisioner).delete(eq(created), eq(REGION), any());
     }
 
     @Test
@@ -104,7 +104,7 @@ class CloudFormationServiceRollbackTest {
         stack.getResources().put(failed.getLogicalId(), failed);
 
         doThrow(new IllegalStateException("Cannot delete listener rule: target group floci-tg-1 not found"))
-                .when(provisioner).delete(eq(created), eq(REGION));
+                .when(provisioner).delete(eq(created), eq(REGION), any());
 
         service.rollbackFailedExecution(stack, REGION, true, failed, null, Set.of());
 
@@ -113,7 +113,7 @@ class CloudFormationServiceRollbackTest {
         assertEquals(
                 "Cannot delete listener rule: target group floci-tg-1 not found",
                 created.getStatusReason());
-        verify(provisioner).delete(created, REGION);
+        verify(provisioner).delete(eq(created), eq(REGION), any());
     }
 
     @Test
@@ -134,16 +134,18 @@ class CloudFormationServiceRollbackTest {
         for (StackResource resource : new StackResource[] {role, logGroup, alreadyDeleted, adopted, owned}) {
             stack.getResources().put(resource.getLogicalId(), resource);
         }
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any(), any())).thenReturn(UpdateCleanupResult.notApplicable());
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
         assertEquals("DELETE_COMPLETE", stack.getStatus());
-        verify(provisioner).delete(role, REGION);
-        verify(provisioner).delete(logGroup, REGION);
-        verify(provisioner).delete(owned, REGION);
-        verify(provisioner, never()).delete(eq(alreadyDeleted), anyString());
-        verify(provisioner, never()).delete(eq(adopted), anyString());
+        verify(provisioner).completeDeleteCleanup(eq(role), any());
+        verify(provisioner, never()).completeUpdate(any(), any());
+        verify(provisioner).deleteAfterCleanup(role, REGION);
+        verify(provisioner).deleteAfterCleanup(logGroup, REGION);
+        verify(provisioner).deleteAfterCleanup(owned, REGION);
+        verify(provisioner, never()).deleteAfterCleanup(eq(alreadyDeleted), anyString());
+        verify(provisioner, never()).deleteAfterCleanup(eq(adopted), anyString());
         assertEquals("DELETE_COMPLETE", role.getStatus());
         assertNull(role.getStatusReason());
         assertEquals("DELETE_COMPLETE", logGroup.getStatus());
@@ -160,9 +162,9 @@ class CloudFormationServiceRollbackTest {
 
         StackResource bucket = resource("Bucket", "leak-probe-bucket", "AWS::S3::Bucket", "UPDATE_FAILED");
         stack.getResources().put(bucket.getLogicalId(), bucket);
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any(), any())).thenReturn(UpdateCleanupResult.notApplicable());
         doThrow(new AwsException("BucketNotEmpty", "The bucket you tried to delete is not empty", 409))
-                .when(provisioner).delete(eq(bucket), eq(REGION));
+                .when(provisioner).deleteAfterCleanup(eq(bucket), eq(REGION));
 
         assertThrows(IllegalStateException.class, () -> service.deleteStackResources(stack, REGION, ACCOUNT));
 

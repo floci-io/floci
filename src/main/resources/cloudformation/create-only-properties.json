@@ -190,6 +190,10 @@
     "UserPoolId",
     "GroupName"
   ],
+  "AWS::Cognito::UserPoolResourceServer": [
+    "Identifier",
+    "UserPoolId"
+  ],
   "AWS::Config::ConfigRule": [
     "ConfigRuleName"
   ],
