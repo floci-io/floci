@@ -1,16 +1,17 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
-import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -29,12 +30,14 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -262,7 +265,10 @@ public class LambdaController {
                     .build();
         }
 
-        InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type);
+        String clientContext = type == InvocationType.RequestResponse
+                ? decodeClientContext(headers.getHeaderString("X-Amz-Client-Context")) : null;
+
+        InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext);
 
         if (type != InvocationType.Event
                 && result.getPayload() != null
@@ -290,6 +296,20 @@ public class LambdaController {
         }
 
         return builder.build();
+    }
+
+    private String decodeClientContext(String encoded) {
+        if (encoded == null || encoded.isEmpty()) {
+            return null;
+        }
+        try {
+            byte[] decoded = Base64.getDecoder().decode(encoded);
+            return objectMapper.writer().with(JsonGenerator.Feature.ESCAPE_NON_ASCII)
+                    .writeValueAsString(objectMapper.readTree(decoded));
+        } catch (IOException | IllegalArgumentException e) {
+            throw new AwsException("InvalidRequestContentException",
+                    "Could not parse the client context: it must be base64-encoded JSON.", 400);
+        }
     }
 
     // ──────────────────────────── Event Source Mappings ────────────────────────────
