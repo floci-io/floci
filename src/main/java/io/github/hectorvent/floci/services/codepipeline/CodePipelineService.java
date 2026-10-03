@@ -591,9 +591,7 @@ public class CodePipelineService {
             execution.setLastUpdateTime(now());
             putExecution(execution);
             eventPublisher.pipelineStateChange(execution, "FAILED");
-            throw new AwsException("ConflictException",
-                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
-                            + "Try again later.", 400);
+            throw pipelineBusy();
         }
         return mapper.createObjectNode().put("pipelineExecutionId", execution.getPipelineExecutionId());
     }
@@ -876,11 +874,15 @@ public class CodePipelineService {
             execution.setStatusSummary("Stage retry could not be scheduled.");
             execution.setLastUpdateTime(now());
             putExecution(execution);
-            throw new AwsException("ConflictException",
-                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
-                            + "Try again later.", 400);
+            throw pipelineBusy();
         }
         return mapper.createObjectNode().put("pipelineExecutionId", executionId);
+    }
+
+    private static AwsException pipelineBusy() {
+        return new AwsException("ConflictException",
+                "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
+                        + "Try again later.", 400);
     }
 
     // Runs under startLocks so two concurrent retries cannot both pass the status checks,
@@ -1037,9 +1039,7 @@ public class CodePipelineService {
                 }
                 return null;
             });
-            throw new AwsException("ConflictException",
-                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
-                            + "Try again later.", 400);
+            throw pipelineBusy();
         }
         Map<String, String> resumeStatuses = resumed;
         if (resumeStatuses != null) {
@@ -1052,9 +1052,7 @@ public class CodePipelineService {
                 execution.setStatusSummary("Stage resume could not be scheduled.");
                 execution.setLastUpdateTime(now());
                 putExecution(execution);
-                throw new AwsException("ConflictException",
-                        "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
-                                + "Try again later.", 400);
+                throw pipelineBusy();
             }
         }
         return mapper.createObjectNode();
