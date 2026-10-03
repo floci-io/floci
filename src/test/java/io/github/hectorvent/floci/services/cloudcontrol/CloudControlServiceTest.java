@@ -15,15 +15,19 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -169,5 +173,50 @@ class CloudControlServiceTest {
                 mock(CfnResourceDispatcher.class), new ObjectMapper());
 
         assertTrue(service.listResources("us-east-1", "AWS::S3::Bucket").isEmpty());
+    }
+
+    @Test
+    void rejectsCreateWhenTheWorkerQueueIsFull() throws Exception {
+        CfnResourceDispatcher provisioner = mock(CfnResourceDispatcher.class);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        StackResource resource = new StackResource();
+        resource.setPhysicalId("vpc-bounded");
+        doAnswer(invocation -> {
+            started.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return resource;
+        }).when(provisioner).provisionStandalone(anyString(), any(), anyString(), anyString());
+
+        AccountAwareStorageBackend<CloudControlService.PersistedRequest> requests =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<CloudControlService.PersistedCreatedResource> created =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        CloudControlService service = new CloudControlService(
+                mock(S3Service.class), mock(Ec2Service.class), mock(IamService.class), provisioner,
+                new ObjectMapper(), requests, created, 1, 1);
+
+        // The single worker takes the first task, the second queues, and the third overflows.
+        service.createResource("us-east-1", "111111111111", "AWS::EC2::VPC", "{}");
+        assertTrue(started.await(10, TimeUnit.SECONDS), "the worker never started");
+        CloudControlService.ProgressEvent queued = service.createResource(
+                "us-east-1", "111111111111", "AWS::EC2::VPC", "{}");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createResource("us-east-1", "111111111111", "AWS::EC2::VPC", "{}"));
+        assertEquals("ThrottlingException", e.getErrorCode());
+        assertEquals(429, e.getHttpStatus());
+
+        // The rejected token was dropped, so only the two accepted requests remain persisted.
+        assertEquals(2, requests.scanAllAccountEntries(k -> true).size());
+
+        // Once the worker drains, submission recovers.
+        release.countDown();
+        for (int i = 0; i < 50
+                && !"SUCCESS".equals(service.requestStatus("111111111111", queued.requestToken()).operationStatus());
+                i++) {
+            Thread.sleep(10);
+        }
+        assertNotNull(service.createResource("us-east-1", "111111111111", "AWS::EC2::VPC", "{}"));
     }
 }
