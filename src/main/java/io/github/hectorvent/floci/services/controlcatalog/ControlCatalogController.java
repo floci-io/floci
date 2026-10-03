@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
-import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -21,22 +21,22 @@ import jakarta.ws.rs.core.Response;
 public class ControlCatalogController {
     private final ControlCatalogService controlCatalogService;
     private final ObjectMapper objectMapper;
-    private final RequestContext requestContext;
+    private final RegionResolver regionResolver;
 
     @Inject
     public ControlCatalogController(ControlCatalogService controlCatalogService,
                                     ObjectMapper objectMapper,
-                                    RequestContext requestContext) {
+                                    RegionResolver regionResolver) {
         this.controlCatalogService = controlCatalogService;
         this.objectMapper = objectMapper;
-        this.requestContext = requestContext;
+        this.regionResolver = regionResolver;
     }
 
     @POST
     @Path("/get-control")
     public Response getControl(String body) {
         JsonNode request = readTree(body);
-        return Response.ok(controlCatalogService.getControl(request, requestContext.getRegion())).build();
+        return Response.ok(controlCatalogService.getControl(request, regionResolver.getRegion())).build();
     }
 
     @POST
@@ -45,7 +45,7 @@ public class ControlCatalogController {
                                  @QueryParam("nextToken") String nextToken,
                                  String body) {
         return Response.ok(controlCatalogService.listControls(readTree(body), maxResults, nextToken,
-                AwsRegions.partitionFor(requestContext.getRegion()))).build();
+                AwsRegions.partitionFor(regionResolver.getRegion()))).build();
     }
 
     private JsonNode readTree(String body) {

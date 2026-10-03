@@ -56,6 +56,7 @@ public class ScheduleInvoker {
     private final StepFunctionsService stepFunctionsService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
+    private final String defaultRegion;
 
     @Inject
     public ScheduleInvoker(SqsService sqsService,
@@ -74,6 +75,7 @@ public class ScheduleInvoker {
         this.stepFunctionsService = stepFunctionsService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
+        this.defaultRegion = config.defaultRegion();
     }
 
     /**
@@ -86,7 +88,7 @@ public class ScheduleInvoker {
             return "{}";
         }
         String arn = target.getArn();
-        String region = regionOf(schedule);
+        String region = regionOf(schedule, defaultRegion);
         if (isUniversalTarget(arn)) {
             invokeUniversalTarget(arn.substring(arn.indexOf(":aws-sdk:") + ":aws-sdk:".length()),
                     target.getInput(), region);
@@ -478,8 +480,8 @@ public class ScheduleInvoker {
         return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 
-    /** The region a schedule lives in, taken from its ARN. */
-    static String regionOf(Schedule schedule) {
-        return AwsArnUtils.regionOrDefault(schedule.getArn(), "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+    /** The region a schedule lives in, taken from its ARN; {@code defaultRegion} answers for one without. */
+    static String regionOf(Schedule schedule, String defaultRegion) {
+        return AwsArnUtils.regionOrDefault(schedule.getArn(), defaultRegion);
     }
 }

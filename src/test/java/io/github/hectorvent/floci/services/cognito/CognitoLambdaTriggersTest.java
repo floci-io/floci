@@ -92,7 +92,7 @@ class CognitoLambdaTriggersTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 "http://localhost:4566", regionResolver, lambdaService, mock(AcmService.class),
-                verificationCodeService, new CognitoMessageDispatcher(ses, sns),
+                verificationCodeService, new CognitoMessageDispatcher(ses, sns, "us-east-1"),
                 mock(TlsCertificateManager.class));
     }
 

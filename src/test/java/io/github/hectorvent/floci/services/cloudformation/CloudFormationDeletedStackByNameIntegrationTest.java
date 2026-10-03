@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * What a client polling a deleted stack by name gets back, per operation. The two wordings are
@@ -35,6 +37,44 @@ class CloudFormationDeletedStackByNameIntegrationTest {
         cfn("DescribeStacks", stackName, null).then().statusCode(400)
                 .body(containsString("<Code>ValidationError</Code>"))
                 .body(containsString("<Message>Stack with id " + stackName + " does not exist</Message>"));
+    }
+
+    /**
+     * A stack id names one stack. After the name is reused, the old id still resolves to the
+     * deleted stack (DELETE_COMPLETE) and the name resolves to the live one; a DeleteStack
+     * aimed at the old id must not reach the live stack that took the name.
+     */
+    @Test
+    void oldStackIdResolvesToTheDeletedStackAfterTheNameIsReused() {
+        String stackName = "reused-name-" + Long.toString(System.nanoTime(), 36);
+        String template = "{\"Resources\":{\"P\":{\"Type\":\"AWS::SSM::Parameter\","
+                + "\"Properties\":{\"Type\":\"String\",\"Value\":\"v\"}}}}";
+        String oldId = cfn("CreateStack", stackName, template).then().statusCode(200)
+                .extract().xmlPath().getString("CreateStackResponse.CreateStackResult.StackId");
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+        cfn("DeleteStack", stackName, null).then().statusCode(200);
+        awaitGone(stackName);
+        String newId = cfn("CreateStack", stackName, template).then().statusCode(200)
+                .extract().xmlPath().getString("CreateStackResponse.CreateStackResult.StackId");
+        assertNotEquals(oldId, newId);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+        Response byOldId = cfn("DescribeStacks", oldId, null);
+        byOldId.then().statusCode(200);
+        assertEquals(oldId, byOldId.xmlPath().getString(
+                "DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackId"));
+        assertEquals("DELETE_COMPLETE", byOldId.xmlPath().getString(
+                "DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus"));
+
+        cfn("DeleteStack", oldId, null).then().statusCode(200);
+        Response byName = cfn("DescribeStacks", stackName, null);
+        byName.then().statusCode(200);
+        assertEquals(newId, byName.xmlPath().getString(
+                "DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackId"));
+        assertEquals("CREATE_COMPLETE", byName.xmlPath().getString(
+                "DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus"));
+
+        cfn("DeleteStack", stackName, null).then().statusCode(200);
     }
 
     @Test

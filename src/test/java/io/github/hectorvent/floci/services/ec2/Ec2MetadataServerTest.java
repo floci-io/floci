@@ -80,12 +80,22 @@ class Ec2MetadataServerTest {
         instance.setPrivateIpAddress("10.0.0.10");
         instance.setRegion("us-west-2");
 
-        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000")
+        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000", "us-west-2a")
                 .contains("\"architecture\":\"arm64\""));
 
         instance.setArchitecture(null);
-        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000")
+        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000", "us-west-2a")
                 .contains("\"architecture\":\"x86_64\""));
+    }
+
+    @Test
+    void identityDocumentOfAnInstanceWithoutPlacementReportsTheConfiguredZone() {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-china");
+        instance.setRegion("cn-north-1");
+
+        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000", "cn-north-1b")
+                .contains("\"availabilityZone\":\"cn-north-1b\""));
     }
 
     @Test

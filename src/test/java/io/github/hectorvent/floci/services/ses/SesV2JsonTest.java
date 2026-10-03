@@ -165,6 +165,38 @@ class SesV2JsonTest {
     }
 
     @Test
+    void structureMemberOrAbsent_rejectsANonObjectTheWayAwsDoes() {
+        JsonNode node = json("{\"o\":{},\"n\":null,\"a\":[],\"s\":\"x\",\"i\":1}");
+        assertTrue(SesV2Json.structureMemberOrAbsent(node, "o").isObject());
+        assertTrue(SesV2Json.structureMemberOrAbsent(node, "n").isNull());
+        assertTrue(SesV2Json.structureMemberOrAbsent(node, "missing").isMissingNode());
+        assertEquals("Start of list found where not expected", assertAws("SerializationException", 400,
+                () -> SesV2Json.structureMemberOrAbsent(node, "a")).getMessage());
+        assertEquals("Expected null", assertAws("SerializationException", 400,
+                () -> SesV2Json.structureMemberOrAbsent(node, "s")).getMessage());
+        assertEquals("Expected null", assertAws("SerializationException", 400,
+                () -> SesV2Json.structureMemberOrAbsent(node, "i")).getMessage());
+    }
+
+    @Test
+    void typedStringMemberOrAbsent_namesTheWrongType() {
+        JsonNode node = json("{\"s\":\"x\",\"n\":null,\"i\":1,\"t\":true,\"f\":false,\"o\":{},\"a\":[]}");
+        assertEquals("x", SesV2Json.typedStringMemberOrAbsent(node, "s"));
+        assertNull(SesV2Json.typedStringMemberOrAbsent(node, "n"));
+        assertNull(SesV2Json.typedStringMemberOrAbsent(node, "missing"));
+        assertEquals("NUMBER_VALUE can not be converted to a String", assertAws("SerializationException", 400,
+                () -> SesV2Json.typedStringMemberOrAbsent(node, "i")).getMessage());
+        assertEquals("TRUE_VALUE can not be converted to a String", assertAws("SerializationException", 400,
+                () -> SesV2Json.typedStringMemberOrAbsent(node, "t")).getMessage());
+        assertEquals("FALSE_VALUE can not be converted to a String", assertAws("SerializationException", 400,
+                () -> SesV2Json.typedStringMemberOrAbsent(node, "f")).getMessage());
+        assertEquals("Start of structure or map found where not expected.", assertAws("SerializationException",
+                400, () -> SesV2Json.typedStringMemberOrAbsent(node, "o")).getMessage());
+        assertEquals("Start of list found where not expected", assertAws("SerializationException", 400,
+                () -> SesV2Json.typedStringMemberOrAbsent(node, "a")).getMessage());
+    }
+
+    @Test
     void unexpectedStartError_distinguishesListFromStructure() {
         assertEquals("Start of list found where not expected",
                 SesV2Json.unexpectedStartError(json("[]")).getMessage());

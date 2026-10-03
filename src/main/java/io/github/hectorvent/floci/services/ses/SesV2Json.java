@@ -145,6 +145,42 @@ final class SesV2Json {
         throw unexpectedStartError(node);
     }
 
+    /**
+     * A structure member as the AWS deserializer reads it: absent or null is returned as is, an
+     * array is "Start of list found where not expected" and any other non-object "Expected null".
+     */
+    static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
+        JsonNode node = parent.path(field);
+        if (node.isMissingNode() || node.isNull() || node.isObject()) {
+            return node;
+        }
+        if (node.isArray()) {
+            throw unexpectedStartError(node);
+        }
+        throw new AwsException("SerializationException", "Expected null", 400);
+    }
+
+    /** A string member with the AWS deserializer's message for each wrong JSON type. */
+    static String typedStringMemberOrAbsent(JsonNode parent, String field) {
+        JsonNode node = parent.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (node.isTextual()) {
+            return node.textValue();
+        }
+        if (node.isNumber()) {
+            throw new AwsException("SerializationException",
+                    "NUMBER_VALUE can not be converted to a String", 400);
+        }
+        if (node.isBoolean()) {
+            throw new AwsException("SerializationException",
+                    (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
+                            + " can not be converted to a String", 400);
+        }
+        throw unexpectedStartError(node);
+    }
+
     static AwsException unexpectedStartError(JsonNode node) {
         if (node.isArray()) {
             return new AwsException("SerializationException",

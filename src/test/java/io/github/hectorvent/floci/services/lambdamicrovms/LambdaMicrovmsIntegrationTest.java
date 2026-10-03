@@ -248,6 +248,28 @@ class LambdaMicrovmsIntegrationTest {
                 .body("State", equalTo("ACTIVE"))
                 .body("Name", equalTo("microvm-it-connector"));
 
+        // UpdateNetworkConnector changes the operator role and protocol as well as the subnets.
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "OperatorRole": "arn:aws:iam::000000000000:role/microvm-connector-operator-v2",
+                          "Configuration": { "VpcEgressConfiguration": { "NetworkProtocol": "DUAL_STACK" } }
+                        }
+                        """)
+                .when()
+                .put(CORE + "/network-connectors/" + connectorId)
+                .then()
+                .statusCode(202);
+        given()
+                .when()
+                .get(CORE + "/network-connectors/" + connectorId)
+                .then()
+                .statusCode(200)
+                .body("OperatorRole", equalTo("arn:aws:iam::000000000000:role/microvm-connector-operator-v2"))
+                .body("Configuration.VpcEgressConfiguration.NetworkProtocol", equalTo("DUAL_STACK"))
+                .body("Configuration.VpcEgressConfiguration.SubnetIds[0]", equalTo("subnet-0000000000000it01"));
+
         given()
                 .when()
                 .delete(CORE + "/network-connectors/" + connectorId)
