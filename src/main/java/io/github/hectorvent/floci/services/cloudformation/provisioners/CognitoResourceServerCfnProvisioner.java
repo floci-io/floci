@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
@@ -16,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 
 @ApplicationScoped
 public class CognitoResourceServerCfnProvisioner implements CfnResourceProvisioner {
@@ -50,7 +52,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
 
         if (ctx.isUpdate() && resource.getAttributes().containsKey(UPDATE_ATTR)) {
             try {
-                rollbackUpdate(resource);
+                rollbackUpdate(resource, ctx.progress(), ctx.resources());
                 resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
                 resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
             } catch (RuntimeException failure) {
@@ -59,7 +61,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             }
         }
         String priorPhysicalId = ctx.isUpdate() ? resource.getPhysicalId() : null;
-        deletePending(resource);
+        deletePending(resource, ctx.resources());
         Identity prior = ctx.isUpdate() ? identity(resource, priorPhysicalId) : null;
         boolean replacement = prior != null
                 && (!prior.poolId().equals(poolId) || !prior.identifier().equals(identifier));
@@ -173,7 +175,12 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
 
     @Override
     public void delete(StackResource resource, String region) {
-        deletePending(resource);
+        delete(resource, region, CfnResourceContext.EMPTY);
+    }
+
+    @Override
+    public void delete(StackResource resource, String region, CfnResourceContext context) {
+        deletePending(resource, context);
         deleteAfterCleanup(resource, region);
     }
 
@@ -192,16 +199,29 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
                 "ResourceNotFoundException");
     }
 
-    private void deletePending(StackResource resource) {
+    private boolean deletePending(StackResource resource, CfnResourceContext context) {
         ObjectNode cleanup = read(resource, CLEANUP_ATTR);
         if (cleanup != null) {
-            delete(identity(cleanup));
+            Identity pending = identity(cleanup);
+            boolean claimed = context.managedElsewhere(other -> TYPE.equals(other.getResourceType())
+                    && pending.poolId().equals(other.getAttributes().get(POOL_ATTR))
+                    && pending.identifier().equals(other.getPhysicalId()));
+            if (!claimed) {
+                delete(pending);
+            }
             resource.getAttributes().remove(CLEANUP_ATTR);
+            return claimed;
         }
+        return false;
     }
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        return rollbackUpdate(resource, event -> {}, CfnResourceContext.EMPTY);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress, CfnResourceContext context) {
         ObjectNode snapshot = read(resource, UPDATE_ATTR);
         if (snapshot == null) {
             return false;
@@ -215,7 +235,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             resource.getAttributes().remove(CLEANUP_ATTR);
             if (!Objects.equals(prior, replacement)) {
                 setCleanup(resource, replacement, false);
-                deletePending(resource);
+                deletePending(resource, context);
             }
         } else {
             cognitoService.updateResourceServer(prior.poolId(), prior.identifier(), name,
@@ -256,18 +276,28 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return completeUpdate(resource, CfnResourceContext.EMPTY);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource, CfnResourceContext context) {
         if ("UPDATE_FAILED".equals(resource.getStatus()) && retainsFailedUpdateState(resource)) {
             throw new IllegalStateException("Resource server rollback is still pending; its original configuration "
                     + "cannot be discarded by another resource's update cleanup");
         }
         boolean updated = resource.getAttributes().remove(UPDATE_ATTR) != null;
-        UpdateCleanupResult cleanup = completeCleanup(resource);
+        UpdateCleanupResult cleanup = completeCleanup(resource, context);
         return !cleanup.applicable() && updated ? new UpdateCleanupResult(true, true, null, 0, null) : cleanup;
     }
 
     @Override
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
-        return completeCleanup(resource);
+        return completeDeleteCleanup(resource, CfnResourceContext.EMPTY);
+    }
+
+    @Override
+    public UpdateCleanupResult completeDeleteCleanup(StackResource resource, CfnResourceContext context) {
+        return completeCleanup(resource, context);
     }
 
     @Override
@@ -275,7 +305,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         // The rollback snapshot remains until deleting the managed server succeeds.
     }
 
-    private UpdateCleanupResult completeCleanup(StackResource resource) {
+    private UpdateCleanupResult completeCleanup(StackResource resource, CfnResourceContext context) {
         ObjectNode cleanup = read(resource, CLEANUP_ATTR);
         if (cleanup == null) {
             return UpdateCleanupResult.notApplicable();
@@ -286,7 +316,10 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             return new UpdateCleanupResult(true, true, identifier, 0, null);
         }
         try {
-            deletePending(resource);
+            if (deletePending(resource, context)) {
+                return UpdateCleanupResult.skipped(identifier,
+                        "Historical cleanup abandoned because another stack manages the resource server address");
+            }
             return new UpdateCleanupResult(true, true, identifier, 0, null);
         } catch (RuntimeException failure) {
             int attempts = cleanup.path("attempts").asInt() + 1;

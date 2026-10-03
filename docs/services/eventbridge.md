@@ -127,6 +127,18 @@ the state machine from the account and region in its ARN.
 
 State machine aliases and versions are not supported as EventBridge targets.
 
+## Target Roles
+
+`PutTargets` stores each target's optional `RoleArn`, and `ListTargetsByRule`
+returns it when set. It is independent of the rule's `RoleArn`. An explicit
+role update replaces the stored value. Omitting the role on an existing
+cross-account event-bus target with the same ID and ARN retains its previous
+role, as documented by AWS.
+
+The value must be between 1 and 1600 characters when supplied. Floci stores
+the role as configuration; target delivery does not assume it or enforce its
+IAM policies.
+
 ## Target Retry and Dead-Letter Queues
 
 A target's `RetryPolicy` and `DeadLetterConfig` are validated by `PutTargets`, stored with the target, returned by `ListTargetsByRule`, and applied to delivery from `PutEvents` and scheduled rules.

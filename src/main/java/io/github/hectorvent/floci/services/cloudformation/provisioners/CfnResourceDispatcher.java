@@ -75,6 +75,15 @@ public class CfnResourceDispatcher {
                                    CloudFormationTemplateEngine engine, String region, String accountId,
                                    String stackName, String existingPhysicalId,
                                    Map<String, String> existingAttributes, Consumer<StackEvent> progress) {
+        return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
+                existingPhysicalId, existingAttributes, progress, CfnResourceContext.EMPTY);
+    }
+
+    public StackResource provision(String logicalId, String resourceType, JsonNode properties,
+                                   CloudFormationTemplateEngine engine, String region, String accountId,
+                                   String stackName, String existingPhysicalId,
+                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress,
+                                   CfnResourceContext context) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
@@ -85,7 +94,7 @@ public class CfnResourceDispatcher {
             CfnResourceProvisioner owner = registry.forType(resourceType).orElse(null);
             if (owner != null) {
                 owner.provision(resource, properties,
-                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
+                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress, context));
             } else if (!stubUnsupportedResourceTypesAllowed()) {
                 // Before the physical id below is assigned, so the Cloud Control path sees a
                 // resource with none and reports this message rather than a success. On the stack
@@ -178,10 +187,14 @@ public class CfnResourceDispatcher {
      * beats the {@code Custom::} fallback the registry applies.
      */
     public void delete(StackResource resource, String region) {
+        delete(resource, region, CfnResourceContext.EMPTY);
+    }
+
+    public void delete(StackResource resource, String region, CfnResourceContext context) {
         String resourceType = resource.getResourceType();
         CfnResourceProvisioner owner = registry.forType(resourceType).orElse(null);
         if (owner != null) {
-            owner.delete(resource, region);
+            owner.delete(resource, region, context);
             return;
         }
         delete(resourceType, resource.getPhysicalId(), region);
@@ -211,16 +224,24 @@ public class CfnResourceDispatcher {
      * provisioner that owns the type.
      */
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return completeUpdate(resource, CfnResourceContext.EMPTY);
+    }
+
+    public UpdateCleanupResult completeUpdate(StackResource resource, CfnResourceContext context) {
         return registry.forType(resource.getResourceType())
-                .map(owner -> owner.completeUpdate(resource))
+                .map(owner -> owner.completeUpdate(resource, context))
                 .filter(UpdateCleanupResult::applicable)
                 .orElseGet(UpdateCleanupResult::notApplicable);
     }
 
     /** Cleanup owed by an unfinished update while deleting the enclosing stack. */
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return completeDeleteCleanup(resource, CfnResourceContext.EMPTY);
+    }
+
+    public UpdateCleanupResult completeDeleteCleanup(StackResource resource, CfnResourceContext context) {
         return registry.forType(resource.getResourceType())
-                .map(owner -> owner.completeDeleteCleanup(resource))
+                .map(owner -> owner.completeDeleteCleanup(resource, context))
                 .filter(UpdateCleanupResult::applicable)
                 .orElseGet(UpdateCleanupResult::notApplicable);
     }
@@ -272,8 +293,12 @@ public class CfnResourceDispatcher {
     }
 
     public boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
+        return rollbackUpdate(resource, progress, CfnResourceContext.EMPTY);
+    }
+
+    public boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress, CfnResourceContext context) {
         return registry.forType(resource.getResourceType())
-                .map(owner -> owner.rollbackUpdate(resource, progress))
+                .map(owner -> owner.rollbackUpdate(resource, progress, context))
                 .orElse(false);
     }
 

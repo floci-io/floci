@@ -28,6 +28,29 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(SqsCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** The schema's mutable properties that map one to one onto a queue attribute of the same name. */
+    private static final List<String> SCALAR_ATTRIBUTES = List.of(
+            "ContentBasedDeduplication", "DeduplicationScope", "DelaySeconds", "FifoThroughputLimit",
+            "KmsDataKeyReusePeriodSeconds", "KmsMasterKeyId", "MaximumMessageSize", "MessageRetentionPeriod",
+            "ReceiveMessageWaitTimeSeconds", "SqsManagedSseEnabled", "VisibilityTimeout");
+    /** The mutable properties a template gives as a JSON document and SQS stores as a JSON string. */
+    private static final List<String> JSON_ATTRIBUTES = List.of("RedriveAllowPolicy", "RedrivePolicy");
+    private static final Set<String> FIFO_ONLY_ATTRIBUTES =
+            Set.of("ContentBasedDeduplication", "DeduplicationScope", "FifoThroughputLimit");
+    /**
+     * Properties AWS keeps when an update drops them from the template, rather than resetting: in
+     * LocalStack's AWS-recorded parity test
+     * {@code test_update_fifo_queue_remove_all_properties_except_queuename} all three are unchanged
+     * after an in-place name-only update, while every other property is back at its default.
+     */
+    private static final Set<String> RETAINED_ON_UPDATE =
+            Set.of("SqsManagedSseEnabled", "DeduplicationScope", "FifoThroughputLimit");
+    /**
+     * Resets that cannot be an empty value: a fresh FIFO queue stores ContentBasedDeduplication as
+     * false, and SetQueueAttributes rejects an empty MessageRetentionPeriod, whose default is fixed.
+     */
+    private static final Map<String, String> EXPLICIT_RESETS =
+            Map.of("ContentBasedDeduplication", "false", "MessageRetentionPeriod", "345600");
 
     private final SqsService sqsService;
 
@@ -137,25 +160,21 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
             if (fifoFlag != null) {
                 attrs.put("FifoQueue", fifoFlag);
             }
-            if (props.has("VisibilityTimeout")) {
-                attrs.put("VisibilityTimeout", ctx.engine().resolve(props.get("VisibilityTimeout")));
+            // A property that resolves to blank is absent: the engine resolves AWS::NoValue to blank,
+            // which is how Fn::If [cond, value, AWS::NoValue] drops a property. Stored as an empty
+            // attribute it would replace the queue's default rather than leave it in place.
+            for (String attribute : SCALAR_ATTRIBUTES) {
+                putUnlessBlank(attrs, attribute, ctx.resolveOptional(props, attribute));
             }
-            if (props.has("ContentBasedDeduplication")) {
-                attrs.put("ContentBasedDeduplication", ctx.engine().resolve(props.get("ContentBasedDeduplication")));
-            }
-            if (props.has("DeduplicationScope")) {
-                attrs.put("DeduplicationScope", ctx.engine().resolve(props.get("DeduplicationScope")));
-            }
-            if (props.has("FifoThroughputLimit")) {
-                attrs.put("FifoThroughputLimit", ctx.engine().resolve(props.get("FifoThroughputLimit")));
-            }
-            if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
-                // Usually a JSON object in the template (deadLetterTargetArn is an Fn::GetAtt);
-                // resolveNode resolves intrinsics in place and SqsService expects the JSON string.
-                // CDK commonly emits RedrivePolicy as an already-serialized string via Fn::Join,
-                // which resolveNode collapses to a TextNode — unwrap it instead of calling
-                // toString(), which would JSON-re-encode (quote/escape) the string a second time.
-                attrs.put("RedrivePolicy", ctx.engine().resolveJsonAttribute(props.path("RedrivePolicy")));
+            for (String attribute : JSON_ATTRIBUTES) {
+                if (props.has(attribute) && !props.path(attribute).isNull()) {
+                    // Usually a JSON object in the template (deadLetterTargetArn is an Fn::GetAtt);
+                    // resolveNode resolves intrinsics in place and SqsService expects the JSON string.
+                    // CDK commonly emits RedrivePolicy as an already-serialized string via Fn::Join,
+                    // which resolveNode collapses to a TextNode: unwrap it instead of calling
+                    // toString(), which would JSON-re-encode (quote/escape) the string a second time.
+                    putUnlessBlank(attrs, attribute, ctx.engine().resolveJsonAttribute(props.path(attribute)));
+                }
             }
         }
         // provision is also the update path. createQueue on a name that exists hands back the
@@ -176,6 +195,7 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         String queueUrl;
         if (ctx.isUpdate() && queueName.equals(priorName)) {
             attrs.remove("FifoQueue");
+            resetDroppedAttributes(attrs, fifo);
             Map<String, String> currentAttrs = sqsService.getQueueAttributes(ctx.priorPhysicalId(), List.of("All"), ctx.region());
             Map<String, String> currentTags = sqsService.listQueueTags(ctx.priorPhysicalId(), ctx.region());
             ObjectNode snapshot = MAPPER.createObjectNode();
@@ -205,6 +225,34 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("QueueName", queueName);
         r.getAttributes().put("QueueUrl", queueUrl);
         ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    private static void putUnlessBlank(Map<String, String> attrs, String attribute, String value) {
+        if (value != null && !value.isBlank()) {
+            attrs.put(attribute, value);
+        }
+    }
+
+    /**
+     * Puts every mutable property the template does not declare back to its default, which is how
+     * CloudFormation applies an update: the desired state is the whole template, so a property dropped
+     * from it no longer holds its old value. An empty value removes the stored attribute, leaving the
+     * queue as a fresh create would, with {@code SqsService} reporting the default for it; the
+     * {@link #EXPLICIT_RESETS} are written out instead. The FIFO-only attributes are left alone on a
+     * standard queue, which cannot hold them, and the {@link #RETAINED_ON_UPDATE} ones keep their
+     * stored value, as AWS does.
+     */
+    private static void resetDroppedAttributes(Map<String, String> attrs, boolean fifo) {
+        for (String attribute : SCALAR_ATTRIBUTES) {
+            if (attrs.containsKey(attribute) || RETAINED_ON_UPDATE.contains(attribute)
+                    || (!fifo && FIFO_ONLY_ATTRIBUTES.contains(attribute))) {
+                continue;
+            }
+            attrs.put(attribute, EXPLICIT_RESETS.getOrDefault(attribute, ""));
+        }
+        for (String attribute : JSON_ATTRIBUTES) {
+            attrs.putIfAbsent(attribute, "");
+        }
     }
 
     /**

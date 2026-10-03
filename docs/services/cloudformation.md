@@ -126,6 +126,12 @@ the managed server and retains its tracking if deletion fails. Committed replace
 `UpdateReplacePolicy: Retain`. Otherwise, old-server deletion uses at most three attempts; after
 three failures the old server leaves stack management and must be deleted through Cognito.
 Failed rollback replacements remain tracked for deletion retries. The committed server stays current.
+Before retrying historical cleanup, Floci checks live resources managed by other stacks in the same
+account, including stacks in another region. If one manages the same pool and identifier, Floci
+skips deletion and permanently drops that cleanup record. A later deletion of the other stack does
+not reactivate the record. This lookup and the subsequent Cognito deletion are not atomic: a
+concurrent stack create can claim the address after the lookup. Direct Cognito API writers are not
+tracked as stack claims and remain subject to address-based deletion.
 `ContinueUpdateRollback` remains unsupported.
 
 ## Supported Resource Types

@@ -37,6 +37,10 @@ public interface CfnResourceProvisioner {
         delete(resource.getResourceType(), resource.getPhysicalId(), region);
     }
 
+    default void delete(StackResource resource, String region, CfnResourceContext context) {
+        delete(resource, region);
+    }
+
     /**
      * Deletes the managed entity after the stack engine has already processed historical cleanup.
      * Override when normal deletion also attempts that cleanup, so its recorded failure and pending
@@ -58,6 +62,11 @@ public interface CfnResourceProvisioner {
 
     default boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
         return rollbackUpdate(resource);
+    }
+
+    default boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress,
+                                   CfnResourceContext context) {
+        return rollbackUpdate(resource, progress);
     }
 
     /**
@@ -87,6 +96,10 @@ public interface CfnResourceProvisioner {
         return UpdateCleanupResult.notApplicable();
     }
 
+    default UpdateCleanupResult completeUpdate(StackResource resource, CfnResourceContext context) {
+        return completeUpdate(resource);
+    }
+
     /**
      * Deletes entities displaced by an unfinished update before the stack itself is deleted.
      * The default uses normal replacement cleanup. A provisioner may distinguish this operation
@@ -94,6 +107,10 @@ public interface CfnResourceProvisioner {
      */
     default UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
         return completeUpdate(resource);
+    }
+
+    default UpdateCleanupResult completeDeleteCleanup(StackResource resource, CfnResourceContext context) {
+        return completeDeleteCleanup(resource);
     }
 
     /**

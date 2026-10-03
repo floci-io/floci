@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -32,6 +34,8 @@ import java.util.function.Supplier;
  * updated in place unless {@code UserPoolId} or {@code GenerateSecret}, its create-only properties,
  * changed, in which case a new client is created and the {@link ReplacementCleanup} record deletes
  * the displaced one once the update commits or restores it on rollback, as CloudFormation does.
+ * Before an in-place update of either, the settings it can change are snapshotted, so a stack update
+ * that fails later puts them back.
  *
  * <p>{@code AWS::Cognito::UserPoolDomain}: the physical id is the domain name, as in AWS, and
  * {@code Fn::GetAtt CloudFrontDistribution} is the CloudFront name a custom domain's DNS alias
@@ -43,6 +47,7 @@ import java.util.function.Supplier;
 public class CognitoCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(CognitoCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String NOT_FOUND = "ResourceNotFoundException";
 
     private static final String USER_POOL = "AWS::Cognito::UserPool";
@@ -73,11 +78,14 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         switch (r.getResourceType()) {
             case USER_POOL -> {
+                // A snapshot describes the update in flight; one an earlier update left behind is stale.
+                r.getAttributes().remove(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR);
                 Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
                 provisionUserPool(r, props, ctx);
                 ReplacementCleanup.record(r, ctx, attributesBefore);
             }
             case USER_POOL_CLIENT -> {
+                r.getAttributes().remove(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR);
                 Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
                 provisionUserPoolClient(r, props, ctx);
                 ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -141,24 +149,64 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         return ReplacementCleanup.cleanupPhysicalId(resource);
     }
 
+    /**
+     * The engine calls this for every resource once a stack update commits, but {@link #clearUpdate}
+     * only after a replacement's cleanup, so an in-place update's snapshot is dropped here: the update
+     * committed and nothing will roll it back.
+     */
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
     /**
-     * A replacement is undone through the cleanup record. Without one the entity was updated in
-     * place, and putting that back needs a snapshot this provisioner does not keep, so the engine
-     * reports it as not rolled back, as it did for the switch.
+     * A replacement is undone through the cleanup record, and an in-place update of a pool or a
+     * client from the snapshot taken before it. With neither, a pool or client provision failed
+     * before it changed anything, since its update call is preceded by the snapshot, so there is
+     * nothing to undo. A domain keeps no snapshot: its in-place update is still reported as not
+     * rolled back.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource, this::delete);
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        if (USER_POOL_DOMAIN.equals(resource.getResourceType())) {
+            return false;
+        }
+        // The snapshot is spent only once the restore succeeded: a restore that throws leaves it in
+        // place for the next attempt instead of reporting a rollback that never happened.
+        String raw = resource.getAttributes().get(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return true;
+        }
+        try {
+            if (USER_POOL.equals(resource.getResourceType())) {
+                cognitoService.restoreUserPoolSettings(MAPPER.readValue(raw, UserPool.class));
+            } else {
+                cognitoService.restoreUserPoolClientSettings(MAPPER.readValue(raw, UserPoolClient.class));
+            }
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the Cognito update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        resource.getAttributes().remove(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    private static void snapshot(StackResource r, Object settings) {
+        try {
+            r.getAttributes().put(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR, MAPPER.writeValueAsString(settings));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not snapshot " + r.getLogicalId() + " before its update", e);
+        }
     }
 
     private void provisionUserPool(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -183,6 +231,7 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         UserPool pool;
         if (ctx.isUpdate()) {
             req.put("UserPoolId", ctx.priorPhysicalId());
+            snapshot(r, cognitoService.userPoolSettings(ctx.priorPhysicalId()));
             pool = cognitoService.updateUserPool(req, ctx.region());
         } else {
             pool = cognitoService.createUserPool(req, ctx.region());
@@ -236,6 +285,7 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         UserPoolClient client;
         if (prior != null && Objects.equals(userPoolId, prior.getUserPoolId())
                 && generateSecret == prior.isGenerateSecret()) {
+            snapshot(r, cognitoService.userPoolClientSettings(userPoolId, prior.getClientId()));
             client = cognitoService.updateUserPoolClient(
                     userPoolId, prior.getClientId(), clientName, allowedOAuthFlowsUserPoolClient,
                     allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,

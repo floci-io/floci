@@ -54,7 +54,7 @@ class ServiceCatalogRoutingIntegrationTest {
 
     @Test
     void queryProtocolAliasesAreDeclaredOnDescriptors() {
-        assertTrue(catalog.byCredentialScope("sesv2").orElseThrow().supportsProtocol(ServiceProtocol.QUERY));
+        assertTrue(catalog.byCredentialScope("ses").orElseThrow().supportsProtocol(ServiceProtocol.QUERY));
         assertTrue(catalog.byCredentialScope("cognito-idp").orElseThrow().supportsProtocol(ServiceProtocol.QUERY));
     }
 

@@ -6,10 +6,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
+import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -51,6 +53,9 @@ class CognitoResourceServerCfnIntegrationTest {
 
     @InjectSpy
     CognitoService cognitoService;
+
+    @Inject
+    CloudFormationService cloudFormationService;
 
     @BeforeAll
     static void configureAwsContentTypes() {
@@ -270,8 +275,10 @@ class CognitoResourceServerCfnIntegrationTest {
         assertEquals(IDENTIFIER, output("ServerRef"));
     }
 
-    @Test
-    void deletingAFailedRollbackDeletesARecreatedServerAtThePendingCleanupAddress() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deletingAFailedRollbackPreservesAnotherStacksServerAtThePendingCleanupAddress(boolean anotherRegion)
+            throws Exception {
         String originalPool = createPool();
         String replacementPool = createPool();
         createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
@@ -291,24 +298,48 @@ class CognitoResourceServerCfnIntegrationTest {
                 .put("Identifier", IDENTIFIER).toString()).then().statusCode(200);
         assertServerGone(replacementPool, IDENTIFIER);
         String secondStack = stack + "-new-owner";
-        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+        String secondAuth = anotherRegion ? CFN_AUTH.replace("us-east-1", "eu-west-1") : CFN_AUTH;
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", secondAuth)
                 .formParam("Action", "CreateStack").formParam("StackName", secondStack)
                 .formParam("TemplateBody", template(replacementPool, IDENTIFIER, "Second stack API", "admin").toString())
                 .post("/").then().statusCode(200);
+        boolean secondDeleted = false;
         try {
-            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(secondStack).status());
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(secondStack, secondAuth).status());
+            assertServer(replacementPool, IDENTIFIER, "Second stack API", "admin");
+            doThrow(new AwsException("InternalErrorException", "temporary current server delete failure", 500))
+                    .when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
+            cloudFormation("DeleteStack", null);
+            assertEquals("DELETE_FAILED", CfnStackWaits.awaitTerminal(stack).status());
+            Stack owner = cloudFormationService.describeStacks(stack, "us-east-1", "000000000000").getFirst();
+            assertFalse(owner.resourcesSnapshot().get("Server").getAttributes()
+                    .containsKey("__FlociResourceServerCleanup"));
+            assertTrue(owner.getEvents().stream().anyMatch(event -> "DELETE_SKIPPED".equals(event.getResourceStatus())
+                    && IDENTIFIER.equals(event.getPhysicalResourceId())
+                    && event.getResourceStatusReason().contains("another stack manages")));
             assertServer(replacementPool, IDENTIFIER, "Second stack API", "admin");
 
+            given().contentType("application/x-www-form-urlencoded").header("Authorization", secondAuth)
+                    .formParam("Action", "DeleteStack").formParam("StackName", secondStack)
+                    .post("/").then().statusCode(200);
+            CfnStackWaits.awaitStackDeleted(secondStack, secondAuth);
+            secondDeleted = true;
+            assertServerGone(replacementPool, IDENTIFIER);
+            createServer(replacementPool, "Reused after second stack", "read");
+            doCallRealMethod().when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
             cloudFormation("DeleteStack", null);
             CfnStackWaits.awaitStackDeleted(stack);
             createdStack = false;
             assertServerGone(originalPool, IDENTIFIER);
-            assertServerGone(replacementPool, IDENTIFIER);
+            assertServer(replacementPool, IDENTIFIER, "Reused after second stack", "read");
         } finally {
-            given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
-                    .formParam("Action", "DeleteStack").formParam("StackName", secondStack)
-                    .post("/").then().statusCode(200);
-            CfnStackWaits.awaitStackDeleted(secondStack);
+            doCallRealMethod().when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
+            if (!secondDeleted) {
+                given().contentType("application/x-www-form-urlencoded").header("Authorization", secondAuth)
+                        .formParam("Action", "DeleteStack").formParam("StackName", secondStack)
+                        .post("/").then().statusCode(200);
+                CfnStackWaits.awaitStackDeleted(secondStack, secondAuth);
+            }
         }
     }
 

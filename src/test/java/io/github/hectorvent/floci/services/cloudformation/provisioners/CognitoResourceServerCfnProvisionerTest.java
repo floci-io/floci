@@ -10,11 +10,14 @@ import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -97,6 +100,78 @@ class CognitoResourceServerCfnProvisionerTest {
         scope.setScopeDescription("Read access");
         server.setScopes(List.of(scope));
         return server;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"provision", "priorRollback", "delete", "rollback", "updateCleanup", "deleteCleanup"})
+    void historicalCleanupAbandonsAnotherStacksCurrentClaimPermanently(String operation) {
+        StackResource resource = resource(IDENTIFIER, POOL);
+        resource.getAttributes().put("__FlociResourceServerCleanup", mapper.createObjectNode()
+                .put("poolId", NEW_POOL).put("identifier", IDENTIFIER).put("retainable", false).toString());
+        AtomicReference<List<StackResource>> claims = new AtomicReference<>(List.of(resource(IDENTIFIER, NEW_POOL)));
+        CfnResourceContext context = new CfnResourceContext(claims::get);
+        when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenReturn(server(POOL, IDENTIFIER, "Old API"));
+        if ("rollback".equals(operation) || "priorRollback".equals(operation)) {
+            resource.getAttributes().put("__FlociResourceServerPoolId", NEW_POOL);
+            ObjectNode snapshot = mapper.createObjectNode().put("poolId", POOL).put("identifier", IDENTIFIER)
+                    .put("name", "Old API").put("replacement", true);
+            snapshot.putArray("scopes");
+            resource.getAttributes().put("__FlociResourceServerUpdate", snapshot.toString());
+        }
+        switch (operation) {
+            case "provision", "priorRollback" -> {
+                ProvisionContext base = ctx(IDENTIFIER);
+                provisioner.provision(resource, properties(POOL, IDENTIFIER, "Next API"),
+                        new ProvisionContext(base.engine(), base.region(), base.accountId(), base.stackName(),
+                                base.priorPhysicalId(), base.progress(), context));
+            }
+            case "delete" -> provisioner.delete(resource, "us-east-1", context);
+            case "rollback" -> assertTrue(provisioner.rollbackUpdate(resource, event -> {}, context));
+            case "updateCleanup" -> assertTrue(provisioner.completeUpdate(resource, context).complete());
+            case "deleteCleanup" -> assertTrue(provisioner.completeDeleteCleanup(resource, context).complete());
+            default -> throw new IllegalArgumentException(operation);
+        }
+        assertFalse(resource.getAttributes().containsKey("__FlociResourceServerCleanup"));
+        claims.set(List.of());
+        assertFalse(provisioner.completeDeleteCleanup(resource, context).applicable());
+        verify(cognito, never()).deleteResourceServer(NEW_POOL, IDENTIFIER);
+        if ("delete".equals(operation)) {
+            verify(cognito).deleteResourceServer(POOL, IDENTIFIER);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"pool", "identifier", "type"})
+    void unrelatedCurrentClaimsDoNotBlockHistoricalCleanup(String difference) {
+        StackResource resource = resource(IDENTIFIER, POOL);
+        resource.getAttributes().put("__FlociResourceServerCleanup", mapper.createObjectNode()
+                .put("poolId", NEW_POOL).put("identifier", IDENTIFIER).toString());
+        StackResource other = resource(IDENTIFIER, NEW_POOL);
+        switch (difference) {
+            case "pool" -> other.getAttributes().put("__FlociResourceServerPoolId", POOL);
+            case "identifier" -> other.setPhysicalId("https://other.example.com");
+            case "type" -> other.setResourceType("AWS::Cognito::UserPool");
+            default -> throw new IllegalArgumentException(difference);
+        }
+        assertTrue(provisioner.completeDeleteCleanup(resource, new CfnResourceContext(() -> List.of(other))).complete());
+        verify(cognito).deleteResourceServer(NEW_POOL, IDENTIFIER);
+        assertFalse(resource.getAttributes().containsKey("__FlociResourceServerCleanup"));
+    }
+
+    @Test
+    void aFailedClaimLookupPreservesHistoricalCleanupForRetry() {
+        StackResource resource = resource(IDENTIFIER, POOL);
+        String cleanup = mapper.createObjectNode().put("poolId", NEW_POOL).put("identifier", IDENTIFIER).toString();
+        resource.getAttributes().put("__FlociResourceServerCleanup", cleanup);
+        CfnResourceContext context = new CfnResourceContext(() -> { throw new IllegalStateException("lookup failed"); });
+        assertThrows(IllegalStateException.class, () -> provisioner.delete(resource, "us-east-1", context));
+        assertEquals(cleanup, resource.getAttributes().get("__FlociResourceServerCleanup"));
+        verifyNoInteractions(cognito);
+        UpdateCleanupResult result = provisioner.completeDeleteCleanup(resource, context);
+        assertFalse(result.complete());
+        assertEquals(1, result.attempts());
+        assertTrue(resource.getAttributes().containsKey("__FlociResourceServerCleanup"));
+        verifyNoInteractions(cognito);
     }
 
     @Test
