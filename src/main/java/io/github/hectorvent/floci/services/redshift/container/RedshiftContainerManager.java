@@ -38,14 +38,13 @@ import java.util.concurrent.TimeUnit;
 public class RedshiftContainerManager {
 
     private static final Logger LOG = Logger.getLogger(RedshiftContainerManager.class);
+    private static final String DEFAULT_DATABASE = "dev";
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerLogStreamer logStreamer;
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
-    private static final String DEFAULT_DATABASE = "dev";
-
     private final Map<String, RedshiftContainerHandle> containers = new ConcurrentHashMap<>();
 
     @Inject

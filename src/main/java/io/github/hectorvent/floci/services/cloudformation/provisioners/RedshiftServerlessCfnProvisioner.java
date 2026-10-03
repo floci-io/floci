@@ -187,6 +187,12 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
         }
     }
 
+    /**
+     * CloudFormation drives a resource to the template, so a property the template omits means its
+     * default, not "keep what is stored". Every setting that has a default is therefore sent with it,
+     * which also resets a value an earlier template set. {@code MaxCapacity} has no default and the
+     * API cannot unset it, so removing it from a template leaves the stored value.
+     */
     private WorkgroupSettings settings(JsonNode props, ProvisionContext ctx) {
         List<ConfigParameter> configParameters = new ArrayList<>();
         JsonNode configNode = props != null ? ctx.engine().resolveNode(props.get("ConfigParameters")) : null;
@@ -202,20 +208,26 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
             String level = ctx.engine().resolve(targetNode.path("Level"));
             target = new PricePerformanceTarget(ctx.engine().resolve(targetNode.path("Status")),
                     level == null || level.isBlank() ? null : Integer.valueOf(level.trim()));
+        } else {
+            target = new PricePerformanceTarget("DISABLED", null);
         }
         return new WorkgroupSettings(
-                integer(props, "BaseCapacity", ctx),
+                orDefault(integer(props, "BaseCapacity", ctx), RedshiftServerlessService.DEFAULT_BASE_CAPACITY),
                 integer(props, "MaxCapacity", ctx),
-                bool(props, "EnhancedVpcRouting", ctx),
-                bool(props, "PubliclyAccessible", ctx),
+                orDefault(bool(props, "EnhancedVpcRouting", ctx), Boolean.FALSE),
+                orDefault(bool(props, "PubliclyAccessible", ctx), Boolean.FALSE),
                 null,
                 configParameters,
                 ctx.resolveStringList(props, "SecurityGroupIds"),
                 ctx.resolveStringList(props, "SubnetIds"),
-                integer(props, "Port", ctx),
+                orDefault(integer(props, "Port", ctx), RedshiftServerlessService.DEFAULT_PORT),
                 target,
                 null,
-                ctx.resolveOptional(props, "TrackName"));
+                ctx.resolveOrDefault(props, "TrackName", RedshiftServerlessService.DEFAULT_TRACK_NAME));
+    }
+
+    private static <T> T orDefault(T value, T fallback) {
+        return value != null ? value : fallback;
     }
 
     private static Integer integer(JsonNode props, String name, ProvisionContext ctx) {
