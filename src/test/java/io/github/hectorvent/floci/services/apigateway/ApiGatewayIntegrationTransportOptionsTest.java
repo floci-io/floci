@@ -20,10 +20,13 @@ import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -45,8 +48,10 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
@@ -82,6 +87,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
     private static int permissiveIntermediateTlsPort;
 
     private final List<String> createdApis = new ArrayList<>();
+    private final List<String> createdLinks = new ArrayList<>();
 
     @BeforeAll
     static void startBackends() throws Exception {
@@ -391,6 +397,61 @@ class ApiGatewayIntegrationTransportOptionsTest {
             given().when().delete("/restapis/" + apiId).then().statusCode(202);
         }
         createdApis.clear();
+        for (String linkId : createdLinks) {
+            given().when().delete("/vpclinks/" + linkId).then().statusCode(202);
+        }
+        createdLinks.clear();
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "selfSigned, false, 502",
+            "selfSigned, true, 200",
+            "privateCa, true, 200",
+            "wrongHostname, true, 502",
+            "expired, true, 502",
+            "nonSigningRoot, true, 502",
+            "keyUsagelessRoot, true, 502",
+            "constrainedIntermediate, true, 502",
+            "permissiveIntermediate, true, 200",
+            "constrainedRoot, true, 502"
+    })
+    void privateHttpsIntegrationPreservesCertificateValidation(String certificateCase,
+                                                              boolean skipIssuanceCheck, int expectedStatus) {
+        int port = switch (certificateCase) {
+            case "selfSigned" -> tlsPort;
+            case "privateCa" -> privateCaTlsPort;
+            case "wrongHostname" -> wrongHostTlsPort;
+            case "expired" -> expiredTlsPort;
+            case "nonSigningRoot" -> nonSigningRootTlsPort;
+            case "keyUsagelessRoot" -> keyUsagelessRootTlsPort;
+            case "constrainedIntermediate" -> nameConstrainedIntermediateTlsPort;
+            case "permissiveIntermediate" -> permissiveIntermediateTlsPort;
+            case "constrainedRoot" -> nameConstrainedRootTlsPort;
+            default -> throw new IllegalArgumentException("Unknown certificate case: " + certificateCase);
+        };
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String linkId = given().contentType(ContentType.JSON)
+                .body("""
+                        {"name":"tls-link-%s","targetArns":[
+                          "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/net/test/abc"
+                        ]}
+                        """.formatted(suffix))
+                .when().post("/vpclinks")
+                .then().statusCode(202).extract().path("id");
+        createdLinks.add(linkId);
+        String extras = ",\"connectionType\":\"VPC_LINK\",\"connectionId\":\"" + linkId + "\"";
+        if (skipIssuanceCheck) {
+            extras += ",\"tlsConfig\":{\"insecureSkipVerification\":true}";
+        }
+        String apiId = createApi("private-tls-" + suffix,
+                "https://localhost:" + port + "/{proxy}", extras);
+
+        ValidatableResponse response = given().when().get("/execute-api/" + apiId + "/test/thing")
+                .then().statusCode(expectedStatus);
+        if (expectedStatus == 200) {
+            response.body("tls", equalTo("ok"));
+        }
     }
 
     @Test
