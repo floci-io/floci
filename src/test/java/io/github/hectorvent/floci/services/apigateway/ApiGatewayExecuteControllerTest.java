@@ -37,7 +37,7 @@ class ApiGatewayExecuteControllerTest {
         return new ApiGatewayExecuteController(
                 null, null, null, null,
                 regionResolver, objectMapper, null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
     }
 
     @Test
@@ -352,7 +352,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
 
         Response response = controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
@@ -382,7 +382,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
 
         controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
@@ -416,7 +416,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
 
         controller.dispatch("GET", "restapi1", "prod", "hello", headers, null, null);
 
