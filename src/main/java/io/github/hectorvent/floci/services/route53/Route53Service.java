@@ -919,10 +919,7 @@ public class Route53Service implements Resettable {
                     "Invalid resource record set: Deleting the SOA or NS record at the zone apex is not permitted.", 400);
         }
         if ("CREATE".equals(action)) {
-            boolean exists = current.stream().anyMatch(r ->
-                    r.getName().equals(rrs.getName()) &&
-                    r.getType().equals(rrs.getType()) &&
-                    equalOrNull(r.getSetIdentifier(), rrs.getSetIdentifier()));
+            boolean exists = current.stream().anyMatch(r -> sameRecord(r, rrs));
             if (exists) {
                 throw new AwsException("InvalidChangeBatch",
                         "Tried to create resource record set [name='" + rrs.getName() +
@@ -930,13 +927,13 @@ public class Route53Service implements Resettable {
             }
         }
         if ("DELETE".equals(action)) {
-            ResourceRecordSet existing = findByNameTypeAndSetIdentifier(current, rrs);
-            if (existing == null) {
+            List<ResourceRecordSet> existing = current.stream().filter(r -> sameRecord(r, rrs)).toList();
+            if (existing.isEmpty()) {
                 throw new AwsException("InvalidChangeBatch",
                         "Tried to delete resource record set " + deleteTargetDescription(rrs)
                                 + " but it was not found", 400);
             }
-            if (!recordSetsMatch(existing, rrs)) {
+            if (existing.stream().noneMatch(r -> recordSetsMatch(r, rrs))) {
                 throw new AwsException("InvalidChangeBatch",
                         "Tried to delete resource record set " + deleteTargetDescription(rrs)
                                 + " but the values provided do not match the current values", 400);
@@ -947,30 +944,37 @@ public class Route53Service implements Resettable {
     private void applyChange(String action, ResourceRecordSet rrs, List<ResourceRecordSet> current) {
         switch (action) {
             case "CREATE" -> current.add(rrs);
-            case "DELETE" -> current.removeIf(r -> recordSetsMatch(r, rrs));
+            case "DELETE" -> current.remove(deleteTarget(current, rrs));
             case "UPSERT" -> {
-                current.removeIf(r ->
-                        r.getName().equals(rrs.getName()) && r.getType().equals(rrs.getType()) &&
-                        equalOrNull(r.getSetIdentifier(), rrs.getSetIdentifier()));
+                current.removeIf(r -> sameRecord(r, rrs));
                 current.add(rrs);
             }
         }
     }
 
-    private static boolean equalOrNull(String a, String b) {
-        if (a == null && b == null) return true;
-        if (a == null || b == null) return false;
-        return a.equals(b);
+    /**
+     * Whether two record sets share an identity: name, type and set identifier. Route 53 treats a
+     * name with or without the trailing dot as the same, and requires a set identifier of at least one
+     * character, so a blank one is none. That also matches a record an earlier CloudFormation
+     * provisioner stored with the template's undotted Name or empty SetIdentifier.
+     */
+    public static boolean sameRecord(ResourceRecordSet a, ResourceRecordSet b) {
+        return normalizeName(a.getName()).equals(normalizeName(b.getName()))
+                && a.getType().equals(b.getType())
+                && Objects.equals(blankToNull(a.getSetIdentifier()), blankToNull(b.getSetIdentifier()));
     }
 
-    private static ResourceRecordSet findByNameTypeAndSetIdentifier(List<ResourceRecordSet> current,
-                                                                     ResourceRecordSet rrs) {
-        return current.stream()
-                .filter(r -> r.getName().equals(rrs.getName())
-                        && r.getType().equals(rrs.getType())
-                        && Objects.equals(r.getSetIdentifier(), rrs.getSetIdentifier()))
-                .findFirst()
-                .orElse(null);
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    /**
+     * One DELETE removes one record. An earlier version could store the same record both undotted and
+     * dotted, possibly for two owners, so prefer the copy named exactly as the request names it.
+     */
+    private static ResourceRecordSet deleteTarget(List<ResourceRecordSet> current, ResourceRecordSet rrs) {
+        List<ResourceRecordSet> matches = current.stream().filter(r -> recordSetsMatch(r, rrs)).toList();
+        return matches.stream().filter(r -> r.getName().equals(rrs.getName())).findFirst().orElse(matches.get(0));
     }
 
     private static String deleteTargetDescription(ResourceRecordSet rrs) {
@@ -982,9 +986,7 @@ public class Route53Service implements Resettable {
     }
 
     private static boolean recordSetsMatch(ResourceRecordSet a, ResourceRecordSet b) {
-        return a.getName().equals(b.getName())
-                && a.getType().equals(b.getType())
-                && Objects.equals(a.getSetIdentifier(), b.getSetIdentifier())
+        return sameRecord(a, b)
                 && Objects.equals(a.getTtl(), b.getTtl())
                 && Objects.equals(a.getWeight(), b.getWeight())
                 && Objects.equals(a.getRegion(), b.getRegion())
