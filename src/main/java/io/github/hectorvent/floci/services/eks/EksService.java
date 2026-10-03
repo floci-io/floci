@@ -106,6 +106,8 @@ public class EksService implements TagHandler, ResourceProvider {
     private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
     private final Map<String, Object> nodeGroupCapacityLocks = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<Boolean>> pendingFirstNodeGroups = new ConcurrentHashMap<>();
+    // Storage hands every caller the same live Cluster, and Cluster keeps identity equality.
+    private final Set<Cluster> clustersBeingDeleted = ConcurrentHashMap.newKeySet();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -650,39 +652,39 @@ public class EksService implements TagHandler, ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No cluster found for name: " + name, 404));
 
-        ClusterStatus previousStatus;
-        synchronized (cluster) {
-            previousStatus = cluster.getStatus();
+        // One delete at a time per cluster, so a delete that fails cannot restore the status or
+        // state of a cluster another delete is tearing down.
+        if (!clustersBeingDeleted.add(cluster)) {
+            throw new AwsException("ResourceInUseException",
+                    "Cluster is already being deleted: " + name, 409);
+        }
+        try {
+            ClusterStatus previousStatus = cluster.getStatus();
             cluster.setStatus(ClusterStatus.DELETING);
-        }
-        if (!config.services().eks().mock()) {
-            try {
-                clusterManager.stopCluster(cluster);
-            } catch (RuntimeException e) {
-                // The cluster record is kept for a retry, so it must not stay stuck in DELETING.
-                // Only the delete that moved it into DELETING restores it, so an overlapping
-                // delete that failed later cannot put DELETING back.
-                synchronized (cluster) {
-                    if (previousStatus != ClusterStatus.DELETING
-                            && cluster.getStatus() == ClusterStatus.DELETING) {
-                        cluster.setStatus(previousStatus);
-                    }
+            if (!config.services().eks().mock()) {
+                try {
+                    clusterManager.stopCluster(cluster);
+                } catch (RuntimeException e) {
+                    // The cluster record is kept for a retry, so it must not stay stuck in DELETING.
+                    cluster.setStatus(previousStatus);
+                    throw e;
                 }
-                throw e;
             }
+            deleteClusterSecurityGroup(cluster);
+            accessEntries.deleteClusterEntries(cluster);
+            if (podIdentityAssociations != null) {
+                podIdentityAssociations.deleteClusterAssociations(cluster);
+            }
+            if (addons != null) {
+                addons.deleteClusterAddons(cluster);
+            }
+            storage.delete(name);
+            clearAppliedClusterUserData(cluster, name);
+            oidcService.deleteKey(name);
+            return cluster;
+        } finally {
+            clustersBeingDeleted.remove(cluster);
         }
-        deleteClusterSecurityGroup(cluster);
-        accessEntries.deleteClusterEntries(cluster);
-        if (podIdentityAssociations != null) {
-            podIdentityAssociations.deleteClusterAssociations(cluster);
-        }
-        if (addons != null) {
-            addons.deleteClusterAddons(cluster);
-        }
-        storage.delete(name);
-        clearAppliedClusterUserData(cluster, name);
-        oidcService.deleteKey(name);
-        return cluster;
     }
 
     public Nodegroup createNodeGroup(String clusterName, CreateNodeGroupRequest request) {
