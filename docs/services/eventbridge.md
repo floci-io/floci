@@ -39,6 +39,11 @@
 | `UpdateConnection` | Update connection description, auth type, or auth parameters |
 | `DeleteConnection` | Delete a connection |
 | `ListConnections` | List connections, optionally filtered by name prefix or state |
+| `CreateApiDestination` | Create an HTTP or HTTPS API destination for EventBridge targets |
+| `DescribeApiDestination` | Get API destination details including endpoint, HTTP method, and rate limit |
+| `UpdateApiDestination` | Update API destination endpoint, HTTP method, connection, or rate limit |
+| `DeleteApiDestination` | Delete an API destination |
+| `ListApiDestinations` | List API destinations, optionally filtered by name prefix or connection ARN |
 | `StartReplay` | - |
 | `DescribeReplay` | - |
 | `CancelReplay` | - |
@@ -138,6 +143,47 @@ role, as documented by AWS.
 The value must be between 1 and 1600 characters when supplied. Floci stores
 the role as configuration; target delivery does not assume it or enforce its
 IAM policies.
+
+## API Destination Targets
+
+A matching rule can send events directly to HTTP or HTTPS endpoints via API destinations. An API destination pairs an HTTP endpoint URL and HTTP method with an EventBridge Connection for authentication (API key, basic auth, or OAuth client credentials).
+
+```bash
+# 1. Create a connection with API key auth
+aws events create-connection \
+  --name webhook-auth \
+  --authorization-type API_KEY \
+  --auth-parameters '{"ApiKeyAuthParameters":{"ApiKeyName":"x-api-key","ApiKeyValue":"secret123"}}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# 2. Create an API destination
+aws events create-api-destination \
+  --name webhook-dest \
+  --connection-arn "arn:aws:events:us-east-1:000000000000:connection/webhook-auth" \
+  --invocation-endpoint "https://api.example.com/events/*" \
+  --http-method POST \
+  --invocation-rate-limit-per-second 10 \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# 3. Add the API destination as a target with path and query parameters
+aws events put-targets \
+  --rule order-placed-rule \
+  --event-bus-name my-bus \
+  --targets '[{
+    "Id": "post-to-webhook",
+    "Arn": "arn:aws:events:us-east-1:000000000000:api-destination/webhook-dest",
+    "HttpParameters": {
+      "PathParameterValues": ["orders"],
+      "QueryStringParameters": {"version": "v1"},
+      "HeaderParameters": {"X-Custom-Header": "eventbridge"}
+    }
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+- Path parameter wildcards (`*`) in `InvocationEndpoint` are substituted in order by `PathParameterValues`.
+- Query string and header parameters from both the Connection and the Target are merged and forwarded on the outgoing HTTP request.
+- Requests to link-local and AWS metadata endpoints (such as `169.254.0.0/16`) are blocked for SSRF protection.
 
 ## Target Retry and Dead-Letter Queues
 

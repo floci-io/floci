@@ -6,8 +6,11 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
+import io.github.hectorvent.floci.services.eventbridge.model.ApiDestinationState;
 import io.github.hectorvent.floci.services.eventbridge.model.Archive;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchivedEvent;
@@ -42,6 +45,7 @@ import java.util.regex.Pattern;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import java.util.Optional;
 import java.util.Set;
 
 @ApplicationScoped
@@ -56,6 +60,7 @@ public class EventBridgeService implements ResourceProvider {
     private final StorageBackend<String, List<ArchivedEvent>> archivedEventStore;
     private final StorageBackend<String, Replay> replayStore;
     private final StorageBackend<String, Connection> connectionStore;
+    private final StorageBackend<String, ApiDestination> apiDestinationStore;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final RuleScheduler ruleScheduler;
@@ -87,9 +92,41 @@ public class EventBridgeService implements ResourceProvider {
                         new TypeReference<Map<String, Replay>>() {}),
                 storageFactory.create("eventbridge", "eventbridge-connections.json",
                         new TypeReference<Map<String, Connection>>() {}),
+                storageFactory.create("eventbridge", "eventbridge-api-destinations.json",
+                        new TypeReference<Map<String, ApiDestination>>() {}),
                 regionResolver, objectMapper, ruleScheduler, dispatcher, replayDispatcher,
                 resourceGroupsTaggingService
         );
+    }
+
+    EventBridgeService(StorageBackend<String, EventBus> busStore,
+                       StorageBackend<String, Rule> ruleStore,
+                       StorageBackend<String, List<Target>> targetStore,
+                       StorageBackend<String, Archive> archiveStore,
+                       StorageBackend<String, List<ArchivedEvent>> archivedEventStore,
+                       StorageBackend<String, Replay> replayStore,
+                       StorageBackend<String, Connection> connectionStore,
+                       StorageBackend<String, ApiDestination> apiDestinationStore,
+                       RegionResolver regionResolver,
+                       ObjectMapper objectMapper,
+                       RuleScheduler ruleScheduler,
+                       TargetDispatcher dispatcher,
+                       ReplayDispatcher replayDispatcher,
+                       ResourceGroupsTaggingService resourceGroupsTaggingService) {
+        this.busStore = busStore;
+        this.ruleStore = ruleStore;
+        this.targetStore = targetStore;
+        this.archiveStore = archiveStore;
+        this.archivedEventStore = archivedEventStore;
+        this.replayStore = replayStore;
+        this.connectionStore = connectionStore;
+        this.apiDestinationStore = apiDestinationStore;
+        this.regionResolver = regionResolver;
+        this.objectMapper = objectMapper;
+        this.ruleScheduler = ruleScheduler;
+        this.dispatcher = dispatcher;
+        this.replayDispatcher = replayDispatcher;
+        this.resourceGroupsTaggingService = resourceGroupsTaggingService;
     }
 
     EventBridgeService(StorageBackend<String, EventBus> busStore,
@@ -105,19 +142,9 @@ public class EventBridgeService implements ResourceProvider {
                        TargetDispatcher dispatcher,
                        ReplayDispatcher replayDispatcher,
                        ResourceGroupsTaggingService resourceGroupsTaggingService) {
-        this.busStore = busStore;
-        this.ruleStore = ruleStore;
-        this.targetStore = targetStore;
-        this.archiveStore = archiveStore;
-        this.archivedEventStore = archivedEventStore;
-        this.replayStore = replayStore;
-        this.connectionStore = connectionStore;
-        this.regionResolver = regionResolver;
-        this.objectMapper = objectMapper;
-        this.ruleScheduler = ruleScheduler;
-        this.dispatcher = dispatcher;
-        this.replayDispatcher = replayDispatcher;
-        this.resourceGroupsTaggingService = resourceGroupsTaggingService;
+        this(busStore, ruleStore, targetStore, archiveStore, archivedEventStore, replayStore, connectionStore,
+                new InMemoryStorage<>(), regionResolver, objectMapper, ruleScheduler, dispatcher, replayDispatcher,
+                resourceGroupsTaggingService);
     }
 
     @PostConstruct
@@ -1474,6 +1501,203 @@ public class EventBridgeService implements ResourceProvider {
             case "BASIC", "OAUTH_CLIENT_CREDENTIALS", "API_KEY" -> { }
             default -> throw new AwsException("ValidationException",
                     "AuthorizationType must be one of BASIC, OAUTH_CLIENT_CREDENTIALS, API_KEY.", 400);
+        }
+    }
+
+    // ──────────────────────────── Api Destinations ────────────────────────────
+
+    private static final Pattern API_DESTINATION_NAME_PATTERN =
+            Pattern.compile("[\\.\\-_A-Za-z0-9]+");
+    private static final Set<String> ALLOWED_HTTP_METHODS =
+            Set.of("GET", "HEAD", "POST", "OPTIONS", "PUT", "DELETE", "PATCH");
+
+    public ApiDestination createApiDestination(String name, String description, String connectionArn,
+                                               String invocationEndpoint, String httpMethod,
+                                               Integer invocationRateLimitPerSecond, String region) {
+        validateApiDestinationName(name);
+        if (connectionArn == null || connectionArn.isBlank()) {
+            throw new AwsException("ValidationException", "ConnectionArn is required.", 400);
+        }
+        findConnectionByArn(connectionArn, region);
+        if (invocationEndpoint == null || invocationEndpoint.isBlank()) {
+            throw new AwsException("ValidationException", "InvocationEndpoint is required.", 400);
+        }
+        validateHttpMethod(httpMethod);
+        if (invocationRateLimitPerSecond != null && invocationRateLimitPerSecond < 1) {
+            throw new AwsException("ValidationException",
+                    "InvocationRateLimitPerSecond must be at least 1.", 400);
+        }
+
+        String key = apiDestinationKey(region, name);
+        if (apiDestinationStore.get(key).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "ApiDestination " + name + " already exists.", 400);
+        }
+
+        String destinationId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+        ApiDestination destination = new ApiDestination();
+        destination.setName(name);
+        destination.setArn(regionResolver.buildArn("events", region,
+                "api-destination/" + name + "/" + destinationId));
+        destination.setDescription(description);
+        destination.setConnectionArn(connectionArn);
+        destination.setInvocationEndpoint(invocationEndpoint);
+        destination.setHttpMethod(httpMethod);
+        destination.setInvocationRateLimitPerSecond(invocationRateLimitPerSecond);
+        destination.setApiDestinationState(ApiDestinationState.ACTIVE);
+        destination.setCreationTime(now);
+        destination.setLastModifiedTime(now);
+
+        apiDestinationStore.put(key, destination);
+        LOG.infov("Created API Destination: {0} with endpoint {1}", name, invocationEndpoint);
+        return destination;
+    }
+
+    public ApiDestination describeApiDestination(String name, String region) {
+        return apiDestinationStore.get(apiDestinationKey(region, name))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "ApiDestination " + name + " does not exist.", 400));
+    }
+
+    public ApiDestination updateApiDestination(String name, String description, String connectionArn,
+                                               String invocationEndpoint, String httpMethod,
+                                               Integer invocationRateLimitPerSecond, String region) {
+        String key = apiDestinationKey(region, name);
+        ApiDestination destination = apiDestinationStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "ApiDestination " + name + " does not exist.", 400));
+
+        if (connectionArn != null) {
+            findConnectionByArn(connectionArn, region);
+            destination.setConnectionArn(connectionArn);
+        }
+        if (description != null) {
+            destination.setDescription(description);
+        }
+        if (invocationEndpoint != null) {
+            destination.setInvocationEndpoint(invocationEndpoint);
+        }
+        if (httpMethod != null) {
+            validateHttpMethod(httpMethod);
+            destination.setHttpMethod(httpMethod);
+        }
+        if (invocationRateLimitPerSecond != null) {
+            if (invocationRateLimitPerSecond < 1) {
+                throw new AwsException("ValidationException",
+                        "InvocationRateLimitPerSecond must be at least 1.", 400);
+            }
+            destination.setInvocationRateLimitPerSecond(invocationRateLimitPerSecond);
+        }
+        Instant now = Instant.now();
+        destination.setLastModifiedTime(now);
+        apiDestinationStore.put(key, destination);
+        LOG.infov("Updated API Destination: {0}", name);
+        return destination;
+    }
+
+    public ApiDestination deleteApiDestination(String name, String region) {
+        String key = apiDestinationKey(region, name);
+        ApiDestination destination = apiDestinationStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "ApiDestination " + name + " does not exist.", 400));
+        apiDestinationStore.delete(key);
+        LOG.infov("Deleted API Destination: {0}", name);
+        return destination;
+    }
+
+    public List<ApiDestination> listApiDestinations(String namePrefix, String connectionArn, String region) {
+        String prefix = "api-destination:" + region + ":";
+        return apiDestinationStore.scan(k -> {
+            if (!k.startsWith(prefix)) {
+                return false;
+            }
+            ApiDestination dest = apiDestinationStore.get(k).orElse(null);
+            if (dest == null) {
+                return false;
+            }
+            if (namePrefix != null && !namePrefix.isBlank()
+                    && !dest.getName().startsWith(namePrefix)) {
+                return false;
+            }
+            if (connectionArn != null && !connectionArn.isBlank()
+                    && !connectionArn.equals(dest.getConnectionArn())) {
+                return false;
+            }
+            return true;
+        });
+    }
+
+    public Connection findConnectionByArn(String connectionArn, String region) {
+        if (connectionArn == null || connectionArn.isBlank()) {
+            throw new AwsException("ResourceNotFoundException", "Connection ARN is required.", 400);
+        }
+        if (AwsArnUtils.isArn(connectionArn)) {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(connectionArn);
+            String resource = parsed.resource();
+            if (resource.startsWith("connection/")) {
+                String remainder = resource.substring("connection/".length());
+                int slash = remainder.indexOf('/');
+                String name = slash > 0 ? remainder.substring(0, slash) : remainder;
+                String connRegion = parsed.region().isEmpty() ? region : parsed.region();
+                Optional<Connection> opt = connectionStore.get(connectionKey(connRegion, name));
+                if (opt.isPresent()) {
+                    return opt.get();
+                }
+            }
+        }
+        return connectionStore.scan(k -> {
+            Connection c = connectionStore.get(k).orElse(null);
+            return c != null && connectionArn.equals(c.getConnectionArn());
+        }).stream().findFirst().orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                "Connection " + connectionArn + " does not exist.", 400));
+    }
+
+    public ApiDestination findApiDestinationByArn(String arn, String region) {
+        if (arn == null || arn.isBlank()) {
+            return null;
+        }
+        if (AwsArnUtils.isArn(arn)) {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            String resource = parsed.resource();
+            if (resource.startsWith("api-destination/")) {
+                String remainder = resource.substring("api-destination/".length());
+                int slash = remainder.indexOf('/');
+                String name = slash > 0 ? remainder.substring(0, slash) : remainder;
+                String destRegion = parsed.region().isEmpty() ? region : parsed.region();
+                Optional<ApiDestination> opt = apiDestinationStore.get(apiDestinationKey(destRegion, name));
+                if (opt.isPresent()) {
+                    return opt.get();
+                }
+            }
+        }
+        return apiDestinationStore.scan(k -> {
+            ApiDestination d = apiDestinationStore.get(k).orElse(null);
+            return d != null && arn.equals(d.getArn());
+        }).stream().findFirst().orElse(null);
+    }
+
+    private static String apiDestinationKey(String region, String name) {
+        return "api-destination:" + region + ":" + name;
+    }
+
+    private static void validateApiDestinationName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "Name is required.", 400);
+        }
+        if (name.length() > 64 || !API_DESTINATION_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("ValidationException",
+                    "Name must match [\\.\\-_A-Za-z0-9]+ and be at most 64 characters.", 400);
+        }
+    }
+
+    private static void validateHttpMethod(String httpMethod) {
+        if (httpMethod == null || httpMethod.isBlank()) {
+            throw new AwsException("ValidationException", "HttpMethod is required.", 400);
+        }
+        if (!ALLOWED_HTTP_METHODS.contains(httpMethod)) {
+            throw new AwsException("ValidationException",
+                    "HttpMethod must be one of GET, HEAD, POST, OPTIONS, PUT, DELETE, PATCH.", 400);
         }
     }
 
