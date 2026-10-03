@@ -242,6 +242,54 @@ public class CloudFormationService implements ResourceProvider {
                 && (status.endsWith("_IN_PROGRESS") || "ROLLBACK_COMPLETE".equals(status));
     }
 
+    /**
+     * Validates the template source of an {@code UpdateStack} or {@code CreateChangeSet} request:
+     * {@code UsePreviousTemplate} excludes {@code TemplateBody} and {@code TemplateURL}, and
+     * without it one of the two is required.
+     */
+    public void validateTemplateSource(String templateBody, String templateUrl, boolean usePreviousTemplate) {
+        boolean hasTemplate = (templateBody != null && !templateBody.isBlank())
+                || (templateUrl != null && !templateUrl.isBlank());
+        if (usePreviousTemplate && hasTemplate) {
+            throw new AwsException("ValidationError",
+                    "UsePreviousTemplate cannot be specified together with TemplateBody or TemplateURL", 400);
+        }
+        if (!usePreviousTemplate && !hasTemplate) {
+            throw new AwsException("ValidationError",
+                    "Either Template URL or Template Body must be specified.", 400);
+        }
+    }
+
+    /**
+     * Creates an UPDATE change set from the template the stack currently holds, as submitted
+     * rather than SAM- or Include-expanded, so executing it keeps {@code GetTemplate}'s Original
+     * stage intact. The template is read outside the stack's lock, so the change set is only
+     * recorded if no other update replaced it in the meantime; otherwise it is read again.
+     */
+    public ChangeSet createChangeSetFromPreviousTemplate(String stackName, String changeSetName,
+                                                         Map<String, String> parameters,
+                                                         List<String> capabilities,
+                                                         Map<String, String> tags, String region) {
+        ChangeSet created = null;
+        while (created == null) {
+            Stack stack = resolveStack(stackName, region);
+            if (stack == null) {
+                throw new AwsException("ValidationError",
+                        "Stack with id " + stackName + " does not exist", 400);
+            }
+            String previousTemplate = previousTemplateOf(stack);
+            created = createChangeSet(stackName, changeSetName, "UPDATE", previousTemplate, null,
+                    parameters, capabilities, tags, region, currentAccount(), false, true);
+        }
+        return created;
+    }
+
+    private static String previousTemplateOf(Stack stack) {
+        return stack.getOriginalTemplateBody() != null
+                ? stack.getOriginalTemplateBody()
+                : stack.getTemplateBody();
+    }
+
     // ── CreateChangeSet ───────────────────────────────────────────────────────
 
     public ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
@@ -249,7 +297,7 @@ public class CloudFormationService implements ResourceProvider {
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, regionResolver.getAccountId(), false);
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false);
     }
 
     /**
@@ -273,7 +321,7 @@ public class CloudFormationService implements ResourceProvider {
                                                Map<String, String> parameters, List<String> capabilities,
                                                Map<String, String> tags, String region) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, regionResolver.getAccountId(), true);
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), true, false);
     }
 
     /**
@@ -291,14 +339,14 @@ public class CloudFormationService implements ResourceProvider {
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region, String accountId) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, accountId, false);
+                parameters, capabilities, tags, region, accountId, false, false);
     }
 
     private ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
                                       String templateBody, String templateUrl,
                                       Map<String, String> parameters, List<String> capabilities,
                                       Map<String, String> tags, String region, String accountId,
-                                      boolean attachToReviewInProgressStack) {
+                                      boolean attachToReviewInProgressStack, boolean fromPreviousTemplate) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
 
         // Real CloudFormation runs a declared macro (here, only AWS::Serverless-2016-10-31)
@@ -380,6 +428,9 @@ public class CloudFormationService implements ResourceProvider {
                             "Stack:" + existing.getStackId() + " is in " + existing.getStatus()
                                     + " state and can not be updated.", 400);
                 }
+                if (fromPreviousTemplate && !Objects.equals(templateBody, previousTemplateOf(existing))) {
+                    return existing;
+                }
                 target = existing;
             }
 
@@ -405,7 +456,9 @@ public class CloudFormationService implements ResourceProvider {
             return target;
         });
 
-        persistStack(stack);
+        if (created[0] != null) {
+            persistStack(stack);
+        }
         return created[0];
     }
 
