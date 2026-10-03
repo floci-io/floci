@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -22,13 +23,16 @@ class EksWorkerAuthentication {
     private final EksService eks;
     private final Ec2Service ec2;
     private final EksAccessEntryService entries;
+    private final EmulatorConfig config;
 
     @Inject
-    EksWorkerAuthentication(IamService iam, EksService eks, Ec2Service ec2, EksAccessEntryService entries) {
+    EksWorkerAuthentication(IamService iam, EksService eks, Ec2Service ec2, EksAccessEntryService entries,
+                            EmulatorConfig config) {
         this.iam = iam;
         this.eks = eks;
         this.ec2 = ec2;
         this.entries = entries;
+        this.config = config;
     }
 
     Optional<Map<String, Object>> authenticate(EksTokenValidator.VerifiedToken token, String name,
@@ -37,7 +41,13 @@ class EksWorkerAuthentication {
         // Keep the existing non-worker compatibility path. Expired/revoked temporary sessions
         // must never fall through to it after signature validation.
         if (session.isEmpty()) {
-            return IamService.isTemporaryAccessKey(token.accessKeyId()) ? Optional.empty() : legacyIdentity();
+            if (IamService.isTemporaryAccessKey(token.accessKeyId())) {
+                return Optional.empty();
+            }
+            // Keys resolve from every account, and the legacy identity is system:masters.
+            return iam.resolveAccountId(token.accessKeyId())
+                    .filter(owner -> owner.equals(clusterAccount(account)))
+                    .flatMap(owner -> legacyIdentity());
         }
         EksSessionIdentity identity = session.get();
         if (identity.instanceId() == null) {
@@ -92,6 +102,11 @@ class EksWorkerAuthentication {
         return iam.findInstanceProfile(account, arn.substring(arn.lastIndexOf('/') + 1))
                 .filter(profile -> arn.equals(profile.getArn()))
                 .filter(profile -> List.of(roleName).equals(profile.getRoleNames())).isPresent();
+    }
+
+    /** Unscoped webhook paths predate per-account clusters, so they serve the default account. */
+    private String clusterAccount(String account) {
+        return account != null ? account : config.defaultAccountId();
     }
 
     private static Optional<Map<String, Object>> legacyIdentity() {
