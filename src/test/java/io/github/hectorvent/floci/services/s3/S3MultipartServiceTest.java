@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
 import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
+import io.github.hectorvent.floci.services.s3.model.Part;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
@@ -553,6 +554,57 @@ class S3MultipartServiceTest {
         S3Object result = s3Service.completeMultipartUpload("test-bucket", "strict.bin", upload.getUploadId(),
                 List.of(1, 2), partChecksums(ChecksumAlgorithm.SHA256, part1, part2), null, null);
         assertEquals(compositeSha256(part1, part2), result.getChecksum().getChecksumSHA256());
+    }
+
+    @Test
+    void uploadPartThatTakesAnInMemoryUploadPastOneArrayIsRejected() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "huge.bin", null);
+        // The check reads the recorded part sizes, so recording one avoids allocating 2 GiB here.
+        Part recorded = new Part(1, "\"etag\"", Integer.MAX_VALUE - 16L);
+        recorded.setStorageId("1-recorded");
+        upload.getParts().put(1, recorded);
+
+        AwsException error = assertThrows(AwsException.class, () -> s3Service.uploadPart(
+                "test-bucket", "huge.bin", upload.getUploadId(), 2, new byte[16]));
+
+        assertEquals("EntityTooLarge", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("Your proposed upload exceeds the maximum allowed object size.", error.getMessage());
+        assertNull(upload.getParts().get(2), "a rejected part is not recorded");
+        s3Service.uploadPart("test-bucket", "huge.bin", upload.getUploadId(), 1, new byte[16]);
+        assertEquals(16, upload.getParts().get(1).getSize(), "re-uploading a part replaces its size in the total");
+    }
+
+    @Test
+    void completeMultipartUploadOverOneArrayIsRejectedInMemoryMode() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "huge.bin", null);
+        s3Service.uploadPart("test-bucket", "huge.bin", upload.getUploadId(), 1, "part1".getBytes(StandardCharsets.UTF_8));
+        s3Service.uploadPart("test-bucket", "huge.bin", upload.getUploadId(), 2, "part2".getBytes(StandardCharsets.UTF_8));
+        // Concurrent UploadParts can each pass their own check, so Complete checks the total again.
+        upload.getParts().get(2).setSize(Integer.MAX_VALUE);
+
+        AwsException error = assertThrows(AwsException.class, () -> s3Service.completeMultipartUpload(
+                "test-bucket", "huge.bin", upload.getUploadId(), List.of(1, 2), null, null));
+
+        assertEquals("EntityTooLarge", error.getErrorCode());
+        assertThrows(AwsException.class, () -> s3Service.getObject("test-bucket", "huge.bin"));
+    }
+
+    @Test
+    void completeThatReadAReplacedPartsRecordFailsInsteadOfStoringTheNewBytes() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "raced.bin", null);
+        s3Service.uploadPart("test-bucket", "raced.bin", upload.getUploadId(), 1, "first".getBytes(StandardCharsets.UTF_8));
+        Part staleRecord = upload.getParts().get(1);
+        s3Service.uploadPart("test-bucket", "raced.bin", upload.getUploadId(), 1, "other".getBytes(StandardCharsets.UTF_8));
+        // A record whose bytes a same-size re-upload replaced. The upload lock keeps a Complete from
+        // reading one, but if it ever did, it must fail rather than store the new bytes.
+        upload.getParts().put(1, staleRecord);
+
+        AwsException error = assertThrows(AwsException.class, () -> s3Service.completeMultipartUpload(
+                "test-bucket", "raced.bin", upload.getUploadId(), List.of(1), null, null));
+
+        assertEquals("InvalidPart", error.getErrorCode());
+        assertThrows(AwsException.class, () -> s3Service.getObject("test-bucket", "raced.bin"));
     }
 
     private static Map<Integer, S3Checksum> partChecksums(ChecksumAlgorithm algorithm, byte[]... parts) {
