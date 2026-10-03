@@ -914,28 +914,31 @@ public class EksClusterManager
      * cluster's workloads survive a Floci restart and are re-latched by {@link #restoreCluster}.
      */
     public void stopCluster(Cluster cluster) {
-        unregisterMetadataEndpoint(cluster);
         String resourceName = clusterResourceName(cluster);
-        Closeable logStream = clusterLogHandles.remove(resourceName);
         if (cluster.getContainerId() == null) {
-            closeQuietly(logStream);
+            unregisterMetadataEndpoint(cluster);
+            closeQuietly(clusterLogHandles.remove(resourceName));
             return;
         }
-        // Strict: a container Docker could not remove may still publish the port, so the delete
-        // fails and keeps the cluster record; a retried delete releases the port once it is gone.
-        try {
-            lifecycleManager.stopAndRemoveStrict(cluster.getContainerId(), logStream);
-        } catch (RuntimeException e) {
-            // Kept so the retried delete closes the logs of a container that may still be running.
-            if (logStream != null) {
-                clusterLogHandles.putIfAbsent(resourceName, logStream);
-            }
-            throw e;
+        Closeable logStream = clusterLogHandles.get(resourceName);
+        // Strict: a container Docker could not remove may still be running and publishing the
+        // port, so the delete fails and keeps the cluster record, its metadata endpoint, log
+        // handle and port reservation; a retried delete releases them once the container is gone.
+        lifecycleManager.stopAndRemoveStrict(cluster.getContainerId(), logStream);
+        unregisterMetadataEndpoint(cluster);
+        // Removed by value so an overlapping delete cannot drop a handle it does not own.
+        if (logStream != null) {
+            clusterLogHandles.remove(resourceName, logStream);
         }
-        if (cluster.getHostPort() > 0) {
-            portAllocator.release(cluster.getHostPort());
-            // Cleared so a delete retried after a failed backup cleanup cannot free a reused port.
+        int hostPort;
+        // Read and cleared together so overlapping deletes, or a delete retried after a failed
+        // backup cleanup, cannot release a port that has since been reused.
+        synchronized (cluster) {
+            hostPort = cluster.getHostPort();
             cluster.setHostPort(0);
+        }
+        if (hostPort > 0) {
+            portAllocator.release(hostPort);
         }
         if (cluster.getDockerName() != null) {
             // A failed backup cleanup must not leave the live node running. Keep the cluster
@@ -1093,9 +1096,10 @@ public class EksClusterManager
             return;
         }
         String resourceName = clusterResourceName(cluster);
-        if (clusterLogHandles.containsKey(resourceName)) {
-            return;
-        }
+        // Logs are attached only for a container that was just started or adopted, so a handle
+        // still registered under this name follows an earlier container: close it rather than
+        // leave the new cluster without control-plane logs.
+        closeQuietly(clusterLogHandles.remove(resourceName));
         String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
         String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
         String region = clusterRegion(cluster);
@@ -1133,13 +1137,13 @@ public class EksClusterManager
         }
 
         if (handles.size() == 1) {
-            clusterLogHandles.put(resourceName, handles.getFirst());
+            closeQuietly(clusterLogHandles.put(resourceName, handles.getFirst()));
         } else if (handles.size() > 1) {
-            clusterLogHandles.put(resourceName, () -> {
+            closeQuietly(clusterLogHandles.put(resourceName, () -> {
                 for (Closeable h : handles) {
                     closeQuietly(h);
                 }
-            });
+            }));
         }
     }
 

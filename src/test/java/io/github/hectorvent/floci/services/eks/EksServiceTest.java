@@ -521,6 +521,18 @@ class EksServiceTest {
         verify(clusterManager, never()).detachCluster(any(Cluster.class));
     }
 
+    @Test
+    void aDeleteThatCouldNotRemoveTheClusterContainerLeavesTheClusterActive() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, false);
+        doThrow(new IllegalStateException("Failed to remove container")).when(clusterManager).stopCluster(cluster);
+
+        assertThrows(IllegalStateException.class, () -> service.deleteCluster("running-cluster"));
+
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("running-cluster").getStatus());
+    }
+
     private static Cluster activeCluster() {
         Cluster cluster = new Cluster();
         cluster.setName("running-cluster");

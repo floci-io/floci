@@ -24,6 +24,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -215,6 +216,21 @@ class ContainerLifecycleManagerVolumeTest {
     }
 
     @Test
+    void strictContainerCleanupLeavesTheLogStreamOpenWhenDockerStoppedButCouldNotRemoveTheContainer() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+        List<String> operations = new ArrayList<>();
+
+        assertThrows(IllegalStateException.class, () ->
+                manager.stopAndRemoveStrict("container-id", () -> operations.add("logs")));
+
+        assertEquals(List.of(), operations);
+    }
+
+    @Test
     void strictContainerCleanupPropagatesRemovalFailure() {
         StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
         RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
@@ -239,6 +255,20 @@ class ContainerLifecycleManagerVolumeTest {
         assertDoesNotThrow(() -> manager.stopAndRemoveStrict("container-id", null));
 
         verify(remove).exec();
+    }
+
+    @Test
+    void strictContainerCleanupClosesTheLogStreamOnceForcedRemovalSucceedsAfterStopFailure() throws Exception {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        Closeable logStream = mock(Closeable.class);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new DockerException("stop failed", 500));
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+
+        manager.stopAndRemoveStrict("container-id", logStream);
+
+        verify(logStream).close();
     }
 
     @Test

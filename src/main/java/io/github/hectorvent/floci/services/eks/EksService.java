@@ -650,9 +650,26 @@ public class EksService implements TagHandler, ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No cluster found for name: " + name, 404));
 
-        cluster.setStatus(ClusterStatus.DELETING);
+        ClusterStatus previousStatus;
+        synchronized (cluster) {
+            previousStatus = cluster.getStatus();
+            cluster.setStatus(ClusterStatus.DELETING);
+        }
         if (!config.services().eks().mock()) {
-            clusterManager.stopCluster(cluster);
+            try {
+                clusterManager.stopCluster(cluster);
+            } catch (RuntimeException e) {
+                // The cluster record is kept for a retry, so it must not stay stuck in DELETING.
+                // Only the delete that moved it into DELETING restores it, so an overlapping
+                // delete that failed later cannot put DELETING back.
+                synchronized (cluster) {
+                    if (previousStatus != ClusterStatus.DELETING
+                            && cluster.getStatus() == ClusterStatus.DELETING) {
+                        cluster.setStatus(previousStatus);
+                    }
+                }
+                throw e;
+            }
         }
         deleteClusterSecurityGroup(cluster);
         accessEntries.deleteClusterEntries(cluster);

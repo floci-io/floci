@@ -1639,6 +1639,40 @@ class EksClusterManagerTest {
             verify(metadataServer).unregisterInstance(any());
             assertNull(manager.getRegisteredClusterNodeInstance(cluster));
         }
+
+        @Test
+        void aDeleteThatCouldNotRemoveTheContainerKeepsItsNodeOnTheMetadataServer() {
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+            cluster.setContainerId("container-42");
+            Mockito.doThrow(new IllegalStateException("Failed to remove container container-42"))
+                    .when(lifecycleManager).stopAndRemoveStrict("container-42", null);
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            verify(metadataServer, never()).unregisterInstance(any());
+            assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
+        }
+
+        @Test
+        void retryingADeleteAfterContainerRemovalFailedRemovesTheNodeFromTheMetadataServer() {
+            EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+            when(config.storage()).thenReturn(storage);
+            when(storage.mode()).thenReturn("memory");
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+            cluster.setContainerId("container-42");
+            Mockito.doThrow(new IllegalStateException("Failed to remove container container-42"))
+                    .doNothing()
+                    .when(lifecycleManager).stopAndRemoveStrict("container-42", null);
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            manager.stopCluster(cluster);
+
+            assertNull(manager.getRegisteredClusterNodeInstance(cluster));
+        }
     }
 
     @Nested
@@ -2818,6 +2852,58 @@ class EksClusterManagerTest {
             assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
 
             assertEquals(mockHandle, manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void aRecreatedClusterReplacesALogHandleLeftBehindUnderItsName() throws Exception {
+            Cluster stale = new Cluster();
+            stale.setName("prod-cluster");
+            stale.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.startCluster(stale);
+            Closeable freshHandle = Mockito.mock(Closeable.class);
+            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(freshHandle);
+            Cluster recreated = new Cluster();
+            recreated.setName("prod-cluster");
+            recreated.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+
+            manager.startCluster(recreated);
+
+            verify(mockHandle).close();
+            assertEquals(freshHandle, manager.getLogHandle(recreated));
+        }
+
+        @Test
+        void retryingADeleteAfterContainerRemovalFailedReleasesTheLogHandle() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.startCluster(cluster);
+            Mockito.doThrow(new IllegalStateException("Failed to remove container"))
+                    .doNothing()
+                    .when(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockHandle);
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            manager.stopCluster(cluster);
+
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void aFailedDeleteOverlappingASuccessfulOneLeavesNoLogHandleBehind() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.startCluster(cluster);
+            String containerId = "container-id-123456789012345678901234567890";
+            Mockito.doAnswer(failing -> {
+                manager.stopCluster(cluster);
+                throw new IllegalStateException("Failed to remove container");
+            }).doNothing().when(lifecycleManager).stopAndRemoveStrict(eq(containerId), any());
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            assertNull(manager.getLogHandle(cluster));
         }
 
         @Test

@@ -432,7 +432,8 @@ public class ContainerLifecycleManager {
      *
      * <p>Most emulator shutdown paths intentionally use best-effort cleanup through
      * {@link #stopAndRemove(String, Closeable)}. Resource-deletion paths that must retain their
-     * persisted record for a retry use this stricter variant instead.
+     * persisted record for a retry use this stricter variant instead. The log stream is closed
+     * only once the container is gone; when removal fails it is left open for the retry.
      */
     public void stopAndRemoveStrict(String containerId, Closeable logStream) {
         LOG.infov("Stopping container {0}", containerId);
@@ -459,14 +460,13 @@ public class ContainerLifecycleManager {
                     "Failed to remove container " + containerId, e);
             if (stopFailure != null) {
                 cleanupFailure.addSuppressed(stopFailure);
-            } else {
-                closeLogStreamIfPresent(logStream);
             }
-            // A container Docker could neither stop nor remove may still be logging: the stream
-            // stays open for the caller's retry.
+            // The container still exists and may still be logging, so the stream stays open for
+            // the caller's retry.
             throw cleanupFailure;
         }
-        // Closed after the stop, as in stopAndRemove, so the follower can drain the final tail.
+        // Closed only once the container is stopped and gone, as in stopAndRemove, so the follower
+        // can drain the final tail.
         closeLogStreamIfPresent(logStream);
     }
 
