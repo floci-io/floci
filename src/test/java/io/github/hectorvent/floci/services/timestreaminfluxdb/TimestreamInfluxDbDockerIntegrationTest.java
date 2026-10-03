@@ -31,8 +31,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 @Tag("docker")
 @QuarkusTest
 @TestProfile(TimestreamInfluxDbDockerIntegrationTest.RealContainerProfile.class)
-// Three 180 s status waits on real containers: past the suite's 2-minute default.
-@Timeout(value = 10, unit = TimeUnit.MINUTES)
+// Three 180 s status waits on real containers, plus the requests and cleanup around them.
+@Timeout(value = 15, unit = TimeUnit.MINUTES)
 class TimestreamInfluxDbDockerIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";

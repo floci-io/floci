@@ -13,10 +13,12 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -52,6 +54,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code mode} defaults to {@code cdi}.
  */
 @QuarkusTest
+// The training job may poll for up to 300 s plus the image pull, past the suite's 2-minute default.
+@Timeout(value = 10, unit = TimeUnit.MINUTES)
 @TestProfile(SageMakerGpuDockerIntegrationTest.GpuHardwareProfile.class)
 class SageMakerGpuDockerIntegrationTest {
 
