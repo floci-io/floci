@@ -441,14 +441,17 @@ public class DockerClientProducer {
         });
         DefaultDockerClientConfig clientConfig = builder.build();
 
-        ApacheDockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
+        return DockerClientImpl.getInstance(clientConfig, newHttpClient(clientConfig, maxConnections));
+    }
+
+    static ApacheDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections) {
+        return new ApacheDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())
+                .sslConfig(clientConfig.getSSLConfig())
                 .maxConnections(maxConnections)
                 .connectionTimeout(Duration.ofSeconds(30))
                 .responseTimeout(Duration.ofMinutes(5))
                 .build();
-
-        return DockerClientImpl.getInstance(clientConfig, httpClient);
     }
 
     /**
