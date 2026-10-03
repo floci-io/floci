@@ -67,6 +67,25 @@ Current limitations:
 - A custom domain does not change where the broker listens or what `DescribeEndpoint` returns (see [Endpoint address](#endpoint-address)), and pointing DNS at the emulator is outside its scope.
 - Server certificate ARNs are stored as given and reported `VALID`; they are not checked against ACM.
 
+## Authorizers
+
+Status: control plane only.
+
+`CreateAuthorizer`, `DescribeAuthorizer`, `UpdateAuthorizer`, `DeleteAuthorizer`, `ListAuthorizers`, `SetDefaultAuthorizer`, `DescribeDefaultAuthorizer` and `ClearDefaultAuthorizer` are served on the REST-JSON paths the AWS SDKs use, with the shapes, error codes and messages measured against AWS:
+
+- A new authorizer is `INACTIVE` with HTTP caching off unless the request says otherwise. Unless `signingDisabled` is `true`, it needs a `tokenKeyName` and one or two RSA-2048 public keys in PEM form; a signing-disabled authorizer takes no keys. The function ARN is checked for ARN syntax only and is never resolved.
+- `DescribeAuthorizer` returns every member; an unset token key name or key map is JSON `null`, and tags are not shown.
+- `UpdateAuthorizer` changes only the members sent and merges signing keys by key name, refusing a third key. Any member sent moves `lastModifiedDate`; an empty body does not.
+- `DeleteAuthorizer` refuses an `ACTIVE` authorizer (`InvalidRequestException`) and the default authorizer (`DeleteConflictException`).
+- `ListAuthorizers` returns the newest authorizer first (`isAscendingOrder=true` reverses it), filters by `status` and pages with `marker` and `pageSize` (1 to 250).
+- Setting the authorizer that already is the default fails with `ResourceAlreadyExistsException`; setting another one replaces it.
+- Tags work through `TagResource`, `UntagResource` and `ListTagsForResource` on the authorizer ARN.
+- CloudFormation provisions `AWS::IoT::Authorizer`: `Ref` is the name and `Fn::GetAtt Arn` the ARN.
+
+Current limitations:
+
+- Authorizers are not evaluated: no connection or HTTP publish invokes the function, and `TestInvokeAuthorizer` is not served (see [MQTT over WebSocket](#mqtt-over-websocket)).
+
 ## MQTT Broker
 
 Status: complete.
