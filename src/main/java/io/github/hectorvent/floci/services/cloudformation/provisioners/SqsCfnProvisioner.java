@@ -38,6 +38,14 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
     private static final Set<String> FIFO_ONLY_ATTRIBUTES =
             Set.of("ContentBasedDeduplication", "DeduplicationScope", "FifoThroughputLimit");
     /**
+     * Properties AWS keeps when an update drops them from the template, rather than resetting: in
+     * LocalStack's AWS-recorded parity test
+     * {@code test_update_fifo_queue_remove_all_properties_except_queuename} all three are unchanged
+     * after an in-place name-only update, while every other property is back at its default.
+     */
+    private static final Set<String> RETAINED_ON_UPDATE =
+            Set.of("SqsManagedSseEnabled", "DeduplicationScope", "FifoThroughputLimit");
+    /**
      * Resets that cannot be an empty value: a fresh FIFO queue stores ContentBasedDeduplication as
      * false, and SetQueueAttributes rejects an empty MessageRetentionPeriod, whose default is fixed.
      */
@@ -231,12 +239,12 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
      * from it no longer holds its old value. An empty value removes the stored attribute, leaving the
      * queue as a fresh create would, with {@code SqsService} reporting the default for it; the
      * {@link #EXPLICIT_RESETS} are written out instead. The FIFO-only attributes are left alone on a
-     * standard queue, which cannot hold them, and {@code SqsManagedSseEnabled} is not reset, as AWS
-     * does not reset it (LocalStack's parity-tested SQS resource provider records both).
+     * standard queue, which cannot hold them, and the {@link #RETAINED_ON_UPDATE} ones keep their
+     * stored value, as AWS does.
      */
     private static void resetDroppedAttributes(Map<String, String> attrs, boolean fifo) {
         for (String attribute : SCALAR_ATTRIBUTES) {
-            if (attrs.containsKey(attribute) || "SqsManagedSseEnabled".equals(attribute)
+            if (attrs.containsKey(attribute) || RETAINED_ON_UPDATE.contains(attribute)
                     || (!fifo && FIFO_ONLY_ATTRIBUTES.contains(attribute))) {
                 continue;
             }

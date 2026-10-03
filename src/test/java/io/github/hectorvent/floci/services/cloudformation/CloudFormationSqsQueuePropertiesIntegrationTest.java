@@ -25,6 +25,7 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
     private static final String STACK = "cfn-sqs-queue-properties";
     private static final String NO_VALUE_STACK = "cfn-sqs-queue-no-value";
     private static final String SSE_STACK = "cfn-sqs-queue-sse";
+    private static final String FIFO_STACK = "cfn-sqs-queue-fifo";
 
     @Test
     void declaredPropertiesReachTheQueueAndDroppedOnesReturnToTheirDefaults() {
@@ -166,6 +167,58 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
         assertEquals("false", updated.get("SqsManagedSseEnabled"), "AWS keeps the stored value");
 
         cloudFormation(SSE_STACK, "DeleteStack", null);
+    }
+
+    /**
+     * The FIFO half of the same AWS-recorded case: a name-only update resets ContentBasedDeduplication
+     * to false and keeps DeduplicationScope and FifoThroughputLimit as they were.
+     */
+    @Test
+    void aFifoNameOnlyUpdateKeepsTheThroughputSettingsAsAwsDoes() {
+        String declared = """
+                {
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {
+                        "QueueName": "cfn-sqs-fifo-%s.fifo",
+                        "FifoQueue": true,
+                        "ContentBasedDeduplication": true,
+                        "DeduplicationScope": "messageGroup",
+                        "FifoThroughputLimit": "perMessageGroupId",
+                        "DelaySeconds": 13
+                      }
+                    }
+                  },
+                  "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
+                }
+                """;
+        String nameOnly = """
+                {
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"QueueName": "cfn-sqs-fifo-%s.fifo", "FifoQueue": true}
+                    }
+                  },
+                  "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
+                }
+                """;
+        String suffix = Long.toString(System.nanoTime(), 36);
+        cloudFormation(FIFO_STACK, "CreateStack", declared.formatted(suffix));
+        String queueUrl = XmlParser.extractPairs(describeStacks(FIFO_STACK, "CREATE_COMPLETE"), "Outputs",
+                "OutputKey", "OutputValue").get("QueueUrl");
+
+        cloudFormation(FIFO_STACK, "UpdateStack", nameOnly.formatted(suffix));
+        describeStacks(FIFO_STACK, "UPDATE_COMPLETE");
+
+        Map<String, String> updated = queueAttributes(queueUrl);
+        assertEquals("0", updated.get("DelaySeconds"));
+        assertEquals("false", updated.get("ContentBasedDeduplication"));
+        assertEquals("messageGroup", updated.get("DeduplicationScope"));
+        assertEquals("perMessageGroupId", updated.get("FifoThroughputLimit"));
+
+        cloudFormation(FIFO_STACK, "DeleteStack", null);
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {

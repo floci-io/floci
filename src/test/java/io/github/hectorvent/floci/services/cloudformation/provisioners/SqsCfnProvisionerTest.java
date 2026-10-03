@@ -348,7 +348,9 @@ class SqsCfnProvisionerTest {
     }
 
     @Test
-    void aFifoUpdateResetsTheFifoAttributesTheTemplateDropped() {
+    void aFifoUpdateResetsContentBasedDeduplicationAndKeepsTheThroughputSettings() {
+        // As AWS records: ContentBasedDeduplication returns to false, while DeduplicationScope and
+        // FifoThroughputLimit keep their stored values when the template drops them.
         StackResource r = resource("AWS::SQS::Queue", "Orders");
         r.setAttributes(new HashMap<>(Map.of("QueueName", "orders.fifo")));
         ObjectNode props = mapper.createObjectNode().put("QueueName", "orders.fifo").put("FifoQueue", true);
@@ -359,8 +361,8 @@ class SqsCfnProvisionerTest {
         ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
         verify(sqs).setQueueAttributes(anyString(), captor.capture(), eq("us-east-1"));
         assertEquals("false", captor.getValue().get("ContentBasedDeduplication"));
-        assertEquals("", captor.getValue().get("DeduplicationScope"));
-        assertEquals("", captor.getValue().get("FifoThroughputLimit"));
+        assertFalse(captor.getValue().containsKey("DeduplicationScope"));
+        assertFalse(captor.getValue().containsKey("FifoThroughputLimit"));
     }
 
     @Test
