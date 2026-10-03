@@ -346,8 +346,12 @@ public class CloudFormationService implements ResourceProvider {
         // persistStack() stays outside: it is storage I/O, and compute()'s contract is that the
         // remapping function does short, non-blocking work.
         boolean isCreateType = changeSetType == null || "CREATE".equalsIgnoreCase(changeSetType);
+        // An update names its stack by name or stack ID; the map is keyed by name.
+        String canonicalStackName = isCreateType
+                ? stackName
+                : getStackOrThrow(stackName, region, accountId).getStackName();
         ChangeSet[] created = new ChangeSet[1];
-        Stack stack = stacks.compute(stackKey(accountId, stackName, region), (k, existing) -> {
+        Stack stack = stacks.compute(stackKey(accountId, canonicalStackName, region), (k, existing) -> {
             Stack target;
             if (existing == null) {
                 if (!isCreateType) {
@@ -372,6 +376,11 @@ public class CloudFormationService implements ResourceProvider {
                     throw new AwsException("AlreadyExistsException",
                             "Stack [" + stackName + "] already exists", 400);
                 }
+                // A stack ID whose stack was deleted and its name reused names no live stack.
+                if (!isCreateType && AwsArnUtils.isArn(stackName) && !stackName.equals(existing.getStackId())) {
+                    throw new AwsException("ValidationError",
+                            "Stack with id " + stackName + " does not exist", 400);
+                }
                 // The message is the one real CloudFormation emits, down to its own "can not"
                 // spelling and the stack id carried as "Stack:<arn>" with no space: clients match
                 // on this string.
@@ -386,7 +395,7 @@ public class CloudFormationService implements ResourceProvider {
             ChangeSet cs = new ChangeSet();
             cs.setChangeSetId(AwsArnUtils.Arn.of("cloudformation", region, accountId, "changeSet/" + changeSetName + "/" + UUID.randomUUID()).toString());
             cs.setChangeSetName(changeSetName);
-            cs.setStackName(stackName);
+            cs.setStackName(canonicalStackName);
             cs.setStackId(target.getStackId());
             cs.setChangeSetType(changeSetType != null ? changeSetType : "CREATE");
             cs.setTemplateBody(resolvedTemplate);
