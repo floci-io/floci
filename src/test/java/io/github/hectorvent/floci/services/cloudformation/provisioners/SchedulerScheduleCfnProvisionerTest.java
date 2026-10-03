@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -19,6 +21,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -28,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.inOrder;
@@ -35,6 +39,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class SchedulerScheduleCfnProvisionerTest {
@@ -334,6 +339,96 @@ class SchedulerScheduleCfnProvisionerTest {
 
         assertEquals(before, previous.getAttributes());
         verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    void malformedCleanupEntryRejectsCreateBeforeAnyServiceCall(String entry) throws Exception {
+        StackResource resource = resource();
+        appendMalformedCleanupEntry(resource, entry);
+
+        assertMalformedCleanupRejectedWithoutMutation(resource, properties("new", "default"), context(null));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    void malformedCleanupEntryRejectsReplacementBeforeAnyServiceCall(String entry) throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "default"), context(null));
+        appendMalformedCleanupEntry(resource, entry);
+
+        assertMalformedCleanupRejectedWithoutMutation(resource, properties("new", "default"), context("current"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    void malformedCleanupEntryRejectsInPlaceUpdateBeforeAnyServiceCall(String entry) throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "default"), context(null));
+        appendMalformedCleanupEntry(resource, entry);
+
+        assertMalformedCleanupRejectedWithoutMutation(resource,
+                properties("current", "default").put("ScheduleExpression", "rate(10 minutes)"), context("current"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    void malformedCleanupEntryPreservesPendingRollbackBeforeAnotherUpdate(String entry) throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "default"), context(null));
+        provisioner.provision(resource,
+                properties("current", "default").put("ScheduleExpression", "rate(10 minutes)"), context("current"));
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+        appendMalformedCleanupEntry(resource, entry);
+
+        assertMalformedCleanupRejectedWithoutMutation(resource,
+                properties("current", "default").put("ScheduleExpression", "rate(15 minutes)"), context("current"));
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    void malformedCleanupEntryRejectsMergeWithoutChangingExistingDebt(String entry) throws Exception {
+        StackResource previous = resource();
+        provisioner.provision(previous, properties("current", "default"), context(null));
+        ReplacementCleanup.recordOrphan(previous, "default/orphan", previous.getResourceType(), REGION);
+        StackResource attempted = resource();
+        attempted.setPhysicalId(previous.getPhysicalId());
+        attempted.setAttributes(new HashMap<>(previous.getAttributes()));
+        appendMalformedCleanupEntry(attempted, entry);
+        Map<String, String> previousBefore = Map.copyOf(previous.getAttributes());
+        Map<String, String> attemptedBefore = Map.copyOf(attempted.getAttributes());
+        clearInvocations(scheduler);
+
+        assertAll(
+                () -> assertThrows(IllegalStateException.class,
+                        () -> provisioner.mergeFailedUpdateResourceTracking(previous, attempted)),
+                () -> assertEquals(previousBefore, previous.getAttributes()),
+                () -> assertEquals(attemptedBefore, attempted.getAttributes()),
+                () -> verifyNoInteractions(scheduler));
+    }
+
+    private void appendMalformedCleanupEntry(StackResource resource, String entry) throws Exception {
+        ReplacementCleanup.recordOrphan(resource, "default/orphan", resource.getResourceType(), REGION);
+        ObjectNode cleanup = (ObjectNode) mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"));
+        ((ObjectNode) cleanup.path("displaced").get(0)).put("cleanupAttempts", 3)
+                .put("cleanupFailureReason", "historical deletion failed");
+        cleanup.withArray("displaced").add(mapper.readTree(entry));
+        resource.getAttributes().put("__FlociReplacementCleanup", cleanup.toString());
+        resource.getAttributes().put("ExistingAttribute", "unchanged");
+    }
+
+    private void assertMalformedCleanupRejectedWithoutMutation(StackResource resource, ObjectNode desired,
+                                                              ProvisionContext ctx) {
+        Map<String, String> before = Map.copyOf(resource.getAttributes());
+        String physicalIdBefore = resource.getPhysicalId();
+        clearInvocations(scheduler);
+
+        assertAll(
+                () -> assertThrows(IllegalStateException.class, () -> provisioner.provision(resource, desired, ctx)),
+                () -> assertEquals(physicalIdBefore, resource.getPhysicalId()),
+                () -> assertEquals(before, resource.getAttributes()),
+                () -> verifyNoInteractions(scheduler));
     }
 
     @Test

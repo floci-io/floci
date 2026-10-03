@@ -354,6 +354,11 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
             if (!node.isObject() || (node.has("displaced") && !node.path("displaced").isArray())) {
                 throw new IllegalStateException("Invalid schedule replacement cleanup");
             }
+            for (JsonNode entry : node.path("displaced")) {
+                if (!entry.isObject()) {
+                    throw new IllegalStateException("Invalid schedule replacement cleanup");
+                }
+            }
             return (ObjectNode) node;
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Could not read schedule replacement cleanup", e);
