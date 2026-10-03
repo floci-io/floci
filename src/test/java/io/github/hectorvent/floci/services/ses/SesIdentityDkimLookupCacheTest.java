@@ -102,6 +102,31 @@ class SesIdentityDkimLookupCacheTest {
         verify(route53Service, times(4)).listResourceRecordSets(eq("zone-1"), eq(null), eq(null), eq(Integer.MAX_VALUE));
     }
 
+    @Test
+    void dnsDetectionUsesTheIdentitySigningHostedZone() {
+        Identity identity = storePendingDomainIdentity();
+        identity.setDkimSigningHostedZone("dkim.identity-specific.floci.test");
+        stubRoute53(identity, buildMatchingRecords(identity));
+
+        assertEquals("Success", identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                .getDkimVerificationStatus());
+    }
+
+    @Test
+    void signingZoneChangeDoesNotReuseANegativeResultForTheSameTokens() {
+        Identity identity = storePendingDomainIdentity();
+        identity.setDkimSigningHostedZone("dkim.old.floci.test");
+        stubRoute53(identity, List.of());
+        assertEquals("Pending", identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                .getDkimVerificationStatus());
+
+        identity.setDkimSigningHostedZone("dkim.new.floci.test");
+        stubRoute53(identity, buildMatchingRecords(identity));
+        assertEquals("Success", identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                .getDkimVerificationStatus());
+        verify(route53Service, times(4)).listHostedZones(null, Integer.MAX_VALUE);
+    }
+
     private Identity storePendingDomainIdentity() {
         Identity identity = new Identity(DOMAIN, "Domain");
         identity.setVerificationStatus("Pending");
@@ -125,7 +150,7 @@ class SesIdentityDkimLookupCacheTest {
             ResourceRecordSet recordSet = new ResourceRecordSet();
             recordSet.setName(token + "._domainkey." + DOMAIN + ".");
             recordSet.setType("CNAME");
-            recordSet.setRecords(List.of(new ResourceRecord(token + ".dkim.amazonses.com.")));
+            recordSet.setRecords(List.of(new ResourceRecord(token + "." + identity.getDkimSigningHostedZone() + ".")));
             records.add(recordSet);
         }
         return records;

@@ -452,6 +452,14 @@ The contact lists (`ListContactLists`, `ListContacts`), the dedicated-IP lists (
 
 DKIM follows AWS's domain-centric model. A **domain** identity carries DKIM tokens (generated at verification, stable across `VerifyDomainDkim` calls); its `DkimVerificationStatus` tracks **DNS record detection** — it transitions to `Success` when the expected `<token>._domainkey.<domain>` CNAMEs are present in the Route53 emulation, not when DKIM is enabled. An **email** identity has no DKIM of its own: its `DkimAttributes` (`SigningEnabled`, `Status`, `Tokens`) are inherited from its parent domain identity when one is registered. The parent is the exact domain after the `@` (verified against AWS): a verified `example.com` covers `user@example.com` but not `user@mail.example.com` unless `mail.example.com` is itself a registered identity. `SetIdentityDkimEnabled` / `PutEmailIdentityDkimAttributes` only toggle the signing flag (they no longer force the verification status); `PutEmailIdentityDkimSigningAttributes` sets the signing origin (`AWS_SES` Easy DKIM — regenerating tokens when the key length changes — or `EXTERNAL` BYODKIM).
 
+SES v2 reports `DkimAttributes.SigningHostedZone` for Easy DKIM identities. CloudFormation's
+`DkimDNSTokenValue1` through `DkimDNSTokenValue3` and Route53-backed DKIM detection use that same
+identity value to construct `<token>.<SigningHostedZone>`. The field survives persistence and key
+rotation; email identities inherit their registered domain's value. Existing identity records without
+the field retain the emulator default `dkim.amazonses.com`. Floci does not reproduce AWS's region-
+and identity-specific hosted-zone assignment. BYODKIM identities and email identities without a
+registered Easy DKIM domain do not report this SES-hosted zone.
+
 ### IAM enforcement
 
 With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, every SES v2 operation is authorized as the `ses:`

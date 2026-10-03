@@ -673,6 +673,9 @@
   "AWS::Scheduler::ScheduleGroup": [
     "Name"
   ],
+  "AWS::SES::EmailIdentity": [
+    "EmailIdentity"
+  ],
   "AWS::SecretsManager::Secret": [
     "Name"
   ],

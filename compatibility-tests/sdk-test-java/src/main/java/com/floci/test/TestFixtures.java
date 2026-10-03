@@ -1035,6 +1035,10 @@ public final class TestFixtures {
         if (tokens == null || tokens.isEmpty()) {
             throw new IllegalStateException("CreateEmailIdentity did not return DKIM tokens for " + domain);
         }
+        String signingHostedZone = identity.dkimAttributes().signingHostedZone();
+        if (signingHostedZone == null || signingHostedZone.isBlank()) {
+            throw new IllegalStateException("CreateEmailIdentity did not return SigningHostedZone for " + domain);
+        }
 
         try (Route53Client route53 = route53Client()) {
             CreateHostedZoneResponse zone = route53.createHostedZone(CreateHostedZoneRequest.builder()
@@ -1050,7 +1054,7 @@ public final class TestFixtures {
                                     .type(RRType.CNAME)
                                     .ttl(300L)
                                     .resourceRecords(ResourceRecord.builder()
-                                            .value(token + ".dkim.amazonses.com")
+                                            .value(token + "." + signingHostedZone)
                                             .build())
                                     .build())
                             .build())

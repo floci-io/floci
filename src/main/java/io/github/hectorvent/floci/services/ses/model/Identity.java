@@ -14,6 +14,8 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Identity {
 
+    private static final String DEFAULT_DKIM_SIGNING_HOSTED_ZONE = "dkim.amazonses.com";
+
     @JsonProperty("Identity")
     private String identity;
 
@@ -37,6 +39,9 @@ public class Identity {
 
     @JsonProperty("DkimSigningAttributesOrigin")
     private String dkimSigningAttributesOrigin = "AWS_SES"; // "AWS_SES" (Easy DKIM) or "EXTERNAL" (BYODKIM)
+
+    @JsonProperty("DkimSigningHostedZone")
+    private String dkimSigningHostedZone;
 
     @JsonProperty("DkimNextSigningKeyLength")
     private String dkimNextSigningKeyLength = "RSA_2048_BIT";
@@ -109,6 +114,15 @@ public class Identity {
 
     public String getDkimSigningAttributesOrigin() { return dkimSigningAttributesOrigin; }
     public void setDkimSigningAttributesOrigin(String origin) { this.dkimSigningAttributesOrigin = origin; }
+
+    public String getDkimSigningHostedZone() {
+        return dkimSigningHostedZone == null || dkimSigningHostedZone.isBlank()
+                ? DEFAULT_DKIM_SIGNING_HOSTED_ZONE : dkimSigningHostedZone;
+    }
+
+    public void setDkimSigningHostedZone(String signingHostedZone) {
+        this.dkimSigningHostedZone = signingHostedZone;
+    }
 
     public String getDkimNextSigningKeyLength() { return dkimNextSigningKeyLength; }
     public void setDkimNextSigningKeyLength(String len) { this.dkimNextSigningKeyLength = len; }
