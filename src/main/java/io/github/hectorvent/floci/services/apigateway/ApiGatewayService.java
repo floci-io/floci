@@ -46,6 +46,7 @@ import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
 import io.swagger.v3.parser.core.models.SwaggerParseResult;
@@ -3541,7 +3542,8 @@ public class ApiGatewayService implements ResourceProvider {
         // Map OpenAPI parameters to requestParameters
         if (operation.getParameters() != null && !operation.getParameters().isEmpty()) {
             Map<String, Boolean> requestParameters = new HashMap<>();
-            for (var param : operation.getParameters()) {
+            for (Parameter declared : operation.getParameters()) {
+                Parameter param = resolveParameter(declared, openAPI);
                 String location = switch (param.getIn()) {
                     case "query" -> "method.request.querystring." + param.getName();
                     case "header" -> "method.request.header." + param.getName();
@@ -3592,6 +3594,38 @@ public class ApiGatewayService implements ResourceProvider {
         if (integrationExt != null) {
             applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
         }
+    }
+
+    private static final String PARAMETER_REF_PREFIX = "#/components/parameters/";
+    private static final String SWAGGER2_PARAMETER_REF_PREFIX = "#/parameters/";
+
+    /**
+     * Returns the parameter a local {@code #/components/parameters/} reference names, following a
+     * component that is itself a reference. The document is parsed without reference resolution, so
+     * a referenced parameter arrives carrying only its {@code $ref}. A Swagger 2 document is converted
+     * to OpenAPI 3, but an ANY method is read from its raw vendor extension, so its references keep
+     * the Swagger 2 form {@code #/parameters/}; they name the same converted components.
+     *
+     * @throws AwsException if the reference names no component, or the references form a cycle
+     */
+    private static Parameter resolveParameter(Parameter param, OpenAPI openAPI) {
+        Map<String, Parameter> components = openAPI.getComponents() == null
+                ? null : openAPI.getComponents().getParameters();
+        Set<String> seen = new HashSet<>();
+        Parameter current = param;
+        while (current.get$ref() != null) {
+            String ref = current.get$ref();
+            String prefix = ref.startsWith(SWAGGER2_PARAMETER_REF_PREFIX)
+                    ? SWAGGER2_PARAMETER_REF_PREFIX : PARAMETER_REF_PREFIX;
+            Parameter target = components != null && ref.startsWith(prefix) && seen.add(ref)
+                    ? components.get(ref.substring(prefix.length())) : null;
+            if (target == null) {
+                throw new AwsException("BadRequestException",
+                        "Unable to resolve parameter reference: " + ref, 400);
+            }
+            current = target;
+        }
+        return current;
     }
 
     private String ensureResourcePath(String region, String apiId, String path,
