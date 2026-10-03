@@ -37,6 +37,7 @@ import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
+import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
@@ -2487,6 +2488,35 @@ class RdsServiceTest {
                 any(), any(), any(), any(), any(), any());
         assertEquals("InvalidDBInstanceState", assertThrows(AwsException.class,
                 () -> rdsService.startDbInstance("standalone")).getErrorCode());
+    }
+
+    @Test
+    void pointInTimeRestoreFailsAndCleansUpWhenTheTargetContainerDidNotStart() {
+        rdsService.createDbInstance("pitr-source", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+        rdsService.createDbCluster("pitr-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        // The target's container fails to start, so there is nothing to copy the source into.
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(null);
+
+        AwsException instanceFault = assertThrows(AwsException.class, () -> rdsService.restoreDbInstanceToPointInTime(
+                new PointInTimeRestoreRequest("pitr-target", "pitr-source", null, null, null, true,
+                        null, null, null, null, null, null, null, null, null, null, null, null, null,
+                        null, null, null, Map.of()),
+                "us-east-1"));
+        assertEquals("InvalidDBInstanceState", instanceFault.getErrorCode());
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
+                () -> rdsService.getDbInstance("pitr-target")).getErrorCode());
+
+        AwsException clusterFault = assertThrows(AwsException.class, () -> rdsService.restoreDbClusterToPointInTime(
+                "pitr-cluster-target", "pitr-cluster", null, null, null, true,
+                null, null, null, null, null, Map.of(), "us-east-1"));
+        assertEquals("InvalidDBClusterStateFault", clusterFault.getErrorCode());
+        assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.getDbCluster("pitr-cluster-target")).getErrorCode());
+        verify(containerManager, never()).createPostgresSnapshot(any(), any());
     }
 
     @Test
