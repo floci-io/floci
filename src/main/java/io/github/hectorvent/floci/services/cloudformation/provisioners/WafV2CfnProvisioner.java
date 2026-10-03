@@ -10,6 +10,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +21,7 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(WafV2CfnProvisioner.class);
     private static final String WEB_ACL = "AWS::WAFv2::WebACL";
+    private static final String WEB_ACL_ASSOCIATION = "AWS::WAFv2::WebACLAssociation";
 
     private final WafV2Service wafV2Service;
 
@@ -30,15 +32,19 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(WEB_ACL);
+        return Set.of(WEB_ACL, WEB_ACL_ASSOCIATION);
     }
 
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        if (WEB_ACL_ASSOCIATION.equals(resource.getResourceType())) {
+            provisionAssociation(resource, props, ctx);
+            return;
+        }
         JsonNode resolved = ctx.engine().resolveNode(props);
-        String scope = required(text(resolved, "Scope"), "Scope");
-        required(raw(resolved, "DefaultAction"), "DefaultAction");
-        required(raw(resolved, "VisibilityConfig"), "VisibilityConfig");
+        String scope = required(text(resolved, "Scope"), WEB_ACL, "Scope");
+        required(raw(resolved, "DefaultAction"), WEB_ACL, "DefaultAction");
+        required(raw(resolved, "VisibilityConfig"), WEB_ACL, "VisibilityConfig");
         String name = text(resolved, "Name");
         WebAcl existing = findExisting(resource.getPhysicalId());
         if (name == null || name.isBlank()) {
@@ -70,13 +76,90 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         setReferences(resource, acl);
     }
 
+    /**
+     * Every property is createOnly, so a changed one leaves a new {@code ResourceArn|WebACLArn} id
+     * and the prior pair is cleaned up or rolled back to through {@link ReplacementCleanup}.
+     */
+    private void provisionAssociation(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        JsonNode resolved = ctx.engine().resolveNode(props);
+        String resourceArn = required(text(resolved, "ResourceArn"), WEB_ACL_ASSOCIATION, "ResourceArn");
+        String webAclArn = required(text(resolved, "WebACLArn"), WEB_ACL_ASSOCIATION, "WebACLArn");
+        Map<String, String> attributesBefore = new HashMap<>(resource.getAttributes());
+        String physicalId = resourceArn + "|" + webAclArn;
+        if (!ctx.reusesPriorEntity(physicalId)) {
+            wafV2Service.associateWebAcl(webAclArn, resourceArn);
+        }
+        resource.setPhysicalId(physicalId);
+        ReplacementCleanup.record(resource, ctx, attributesBefore);
+    }
+
     @Override
     public void delete(String resourceType, String physicalId, String region) {
+        if (WEB_ACL_ASSOCIATION.equals(resourceType)) {
+            deleteAssociation(physicalId);
+            return;
+        }
         WebAcl existing = findExisting(physicalId);
         if (existing != null) {
             wafV2Service.deleteWebAcl(existing.getScope(), existing.getId(), existing.getName(),
                     existing.getLockToken());
         }
+    }
+
+    /**
+     * Disassociates only while the resource still uses this pair's ACL: a replacement on the same
+     * resource has already re-pointed it, and AWS keeps that newer association when the old pair is
+     * cleaned up. A resource already disassociated is a no-op.
+     */
+    private void deleteAssociation(String physicalId) {
+        String[] pair = associationPair(physicalId);
+        if (pair == null) {
+            return;
+        }
+        WebAcl current = wafV2Service.getWebAclForResource(pair[0]);
+        if (current != null && pair[1].equals(current.getArn())) {
+            wafV2Service.disassociateWebAcl(pair[0]);
+        }
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (!WEB_ACL_ASSOCIATION.equals(resource.getResourceType())) {
+            return false;
+        }
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            // The replacement overwrote this association on the same resource, then its delete disassociated it.
+            String[] pair = associationPair(resource.getPhysicalId());
+            if (pair != null) {
+                wafV2Service.associateWebAcl(pair[1], pair[0]);
+            }
+        }
+        return true;
+    }
+
+    private static String[] associationPair(String physicalId) {
+        String[] parts = physicalId == null ? new String[0] : physicalId.split("\\|", -1);
+        return parts.length == 2 ? parts : null;
     }
 
     private WebAcl fromProperties(JsonNode props) {
@@ -110,9 +193,9 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         return acl;
     }
 
-    private static String required(String value, String property) {
+    private static String required(String value, String resourceType, String property) {
         if (value == null || value.isBlank()) {
-            throw new AwsException("ValidationError", WEB_ACL + " requires " + property, 400);
+            throw new AwsException("ValidationError", resourceType + " requires " + property, 400);
         }
         return value;
     }
