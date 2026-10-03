@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -35,6 +36,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -807,14 +809,85 @@ class CognitoCfnProvisionerTest {
     }
 
     @Test
-    void anInPlaceUserPoolClientUpdateCannotBeRolledBack() {
+    void anInPlaceUserPoolClientUpdateIsRolledBackFromTheSnapshotTakenBeforeIt() {
         when(cognito.describeUserPoolClient(CLIENT_ID)).thenReturn(client("web", null));
-        stubClientUpdate(client("web", null));
+        UserPoolClient before = client("web", null);
+        before.setCallbackURLs(List.of("https://before.example.com/callback"));
+        when(cognito.userPoolClientSettings(POOL_ID, CLIENT_ID)).thenReturn(before);
+        stubClientUpdate(client("web-renamed", null));
         StackResource r = resource(USER_POOL_CLIENT, "Client");
         r.setPhysicalId(CLIENT_ID);
-        provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", POOL_ID), ctx(CLIENT_ID));
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web-renamed"),
+                ctx(CLIENT_ID));
 
-        assertFalse(provisioner.rollbackUpdate(r));
+        InOrder order = inOrder(cognito);
+        order.verify(cognito).userPoolClientSettings(POOL_ID, CLIENT_ID);
+        order.verify(cognito).updateUserPoolClient(any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<UserPoolClient> restored = ArgumentCaptor.forClass(UserPoolClient.class);
+        verify(cognito).restoreUserPoolClientSettings(restored.capture());
+        assertEquals(CLIENT_ID, restored.getValue().getClientId());
+        assertEquals("web", restored.getValue().getClientName());
+        assertEquals(List.of("https://before.example.com/callback"), restored.getValue().getCallbackURLs());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR), "the snapshot is spent");
+    }
+
+    @Test
+    void anInPlaceUserPoolUpdateIsRolledBackFromTheSnapshotTakenBeforeIt() {
+        UserPool before = pool(POOL_ID, "my-pool");
+        before.setMfaConfiguration("OFF");
+        when(cognito.userPoolSettings(POOL_ID)).thenReturn(before);
+        when(cognito.updateUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "renamed-pool"));
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolName", "renamed-pool")
+                .put("MfaConfiguration", "OPTIONAL"), ctx(POOL_ID));
+
+        InOrder order = inOrder(cognito);
+        order.verify(cognito).userPoolSettings(POOL_ID);
+        order.verify(cognito).updateUserPool(any(), eq(REGION));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<UserPool> restored = ArgumentCaptor.forClass(UserPool.class);
+        verify(cognito).restoreUserPoolSettings(restored.capture());
+        assertEquals(POOL_ID, restored.getValue().getId());
+        assertEquals("my-pool", restored.getValue().getName());
+        assertEquals("OFF", restored.getValue().getMfaConfiguration());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR), "the snapshot is spent");
+    }
+
+    @Test
+    void aFailedRestoreKeepsTheSnapshotForTheNextAttempt() {
+        when(cognito.userPoolSettings(POOL_ID)).thenReturn(pool(POOL_ID, "my-pool"));
+        when(cognito.updateUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "renamed-pool"));
+        when(cognito.restoreUserPoolSettings(any()))
+                .thenThrow(new AwsException("InternalErrorException", "storage unavailable", 500));
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolName", "renamed-pool"), ctx(POOL_ID));
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertTrue(r.getAttributes().containsKey(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aCommittedUpdateDropsTheSnapshotAndTheNextProvisionStartsWithoutOne() {
+        when(cognito.userPoolSettings(POOL_ID)).thenReturn(pool(POOL_ID, "my-pool"));
+        when(cognito.updateUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "renamed-pool"));
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolName", "renamed-pool"), ctx(POOL_ID));
+
+        provisioner.clearUpdate(r);
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR));
+        assertTrue(provisioner.rollbackUpdate(r), "nothing to undo once the update committed");
+        verify(cognito, never()).restoreUserPoolSettings(any());
     }
 
     @Test
