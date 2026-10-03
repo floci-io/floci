@@ -477,7 +477,11 @@ class IamTest {
     @Order(101)
     void getAccountSummary() {
         GetAccountSummaryResponse response = iam.getAccountSummary();
-        assertThat(response.summaryMap()).hasSize(34);
+        // GlobalEndpointTokenVersion reports the global STS endpoint, which only the commercial partition has.
+        boolean globalSts = "aws".equals(TestFixtures.partition());
+        assertThat(response.summaryMap()).hasSize(globalSts ? 34 : 33);
+        assertThat(response.summaryMap().containsKey(SummaryKeyType.GLOBAL_ENDPOINT_TOKEN_VERSION))
+                .isEqualTo(globalSts);
         assertThat(response.summaryMap().get(SummaryKeyType.USERS_QUOTA)).isEqualTo(5000);
         assertThat(response.summaryMap().get(SummaryKeyType.GROUPS_QUOTA)).isEqualTo(300);
         assertThat(response.summaryMap().get(SummaryKeyType.ROLES_QUOTA)).isEqualTo(1000);

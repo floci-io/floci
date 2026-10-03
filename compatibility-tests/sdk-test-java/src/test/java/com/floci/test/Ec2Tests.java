@@ -947,24 +947,35 @@ class Ec2Tests {
         DescribeVpcEndpointServicesResponse resp = ec2.describeVpcEndpointServices(
                 DescribeVpcEndpointServicesRequest.builder().build());
 
-        assertThat(resp.serviceNames()).contains("com.amazonaws.us-east-1.s3");
+        // The S3 gateway keeps com.amazonaws everywhere. China names its interface services, S3's and
+        // ECR's among them, with the reversed cn DNS suffix, so there the two S3 offerings split.
+        String region = TestFixtures.region().id();
+        String interfacePrefix = "aws-cn".equals(TestFixtures.partition()) ? "cn.com.amazonaws." : "com.amazonaws.";
+        String s3Gateway = "com.amazonaws." + region + ".s3";
+        String s3Interface = interfacePrefix + region + ".s3";
+        assertThat(resp.serviceNames()).contains(s3Gateway, s3Interface);
         assertThat(resp.serviceDetails()).isNotEmpty();
 
-        ServiceDetail s3 = resp.serviceDetails().stream()
-                .filter(d -> d.serviceName().equals("com.amazonaws.us-east-1.s3"))
-                .findFirst()
-                .orElseThrow();
-        // S3 is the one service offering both endpoint types.
-        assertThat(s3.serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList())
-                .containsExactlyInAnyOrder("Gateway", "Interface");
-        assertThat(s3.availabilityZones()).isNotEmpty();
+        if (s3Interface.equals(s3Gateway)) {
+            // S3 is the one service offering both endpoint types.
+            assertThat(serviceTypes(resp, s3Gateway)).containsExactlyInAnyOrder("Gateway", "Interface");
+        } else {
+            assertThat(serviceTypes(resp, s3Gateway)).containsExactly("Gateway");
+            assertThat(serviceTypes(resp, s3Interface)).containsExactly("Interface");
+        }
+        assertThat(serviceDetail(resp, s3Gateway).availabilityZones()).isNotEmpty();
+        assertThat(serviceTypes(resp, interfacePrefix + region + ".ecr.api")).containsExactly("Interface");
+    }
 
-        ServiceDetail ecr = resp.serviceDetails().stream()
-                .filter(d -> d.serviceName().equals("com.amazonaws.us-east-1.ecr.api"))
+    private static ServiceDetail serviceDetail(DescribeVpcEndpointServicesResponse resp, String name) {
+        return resp.serviceDetails().stream()
+                .filter(d -> d.serviceName().equals(name))
                 .findFirst()
                 .orElseThrow();
-        assertThat(ecr.serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList())
-                .containsExactly("Interface");
+    }
+
+    private static List<String> serviceTypes(DescribeVpcEndpointServicesResponse resp, String name) {
+        return serviceDetail(resp, name).serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList();
     }
 
     @Test

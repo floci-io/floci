@@ -70,21 +70,3 @@ S3VectorsTest#createVectorBucket
 SecretsManagerTest#rotateSecretStub
 SesEventPublishingTest#
 SsoOidcTest#createTokenWithIamUsesAwsSdk
-
-# The test exercises something that does not exist in China, and Floci answers as AWS
-# does there (Marketplace and Lightsail are commercial-only, an eu-central-1 bucket cannot be
-# created through a China endpoint, no global STS token version, China interface endpoint
-# names, the China SAML sign-on URL). These need a commercial-only guard in the test.
-Ec2Tests#describeVpcEndpointServices
-IamTest#getAccountSummary
-LightsailTest#sdkCanCreateAndManageCoreLightsailResources
-MarketplaceAgreementTest#usesAwsSdkWireContract
-MarketplaceCatalogTest#usesAwsSdkWireContract
-MarketplaceDeploymentTest#usesAwsSdkWireContract
-MarketplaceDiscoveryTest#usesAwsSdkWireContract
-MarketplaceEntitlementTest#usesAwsSdkWireContract
-S3Test#createBucketWithLocationConstraint
-S3Test#deleteEuBucket
-S3Test#getBucketLocationEuCentral1
-StsTest#assumeRoleWithSaml
-StsTest#assumeRoleWithSamlAssumedRoleUser
