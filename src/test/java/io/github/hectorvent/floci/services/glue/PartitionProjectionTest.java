@@ -384,4 +384,22 @@ class PartitionProjectionTest {
         assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
                 exceededInListQuery, List.of(injectedTenantTable())));
     }
+
+    @Test
+    void nestedFilterInSubqueryDoesNotSatisfyOuterTableCheck() {
+        Table other = table("other_table", Map.of(), List.of());
+        other.getStorageDescriptor().setColumns(List.of(column("tenant")));
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE id IN (SELECT id FROM other_table WHERE tenant = 'abc')",
+                List.of(injectedTenantTable(), other)));
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE id IN (SELECT id FROM other_table WHERE audit_events.tenant = 'abc')",
+                List.of(injectedTenantTable(), other)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = 'abc' AND id IN (SELECT id FROM other_table WHERE tenant = 'xyz')",
+                List.of(injectedTenantTable(), other)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM other_table WHERE id IN (SELECT id FROM audit_events WHERE tenant = 'abc')",
+                List.of(injectedTenantTable(), other)));
+    }
 }

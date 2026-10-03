@@ -179,17 +179,18 @@ public final class PartitionProjection {
 
     private static boolean isAliasFiltered(WhereScope scope, Table table, String alias, String column,
                                            List<Table> tables) {
+        if (!tableAliases(scope.fromClause(), table.getName()).contains(alias)) {
+            return false;
+        }
         if (hasStaticEquality(scope.whereClause(), alias, column, false)) {
             return true;
         }
-        if (tableAliases(scope.fromClause(), table.getName()).contains(alias)) {
-            long declaringSources = tables.stream()
-                    .filter(other -> other != null && other.getName() != null && declaresColumn(other, column))
-                    .mapToLong(other -> tableAliases(scope.fromClause(), other.getName()).size())
-                    .sum();
-            if (declaringSources == 1 && hasStaticEquality(scope.whereClause(), alias, column, true)) {
-                return true;
-            }
+        long declaringSources = tables.stream()
+                .filter(other -> other != null && other.getName() != null && declaresColumn(other, column))
+                .mapToLong(other -> tableAliases(scope.fromClause(), other.getName()).size())
+                .sum();
+        if (declaringSources == 1 && hasStaticEquality(scope.whereClause(), alias, column, true)) {
+            return true;
         }
         return false;
     }
@@ -230,9 +231,53 @@ public final class PartitionProjection {
             }
             String whereClause = code.substring(start, i);
             String fromClause = findPrecedingFromClause(code, whereStart);
-            scopes.add(new WhereScope(fromClause, whereClause));
+            scopes.add(new WhereScope(fromClause, maskSubqueries(whereClause)));
         }
         return scopes;
+    }
+
+    /**
+     * Blanks out subqueries inside parentheses, so their internal predicates do not satisfy
+     * or conflict with the outer query's injected-partition filters.
+     */
+    private static String maskSubqueries(String clause) {
+        char[] chars = clause.toCharArray();
+        int i = 0;
+        while (i < chars.length) {
+            if (chars[i] == '(') {
+                int k = i + 1;
+                while (k < chars.length && Character.isWhitespace(chars[k])) {
+                    k++;
+                }
+                boolean isSubquery = (k + 6 <= chars.length && clause.regionMatches(true, k, "SELECT", 0, 6)
+                        && isWordBoundary(clause, k, 6))
+                        || (k + 4 <= chars.length && clause.regionMatches(true, k, "WITH", 0, 4)
+                        && isWordBoundary(clause, k, 4));
+                if (isSubquery) {
+                    int depth = 1;
+                    int subStart = i + 1;
+                    int p = subStart;
+                    while (p < chars.length && depth > 0) {
+                        if (chars[p] == '(') {
+                            depth++;
+                        } else if (chars[p] == ')') {
+                            depth--;
+                        }
+                        p++;
+                    }
+                    int subEnd = depth == 0 ? p - 1 : chars.length;
+                    for (int m = subStart; m < subEnd; m++) {
+                        if (chars[m] != '\n') {
+                            chars[m] = ' ';
+                        }
+                    }
+                    i = subEnd;
+                    continue;
+                }
+            }
+            i++;
+        }
+        return new String(chars);
     }
 
     private static String findPrecedingFromClause(String code, int whereStart) {
