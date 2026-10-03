@@ -6,10 +6,12 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItems;
@@ -522,6 +524,35 @@ class EcsFargateEdgeCaseIntegrationTest {
         second.then().body("taskArns", hasSize(1));
         assertEquals(null, second.jsonPath().getString("nextToken"),
                 "the last page carries no token");
+    }
+
+    @Test
+    void listTasksTakesTheServiceNameOrItsArn() {
+        String family = seed("edge-list-service");
+        String serviceArn = call("CreateService", "{\"cluster\":\"" + CLUSTER
+                + "\",\"serviceName\":\"edge-list-svc\",\"taskDefinition\":\"" + family
+                + "\",\"desiredCount\":1,\"launchType\":\"FARGATE\"," + NETWORK + "}", 200)
+                .jsonPath().getString("service.serviceArn");
+        String idleArn = call("CreateService", "{\"cluster\":\"" + CLUSTER
+                + "\",\"serviceName\":\"edge-list-idle-svc\",\"taskDefinition\":\"" + family
+                + "\",\"desiredCount\":0,\"launchType\":\"FARGATE\"," + NETWORK + "}", 200)
+                .jsonPath().getString("service.serviceArn");
+
+        // The reconciler launches the service's task on its own schedule.
+        await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(200))
+                .until(() -> listTaskArns("edge-list-svc").size() == 1);
+        List<String> byName = listTaskArns("edge-list-svc");
+
+        assertEquals(byName, listTaskArns(serviceArn), "the service ARN must select the same task");
+        assertEquals(byName, listTaskArns(serviceArn.replace("service/" + CLUSTER + "/", "service/")),
+                "the old service/<name> ARN format must select it too");
+        assertEquals(List.of(), listTaskArns(idleArn),
+                "another service's ARN must not select this service's task");
+    }
+
+    private static List<String> listTaskArns(String serviceName) {
+        return call("ListTasks", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"" + serviceName
+                + "\"}", 200).jsonPath().getList("taskArns");
     }
 
     @Test

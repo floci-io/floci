@@ -2190,9 +2190,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 : (serviceName != null ? clusters.get(clusterKey(region, DEFAULT_CLUSTER)) : null);
         String clusterArn = clusterRef != null ? cluster.getClusterArn() : null;
         // A serviceName filter selects the service's own tasks, so it resolves through the
-        // reconciler-stamped ownership rather than the caller-supplied group.
+        // reconciler-stamped ownership rather than the caller-supplied group. It may be the
+        // service's name or its ARN; as on AWS, only the last path segment names the service.
         EcsServiceModel svc = serviceName != null && cluster != null
-                ? services.get(serviceKey(region, cluster.getClusterName(), serviceName))
+                ? services.get(serviceKey(region, cluster.getClusterName(), extractServiceName(serviceName)))
                 : null;
         String family = request.getFamily();
         LaunchType launchType = request.getLaunchType();
