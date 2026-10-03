@@ -655,6 +655,7 @@ final class CognitoAuthFlowHandler {
         if (!pool.getId().equals(parts[0])) {
             throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
+        CognitoService.requireRefreshTokenOfClient(client, parts);
         String username = parts[1];
         long iat;
         try {
@@ -1932,8 +1933,10 @@ final class CognitoAuthFlowHandler {
         return service.generateAuthResult(user, pool, client, override);
     }
 
-    CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user) {
-        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens", List.of());
+    /** {@code scopes} are those of the grant being refreshed, or null for a sign-in through the API. */
+    CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user,
+                                                               List<String> scopes) {
+        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens", scopes);
     }
 
     /**

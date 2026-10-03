@@ -123,9 +123,13 @@ A domain created with `CustomDomainConfig` answers the OAuth endpoints on that h
 
 ```
 GET  https://auth.example.localhost.floci.io/oauth2/authorize
+GET  https://auth.example.localhost.floci.io/oauth2/idpresponse
 POST https://auth.example.localhost.floci.io/oauth2/token
+POST https://auth.example.localhost.floci.io/oauth2/revoke
 GET  https://auth.example.localhost.floci.io/oauth2/userInfo
+POST https://auth.example.localhost.floci.io/oauth2/userInfo
 GET  https://auth.example.localhost.floci.io/login
+POST https://auth.example.localhost.floci.io/login
 GET  https://auth.example.localhost.floci.io/logout
 ```
 
@@ -137,6 +141,10 @@ another pool is refused with `invalid_client`, and an access token issued by ano
 URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`) are stored but not
 routed, since that hostname never reaches Floci. `/login` and `/logout` are served at the root only
 on a custom-domain host; on Floci's own host they are `/cognito-idp/login` and `/cognito-idp/logout`.
+On a custom-domain host, any other path under `/oauth2/` is answered with AWS's JSON 404, and a
+served path called with a method it does not serve with an empty 405 whose `Allow` header lists
+the methods it does serve. AWS answers `GET /oauth2/token` with its managed login error page
+instead; Floci answers 405.
 
 With TLS enabled, a custom domain (`CustomDomainConfig` set) is added to Floci's server
 certificate as soon as it is created, so `https://<domain>` verifies without a restart; see
@@ -364,7 +372,9 @@ plain, so branding is stored and returned rather than rendered. Two divergences 
 | `GET /cognito-idp/oauth2/idpresponse`                | OIDC provider callback endpoint                                  |
 | `GET`, `POST /cognito-idp/login`                     | Managed login sign-in form                                       |
 | `GET /cognito-idp/logout`                            | Managed login sign-out                                           |
-| `POST /cognito-idp/oauth2/token`                     | OAuth authorization-code and client-credentials token endpoint   |
+| `POST /cognito-idp/oauth2/token`                     | OAuth code, refresh-token and client-credentials token endpoint  |
+| `POST /cognito-idp/oauth2/revoke`                    | OAuth refresh token revocation endpoint                          |
+| `GET`, `POST /cognito-idp/oauth2/userInfo`           | OIDC userInfo endpoint, for a user's access token                |
 
 The OAuth endpoints support browser-style authorization-code sign-in, for the pool's own
 users and through a federated OIDC provider, as well as the emulator-friendly
@@ -378,6 +388,42 @@ client-credentials flow:
 - `POST /cognito-idp/oauth2/token` redeems that authorization code once, checking its PKCE
   `code_verifier` when the authorization request sent a `code_challenge`, or issues a machine
   token for `grant_type=client_credentials`.
+- `POST /cognito-idp/oauth2/token` with `grant_type=refresh_token` and a `refresh_token` renews a
+  session as `GetTokensFromRefreshToken` does, firing the pre token generation trigger with
+  `TokenGeneration_RefreshTokens`. It accepts a refresh token from managed login or from a
+  sign-in through the API, and, as on AWS, it requires neither `ALLOW_REFRESH_TOKEN_AUTH` nor any
+  OAuth setting on the client, unlike `InitiateAuth` `REFRESH_TOKEN_AUTH` and
+  `GetTokensFromRefreshToken`. A public client sends `client_id`, and a `client_secret` it sends
+  in the body is ignored. A client with a secret sends `client_secret` in the body or Basic
+  credentials; a Basic header names the client whatever the body's `client_id` says. The access token keeps the original grant's `scope` (for a sign-in
+  through the API, `aws.cognito.signin.user.admin`), its `origin_jti` and its `auth_time`, with a
+  new `jti` and `iat`. A `scope` parameter is ignored. The answer has `access_token`,
+  `expires_in`, `token_type`, and an `id_token` exactly when the original sign-in issued one. It
+  has no `refresh_token`: refresh token rotation is not implemented, whatever the client's
+  `RefreshTokenRotation` says. Errors are 400 without a `WWW-Authenticate` header, as on AWS:
+  - `{"error":"invalid_request"}` for a request without `grant_type`, as for every grant.
+  - `{"error":"invalid_client"}` for a missing or unknown client, a malformed Basic header, Basic
+    credentials of a public client with an empty secret, or, on a custom domain, a client of
+    another pool. The client is checked before the refresh token.
+  - `{"error":"invalid_client","error_description":"invalid_client_secret"}` for a client with a
+    secret that sends none, or a wrong one, and for Basic credentials of a public client with a
+    secret.
+  - `{"error":"invalid_request","error_description":"invalid_refresh_token"}` for an empty or
+    absent `refresh_token`.
+  - `{"error":"invalid_grant"}` for a refresh token that is not valid, expired, revoked, or issued
+    to another client or pool.
+
+  `GetTokensFromRefreshToken` and `InitiateAuth` `REFRESH_TOKEN_AUTH` refuse another client's
+  refresh token with `NotAuthorizedException` `Refresh Token has different Client`.
+- `POST /cognito-idp/oauth2/revoke` revokes a refresh token (`token`), and with it every access
+  and ID token minted from it, as `RevokeToken` does. A public client sends `client_id`; a client
+  with a secret sends it in a Basic `Authorization` header. Unlike the token endpoint, it ignores a
+  `client_secret` in the form body, as AWS does. Success, and a token that is not valid or already
+  revoked, are 200 with an empty body. A missing token, or a client with
+  `EnableTokenRevocation=false`, is 400 `invalid_request`; an access or ID token is 400
+  `unsupported_token_type`; missing or bad client credentials, a client of another pool on a
+  custom domain, and a token issued to another client are 401 `invalid_client` with
+  `WWW-Authenticate: Basic`.
 
 ### Managed login
 
@@ -512,7 +558,7 @@ curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
 - It doesn't require a Cognito domain.
 - Client-credentials returns only `access_token`, `token_type`, and `expires_in`; authorization-code
   redemption returns the Cognito access and refresh tokens, and an ID token when the granted scopes
-  include `openid`.
+  include `openid`; a refresh returns the same tokens without a refresh token.
 - It validates requested OAuth scopes against the app client's `AllowedOAuthScopes` and the pool's registered resource-server scopes.
 - It advertises the prefixed token endpoint in `/{userPoolId}/.well-known/openid-configuration`, or
   `https://<domain>/oauth2/token` when the pool has a custom domain (see Custom domains above).
