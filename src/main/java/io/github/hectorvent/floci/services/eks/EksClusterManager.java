@@ -915,14 +915,23 @@ public class EksClusterManager
      */
     public void stopCluster(Cluster cluster) {
         unregisterMetadataEndpoint(cluster);
-        Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
+        String resourceName = clusterResourceName(cluster);
+        Closeable logStream = clusterLogHandles.remove(resourceName);
         if (cluster.getContainerId() == null) {
             closeQuietly(logStream);
             return;
         }
         // Strict: a container Docker could not remove may still publish the port, so the delete
         // fails and keeps the cluster record; a retried delete releases the port once it is gone.
-        lifecycleManager.stopAndRemoveStrict(cluster.getContainerId(), logStream);
+        try {
+            lifecycleManager.stopAndRemoveStrict(cluster.getContainerId(), logStream);
+        } catch (RuntimeException e) {
+            // Kept so the retried delete closes the logs of a container that may still be running.
+            if (logStream != null) {
+                clusterLogHandles.putIfAbsent(resourceName, logStream);
+            }
+            throw e;
+        }
         if (cluster.getHostPort() > 0) {
             portAllocator.release(cluster.getHostPort());
             // Cleared so a delete retried after a failed backup cleanup cannot free a reused port.

@@ -199,6 +199,22 @@ class ContainerLifecycleManagerVolumeTest {
     }
 
     @Test
+    void strictContainerCleanupLeavesTheLogStreamOpenWhenDockerCouldNotStopOrRemoveTheContainer() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new DockerException("stop failed", 500));
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+        List<String> operations = new ArrayList<>();
+
+        assertThrows(IllegalStateException.class, () ->
+                manager.stopAndRemoveStrict("container-id", () -> operations.add("logs")));
+
+        assertEquals(List.of(), operations);
+    }
+
+    @Test
     void strictContainerCleanupPropagatesRemovalFailure() {
         StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
         RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);

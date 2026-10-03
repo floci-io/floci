@@ -436,22 +436,13 @@ public class ContainerLifecycleManager {
      */
     public void stopAndRemoveStrict(String containerId, Closeable logStream) {
         LOG.infov("Stopping container {0}", containerId);
-        try {
-            stopAndRemoveStrictOrThrow(containerId);
-        } finally {
-            // Closed after the stop, as in stopAndRemove, so the follower can drain the final tail.
-            if (logStream != null) {
-                closeLogStreamAfterContainerStop(logStream);
-            }
-        }
-    }
 
-    private void stopAndRemoveStrictOrThrow(String containerId) {
         Exception stopFailure = null;
         try {
             dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
         } catch (NotFoundException e) {
             LOG.debugv("Container {0} not found (already removed)", containerId);
+            closeLogStreamIfPresent(logStream);
             return;
         } catch (Exception e) {
             stopFailure = e;
@@ -468,8 +459,20 @@ public class ContainerLifecycleManager {
                     "Failed to remove container " + containerId, e);
             if (stopFailure != null) {
                 cleanupFailure.addSuppressed(stopFailure);
+            } else {
+                closeLogStreamIfPresent(logStream);
             }
+            // A container Docker could neither stop nor remove may still be logging: the stream
+            // stays open for the caller's retry.
             throw cleanupFailure;
+        }
+        // Closed after the stop, as in stopAndRemove, so the follower can drain the final tail.
+        closeLogStreamIfPresent(logStream);
+    }
+
+    private void closeLogStreamIfPresent(Closeable logStream) {
+        if (logStream != null) {
+            closeLogStreamAfterContainerStop(logStream);
         }
     }
 
