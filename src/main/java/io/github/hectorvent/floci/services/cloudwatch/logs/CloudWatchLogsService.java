@@ -1120,6 +1120,10 @@ public class CloudWatchLogsService implements ResourceProvider {
         return metricFilterStore;
     }
 
+    StorageBackend<String, SubscriptionFilter> subscriptionFilterStore() {
+        return subscriptionFilterStore;
+    }
+
     static FilterPattern requireFilterPattern(String filterPattern) {
         if (filterPattern == null) {
             throw invalid("filterPattern is required.");
@@ -1310,7 +1314,7 @@ public class CloudWatchLogsService implements ResourceProvider {
                 : eventKey.substring(groupPrefix.length(), timestampSeparator);
     }
 
-    private static String subscriptionFilterKeyPrefix(String region, String logGroupName) {
+    static String subscriptionFilterKeyPrefix(String region, String logGroupName) {
         return region + "::" + logGroupName + "::filter::";
     }
 
