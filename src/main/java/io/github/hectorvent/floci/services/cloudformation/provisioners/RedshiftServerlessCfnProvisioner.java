@@ -157,7 +157,8 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
             Workgroup current = service.getWorkgroup(name, ctx.region());
             if (namespaceName != null && !namespaceName.equals(current.getNamespaceName())) {
                 throw new AwsException("ValidationException",
-                        "NamespaceName cannot be changed in place; change WorkgroupName as well to replace the workgroup",
+                        "NamespaceName cannot be changed in place; a workgroup belongs to one namespace for its "
+                                + "lifetime, so remove the workgroup from the template and add it back",
                         400);
             }
             workgroup = service.updateWorkgroup(name, settings, ctx.region());

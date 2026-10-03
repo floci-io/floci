@@ -409,6 +409,15 @@ public class RedshiftServerlessService implements Resettable {
             startRuntime(workgroups.accountId(), region, workgroup, ensureAdminPassword(namespace, region), false);
             workgroups.put(key, workgroup);
         } catch (RuntimeException e) {
+            // The runtime may have started before the failure (a failed put), so tear it down; a
+            // runtime that failed to start has already rolled itself back and this is then a no-op.
+            try {
+                runtime.stop(workgroups.accountId(), region, workgroupName);
+            } catch (RuntimeException stopFailure) {
+                LOG.warnv(stopFailure, "Could not stop the runtime of workgroup {0} after a failed create",
+                        workgroupName);
+                e.addSuppressed(stopFailure);
+            }
             endpoints.release(workgroup.getEndpoint());
             throw e;
         }
