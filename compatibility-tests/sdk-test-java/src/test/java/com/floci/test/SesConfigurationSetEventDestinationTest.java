@@ -28,6 +28,7 @@ import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetEventDesti
 import software.amazon.awssdk.services.sesv2.model.SnsDestination;
 import software.amazon.awssdk.services.sesv2.model.UpdateConfigurationSetEventDestinationRequest;
 
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -234,21 +235,24 @@ class SesConfigurationSetEventDestinationTest {
                 .isEqualTo(404);
     }
 
-    /** Event buses SES v2 must refuse: a custom bus, or the default bus of another account or region. */
+    /**
+     * Event buses SES v2 must refuse: a custom bus, or the default bus of another account or region.
+     * The other-region case needs a second region in the fixture partition, which a single-region
+     * partition (aws-eusc, aws-iso-e) does not have, so it is the only case left out there.
+     */
     static Stream<Arguments> rejectedEventBuses() {
-        String otherRegion = Region.regions().stream()
+        Optional<String> otherRegion = Region.regions().stream()
                 .filter(region -> !region.isGlobalRegion() && !region.equals(TestFixtures.region()))
                 .filter(region -> region.metadata() != null
                         && region.metadata().partition().id().equals(TestFixtures.partition()))
                 .map(Region::id)
                 .sorted()
-                .findFirst()
-                .orElseThrow();
-        return Stream.of(
+                .findFirst();
+        Stream<Arguments> always = Stream.of(
                 Arguments.of("custom", CUSTOM_BUS_ARN),
-                Arguments.of("mismatched-account", TestFixtures.arn("events", "111111111111", "event-bus/default")),
-                Arguments.of("mismatched-region",
-                        TestFixtures.arn("events", otherRegion, "000000000000", "event-bus/default")));
+                Arguments.of("mismatched-account", TestFixtures.arn("events", "111111111111", "event-bus/default")));
+        return Stream.concat(always, otherRegion.stream().map(region -> Arguments.of("mismatched-region",
+                TestFixtures.arn("events", region, "000000000000", "event-bus/default"))));
     }
 
     @ParameterizedTest(name = "{0}")
