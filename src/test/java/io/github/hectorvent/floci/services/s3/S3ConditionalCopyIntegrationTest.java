@@ -174,6 +174,31 @@ class S3ConditionalCopyIntegrationTest {
     }
 
     @Test
+    void uploadPartCopy_rejectedCopyLeavesExistingPartUnchanged() {
+        String bucket = createBucket("upload-part-copy-keep");
+        putObject(bucket, "src.txt", "source");
+        String uploadId = given()
+        .when()
+            .post("/" + bucket + "/dst.txt?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String partETag = given().body("original")
+        .when().put("/" + bucket + "/dst.txt?partNumber=1&uploadId=" + uploadId)
+        .then().statusCode(200).extract().header("ETag");
+
+        copy(bucket, "src.txt", "dst.txt").header("x-amz-copy-source-if-match", STALE_ETAG)
+        .when().put("/" + bucket + "/dst.txt?partNumber=1&uploadId=" + uploadId)
+        .then().statusCode(412);
+
+        given().body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + partETag
+                + "</ETag></Part></CompleteMultipartUpload>")
+        .when().post("/" + bucket + "/dst.txt?uploadId=" + uploadId)
+        .then().statusCode(200);
+        assertObjectBody(bucket, "dst.txt", "original");
+    }
+
+    @Test
     void uploadPartCopy_copySourceIfMatch() {
         String bucket = createBucket("upload-part-copy-src");
         String sourceETag = putObject(bucket, "src.txt", "source");
