@@ -1332,7 +1332,9 @@ public class LambdaService implements ResourceProvider {
 
         ResolvedFunctionTarget target = resolveFunctionTarget(resolvedRegion, fnRef);
 
-        int batchSize = toInt(request.get("BatchSize"), 10);
+        boolean isSqs = eventSourceArn != null && eventSourceArn.contains(":sqs:");
+        int defaultBatchSize = isSqs ? 10 : 100;
+        int batchSize = toInt(request.get("BatchSize"), defaultBatchSize);
         Integer maximumBatchingWindowInSeconds = parseMaximumBatchingWindow(request);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
 
@@ -1353,7 +1355,7 @@ public class LambdaService implements ResourceProvider {
 
         StartingPositionSpec startingPosition = parseStartingPosition(request, eventSourceArn, isSelfManagedKafka);
 
-        String queueUrl = (eventSourceArn != null && eventSourceArn.contains(":sqs:"))
+        String queueUrl = isSqs
                 ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config != null ? config.effectiveBaseUrl() : null)
                 : null;
 
@@ -1384,7 +1386,7 @@ public class LambdaService implements ResourceProvider {
         esm.setTags(requestTags(request));
         esm.setLastModified(System.currentTimeMillis());
 
-        if (eventSourceArn != null && eventSourceArn.contains(":dynamodb:")) {
+        if (dynamodbStreamsPoller != null && eventSourceArn != null && eventSourceArn.contains(":dynamodb:")) {
             dynamodbStreamsPoller.initializeStartingPosition(esm);
         }
         esmStore.save(esm);
@@ -1839,11 +1841,17 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         if (esm.getEventSourceArn().contains(":sqs:")) {
-            poller.startPolling(esm);
+            if (poller != null) {
+                poller.startPolling(esm);
+            }
         } else if (esm.getEventSourceArn().contains(":kinesis:")) {
-            kinesisPoller.startPolling(esm);
+            if (kinesisPoller != null) {
+                kinesisPoller.startPolling(esm);
+            }
         } else if (esm.getEventSourceArn().contains(":dynamodb:")) {
-            dynamodbStreamsPoller.startPolling(esm);
+            if (dynamodbStreamsPoller != null) {
+                dynamodbStreamsPoller.startPolling(esm);
+            }
         }
     }
 
@@ -1852,11 +1860,17 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         if (esm.getEventSourceArn().contains(":sqs:")) {
-            poller.stopPolling(esm.getUuid());
+            if (poller != null) {
+                poller.stopPolling(esm.getUuid());
+            }
         } else if (esm.getEventSourceArn().contains(":kinesis:")) {
-            kinesisPoller.stopPolling(esm.getUuid());
+            if (kinesisPoller != null) {
+                kinesisPoller.stopPolling(esm.getUuid());
+            }
         } else if (esm.getEventSourceArn().contains(":dynamodb:")) {
-            dynamodbStreamsPoller.stopPolling(esm.getUuid());
+            if (dynamodbStreamsPoller != null) {
+                dynamodbStreamsPoller.stopPolling(esm.getUuid());
+            }
         }
     }
 
@@ -2031,7 +2045,7 @@ public class LambdaService implements ResourceProvider {
         EventSourceMapping esm = getEventSourceMapping(uuid); // throws 404 if not found
         stopPollingHelper(esm);
         esmStore.delete(uuid);
-        if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":dynamodb:")) {
+        if (dynamodbStreamsPoller != null && esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":dynamodb:")) {
             dynamodbStreamsPoller.mappingDeleted(uuid);
         }
         LOG.infov("Deleted ESM {0}", uuid);

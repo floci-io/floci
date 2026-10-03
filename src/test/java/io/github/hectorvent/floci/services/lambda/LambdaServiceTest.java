@@ -1971,8 +1971,69 @@ class LambdaServiceTest {
                 "FunctionResponseTypes", List.of("Bogus"))));
 
         EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
-        assertEquals(10, stored.getBatchSize());
+        assertEquals(100, stored.getBatchSize());
         assertTrue(stored.isEnabled());
+    }
+
+    @Test
+    void createEventSourceMapping_sqs_defaultsBatchSizeToTen() {
+        service.createFunction(REGION, baseRequest("sqs-batch-size-default-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "sqs-batch-size-default-fn",
+                "EventSourceArn", "arn:aws:sqs:" + REGION + ":000000000000:batch-test-queue"
+        ));
+        assertEquals(10, esm.getBatchSize());
+    }
+
+    @Test
+    void createEventSourceMapping_kinesis_defaultsBatchSizeToOneHundred() {
+        service.createFunction(REGION, baseRequest("kinesis-batch-size-default-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kinesis-batch-size-default-fn",
+                "EventSourceArn", "arn:aws:kinesis:" + REGION + ":000000000000:stream/batch-test-stream"
+        ));
+        assertEquals(100, esm.getBatchSize());
+    }
+
+    @Test
+    void createEventSourceMapping_dynamoDb_defaultsBatchSizeToOneHundred() {
+        service.createFunction(REGION, baseRequest("dynamo-batch-size-default-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "dynamo-batch-size-default-fn",
+                "EventSourceArn", "arn:aws:dynamodb:" + REGION + ":000000000000:table/batch-test-table/stream/2026-01-01T00:00:00.000"
+        ));
+        assertEquals(100, esm.getBatchSize());
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafka_defaultsBatchSizeToOneHundred() {
+        service.createFunction(REGION, baseRequest("kafka-batch-size-default-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kafka-batch-size-default-fn",
+                "Topics", List.of("batch-test-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092"))
+                )
+        ));
+        assertEquals(100, esm.getBatchSize());
+    }
+
+    @Test
+    void createEventSourceMapping_explicitBatchSize_honorsRequestedValue() {
+        service.createFunction(REGION, baseRequest("explicit-batch-size-fn"));
+        EventSourceMapping sqsEsm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "explicit-batch-size-fn",
+                "EventSourceArn", "arn:aws:sqs:" + REGION + ":000000000000:explicit-queue",
+                "BatchSize", 5
+        ));
+        assertEquals(5, sqsEsm.getBatchSize());
+
+        EventSourceMapping kinesisEsm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "explicit-batch-size-fn",
+                "EventSourceArn", "arn:aws:kinesis:" + REGION + ":000000000000:stream/explicit-stream",
+                "BatchSize", 20
+        ));
+        assertEquals(20, kinesisEsm.getBatchSize());
     }
 
     @Test
