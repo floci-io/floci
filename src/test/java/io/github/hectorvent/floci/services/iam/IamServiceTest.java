@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -1302,6 +1303,70 @@ class IamServiceTest {
         IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
 
         assertTrue(service.resolveAccountId(accessKey.getAccessKeyId()).isEmpty());
+    }
+
+    @Test
+    void findSecretKeyDoesNotResolveAnotherAccountsKey() {
+        // The ElastiCache, MemoryDB and RDS IAM-auth proxies verify through findSecretKey and do
+        // not compare the key's account with the cluster's, so another account's key must stay unknown.
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERACCOUNTKEY", "other-secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.findSecretKey(accessKey.getAccessKeyId()).isEmpty());
+        assertTrue(service.findSecretKey(accessKey.getAccessKeyId(), null).isEmpty());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountResolvesLongTermKeyFromAnotherAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERACCOUNTKEY", "other-secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals("other-secret", service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountOfTheRequestAccountDoesNotScanOtherAccounts() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        AccessKey accessKey = new AccessKey("AKIAOWNACCOUNTKEY", "own-secret", "dev");
+        accessKeys.putForAccount("000000000000", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals("own-secret", service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow());
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountOfATemporaryKeyDoesNotScanLongTermKeys() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        service.findSecretKeyInAnyAccount("ASIATEMPORARYKEY1234", "session-token");
+
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountIgnoresInactiveKeyInAnotherAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERINACTIVE", "other-secret", "worker");
+        accessKey.setStatus("Inactive");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).isEmpty());
     }
 
     private static final class CountingAccountAwareSessionStorage

@@ -2782,6 +2782,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(accessKeyId);
     }
 
+    /**
+     * Like {@link #findSecretKey(String, String)}, but finds a long-term key whichever account owns
+     * it. Only for callers with no account in scope that check the owner themselves, such as the
+     * EKS token webhook: everywhere else a key from another account must stay unknown.
+     */
+    public Optional<String> findSecretKeyInAnyAccount(String accessKeyId, String sessionToken) {
+        return findSecretKey(accessKeyId, sessionToken)
+                .or(() -> activeAccessKeyInAnyAccount(accessKeyId).map(entry -> entry.value().getSecretAccessKey()));
+    }
+
+    /** The active long-term key with this ID, from whichever account owns it. */
+    private Optional<AccountAwareStorageBackend.AccountEntry<AccessKey>> activeAccessKeyInAnyAccount(
+            String accessKeyId) {
+        if (accessKeyId == null || isTemporaryAccessKey(accessKeyId)
+                || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
+            return Optional.empty();
+        }
+        return aware.scanAllAccountEntries(accessKeyId::equals).stream()
+                .filter(entry -> "Active".equals(entry.value().getStatus()))
+                .findFirst();
+    }
+
     private Optional<String> activeAccessKeySecret(String accessKeyId) {
         return accessKeys.get(accessKeyId)
                 .filter(accessKey -> "Active".equals(accessKey.getStatus()))
@@ -3093,13 +3115,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
         if (!isTemporaryAccessKey(accessKeyId)) {
-            if (accessKeyId == null || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
-                return Optional.empty();
-            }
-            return aware.scanAllAccountEntries(accessKeyId::equals).stream()
-                    .filter(entry -> "Active".equals(entry.value().getStatus()))
-                    .map(AccountAwareStorageBackend.AccountEntry::accountId)
-                    .findFirst();
+            return activeAccessKeyInAnyAccount(accessKeyId).map(AccountAwareStorageBackend.AccountEntry::accountId);
         }
         Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
         if (sessionOpt.isEmpty()) {

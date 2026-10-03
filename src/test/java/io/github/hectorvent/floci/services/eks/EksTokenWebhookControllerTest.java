@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.eks;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import jakarta.ws.rs.core.Response;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -13,16 +15,65 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class EksTokenWebhookControllerTest {
 
     private static final String CLUSTER_NAME = "demo";
     private static final String ACCESS_KEY_ID = "AKIDEKSTEST";
     private static final String SECRET_ACCESS_KEY = "eks-secret-key";
-    private final IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey(
-            ACCESS_KEY_ID, SECRET_ACCESS_KEY);
+    private static final String DEFAULT_ACCOUNT = "000000000000";
+    private final IamService iamService = IamServiceTestHelper.iamServiceWithAccessKeyInAccount(
+            ACCESS_KEY_ID, SECRET_ACCESS_KEY, DEFAULT_ACCOUNT);
+    private final EmulatorConfig config = mock(EmulatorConfig.class);
     private final EksTokenWebhookController controller = new EksTokenWebhookController(
-            new EksTokenValidator(iamService), new EksWorkerAuthentication(iamService, null, null, null));
+            new EksTokenValidator(iamService), new EksWorkerAuthentication(iamService, null, null, null, config));
+
+    @BeforeEach
+    void defaultAccount() {
+        when(config.defaultAccountId()).thenReturn(DEFAULT_ACCOUNT);
+    }
+
+    @Test
+    void scopedWebhookAcceptsAKeyOnlyOnAClusterOfItsOwnAccount() throws Exception {
+        IamService otherAccountKeys = IamServiceTestHelper.iamServiceWithAccessKeyInAccount(
+                ACCESS_KEY_ID, SECRET_ACCESS_KEY, "111122223333", DEFAULT_ACCOUNT);
+        EksTokenWebhookController scoped = new EksTokenWebhookController(new EksTokenValidator(otherAccountKeys),
+                new EksWorkerAuthentication(otherAccountKeys, null, null, null, config));
+
+        Response sameAccount = scoped.reviewScoped(CLUSTER_NAME, "111122223333", "us-east-1", "0",
+                tokenReview(validToken()));
+        Response otherAccount = scoped.reviewScoped(CLUSTER_NAME, "999988887777", "us-east-1", "0",
+                tokenReview(validToken()));
+
+        assertTrue((Boolean) status(sameAccount).get("authenticated"));
+        assertFalse((Boolean) status(otherAccount).get("authenticated"));
+    }
+
+    @Test
+    void defaultAccountKeyIsRejectedOnAnotherAccountsCluster() throws Exception {
+        Response own = controller.reviewScoped(CLUSTER_NAME, DEFAULT_ACCOUNT, "us-east-1", "0",
+                tokenReview(validToken()));
+        Response other = controller.reviewScoped(CLUSTER_NAME, "111122223333", "us-east-1", "0",
+                tokenReview(validToken()));
+
+        assertTrue((Boolean) status(own).get("authenticated"));
+        assertFalse((Boolean) status(other).get("authenticated"));
+    }
+
+    @Test
+    void webhookRejectsAnInactiveKey() throws Exception {
+        IamService inactive = IamServiceTestHelper.iamServiceWithAccessKeyInAccount(
+                ACCESS_KEY_ID, SECRET_ACCESS_KEY, DEFAULT_ACCOUNT);
+        inactive.updateAccessKey("test-user", ACCESS_KEY_ID, "Inactive");
+        EksTokenWebhookController controllerWithInactiveKey = new EksTokenWebhookController(
+                new EksTokenValidator(inactive), new EksWorkerAuthentication(inactive, null, null, null, config));
+
+        Response response = controllerWithInactiveKey.review(CLUSTER_NAME, null, null, null, tokenReview(validToken()));
+
+        assertFalse((Boolean) status(response).get("authenticated"));
+    }
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> status(Response response) {
