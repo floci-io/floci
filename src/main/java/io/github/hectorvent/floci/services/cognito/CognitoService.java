@@ -2146,6 +2146,33 @@ public class CognitoService implements ResourceProvider {
         LOG.infov("GlobalSignOut: revoked all tokens for user {0} in pool {1}", user.getUsername(), poolId);
     }
 
+    /**
+     * DeleteUser — the self-service counterpart to AdminDeleteUser, authenticated with the caller's
+     * access token instead of admin credentials. Deletes the user profile and removes them from all
+     * groups, matching AWS behavior.
+     */
+    public void deleteUser(String accessToken) {
+        if (accessToken == null || accessToken.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
+        }
+
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        String username = token.username();
+        String poolId = token.poolId();
+        try {
+            adminDeleteUser(poolId, username);
+        } catch (AwsException e) {
+            if ("UserNotFoundException".equals(e.getErrorCode())
+                    || "ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            }
+            throw e;
+        }
+
+        LOG.infov("DeleteUser: deleted user {0} in pool {1}", username, poolId);
+    }
+
     public CognitoUser adminGetUser(String userPoolId, String username) {
         UserPool pool = poolStore.get(userPoolId).orElseThrow(
                 () -> userPoolNotFound(userPoolId));
