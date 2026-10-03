@@ -131,8 +131,6 @@ public final class PartitionProjection {
         // Literals and comments are not code: a column name inside either constrains nothing.
         String code = maskLiteralsAndComments(query);
         List<String> whereClauses = null;
-        List<String> allAliases = tables.stream().filter(table -> table != null && table.getName() != null)
-                .flatMap(table -> tableAliases(code, table.getName()).stream()).toList();
         for (Table table : tables) {
             if (!enabled(table) || table.getName() == null || table.getPartitionKeys() == null) {
                 continue;
@@ -153,7 +151,11 @@ public final class PartitionProjection {
                 if (whereClauses == null) {
                     whereClauses = whereClauses(code);
                 }
-                boolean unqualifiedAllowed = allAliases.size() == 1;
+                // an unqualified column is unambiguous only when exactly one source in the query declares it
+                long declaringSources = tables.stream()
+                        .filter(other -> other != null && other.getName() != null && declaresColumn(other, key.getName()))
+                        .mapToLong(other -> tableAliases(code, other.getName()).size()).sum();
+                boolean unqualifiedAllowed = declaringSources == 1;
                 List<String> clauses = whereClauses;
                 if (aliases.stream().allMatch(alias -> clauses.stream()
                         .anyMatch(clause -> hasStaticEquality(clause, alias, key.getName(), unqualifiedAllowed)))) {
@@ -255,20 +257,59 @@ public final class PartitionProjection {
         return new String(chars);
     }
 
+    private static boolean declaresColumn(Table table, String column) {
+        List<Column> declared = new ArrayList<>();
+        if (table.getStorageDescriptor() != null && table.getStorageDescriptor().getColumns() != null) {
+            declared.addAll(table.getStorageDescriptor().getColumns());
+        }
+        if (table.getPartitionKeys() != null) {
+            declared.addAll(table.getPartitionKeys());
+        }
+        return declared.stream().anyMatch(c -> c != null && column.equalsIgnoreCase(c.getName()));
+    }
+
+    /**
+     * The alias, or the table's own name, under which each {@code FROM}, {@code JOIN} or comma-separated
+     * source naming {@code tableName} appears. The name must end at an identifier boundary, so
+     * {@code events_daily} is not a reference to {@code events}.
+     */
     private static List<String> tableAliases(String code, String tableName) {
         String identifier = identifierPattern(tableName);
-        String qualifiedName = "(?:" + IDENTIFIER + "\\s*\\.\\s*)*" + identifier;
-        Pattern source = Pattern.compile("(?i)" + KEYWORD_BOUNDS.formatted("(?:FROM|JOIN)") + "\\s+" + qualifiedName
-                + "(?:\\s+(?:AS\\s+)?(" + IDENTIFIER + "))?");
+        String qualifiedName = "(?:" + IDENTIFIER + "\\s*\\.\\s*)*" + identifier + "(?![A-Za-z0-9_$])";
+        String aliasPart = "(?:\\s+(?:AS\\s+)?(" + IDENTIFIER + "))?";
+        Pattern keywordSource = Pattern.compile("(?i)" + KEYWORD_BOUNDS.formatted("(?:FROM|JOIN)") + "\\s+"
+                + qualifiedName + aliasPart);
+        Pattern commaSource = Pattern.compile("(?i),\\s*" + qualifiedName + aliasPart);
         List<String> aliases = new ArrayList<>();
-        Matcher matcher = source.matcher(code);
+        Matcher matcher = keywordSource.matcher(code);
         while (matcher.find()) {
-            String alias = matcher.group(1);
-            String normalized = alias == null || TABLE_ALIAS_KEYWORDS.contains(unquoteIdentifier(alias).toLowerCase(Locale.ROOT))
-                    ? unquoteIdentifier(tableName).toLowerCase(Locale.ROOT) : unquoteIdentifier(alias).toLowerCase(Locale.ROOT);
-            aliases.add(normalized);
+            aliases.add(sourceName(matcher.group(1), tableName));
+        }
+        matcher = commaSource.matcher(code);
+        while (matcher.find()) {
+            if (inFromList(code, matcher.start())) {
+                aliases.add(sourceName(matcher.group(1), tableName));
+            }
         }
         return aliases;
+    }
+
+    private static String sourceName(String alias, String tableName) {
+        boolean noAlias = alias == null
+                || TABLE_ALIAS_KEYWORDS.contains(unquoteIdentifier(alias).toLowerCase(Locale.ROOT));
+        return unquoteIdentifier(noAlias ? tableName : alias).toLowerCase(Locale.ROOT);
+    }
+
+    /** True when the nearest clause keyword before {@code position} is {@code FROM} or {@code JOIN}. */
+    private static boolean inFromList(String code, int position) {
+        Matcher keyword = Pattern.compile("(?i)" + KEYWORD_BOUNDS.formatted(
+                "(?:SELECT|FROM|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|JOIN|ON|USING|WINDOW"
+                        + "|QUALIFY|FETCH)")).matcher(code.substring(0, position));
+        String last = null;
+        while (keyword.find()) {
+            last = keyword.group().trim().toUpperCase(Locale.ROOT);
+        }
+        return "FROM".equals(last) || "JOIN".equals(last);
     }
 
     private static final String IDENTIFIER = "(?:[A-Za-z_][A-Za-z0-9_$]*|\"(?:\"\"|[^\"])+\"|`[^`]+`)";
@@ -294,7 +335,9 @@ public final class PartitionProjection {
     private static boolean hasStaticEquality(String clause, String alias, String column, boolean allowUnqualified) {
         String qualified = identifierPattern(alias) + "\\s*\\.\\s*" + identifierPattern(column);
         String left = allowUnqualified ? "(?:" + qualified + "|" + identifierPattern(column) + ")" : qualified;
-        String literal = "(?:'(?:''|[^'])*'|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?|TRUE|FALSE)";
+        String constant = "(?:'(?:''|[^'])*'|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?|TRUE|FALSE)";
+        // a constant may be wrapped in parentheses: tenant = ('abc')
+        String literal = "\\(*\\s*" + constant + "\\s*\\)*";
         // Athena accepts an IN list of literals for an injected column, up to 1,000 values
         String literalList = "\\(\\s*" + literal + "(?:\\s*,\\s*" + literal + ")*\\s*\\)";
         Pattern equality = Pattern.compile("(?i)(?<![A-Za-z0-9_$])(?:" + left + "\\s*(?<![<>=!])=(?!=)\\s*"

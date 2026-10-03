@@ -148,6 +148,8 @@ class S3ServiceTest {
     void listBucketsHidesSpectrumScratchBucketButKeepsOtherInternalPrefixBuckets() {
         s3Service.createBucket("bucket-a", "us-east-1");
         s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
+        s3Service.putBucketTagging(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, Map.of(
+                S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE));
         String userBucket = S3Service.INTERNAL_BUCKET_PREFIX + "customer-data";
         s3Service.createBucket(userBucket, "us-east-1");
 
@@ -158,6 +160,16 @@ class S3ServiceTest {
         assertTrue(buckets.stream().anyMatch(bucket -> userBucket.equals(bucket.getName())));
         assertFalse(buckets.stream().anyMatch(bucket ->
                 S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())));
+    }
+
+    @Test
+    void listBucketsKeepsAUserBucketThatOnlySharesTheScratchBucketName() {
+        s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
+
+        List<Bucket> buckets = s3Service.listBuckets();
+
+        assertEquals(1, buckets.size());
+        assertEquals(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, buckets.get(0).getName());
     }
 
     @Test

@@ -126,6 +126,47 @@ class PartitionProjectionTest {
     }
 
     @Test
+    void aTableNameThatOnlyPrefixesAnotherTableIsNotAReferenceToIt() {
+        Table daily = table("events_daily", Map.of(), List.of());
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM events_daily",
+                List.of(table("events", projecting("projection.tenant.type", "injected"),
+                        List.of(column("tenant"))), daily)));
+    }
+
+    @Test
+    void anUnqualifiedColumnIsAcceptedInAJoinWhenOnlyOneSourceDeclaresIt() {
+        Table orders = table("orders", Map.of(), List.of());
+        orders.getStorageDescriptor().setColumns(List.of(column("id")));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events a JOIN orders o ON a.id = o.id WHERE tenant = 'abc'",
+                List.of(injectedTenantTable(), orders)));
+        Table ordersWithTenant = table("orders", Map.of(), List.of());
+        ordersWithTenant.getStorageDescriptor().setColumns(List.of(column("tenant")));
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events a JOIN orders o ON a.id = o.id WHERE tenant = 'abc'",
+                List.of(injectedTenantTable(), ordersWithTenant)));
+    }
+
+    @Test
+    void aCommaSeparatedSourceNeedsItsOwnFilter() {
+        Table orders = table("orders", Map.of(), List.of());
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM orders o, audit_events a WHERE o.id = 1", List.of(injectedTenantTable(), orders)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM orders o, audit_events a WHERE a.tenant = 'abc'",
+                List.of(injectedTenantTable(), orders)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT o.id, audit_events FROM orders o WHERE o.id = 1", List.of(injectedTenantTable(), orders)));
+    }
+
+    @Test
+    void aConstantInParenthesesIsStillAStaticEquality() {
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = ('abc')", List.of(injectedTenantTable())));
+    }
+
+    @Test
     void joinKeywordsAfterTheTableAreNotTakenForItsAlias() {
         assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
                 "SELECT * FROM audit_events NATURAL JOIN other_table WHERE tenant = 'abc'",

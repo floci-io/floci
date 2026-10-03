@@ -33,6 +33,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -103,22 +104,34 @@ public class ExternalTableMaterializer {
             authorizeIcebergDataFiles(session.accountId(), binding, roleSession, table, location);
             String cacheKey = cacheKey(session, binding, tableName);
             String fingerprint = fingerprint(table, partitions, objects);
-            if (!session.inTransaction() && fingerprint.equals(fingerprints.get(cacheKey))) {
+            // An Iceberg snapshot can change through its metadata or manifests while the Glue table and the
+            // listed objects stay the same, so no fingerprint can vouch for it: it is read on every query.
+            boolean cacheable = !session.inTransaction() && !GlueTableResolver.isIcebergTable(table);
+            if (cacheable && fingerprint.equals(fingerprints.get(cacheKey))) {
                 return Outcome.CURRENT;
             }
             ReentrantLock lock = locks.computeIfAbsent(cacheKey, ignored -> new ReentrantLock());
             acquire(lock, label, session.inTransaction());
             try {
-                if (!session.inTransaction() && fingerprint.equals(fingerprints.get(cacheKey))) {
+                if (cacheable && fingerprint.equals(fingerprints.get(cacheKey))) {
                     return Outcome.CURRENT;
                 }
-                String definitions = load(backend, session, binding, table, sources, schemaSignatures.get(cacheKey));
+                String previousSignature = schemaSignatures.get(cacheKey);
+                String definitions = load(backend, session, binding, table, sources, previousSignature);
                 if (session.inTransaction()) {
-                    // Transactional DDL may roll back, so do not cache this load's fingerprint or schema signature.
+                    // Transactional DDL may roll back, so the rows cannot be trusted afterwards. The schema
+                    // signature stays when this load kept the committed columns, so a view that depends on the
+                    // table can still be refilled in place; a replaced table may roll back to the old columns.
                     fingerprints.remove(cacheKey);
-                    schemaSignatures.remove(cacheKey);
+                    if (!definitions.equals(previousSignature)) {
+                        schemaSignatures.remove(cacheKey);
+                    }
                 } else {
-                    fingerprints.put(cacheKey, fingerprint);
+                    if (cacheable) {
+                        fingerprints.put(cacheKey, fingerprint);
+                    } else {
+                        fingerprints.remove(cacheKey);
+                    }
                     schemaSignatures.put(cacheKey, definitions);
                 }
                 return Outcome.LOADED;
@@ -454,7 +467,7 @@ public class ExternalTableMaterializer {
                 objects.addAll(page.objects());
                 token = page.isTruncated() ? page.nextContinuationToken() : null;
             } while (token != null);
-            objects.removeIf(object -> isIgnoredBySpectrum(object.getKey()));
+            objects.removeIf(object -> isIgnoredBySpectrum(object.getKey(), location.prefix()));
             objects.sort(Comparator.comparing(S3Object::getKey));
             return objects;
         });
@@ -463,27 +476,55 @@ public class ExternalTableMaterializer {
     /**
      * Spectrum ignores hidden files (names starting with a period, underscore or hash mark, or ending with
      * a tilde), which job output such as {@code _SUCCESS} relies on, and a folder marker has no data.
+     * A file under a hidden folder such as {@code _temporary/} is intermediate output, so every path
+     * component below the table or partition prefix is checked, not only the file name.
      */
-    private static boolean isIgnoredBySpectrum(String key) {
-        String name = key.substring(key.lastIndexOf('/') + 1);
-        return name.isEmpty() || name.startsWith(".") || name.startsWith("_") || name.startsWith("#")
-                || name.endsWith("~");
+    private static boolean isIgnoredBySpectrum(String key, String prefix) {
+        String relative = key.startsWith(prefix) ? key.substring(prefix.length()) : key;
+        if (relative.isEmpty() || relative.endsWith("/")) {
+            return true;
+        }
+        for (String component : relative.split("/")) {
+            if (component.startsWith(".") || component.startsWith("_") || component.startsWith("#")
+                    || component.endsWith("~")) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    /** A partition's values, location and the format settings the read depends on, so a format change reloads. */
-    private static String partitionEntry(Partition partition) {
-        StorageDescriptor descriptor = partition.getStorageDescriptor();
+    /**
+     * A partition's values and everything in its descriptor that the read depends on (location, columns,
+     * formats, SerDe and its parameters), so that any change to how its files are decoded reloads the table.
+     */
+    private static String partitionEntry(Table table, Partition partition) {
+        StorageDescriptor descriptor = partitionDescriptor(table, partition);
+        StringBuilder entry = new StringBuilder().append(partition.getValues()).append('=');
         if (descriptor == null) {
-            return partition.getValues() + "=";
+            return entry.toString();
         }
-        String serde = descriptor.getSerdeInfo() == null ? "" : descriptor.getSerdeInfo().getSerializationLibrary();
-        return partition.getValues() + "=" + descriptor.getLocation() + "|" + descriptor.getInputFormat() + "|" + serde;
+        entry.append(descriptor.getLocation()).append('|')
+                .append(descriptor.getInputFormat()).append('|')
+                .append(descriptor.getOutputFormat()).append('|')
+                .append(descriptor.getCompressed()).append('|');
+        if (descriptor.getColumns() != null) {
+            descriptor.getColumns().forEach(column -> entry.append(column.getName()).append(':')
+                    .append(column.getType()).append(','));
+        }
+        entry.append('|').append(new TreeMap<>(descriptor.getParameters() == null
+                ? Map.of() : descriptor.getParameters())).append('|');
+        if (descriptor.getSerdeInfo() != null) {
+            entry.append(descriptor.getSerdeInfo().getSerializationLibrary()).append(new TreeMap<>(
+                    descriptor.getSerdeInfo().getParameters() == null
+                            ? Map.of() : descriptor.getSerdeInfo().getParameters()));
+        }
+        return entry.toString();
     }
 
     private String fingerprint(Table table, List<Partition> partitions, List<S3Object> objects) {
         StringBuilder value = new StringBuilder().append(table.getVersionId()).append('|').append(table.getUpdateTime()).append('|');
         if (!partitions.isEmpty()) {
-            partitions.stream().map(ExternalTableMaterializer::partitionEntry).sorted()
+            partitions.stream().map(partition -> partitionEntry(table, partition)).sorted()
                     .forEach(entry -> value.append(entry).append(';'));
         }
         for (S3Object object : objects) {
@@ -519,6 +560,8 @@ public class ExternalTableMaterializer {
             stagingCreated = true;
             boolean hasObjects = sources.stream().anyMatch(source -> !source.objects().isEmpty());
             if (plan.iceberg() || hasObjects) {
+                // before a key exists: a scratch bucket that is not ours must see no write and no delete
+                prepareScratchBucket(session.accountId());
                 scratchKey = SCRATCH_KEY_PREFIX + UUID.randomUUID() + ".csv";
                 readWithDuckDb(session.accountId(), table, sources,
                         config.services().redshift().spectrumMaxRows(), scratchKey);
@@ -565,20 +608,17 @@ public class ExternalTableMaterializer {
         }
     }
 
-    private void readWithDuckDb(String accountId, Table table, List<ReadSource> sources, long maxRows,
-                                String scratchKey) {
+    private void prepareScratchBucket(String accountId) {
         RequestScopes.runAs(accountId, () -> {
-            try {
-                s3Service.createBucket(SCRATCH_BUCKET, config.defaultRegion());
-            } catch (AwsException exception) {
-                if (!"BucketAlreadyOwnedByYou".equals(exception.getErrorCode())) {
-                    throw exception;
-                }
-            }
+            ensureScratchBucket();
             if (sweptAccounts.add(accountId)) {
                 sweepStaleScratchObjects();
             }
         });
+    }
+
+    private void readWithDuckDb(String accountId, Table table, List<ReadSource> sources, long maxRows,
+                                String scratchKey) {
         List<String> selects = sources.stream().filter(source -> source.partition() == null || !source.objects().isEmpty())
                 .map(this::readSelect).toList();
         if (selects.isEmpty() && GlueTableResolver.isIcebergTable(table)) {
@@ -590,6 +630,30 @@ public class ExternalTableMaterializer {
         String setup = GlueTableResolver.isIcebergTable(table) ? ICEBERG_SETUP : null;
         duckClient.execute(query + " LIMIT " + (maxRows + 1), setup,
                 "s3://" + SCRATCH_BUCKET + "/" + scratchKey, accountId);
+    }
+
+    /**
+     * Creates the scratch bucket and tags it as ours. A bucket of that name that carries no tag belongs to
+     * the user: it is neither written to nor swept, and the load fails instead of mixing with it.
+     */
+    private void ensureScratchBucket() {
+        boolean created = true;
+        try {
+            s3Service.createBucket(SCRATCH_BUCKET, config.defaultRegion());
+        } catch (AwsException exception) {
+            if (!"BucketAlreadyOwnedByYou".equals(exception.getErrorCode())) {
+                throw exception;
+            }
+            created = false;
+        }
+        if (created) {
+            s3Service.putBucketTagging(SCRATCH_BUCKET,
+                    Map.of(S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE));
+        } else if (!S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE.equals(
+                s3Service.getBucketTagging(SCRATCH_BUCKET).get(S3Service.INTERNAL_BUCKET_TAG_KEY))) {
+            throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "Bucket \"" + SCRATCH_BUCKET
+                    + "\" already exists and is not the Spectrum scratch bucket");
+        }
     }
 
     /**
