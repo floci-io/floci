@@ -52,6 +52,7 @@ import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -933,29 +934,76 @@ public class CodePipelineService {
         return latestStatuses;
     }
 
-    private ObjectNode startExecutionFrom(CodePipelineExecution source, String region, String account) {
-        ObjectNode start = mapper.createObjectNode();
-        start.put("name", source.getPipelineName());
-        synchronized (source) {
-            start.set("sourceRevisions", mapper.valueToTree(source.getSourceRevisionOverrides()));
+    private ObjectNode rollbackStage(JsonNode request, String region, String account) {
+        String pipelineName = text(request, "pipelineName");
+        String stageName = text(request, "stageName");
+        CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
+        requireStage(pipeline, stageName);
+        CodePipelineExecution target = requireExecution(
+                account, region, pipelineName, text(request, "targetPipelineExecutionId"));
+        Map<String, String> targetStatuses = latestActionStatuses(target, stageName);
+        boolean stageSucceededInTarget = !targetStatuses.isEmpty()
+                && targetStatuses.values().stream().allMatch("Succeeded"::equals);
+        if (!stageSucceededInTarget) {
+            throw new AwsException("UnableToRollbackStageException",
+                    "The stage did not complete successfully in the target execution.", 400);
         }
-        ArrayNode vars = start.putArray("variables");
-        source.getVariables().forEach(v -> vars.addObject()
-                .put("name", v.get("name"))
-                .put("value", v.get("resolvedValue")));
-        return startPipelineExecution(start, region, account);
+        CodePipelineExecution rollback = startRollback(pipeline, account, region, stageName, target);
+        return mapper.createObjectNode().put("pipelineExecutionId", rollback.getPipelineExecutionId());
     }
 
-    private ObjectNode rollbackStage(JsonNode request, String region, String account) {
-        CodePipelineExecution target = requireExecution(
-                account, region, text(request, "pipelineName"), text(request, "targetPipelineExecutionId"));
-        ObjectNode started = startExecutionFrom(target, region, account);
-        CodePipelineExecution rollback = requireExecution(
-                account, region, target.getPipelineName(), started.path("pipelineExecutionId").asText());
+    /**
+     * Starts a ROLLBACK execution for one stage. Source-only stages before the target stage re-run
+     * to seed the input artifacts, pinned to the target execution's source revisions, then only
+     * the target stage itself runs; intermediate build/deploy stages are skipped.
+     */
+    private CodePipelineExecution startRollback(CodePipelinePipeline pipeline, String account,
+                                                String region, String stageName,
+                                                CodePipelineExecution target) {
+        CodePipelineExecution rollback = new CodePipelineExecution();
+        rollback.setAccountId(account);
+        rollback.setRegion(region);
+        rollback.setPipelineExecutionId(UUID.randomUUID().toString());
+        rollback.setPipelineName(pipeline.getName());
+        rollback.setPipelineVersion(pipeline.getVersion());
+        rollback.setExecutionMode(pipeline.getDeclaration().path("executionMode").asText(DEFAULT_EXECUTION_MODE));
+        rollback.setStatus("InProgress");
+        rollback.setStatusSummary("Rolling back stage " + stageName + " to execution "
+                + target.getPipelineExecutionId() + ".");
         rollback.setExecutionType("ROLLBACK");
         rollback.setRollbackTargetPipelineExecutionId(target.getPipelineExecutionId());
-        putExecution(rollback);
-        return started;
+        rollback.setRollbackStageName(stageName);
+        rollback.setStartTime(now());
+        rollback.setLastUpdateTime(rollback.getStartTime());
+        rollback.setSourceRevisions(new ArrayList<>());
+        synchronized (target) {
+            // The target pinned the S3 object version each source action resolved, so re-running
+            // the sources with these overrides reproduces the target's artifacts.
+            rollback.setSourceRevisionOverrides(new ArrayList<>(target.getSourceRevisionOverrides()));
+        }
+        rollback.setVariables(new ArrayList<>(target.getVariables()));
+        Map<String, String> trigger = new LinkedHashMap<>();
+        trigger.put("triggerType", "RollbackStage");
+        trigger.put("triggerDetail", target.getPipelineExecutionId());
+        rollback.setTrigger(trigger);
+        if (!persistExecutionIfSlotAvailable(rollback)) {
+            throw new AwsException("ConcurrentPipelineExecutionsLimitExceededException",
+                    "The pipeline has reached the limit for concurrent pipeline executions", 400);
+        }
+        applyExecutionMode(rollback);
+
+        try {
+            executor.submit(() -> runExecution(pipeline, rollback));
+        } catch (RejectedExecutionException exception) {
+            rollback.setStatus("Failed");
+            rollback.setStatusSummary("Pipeline execution could not be scheduled.");
+            rollback.setLastUpdateTime(now());
+            putExecution(rollback);
+            throw new AwsException("ConflictException",
+                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
+                            + "Try again later.", 400);
+        }
+        return rollback;
     }
 
     private ObjectNode overrideStageCondition(JsonNode request, String region, String account) {
@@ -1162,11 +1210,42 @@ public class CodePipelineService {
         return mapper.createObjectNode().set("tags", tagsNode(pipeline.getTags()));
     }
 
+    /**
+     * The stage names a run may execute, or {@code null} for all stages. A ROLLBACK execution runs
+     * only the source stages before the rolled-back stage plus that stage. Derived from persisted
+     * state so start, restart-resume and retry all agree.
+     */
+    private Set<String> includeStagesFor(CodePipelinePipeline pipeline, CodePipelineExecution execution) {
+        if (!"ROLLBACK".equals(execution.getExecutionType())) {
+            return null;
+        }
+        String stageName = execution.getRollbackStageName();
+        Set<String> include = new LinkedHashSet<>();
+        for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
+            String name = stage.path("name").asText();
+            if (name.equals(stageName)) {
+                include.add(name);
+                break;
+            }
+            boolean sourceOnly = stage.path("actions").size() > 0;
+            for (JsonNode action : stage.path("actions")) {
+                if (!"Source".equals(action.path("actionTypeId").path("category").asText())) {
+                    sourceOnly = false;
+                    break;
+                }
+            }
+            if (sourceOnly) {
+                include.add(name);
+            }
+        }
+        return include;
+    }
+
     private void runExecution(CodePipelinePipeline pipeline, CodePipelineExecution execution) {
         activeRuns.add(runKey(execution));
         Runnable work = () -> {
             try {
-                runStagesFrom(pipeline, execution, 0);
+                runStagesFrom(pipeline, execution, 0, includeStagesFor(pipeline, execution));
             } catch (Exception e) {
                 if (execution.getCurrentStage() != null) {
                     execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
@@ -1216,7 +1295,7 @@ public class CodePipelineService {
             execution.setCurrentStage(null);
             execution.setLastUpdateTime(now());
             putExecution(execution);
-            runStagesFrom(pipeline, execution, stageIndex + 1);
+            runStagesFrom(pipeline, execution, stageIndex + 1, includeStagesFor(pipeline, execution));
         } catch (Exception e) {
             if (execution.getCurrentStage() != null) {
                 execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
@@ -1229,12 +1308,15 @@ public class CodePipelineService {
         }
     }
 
-    private void runStagesFrom(CodePipelinePipeline pipeline, CodePipelineExecution execution, int startIndex)
-            throws InterruptedException {
+    private void runStagesFrom(CodePipelinePipeline pipeline, CodePipelineExecution execution, int startIndex,
+                               Set<String> includeStages) throws InterruptedException {
         JsonNode stages = pipeline.getDeclaration().path("stages");
         for (int i = startIndex; i < stages.size(); i++) {
             JsonNode stage = stages.get(i);
             String stageName = stage.path("name").asText();
+            if (includeStages != null && !includeStages.contains(stageName)) {
+                continue;
+            }
             waitForTransition(pipeline, execution, stageName);
             if (finishIfStopped(execution)) {
                 return;
@@ -2206,8 +2288,8 @@ public class CodePipelineService {
         }
         node.remove(List.of("accountId", "region", "startTime", "lastUpdateTime",
                 "sourceRevisions", "sourceRevisionOverrides", "actionExecutions", "currentStage",
-                "stopRequested", "abandon", "rollbackTargetPipelineExecutionId", "stageExecutionStatuses",
-                "artifactsReleased"));
+                "stopRequested", "abandon", "rollbackTargetPipelineExecutionId", "rollbackStageName",
+                "stageExecutionStatuses", "artifactsReleased"));
         if (execution.getRollbackTargetPipelineExecutionId() != null) {
             node.putObject("rollbackMetadata").put(
                     "rollbackTargetPipelineExecutionId", execution.getRollbackTargetPipelineExecutionId());
