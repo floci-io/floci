@@ -329,7 +329,8 @@ public class AwsJson11Controller {
                 case "glue" -> glueJsonHandler.handle(action, request, region);
                 case "athena" -> athenaJsonHandler.handle(action, request, region);
                 case "redshift-data" -> redshiftDataJsonHandler.handle(action, request, region);
-                case "redshift-serverless" -> redshiftServerlessJsonHandler.handle(action, request, region);
+                case "redshift-serverless" -> redshiftServerlessJsonHandler.handle(
+                        action, request, region, httpHeaders.getHeaderString("Authorization"));
                 case "firehose" -> firehoseJsonHandler.handle(action, request, region);
                 case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
                 case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());

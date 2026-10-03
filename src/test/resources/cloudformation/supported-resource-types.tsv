@@ -133,6 +133,8 @@ AWS::Redshift::Cluster	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterParameterGroup	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterSecurityGroup	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterSubnetGroup	RedshiftClusterCfnProvisioner
+AWS::RedshiftServerless::Namespace	RedshiftServerlessCfnProvisioner
+AWS::RedshiftServerless::Workgroup	RedshiftServerlessCfnProvisioner
 AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	Route53CfnProvisioner
 AWS::S3::Bucket	S3CfnProvisioner

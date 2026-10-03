@@ -1846,4 +1846,28 @@ class RedshiftServiceTest {
         assertEquals(PasswordValidator.AuthResult.PASSTHROUGH,
                 validator.validate("someone-else", "whatever"));
     }
+
+    @Test
+    void reservedProxyPortsAreSharedBetweenAllCallersAndReusableOnceReleased() {
+        int first = service.reserveProxyPort();
+        int second = service.reserveProxyPort();
+
+        assertEquals(7100, first);
+        assertEquals(7101, second);
+        assertFalse(service.reserveProxyPort(first), "a port already handed out cannot be reserved again");
+        assertTrue(service.reserveProxyPort(7150), "a specific free port, such as a persisted one, can be reserved");
+        assertEquals(7102, service.reserveProxyPort(), "reserving a specific port does not disturb the sequence");
+
+        service.releaseProxyPort(first);
+        assertTrue(service.reserveProxyPort(first));
+        assertFalse(service.reserveProxyPort(0), "port 0 is never a real port");
+    }
+
+    @Test
+    void advertisedEndpointUsesTheConfiguredHostAndTheGivenPort() {
+        Endpoint endpoint = service.advertisedEndpoint(7123);
+
+        assertEquals("localhost", endpoint.getAddress());
+        assertEquals(7123, endpoint.getPort());
+    }
 }
