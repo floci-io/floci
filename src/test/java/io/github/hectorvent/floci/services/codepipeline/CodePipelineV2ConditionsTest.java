@@ -21,9 +21,12 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,13 +49,14 @@ class CodePipelineV2ConditionsTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private LambdaService lambdaService;
+    private S3Service s3Service;
     private CodePipelineService service;
     private InMemoryStorageFactory storageFactory;
 
     @BeforeEach
     void setUp() {
         lambdaService = mock(LambdaService.class);
-        S3Service s3Service = mock(S3Service.class);
+        s3Service = mock(S3Service.class);
         S3Object object = mock(S3Object.class);
         when(object.getData()).thenReturn("artifact".getBytes());
         when(object.getETag()).thenReturn("etag-1");
@@ -380,6 +384,20 @@ class CodePipelineV2ConditionsTest {
     void overrideWaiterTimingOutDoesNotEraseAnOverrideAnotherRequestAccepted() {
         // Catches: a timed-out override waiter removing the flag of a concurrent override that already
         // resumed the run.
+        // Shorten the finish wait; just before the waiter cleans up, the run finishes and a second
+        // override resumes it.
+        AtomicBoolean cleanupProbed = new AtomicBoolean();
+        AtomicReference<ObjectNode> pendingOverride = new AtomicReference<>();
+        service = new CodePipelineService(storageFactory, mapper, mock(CodeBuildService.class),
+                mock(CodeDeployService.class), lambdaService, s3Service,
+                new CodePipelineEventPublisher(null, null, mapper), 500L,
+                TimeUnit.MILLISECONDS.toNanos(200), () -> {
+                    if (cleanupProbed.compareAndSet(false, true)) {
+                        ObjectNode request = pendingOverride.get();
+                        service.activeRuns.remove(ACCOUNT + ":" + request.path("pipelineExecutionId").asText());
+                        service.handle("OverrideStageCondition", request, REGION, ACCOUNT);
+                    }
+                });
         ObjectNode deploy = lambdaStage("Deploy");
         addRule(deploy, "onSuccess", "FAIL", "VariableCheck")
                 .put("Variable", "#{variables.env}").put("Value", "prod").put("Operator", "EQ");
@@ -390,16 +408,10 @@ class CodePipelineV2ConditionsTest {
         ObjectNode override = mapper.createObjectNode().put("pipelineName", "override-race")
                 .put("pipelineExecutionId", executionId).put("stageName", "Deploy")
                 .put("conditionType", "ON_SUCCESS");
+        pendingOverride.set(override);
         // The run looks like it is still finishing, so the first override waits and then times out.
         String runKey = ACCOUNT + ":" + executionId;
         service.activeRuns.add(runKey);
-        service.runFinishWaitNanos = TimeUnit.MILLISECONDS.toNanos(200);
-        // Just before that waiter cleans up, the run finishes and a second override resumes it.
-        service.beforeOverrideTimeoutCleanup = () -> {
-            service.beforeOverrideTimeoutCleanup = () -> { };
-            service.activeRuns.remove(runKey);
-            service.handle("OverrideStageCondition", override, REGION, ACCOUNT);
-        };
 
         AwsException thrown = assertThrows(AwsException.class,
                 () -> service.handle("OverrideStageCondition", override, REGION, ACCOUNT));
@@ -410,7 +422,7 @@ class CodePipelineV2ConditionsTest {
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
-        private final List<AccountAwareStorageBackend<?>> created = new java.util.ArrayList<>();
+        private final List<AccountAwareStorageBackend<?>> created = new ArrayList<>();
 
         private InMemoryStorageFactory() {
             super(null, null);

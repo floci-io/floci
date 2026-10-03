@@ -124,6 +124,12 @@ public class CodePipelineService {
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
     final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
     private final long sourcePollIntervalMs;
+    // Test hooks, set only through the package-private constructor: a shortened wait, and a probe
+    // for the gap before the override timeout cleanup.
+    private final long runFinishWaitNanos;
+    private final Runnable beforeOverrideTimeoutCleanup;
+
+    private static final long DEFAULT_RUN_FINISH_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     /** Matches the {@code source-poll-interval-ms} default in application.yml. */
     private static final long DEFAULT_SOURCE_POLL_INTERVAL_MS = 500L;
@@ -136,7 +142,8 @@ public class CodePipelineService {
                         CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                         LambdaService lambdaService, S3Service s3Service) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
-                detachedEventPublisher(mapper), DEFAULT_SOURCE_POLL_INTERVAL_MS);
+                detachedEventPublisher(mapper), DEFAULT_SOURCE_POLL_INTERVAL_MS,
+                DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { });
     }
 
     public CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
@@ -154,7 +161,8 @@ public class CodePipelineService {
                                EmulatorConfig config, CodePipelineEventPublisher eventPublisher) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
                 eventPublisher,
-                resolveSourcePollInterval(config.services().codepipeline().sourcePollIntervalMs()));
+                resolveSourcePollInterval(config.services().codepipeline().sourcePollIntervalMs()),
+                DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { });
     }
 
     /**
@@ -180,10 +188,11 @@ public class CodePipelineService {
     }
 
     @SuppressWarnings("unchecked")
-    private CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
-                                CodeBuildService codeBuildService, CodeDeployService codeDeployService,
-                                LambdaService lambdaService, S3Service s3Service,
-                                CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs) {
+    CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
+                        CodeBuildService codeBuildService, CodeDeployService codeDeployService,
+                        LambdaService lambdaService, S3Service s3Service,
+                        CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs,
+                        long runFinishWaitNanos, Runnable beforeOverrideTimeoutCleanup) {
         this.pipelineStore = storageFactory.create(
                 "codepipeline", "codepipeline-pipelines.json", new TypeReference<Map<String, CodePipelinePipeline>>() {});
         this.executionStore = storageFactory.create(
@@ -197,6 +206,8 @@ public class CodePipelineService {
         this.s3Service = s3Service;
         this.eventPublisher = eventPublisher;
         this.sourcePollIntervalMs = sourcePollIntervalMs;
+        this.runFinishWaitNanos = runFinishWaitNanos;
+        this.beforeOverrideTimeoutCleanup = beforeOverrideTimeoutCleanup;
     }
 
     public JsonNode handle(String action, JsonNode request, String region, String account) {
@@ -960,10 +971,6 @@ public class CodePipelineService {
         putExecution(rollback);
         return started;
     }
-
-    // Package-private so tests can shorten the wait and probe the gap before the timeout cleanup.
-    volatile long runFinishWaitNanos = TimeUnit.SECONDS.toNanos(5);
-    volatile Runnable beforeOverrideTimeoutCleanup = () -> { };
 
     private ObjectNode overrideStageCondition(JsonNode request, String region, String account) {
         String pipelineName = text(request, "pipelineName");
