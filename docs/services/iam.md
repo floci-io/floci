@@ -578,6 +578,52 @@ Classic and CloudFront store certificate identifiers without resolving them agai
 [#4875](https://github.com/floci-io/floci/issues/4875), which covers both directions: rejecting a
 reference to a certificate that does not exist, and refusing to delete one that is in use.
 
+### Signing Certificates
+
+| Action | Description |
+|--------|-------------|
+| UploadSigningCertificate | Stores an X.509 signing certificate against an IAM user and returns its generated `CertificateId`. |
+| ListSigningCertificates | Lists a user's signing certificates, with `Marker` and `MaxItems` paging. |
+| UpdateSigningCertificate | Sets a certificate's status to `Active`, `Inactive` or `Expired`. |
+| DeleteSigningCertificate | Deletes one of a user's signing certificates. |
+
+A signing certificate is not a server certificate: it belongs to a user rather than the account, it
+carries no private key, no name and no path, and the generated `CertificateId` is the only handle
+to it. The body is parsed on upload, because `MalformedCertificate` cannot be answered without
+reading the material, and the status starts as `Active`.
+
+`UserName` is optional on all four operations. Left out, it resolves to the user owning the access
+key that signed the request, which is what the model documents.
+
+Two certificates per user, which the User Guide states directly: "Users can have up to two X.509
+signing certificates, to make certificate rotation easier". A third upload is `LimitExceeded`. The
+count is taken inside the same lock as the write, so concurrent uploads cannot both see room for
+the last slot.
+
+`DuplicateCertificate` is account-wide rather than per user: AWS describes it as "the same
+certificate is associated with an IAM user in the account", so a second user cannot upload material
+the first already holds. The comparison is made on the encoded certificate rather than the PEM
+text, so the same certificate re-wrapped or re-indented still counts as the same one.
+
+`UpdateSigningCertificate` accepts `Expired` as well as `Active` and `Inactive`. The parameter's
+prose explains only the first two, but the API Reference gives all three as valid values.
+
+A signing certificate blocks `DeleteUser` until it is removed, which is one of the items AWS lists
+as a prerequisite for deleting a user programmatically. It also follows the user across an
+`UpdateUser` rename: left behind, a certificate would be stranded on a name that no longer exists,
+invisible to its owner because listing goes through the user.
+
+The credential report's `cert_1_active` and `cert_2_active` columns are backed by this store
+instead of always reporting `FALSE`. The matching `cert_*_last_rotated` columns report the upload
+date, and `N/A` when the certificate is not `Active`, which is how the User Guide defines them.
+`GetAccountSummary`'s `AccountSigningCertificatesPresent` is unaffected: it reports the account root
+user's certificates, and Floci does not model root credentials.
+
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
+owning user's ARN, along with every other IAM action except the server-certificate operations. That
+is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979), not something
+specific to signing certificates.
+
 ## AWS Managed Policies
 
 Floci seeds a catalog of commonly-used AWS managed policies at startup. These are attachable immediately without any setup:

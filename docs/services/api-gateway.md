@@ -352,6 +352,7 @@ Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` r
 | `requestParameters` / `requestTemplates` | Applied at invoke time and returned on read-back |
 | `passthroughBehavior` | `NEVER` and `WHEN_NO_TEMPLATES` reject an unmatched Content-Type with `415` |
 | `timeoutInMillis` | Honoured; defaults to AWS's 29,000 ms. Values below 50 are rejected. The 29s ceiling is an edge-optimized limit, so Regional APIs may exceed it |
+| `responseTransferMode` | Defaults to `BUFFERED`. `STREAM` is accepted only for `HTTP_PROXY` and `AWS_PROXY` integrations and is stored and returned by the management API, but execution responses are still buffered; response streaming is not yet implemented |
 | `tlsConfig.insecureSkipVerification` | Honoured, with AWS's semantics: it stops requiring the backend certificate to be issued by a trusted CA, so a private-CA or self-signed backend is reachable, but expiration, hostname and the presence of a root certificate authority are still checked |
 | `contentHandling` | `CONVERT_TO_TEXT` base64-encodes a binary request for mapping templates; `CONVERT_TO_BINARY` base64-decodes a text request before sending it |
 | `connectionType` / `connectionId` | `VPC_LINK` requires `connectionId` to name an existing, available VPC link; an unknown link yields `502` |

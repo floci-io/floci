@@ -111,6 +111,31 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(10)
+    void nextEndpoint_emitsClientContextHeaderOnlyWhenPresent() throws Exception {
+        String clientContext = "{\"custom\":{\"traceparent\":\"00-abc-def-01\"}}";
+        PendingInvocation withContext = new PendingInvocation(
+                "req-ctx", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        withContext.setClientContext(clientContext);
+        server.enqueue(withContext);
+
+        HttpRequest next = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        HttpResponse<String> first = httpClient.send(next, HttpResponse.BodyHandlers.ofString());
+        assertEquals(clientContext, first.headers().firstValue("Lambda-Runtime-Client-Context").orElse(null));
+
+        server.enqueue(new PendingInvocation(
+                "req-noctx", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>()));
+        HttpResponse<String> second = httpClient.send(next, HttpResponse.BodyHandlers.ofString());
+        assertTrue(second.headers().firstValue("Lambda-Runtime-Client-Context").isEmpty());
+    }
+
+    @Test
+    @Timeout(10)
     void nextEndpoint_startsDeadlineWhenInvocationIsDispatched() throws Exception {
         long queuedDeadline = System.currentTimeMillis() + 1_000;
         PendingInvocation invocation = new PendingInvocation(

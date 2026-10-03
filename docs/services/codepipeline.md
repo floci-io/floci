@@ -72,6 +72,12 @@ as `Approved` or `Rejected`, limits `result.summary` to 512 characters, returns
 `InvalidApprovalTokenException` for unknown tokens, and returns
 `ApprovalAlreadyCompletedException` if the same approval token is reused after completion.
 
+## V2 stage conditions
+
+V2 stage condition blocks (`beforeEntry` and `onSuccess`) are evaluated during execution. Two rule providers evaluate for real: **LambdaInvoke** (invokes the configured local Lambda function; the rule passes when the invocation succeeds) and **VariableCheck** (compares a `#{variables.name}` reference with `EQ`, `NE`, `CONTAINS`, or `MATCHES`; `MATCHES` rejects a pattern or value longer than 256 characters). `Commands`, `DeploymentWindow` and `CloudWatchAlarm` rules are accepted but pass permissively. A `VariableCheck` reference resolves against the start request's variables and the pipeline's declared defaults; a reference that cannot be resolved (including action output variables) fails the rule. Every rule run is recorded on the execution and returned by `ListRuleExecutions`; `ListRuleTypes` returns the AWS rule catalog.
+
+A failed `beforeEntry` or `onSuccess` condition applies its declared `result`: `FAIL` (the default) stops the execution, and `SKIP` skips the stage when it is on a `beforeEntry` condition. A failed `onSuccess` condition always fails the stage, because the stage has already run. `OverrideStageCondition` marks the condition overridden and, when the execution failed on exactly that condition, resumes it from the overridden stage. `onFailure` conditions and the `ROLLBACK` result are not acted on; a stage failure is recorded as a plain failure.
+
 ## Events and notifications
 
 Executions publish the real `aws.codepipeline` state-change events to the **default

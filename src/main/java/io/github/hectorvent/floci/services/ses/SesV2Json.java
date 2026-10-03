@@ -9,8 +9,10 @@ import io.github.hectorvent.floci.services.ses.model.Tag;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Helpers shared by the SES v2 REST JSON controllers: body and member shape checks that answer
@@ -179,6 +181,41 @@ final class SesV2Json {
                             + " can not be converted to a String", 400);
         }
         throw unexpectedStartError(node);
+    }
+
+    /**
+     * A string-to-string map member, such as a list operation's {@code Filter}: absent or null is
+     * null, a null value is kept as null so a key check still sees its key, and a value of another
+     * JSON type gets the deserializer's message for it.
+     */
+    static Map<String, String> stringMapMemberOrAbsent(JsonNode parent, String field) {
+        JsonNode node = structureMemberOrAbsent(parent, field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonNode> entry : node.properties()) {
+            values.put(entry.getKey(), typedStringMemberOrAbsent(node, entry.getKey()));
+        }
+        return values;
+    }
+
+    /**
+     * The model's own constraints on a {@code Filter} map, as the SES validation layer reports them:
+     * every key in the enum, listed in the order SES prints it, and no empty value. A key is checked
+     * before a value.
+     */
+    static void requireFilterKeysAndValues(Map<String, String> filter, List<String> keys) {
+        if (!keys.containsAll(filter.keySet())) {
+            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+                    + "failed to satisfy constraint: Map keys must satisfy constraint: "
+                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]", 400);
+        }
+        if (filter.containsValue("")) {
+            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+                    + "failed to satisfy constraint: Map value must satisfy constraint: "
+                    + "[Member must have length greater than or equal to 1]", 400);
+        }
     }
 
     static AwsException unexpectedStartError(JsonNode node) {

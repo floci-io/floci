@@ -234,8 +234,8 @@ public class S3Controller {
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListAllMyBucketsResult", AwsNamespaces.S3)
                     .start("Owner")
-                    .elem("ID", "owner")
-                    .elem("DisplayName", "owner")
+                    .elem("ID", regionResolver.getAccountId())
+                    .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
                     .end("Owner")
                     .start("Buckets");
             for (Bucket b : buckets) {
@@ -1711,13 +1711,17 @@ public class S3Controller {
                .elem("Size", part.getSize())
                .end("Part");
         }
+        String ownerAccountId = upload.getOwnerAccountId() != null
+                ? upload.getOwnerAccountId() : s3Service.getBucketOwnerAccountId(bucket);
+        String initiatorAccountId = upload.getInitiatorAccountId() != null
+                ? upload.getInitiatorAccountId() : ownerAccountId;
         xml.start("Initiator")
-           .elem("ID", "owner")
-           .elem("DisplayName", "owner")
+           .elem("ID", initiatorAccountId)
+           .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
            .end("Initiator")
            .start("Owner")
-           .elem("ID", "owner")
-           .elem("DisplayName", "owner")
+           .elem("ID", ownerAccountId)
+           .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
            .end("Owner")
            .elem("StorageClass", upload.getStorageClass());
         xml.end("ListPartsResult");

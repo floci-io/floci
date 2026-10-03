@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
@@ -91,6 +92,10 @@ public class IamQueryHandler {
             case "DeleteUser" -> handleDeleteUser(params);
             case "ListUsers" -> handleListUsers(params);
             case "UpdateUser" -> handleUpdateUser(params);
+            case "UploadSigningCertificate" -> handleUploadSigningCertificate(params, authorization);
+            case "ListSigningCertificates" -> handleListSigningCertificates(params, authorization);
+            case "UpdateSigningCertificate" -> handleUpdateSigningCertificate(params, authorization);
+            case "DeleteSigningCertificate" -> handleDeleteSigningCertificate(params, authorization);
             case "TagUser" -> handleTagUser(params);
             case "UntagUser" -> handleUntagUser(params);
             case "ListUserTags" -> handleListUserTags(params);
@@ -749,6 +754,63 @@ public class IamQueryHandler {
             xml.elem("Marker", page.marker());
         }
         return Response.ok(AwsQueryResponse.envelope("ListServerCertificates", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * UserName is optional on every signing-certificate operation: the model says it is determined
+     * implicitly from the access key that signed the request.
+     */
+    private Response handleUploadSigningCertificate(MultivaluedMap<String, String> params,
+                                                    String authorization) {
+        SigningCertificate certificate = iamService.uploadSigningCertificate(
+                resolveUserName(params, authorization), getParam(params, "CertificateBody"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("Certificate").raw(signingCertificateXml(certificate)).end("Certificate");
+        return Response.ok(AwsQueryResponse.envelope("UploadSigningCertificate",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleListSigningCertificates(MultivaluedMap<String, String> params,
+                                                   String authorization) {
+        Page<SigningCertificate> page = paginate(
+                iamService.listSigningCertificates(resolveUserName(params, authorization)), params);
+        XmlBuilder xml = new XmlBuilder().start("Certificates");
+        for (SigningCertificate certificate : page.items()) {
+            xml.start("member").raw(signingCertificateXml(certificate)).end("member");
+        }
+        xml.end("Certificates").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListSigningCertificates",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateSigningCertificate(MultivaluedMap<String, String> params,
+                                                    String authorization) {
+        iamService.updateSigningCertificate(resolveUserName(params, authorization),
+                requireParam(params, "CertificateId"), getParam(params, "Status"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateSigningCertificate",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteSigningCertificate(MultivaluedMap<String, String> params,
+                                                    String authorization) {
+        iamService.deleteSigningCertificate(resolveUserName(params, authorization),
+                requireParam(params, "CertificateId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteSigningCertificate",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /** The four members the model marks required, plus UploadDate. */
+    private String signingCertificateXml(SigningCertificate certificate) {
+        return new XmlBuilder()
+                .elem("UserName", certificate.getUserName())
+                .elem("CertificateId", certificate.getCertificateId())
+                .elem("CertificateBody", certificate.getCertificateBody())
+                .elem("Status", certificate.getStatus())
+                .elem("UploadDate", isoDate(certificate.getUploadDate()))
+                .build();
     }
 
     private Response handleTagServerCertificate(MultivaluedMap<String, String> params) {

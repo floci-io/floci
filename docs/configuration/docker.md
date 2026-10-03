@@ -50,7 +50,7 @@ Use this only when the socket's permissions require root. Without the option, Fl
 
 ## Connection Pool
 
-Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds two (its followed log stream and the watcher that notices its runtime exiting) plus one per Lambda extension, and other container-backed services hold one for their log stream. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.
+Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds one (the watcher that notices its runtime exiting) plus one per Lambda extension. Log-follow streams use a second pool, described below. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.
 
 The default of 1024 connections covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows. Raise it if you widen that range or run many other containers at the same time:
 
@@ -61,6 +61,16 @@ floci:
 ```
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
+
+Container log-follow streams use a second, separate pool so they can never starve create, start, stop and remove calls. Its size defaults to 512 and follows the same rule (at least 1). Exec-output and container-wait streams (CodeBuild phases, Lambda extensions and exit watchers, EKS audit followers) still use the main pool and count against `max-connections`:
+
+```yaml
+floci:
+  docker:
+    streaming-max-connections: 512
+```
+
+Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
 
 ## Private Registry Authentication
 
@@ -285,6 +295,12 @@ What each setting does and why it is needed:
     given host (here the `FLOCI_HOSTNAME` value), skipping Floci's
     auto-detection entirely. See the [Lambda docs](../services/lambda.md#configuration)
     for details.
+
+## Transient I/O retry
+
+All of Floci's short-lived docker calls (create/start/inspect/remove container, volume management, image operations) travel one shared daemon socket, and under fan-out load the daemon occasionally drops a connection mid-call with `java.io.IOException: Broken pipe`. Floci retries these transient failures centrally, at the docker transport layer, up to 6 attempts with a capped exponential backoff (500ms base, 8s cap); so every call site is covered without per-call configuration, and a genuine daemon rejection (a 4xx, a name conflict) still surfaces immediately.
+
+A request is only replayed when doing so cannot change semantics: requests carrying a one-shot upload stream (e.g. copying an archive into a container), bidirectional attach streams, and `exec` requests (which would re-run the command) are never retried. Log-follow connections use a separate transport that does not retry at all. Bodyless actions whose replay changes the outcome (unnamed container create, network create, container restart, network connect and disconnect) are not retried either. A tar-writer failure on the Floci host (for example an unreadable source file) is reported at once instead of retried.
 
 ## Full Reference
 

@@ -55,7 +55,7 @@ class AppSyncTest {
         assertThat(apiId).isNotBlank();
         assertThat(resp.graphqlApi().name()).isEqualTo("sdk-test-api");
         assertThat(resp.graphqlApi().authenticationType()).isEqualTo(AuthenticationType.API_KEY);
-        assertThat(resp.graphqlApi().arn()).contains("arn:aws:appsync:");
+        assertThat(resp.graphqlApi().arn()).startsWith("arn:" + TestFixtures.partition() + ":appsync:");
     }
 
     @Test
@@ -621,7 +621,7 @@ class AppSyncTest {
                 .build());
 
         assertThat(resp.dataSource().dataSourceArn()).isNotNull();
-        assertThat(resp.dataSource().dataSourceArn()).contains("arn:aws:appsync:");
+        assertThat(resp.dataSource().dataSourceArn()).startsWith("arn:" + TestFixtures.partition() + ":appsync:");
         assertThat(resp.dataSource().dataSourceArn()).contains("/datasources/arn-check-ds");
 
         client.deleteDataSource(r -> r.apiId(apiId).name("arn-check-ds"));
@@ -638,7 +638,7 @@ class AppSyncTest {
                 .build());
 
         assertThat(resp.resolver().resolverArn()).isNotNull();
-        assertThat(resp.resolver().resolverArn()).contains("arn:aws:appsync:");
+        assertThat(resp.resolver().resolverArn()).startsWith("arn:" + TestFixtures.partition() + ":appsync:");
         assertThat(resp.resolver().resolverArn()).contains("/types/Query/resolvers/resolverArnCheck");
 
         client.deleteResolver(r -> r.apiId(apiId).typeName("Query").fieldName("resolverArnCheck"));
@@ -654,7 +654,8 @@ class AppSyncTest {
                 .build());
 
         assertThat(resp.functionConfiguration().functionArn()).isNotNull();
-        assertThat(resp.functionConfiguration().functionArn()).contains("arn:aws:appsync:");
+        assertThat(resp.functionConfiguration().functionArn())
+                .startsWith("arn:" + TestFixtures.partition() + ":appsync:");
 
         client.deleteFunction(r -> r.apiId(apiId).functionId(resp.functionConfiguration().functionId()));
     }

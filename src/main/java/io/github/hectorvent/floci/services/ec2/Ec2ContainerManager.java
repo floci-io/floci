@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -32,11 +33,8 @@ import com.github.dockerjava.api.model.MountType;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
@@ -1494,11 +1492,8 @@ public class Ec2ContainerManager {
 
             // Copy authorized_keys via docker cp
             String keyContent = publicKey.trim() + "\n";
-            byte[] tar = buildSingleFileTar("authorized_keys", keyContent.getBytes(StandardCharsets.UTF_8), 0600);
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath("/root/.ssh")
-                    .withTarInputStream(new ByteArrayInputStream(tar))
-                    .exec();
+            RetryingTarCopier.copyBytes(dockerClient, containerId, "/root/.ssh",
+                    "authorized_keys", keyContent.getBytes(StandardCharsets.UTF_8), 0600);
 
             execInContainer(containerId, new String[]{"chmod", "600", "/root/.ssh/authorized_keys"}, 5);
             LOG.infov("Injected SSH public key into container {0}", containerId);
@@ -1763,9 +1758,5 @@ public class Ec2ContainerManager {
 
     static Optional<String> preferredMetadataSourceIp(Map<String, ContainerNetwork> networks) {
         return Ec2MetadataProxy.preferredMetadataSourceIp(networks);
-    }
-
-    private byte[] buildSingleFileTar(String filename, byte[] content, int mode) throws IOException {
-        return UserDataPipeline.buildSingleFileTar(filename, content, mode);
     }
 }

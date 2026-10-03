@@ -89,6 +89,13 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TAG_KEY_LENGTH = 128;
     private static final Pattern KMS_KEY_ARN_PATTERN = Pattern.compile(
             "^(arn:(aws[a-zA-Z-]*)?:[a-z0-9-.]+:.*)?$");
+    /** The DurableConfig member has its own pattern text, which AWS prints in the validation message. */
+    private static final Pattern DURABLE_KMS_KEY_ARN_PATTERN = Pattern.compile(
+            "(arn:(aws[a-zA-Z-]*)?:[a-z0-9-.]+:.*)|()");
+    private static final int MAX_DURABLE_EXECUTION_TIMEOUT_SECONDS = 31622400;
+    private static final int MAX_DURABLE_RETENTION_DAYS = 90;
+    private static final int DEFAULT_DURABLE_RETENTION_DAYS = 14;
+    private static final int MAX_FUNCTION_TIMEOUT_SECONDS = 900;
     private static final Pattern LAYER_VERSION_ARN_PATTERN = Pattern.compile(
             "^((arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:\\d{12}:layer:[a-zA-Z0-9-_]+:[0-9]+)"
                     + "|(arn:[a-zA-Z0-9-]+:lambda:::awslayer:[a-zA-Z0-9-_]+))$");
@@ -124,7 +131,7 @@ public class LambdaService implements ResourceProvider {
      */
     private static final List<String> CONFIG_STRUCTURE_MEMBERS = List.of(
             "Environment", "EphemeralStorage", "TracingConfig", "DeadLetterConfig",
-            "VpcConfig", "SnapStart", "LoggingConfig", "ImageConfig");
+            "VpcConfig", "SnapStart", "LoggingConfig", "ImageConfig", "DurableConfig");
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -404,6 +411,7 @@ public class LambdaService implements ResourceProvider {
         Map<String, Object> snapStart = structureMember(request, "SnapStart");
         Map<String, Object> loggingConfig = structureMember(request, "LoggingConfig");
         Map<String, Object> imageConfig = structureMember(request, "ImageConfig");
+        Map<String, Object> durableConfig = structureMember(request, "DurableConfig");
         Map<String, Object> code = structureMember(request, "Code");
 
         String functionName = (String) request.get("FunctionName");
@@ -413,7 +421,16 @@ public class LambdaService implements ResourceProvider {
         validateEnum(request.get("PackageType"), "packageType", List.of("Zip", "Image"));
         String packageType = request.getOrDefault("PackageType", "Zip").toString();
         String description = (String) request.get("Description");
-        int timeout = toInt(request.get("Timeout"), config != null ? config.services().lambda().defaultTimeoutSeconds() : 3);
+        DurableConfigRequest durable = durableConfigRequest(durableConfig);
+        int defaultTimeout = config != null ? config.services().lambda().defaultTimeoutSeconds() : 3;
+        if (durable != null) {
+            if (durable.executionTimeout() == null) {
+                throw new AwsException("InvalidParameterValueException",
+                        "You cannot create a function with a durable configuration without an executionTimeout", 400);
+            }
+            defaultTimeout = Math.min(durable.executionTimeout(), MAX_FUNCTION_TIMEOUT_SECONDS);
+        }
+        int timeout = toInt(request.get("Timeout"), defaultTimeout);
         int memorySize = toInt(request.get("MemorySize"), config != null ? config.services().lambda().defaultMemoryMb() : 128);
 
         if (functionName == null || functionName.isBlank()) {
@@ -511,6 +528,7 @@ public class LambdaService implements ResourceProvider {
         }
 
         applySnapStart(fn, snapStart);
+        applyDurableConfig(fn, durable);
         applyLoggingConfig(fn, loggingConfig);
 
         List<LambdaFileSystemConfig> fileSystemConfigs =
@@ -772,6 +790,7 @@ public class LambdaService implements ResourceProvider {
         Map<String, Object> snapStart = structureMember(request, "SnapStart");
         Map<String, Object> loggingConfig = structureMember(request, "LoggingConfig");
         Map<String, Object> imageConfig = structureMember(request, "ImageConfig");
+        Map<String, Object> durableConfig = structureMember(request, "DurableConfig");
 
         // Validated before any field mutation below, not inline where Layers is applied further
         // down - fn is the live object backing this store entry (InMemoryStorage#get returns the
@@ -798,8 +817,14 @@ public class LambdaService implements ResourceProvider {
             validateSnapStart(snapStart);
         }
         if (request.containsKey("LoggingConfig")) {
-            validateLoggingConfig(loggingConfig);
+            validateLoggingConfig(loggingConfig, fn.isDurable());
         }
+        if (durableConfig != null && !fn.isDurable()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "You cannot add a durable configuration to a function that was originally created "
+                            + "with no durable configuration", 400);
+        }
+        DurableConfigRequest durable = durableConfigRequest(durableConfig);
         if (request.containsKey("Role")) {
             validateRoleArn((String) request.get("Role"));
         }
@@ -902,6 +927,10 @@ public class LambdaService implements ResourceProvider {
 
         if (request.containsKey("LoggingConfig")) {
             applyLoggingConfig(fn, loggingConfig);
+        }
+
+        if (durable != null) {
+            mergeDurableConfig(fn, durable);
         }
 
         if (request.containsKey("FileSystemConfigs")) {
@@ -1136,6 +1165,15 @@ public class LambdaService implements ResourceProvider {
      */
     public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
                                InvocationType type) {
+        return invoke(region, functionName, queryQualifier, payload, type, null);
+    }
+
+    /**
+     * Invokes a function, handing {@code clientContext} (the decoded {@code X-Amz-Client-Context} JSON) to a
+     * synchronous invocation. AWS passes it to synchronous invocations only.
+     */
+    public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
+                               InvocationType type, String clientContext) {
         validateInvokeQualifier(queryQualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
@@ -1149,7 +1187,7 @@ public class LambdaService implements ResourceProvider {
         }
         reportCustomResourceLiveness(payload);
         InvokeResult result = executorService.invoke(fn, payload, type,
-                LambdaInvocationChain.currentDepth(), qualifier);
+                LambdaInvocationChain.currentDepth(), qualifier, clientContext);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -2249,6 +2287,9 @@ public class LambdaService implements ResourceProvider {
             snapshot.setTracingMode(fn.getTracingMode());
             snapshot.setDeadLetterTargetArn(fn.getDeadLetterTargetArn());
             snapshot.setKmsKeyArn(fn.getKmsKeyArn());
+            snapshot.setDurableExecutionTimeout(fn.getDurableExecutionTimeout());
+            snapshot.setDurableRetentionPeriodInDays(fn.getDurableRetentionPeriodInDays());
+            snapshot.setDurableKmsKeyArn(fn.getDurableKmsKeyArn());
 
             functionStore.save(region, snapshot);
             LOG.infov("Published version {0} for function {1}", version, functionName);
@@ -2443,9 +2484,74 @@ public class LambdaService implements ResourceProvider {
         fn.setSnapStartApplyOn(applyOn instanceof String s && !s.isBlank() ? s : "None");
     }
 
-    private static void validateLoggingConfig(Object value) {
+    /** The members of a request's DurableConfig after type, range and pattern validation; each may be absent. */
+    private record DurableConfigRequest(Integer executionTimeout, Integer retentionPeriodInDays, String kmsKeyArn) {
+    }
+
+    private static DurableConfigRequest durableConfigRequest(Map<String, Object> durableConfig) {
+        if (durableConfig == null) {
+            return null;
+        }
+        Integer executionTimeout = durableConfigInteger(durableConfig.get("ExecutionTimeout"),
+                "ExecutionTimeout", MAX_DURABLE_EXECUTION_TIMEOUT_SECONDS);
+        Integer retentionPeriodInDays = durableConfigInteger(durableConfig.get("RetentionPeriodInDays"),
+                "RetentionPeriodInDays", MAX_DURABLE_RETENTION_DAYS);
+        Object kmsKeyArn = durableConfig.get("KMSKeyArn");
+        if (kmsKeyArn != null && !(kmsKeyArn instanceof String)) {
+            throw new AwsException("SerializationException", "DurableConfig.KMSKeyArn must be a string", 400);
+        }
+        validatePattern(kmsKeyArn, "durableConfig.kMSKeyArn", DURABLE_KMS_KEY_ARN_PATTERN);
+        return new DurableConfigRequest(executionTimeout, retentionPeriodInDays, (String) kmsKeyArn);
+    }
+
+    private static Integer durableConfigInteger(Object value, String member, int maximum) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long)) {
+            throw new AwsException("SerializationException", "DurableConfig." + member + " must be an integer", 400);
+        }
+        long number = ((Number) value).longValue();
+        if (number < 1 || number > maximum) {
+            String field = "durableConfig." + Character.toLowerCase(member.charAt(0)) + member.substring(1);
+            String bound = number < 1 ? "greater than or equal to 1" : "less than or equal to " + maximum;
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + number + "' at '" + field + "' failed to satisfy "
+                            + "constraint: Member must have value " + bound, 400);
+        }
+        return (int) number;
+    }
+
+    private static void applyDurableConfig(LambdaFunction fn, DurableConfigRequest durable) {
+        if (durable == null) {
+            return;
+        }
+        fn.setDurableRetentionPeriodInDays(DEFAULT_DURABLE_RETENTION_DAYS);
+        mergeDurableConfig(fn, durable);
+        fn.setLogFormat("JSON");
+    }
+
+    /** UpdateFunctionConfiguration merges DurableConfig per member; a member left out keeps its stored value. */
+    private static void mergeDurableConfig(LambdaFunction fn, DurableConfigRequest durable) {
+        if (durable.executionTimeout() != null) {
+            fn.setDurableExecutionTimeout(durable.executionTimeout());
+        }
+        if (durable.retentionPeriodInDays() != null) {
+            fn.setDurableRetentionPeriodInDays(durable.retentionPeriodInDays());
+        }
+        if (durable.kmsKeyArn() != null) {
+            fn.setDurableKmsKeyArn(durable.kmsKeyArn().isEmpty() ? null : durable.kmsKeyArn());
+        }
+    }
+
+    private static void validateLoggingConfig(Object value, boolean durable) {
         if (!(value instanceof Map<?, ?> logging)) {
             return;
+        }
+        if (durable && "Text".equals(logging.get("LogFormat"))) {
+            throw new AwsException("InvalidParameterValueException",
+                    "You cannot use plain text logs with a durable function. Only JSON format logs are supported",
+                    400);
         }
         validateEnum(logging.get("LogFormat"), "loggingConfig.logFormat", List.of("JSON", "Text"));
         validateEnum(logging.get("ApplicationLogLevel"), "loggingConfig.applicationLogLevel",
@@ -2614,8 +2720,9 @@ public class LambdaService implements ResourceProvider {
         if (!(value instanceof Map<?, ?> logging)) {
             return;
         }
-        validateLoggingConfig(value);
-        String format = logging.get("LogFormat") instanceof String f && !f.isBlank() ? f : "Text";
+        validateLoggingConfig(value, fn.isDurable());
+        String defaultFormat = fn.isDurable() ? "JSON" : "Text";
+        String format = logging.get("LogFormat") instanceof String f && !f.isBlank() ? f : defaultFormat;
         boolean json = "JSON".equals(format);
         fn.setLogFormat(format);
         fn.setApplicationLogLevel(json && logging.get("ApplicationLogLevel") instanceof String level

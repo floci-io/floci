@@ -118,7 +118,9 @@ public class AwsQueryController {
             "TagServerCertificate", "UntagServerCertificate", "ListServerCertificateTags",
             "CreateVirtualMFADevice", "DeleteVirtualMFADevice", "ListVirtualMFADevices",
             "EnableMFADevice", "DeactivateMFADevice", "ResyncMFADevice", "ListMFADevices",
-            "TagMFADevice", "UntagMFADevice", "ListMFADeviceTags"
+            "TagMFADevice", "UntagMFADevice", "ListMFADeviceTags",
+            "UploadSigningCertificate", "ListSigningCertificates",
+            "UpdateSigningCertificate", "DeleteSigningCertificate"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(
