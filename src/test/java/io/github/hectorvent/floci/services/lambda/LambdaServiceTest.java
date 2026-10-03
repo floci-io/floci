@@ -2286,4 +2286,34 @@ class LambdaServiceTest {
         assertEquals("ResourceNotFoundException",
                 assertThrows(AwsException.class, () -> service.getFunction(REGION, "package-type-fn")).getErrorCode());
     }
+
+    @Test
+    void updateFunctionCode_withMismatchedRevisionId_throwsPreconditionFailedException() throws Exception {
+        // Catches: UpdateFunctionCode silently accepts a stale RevisionId and overwrites the function's code
+        Map<String, Object> createReq = baseRequest("revision-lock-func");
+        service.createFunction(REGION, createReq);
+
+        LambdaFunction fn = service.getFunction(REGION, "revision-lock-func");
+        String initialRevisionId = fn.getRevisionId();
+        String mismatchingRevision = "stale-revision-id-abc123";
+        String zipBase64 = createZipBase64("index.js");
+
+        Map<String, Object> updateReq = new HashMap<>();
+        updateReq.put("ZipFile", zipBase64);
+        updateReq.put("RevisionId", mismatchingRevision);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION, "revision-lock-func", updateReq));
+        assertEquals("PreconditionFailedException", ex.getErrorCode());
+        assertEquals(412, ex.getHttpStatus());
+        assertEquals("The Revision Id provided does not match the latest Revision Id. Call the GetFunction or the GetFunctionConfiguration API to retrieve the latest Revision Id for your resource.", ex.getMessage());
+
+        LambdaFunction unchangedFn = service.getFunction(REGION, "revision-lock-func");
+        assertEquals(initialRevisionId, unchangedFn.getRevisionId());
+
+        updateReq.put("RevisionId", initialRevisionId);
+        service.updateFunctionCode(REGION, "revision-lock-func", updateReq);
+
+        LambdaFunction updatedFn = service.getFunction(REGION, "revision-lock-func");
+        assertNotEquals(initialRevisionId, updatedFn.getRevisionId());
+    }
 }
