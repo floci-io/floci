@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
@@ -1419,11 +1420,8 @@ public class EksClusterManager
      */
     private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(localFile)
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, localFile);
         } catch (Exception e) {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
@@ -1851,11 +1849,8 @@ public class EksClusterManager
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(REGISTRIES_TAR_ENTRY, content)))
-                    .withRemotePath("/etc")
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
+                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644);
             LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}", endpoint, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "

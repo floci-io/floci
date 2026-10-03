@@ -3462,10 +3462,10 @@ public interface EmulatorConfig {
         /**
          * Size of the connection pool behind the shared Docker client. Every Docker call leases a
          * connection from it, and some hold one for as long as a container runs: a Lambda
-         * container holds two (its followed log stream and its exit watcher) plus one per
-         * extension, and other container-backed services hold one for their log stream. Once
-         * those fill the pool, create, start, stop and remove wait for a free connection,
-         * including the calls that would release one, so the emulator stalls.
+         * container holds one (its exit watcher) plus one per extension. Log-follow streams
+         * live in the separate streaming pool. Once the long-lived connections fill this pool,
+         * create, start, stop and remove wait for a free connection, including the calls that
+         * would release one, so the emulator stalls.
          *
          * <p>1024 rather than the former hard-coded 100, which capped live Lambda containers at
          * about 50: a tenth of the 500 that the runtime API port range
@@ -3474,6 +3474,17 @@ public interface EmulatorConfig {
          */
         @WithDefault("1024")
         int maxConnections();
+
+        /**
+         * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
+         * long-lived container log-follow streams that occupy a slot for a container's entire
+         * lifetime. Exec-output and container-wait streams stay on the main pool. Total live
+         * containers is unbounded across distinct functions (each {@code WarmPool} caps only
+         * per-function), so this pool is sized generously rather than tied to any single
+         * function's warm-pool cap.
+         */
+        @WithDefault("512")
+        int streamingMaxConnections();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.
