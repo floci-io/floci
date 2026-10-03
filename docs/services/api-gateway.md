@@ -544,8 +544,12 @@ Routes carrying `authorizationType: AWS_IAM`: including those an OpenAPI import 
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
 | **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, DeleteApiMapping |
-| **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, DeleteVpcLink |
+| **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink, DeleteVpcLink |
 | **Tags** | TagResource, UntagResource, GetTags |
+
+`TagResource`, `UntagResource` and `GetTags` accept API, stage and VPC link ARNs
+(`arn:<partition>:apigateway:<region>::/vpclinks/<vpcLinkId>`). `UpdateVpcLink` changes only the
+name, as in the API model.
 
 ### WebSocket Data-Plane {#websocket-data-plane}
 
@@ -607,7 +611,6 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 ### Not Implemented
 
 - `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
-- `UpdateVpcLink` — the other four VPC Link operations are implemented; see the table above
 
 ### Examples
 

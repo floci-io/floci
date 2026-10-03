@@ -96,6 +96,21 @@ public final class CfnRollback {
     public static final String API_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociApiKeyUpdateSnapshot";
 
     /**
+     * Holds the name and tags an API Gateway V2 VPC link carried before an in-place update changed
+     * them, so a failed stack update can put them back. Written by {@code ApiGatewayV2CfnProvisioner}
+     * before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String VPC_LINK_UPDATE_SNAPSHOT_ATTR = "__FlociVpcLinkUpdateSnapshot";
+
+    /**
+     * Holds the connection type and id an API Gateway V2 integration carried before an update, and
+     * whether that update also changed another field, so a failed stack update can put the
+     * connection back. Written by {@code ApiGatewayV2CfnProvisioner} before its update call and
+     * spent by its {@code rollbackUpdate}.
+     */
+    public static final String INTEGRATION_CONNECTION_SNAPSHOT_ATTR = "__FlociIntegrationConnectionSnapshot";
+
+    /**
      * Holds the complete prior metric filter, identity, name mode and per-address mutation outcomes
      * and ownership states.
      * Written before either an in-place put or a delete-then-create replacement; retained across

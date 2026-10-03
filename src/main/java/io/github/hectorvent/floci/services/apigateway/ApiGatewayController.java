@@ -1546,6 +1546,22 @@ public class ApiGatewayController {
                 .type(MediaType.APPLICATION_JSON).build();
     }
 
+    @PATCH
+    @Path("/v2/vpclinks/{vpcLinkId}")
+    public Response updateVpcLink(@Context HttpHeaders headers,
+                                  @PathParam("vpcLinkId") String vpcLinkId,
+                                  String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            VpcLink link = v2Service.updateVpcLink(region, vpcLinkId, request);
+            return Response.ok(toV2VpcLinkNode(link).toString()).type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
     @DELETE
     @Path("/v2/vpclinks/{vpcLinkId}")
     public Response deleteVpcLink(@Context HttpHeaders headers, @PathParam("vpcLinkId") String vpcLinkId) {

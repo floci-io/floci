@@ -17,6 +17,7 @@ AWS::ApiGatewayV2::Deployment	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Integration	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Route	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Stage	ApiGatewayV2CfnProvisioner
+AWS::ApiGatewayV2::VpcLink	ApiGatewayV2CfnProvisioner
 AWS::AppSync::ApiKey	AppSyncCfnProvisioner
 AWS::AppSync::DataSource	AppSyncCfnProvisioner
 AWS::AppSync::FunctionConfiguration	AppSyncCfnProvisioner
