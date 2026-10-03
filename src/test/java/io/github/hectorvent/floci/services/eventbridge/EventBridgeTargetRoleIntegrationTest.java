@@ -2,8 +2,11 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -13,15 +16,29 @@ class EventBridgeTargetRoleIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String ROLE = "arn:aws:iam::000000000000:role/eventbridge-target";
+    private String rule;
 
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    @AfterEach
+    void removeTestResources() {
+        given().contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.RemoveTargets")
+                .body("{\"Rule\":\"" + rule + "\",\"Ids\":[\"workflow\"]}")
+                .when().post("/").then().statusCode(200);
+
+        given().contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.DeleteRule")
+                .body("{\"Name\":\"" + rule + "\"}")
+                .when().post("/").then().statusCode(200);
+    }
+
     @Test
     void listTargetsReturnsRoleAlongsideRetryAndDeadLetterSettings() {
-        String rule = "eb-target-role-round-trip";
+        rule = "eb-target-role-" + UUID.randomUUID().toString().substring(0, 8);
         given().contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "AWSEvents.PutRule")
                 .body("{\"Name\":\"" + rule + "\",\"EventPattern\":\"{}\"}")

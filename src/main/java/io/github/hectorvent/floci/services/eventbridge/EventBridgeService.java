@@ -416,7 +416,7 @@ public class EventBridgeService implements ResourceProvider {
         for (Target newTarget : newTargets) {
             if (newTarget.getRoleArn() == null && isCrossAccountEventBus(newTarget.getArn(), rule)) {
                 existing.stream()
-                        .filter(t -> t.getId().equals(newTarget.getId()) && t.getArn().equals(newTarget.getArn()))
+                        .filter(t -> t.getId().equals(newTarget.getId()) && newTarget.getArn().equals(t.getArn()))
                         .findFirst()
                         .ifPresent(t -> newTarget.setRoleArn(t.getRoleArn()));
             }

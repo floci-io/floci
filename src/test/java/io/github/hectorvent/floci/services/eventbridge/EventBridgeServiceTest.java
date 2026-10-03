@@ -386,6 +386,20 @@ class EventBridgeServiceTest {
                 stored.getDeadLetterConfig());
     }
 
+    @Test
+    void crossAccountBusUpdateReplacesStoredTargetWithoutArn() {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        service.putTargets("role-rule", null, List.of(new Target("bus", null, null, null)), REGION);
+        String arn = "arn:aws:events:us-east-1:111111111111:event-bus/destination";
+
+        service.putTargets("role-rule", null, List.of(new Target("bus", arn, null, null)), REGION);
+
+        List<Target> stored = service.listTargetsByRule("role-rule", null, REGION);
+        assertEquals(1, stored.size());
+        assertEquals(arn, stored.getFirst().getArn());
+        assertNull(stored.getFirst().getRoleArn());
+    }
+
     @ParameterizedTest
     @CsvSource({
             "aws, us-east-1",
