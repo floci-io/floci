@@ -1,12 +1,26 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 class EventBridgeInvokerApiDestinationTest {
 
@@ -66,5 +80,48 @@ class EventBridgeInvokerApiDestinationTest {
     @Test
     void appendQueryParameters_withoutParamsReturnsUrl() {
         assertEquals("https://x.test/p", EventBridgeInvoker.appendQueryParameters("https://x.test/p", Map.of()));
+    }
+
+    @Test
+    void acquireRatePermit_neverGrantsMoreThanTheLimitToConcurrentDeliveries() throws Exception {
+        EventBridgeInvoker invoker = new EventBridgeInvoker(mock(LambdaService.class), mock(SqsService.class),
+                mock(SnsService.class), new ObjectMapper(), mock(EmulatorConfig.class));
+        // More than the sweep threshold, so the sweep runs while the deliveries below are counting
+        for (int i = 0; i < 300; i++) {
+            invoker.acquireRatePermit(rateLimited("filler-" + i, 1));
+        }
+        ApiDestination destination = rateLimited("busy", 5);
+
+        int threads = 64;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger granted = new AtomicInteger();
+        try {
+            for (int i = 0; i < threads; i++) {
+                pool.submit(() -> {
+                    start.await();
+                    try {
+                        invoker.acquireRatePermit(destination);
+                        granted.incrementAndGet();
+                    } catch (AwsException throttled) {
+                        assertEquals("ThrottlingException", throttled.getErrorCode());
+                    }
+                    return null;
+                });
+            }
+            start.countDown();
+        } finally {
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+        }
+
+        // Two permits' worth of slack covers the one-second window rolling over mid-test
+        assertTrue(granted.get() >= 5 && granted.get() <= 10, "granted " + granted.get());
+    }
+
+    private static ApiDestination rateLimited(String name, int limit) {
+        return new ApiDestination(name, "arn:aws:events:us-east-1:000000000000:api-destination/" + name + "/1",
+                "arn:aws:events:us-east-1:000000000000:connection/c/1", "https://api.example.com", "POST",
+                limit, null);
     }
 }

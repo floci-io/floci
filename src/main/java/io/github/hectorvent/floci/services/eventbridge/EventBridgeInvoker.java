@@ -597,7 +597,7 @@ public class EventBridgeInvoker {
     }
 
     // Fixed one-second window per destination; an event over the limit is throttled and retried with backoff
-    private void acquireRatePermit(ApiDestination destination) {
+    void acquireRatePermit(ApiDestination destination) {
         Integer limit = destination.getInvocationRateLimitPerSecond();
         if (limit == null) {
             return;
@@ -605,25 +605,26 @@ public class EventBridgeInvoker {
         long nowSecond = Instant.now().getEpochSecond();
         // Windows of deleted or idle destinations would otherwise pile up, so stale ones are swept once the map grows
         if (rateWindows.size() > MAX_IDLE_RATE_WINDOWS) {
-            rateWindows.values().removeIf(stale -> nowSecond - stale.second > 1);
+            rateWindows.values().removeIf(stale -> nowSecond - stale.second() > 1);
         }
-        RateWindow window = rateWindows.computeIfAbsent(destination.getArn(), key -> new RateWindow());
-        synchronized (window) {
-            if (window.second != nowSecond) {
-                window.second = nowSecond;
-                window.used = 0;
+        // The whole check-and-count runs inside compute, which is atomic per key and also against the sweep above,
+        // so no delivery can keep counting on a window that was removed from the map
+        boolean[] allowed = new boolean[1];
+        rateWindows.compute(destination.getArn(), (key, current) -> {
+            RateWindow window = current == null || current.second() != nowSecond ? new RateWindow(nowSecond, 0) : current;
+            if (window.used() >= limit) {
+                return window;
             }
-            if (window.used >= limit) {
-                throw new AwsException("ThrottlingException", "API destination " + destination.getName()
-                        + " exceeded its InvocationRateLimitPerSecond of " + limit + ".", 429);
-            }
-            window.used++;
+            allowed[0] = true;
+            return new RateWindow(nowSecond, window.used() + 1);
+        });
+        if (!allowed[0]) {
+            throw new AwsException("ThrottlingException", "API destination " + destination.getName()
+                    + " exceeded its InvocationRateLimitPerSecond of " + limit + ".", 429);
         }
     }
 
-    private static final class RateWindow {
-        private volatile long second;
-        private int used;
+    private record RateWindow(long second, int used) {
     }
 
     // Only substitutes '*' inside the path: a user-supplied value must not be able to change the host, query or fragment.
