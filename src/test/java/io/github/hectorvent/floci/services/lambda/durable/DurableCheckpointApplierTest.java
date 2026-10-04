@@ -28,6 +28,14 @@ class DurableCheckpointApplierTest {
     }
 
     @Test
+    void anExecutionErrorHasTheSameSizeLimitAsAnOperationError() {
+        DurableErrorObject large = DurableErrorObject.of("x".repeat(DurableCheckpointApplier.MAX_ERROR_BYTES), "T");
+        assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
+                DurableOperationAction.FAIL, null, large, null, null, null)),
+                "Error object size must be less than 32768 bytes.");
+    }
+
+    @Test
     void duplicateIdsAreRejectedUnlessAStartIsClosedInTheSameBatch() {
         assertRejected(List.of(stepStart("s1", null), stepStart("s1", null)),
                 "Cannot checkpoint multiple operations with the same ID.");

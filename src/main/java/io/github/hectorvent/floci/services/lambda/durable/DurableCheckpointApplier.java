@@ -161,9 +161,7 @@ final class DurableCheckpointApplier {
                     throw invalid("Invalid parent operation id.");
                 }
             }
-            if (update.error() != null && utf8Length(errorJson(update.error())) >= MAX_ERROR_BYTES) {
-                throw invalid("Error object size must be less than " + MAX_ERROR_BYTES + " bytes.");
-            }
+            requireErrorSize(update);
             if (utf8Length(update.payload()) > MAX_OPERATION_PAYLOAD_BYTES) {
                 throw invalid(update.type() + " payload size must be less than or equal to "
                         + MAX_OPERATION_PAYLOAD_BYTES + " bytes.");
@@ -200,6 +198,7 @@ final class DurableCheckpointApplier {
             if (update.action() != DurableOperationAction.SUCCEED && update.action() != DurableOperationAction.FAIL) {
                 throw invalid("Invalid EXECUTION action.");
             }
+            requireErrorSize(update);
             if (utf8Length(update.payload()) > execution.getMaxResultBytes()) {
                 throw invalid("Execution output payload size must be less than or equal to "
                         + execution.getMaxResultBytes() + " bytes.");
@@ -342,6 +341,12 @@ final class DurableCheckpointApplier {
                     event(existing, "WaitCancelled", new LinkedHashMap<>());
                 }
                 default -> throw invalid("Invalid action for the given operation type.");
+            }
+        }
+
+        private static void requireErrorSize(DurableOperationUpdate update) {
+            if (update.error() != null && utf8Length(errorJson(update.error())) >= MAX_ERROR_BYTES) {
+                throw invalid("Error object size must be less than " + MAX_ERROR_BYTES + " bytes.");
             }
         }
 
