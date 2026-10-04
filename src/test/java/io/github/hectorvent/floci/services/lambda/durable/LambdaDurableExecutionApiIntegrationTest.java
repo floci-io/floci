@@ -91,7 +91,9 @@ class LambdaDurableExecutionApiIntegrationTest {
         raw().contentType("application/json").body("{\"CheckpointToken\": \"QUJD\", \"Updates\": []}")
             .post(DURABLE + "/durable-executions/" + UNKNOWN_EXECUTION + "/checkpoint")
             .then()
-            .statusCode(404);
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", equalTo("Invalid checkpoint token"));
     }
 
     @Test

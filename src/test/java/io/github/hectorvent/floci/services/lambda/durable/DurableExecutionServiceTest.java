@@ -187,6 +187,11 @@ class DurableExecutionServiceTest {
             assertEquals("Invalid checkpoint token", stale.getMessage());
             assertEquals(400, stale.getHttpStatus());
             assertThrows(AwsException.class, () -> checkpoint(event, "QUJDRA==", List.of()));
+            String arn = event.get("DurableExecutionArn").asText();
+            String otherArn = arn.substring(0, arn.lastIndexOf('/') + 1) + "other-id";
+            AwsException other = assertThrows(AwsException.class,
+                    () -> service.checkpoint(otherArn, second, List.of()));
+            assertEquals("Checkpoint token is not valid for the durable execution ARN", other.getMessage());
             CheckpointResult closing = checkpoint(event, second, List.of(executionSucceed("\"r\"")));
             assertNull(closing.checkpointToken(), "the closing checkpoint carries no token");
             assertThrows(AwsException.class, () -> checkpoint(event, second, List.of()));

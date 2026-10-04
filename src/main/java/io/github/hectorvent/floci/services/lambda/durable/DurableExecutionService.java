@@ -72,6 +72,7 @@ public class DurableExecutionService implements Resettable {
     private static final int LOCK_STRIPES = 256;
     static final int MAX_PAGE_SIZE = 1000;
     static final String INVALID_TOKEN = "Invalid checkpoint token";
+    static final String TOKEN_FOR_OTHER_EXECUTION = "Checkpoint token is not valid for the durable execution ARN";
     static final String NOT_FOUND = "Durable Execution does not exist";
     private static final Pattern EXECUTION_ARN = Pattern.compile(
             "arn:([a-zA-Z0-9-]+):lambda:([a-zA-Z0-9-]+):(\\d{12}):function:([a-zA-Z0-9_-]+):"
@@ -236,8 +237,7 @@ public class DurableExecutionService implements Resettable {
         List<Runnable> effects = new ArrayList<>();
         CheckpointResult result;
         synchronized (lockFor(arn)) {
-            DurableExecution execution = load(arn);
-            requireCurrentToken(execution, checkpointToken);
+            DurableExecution execution = loadWithCurrentToken(arn, checkpointToken);
             long now = clock.millis();
             DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution, updates, now);
             if (!outcome.closed()) {
@@ -264,8 +264,7 @@ public class DurableExecutionService implements Resettable {
         ArnParts arn = parseArn(executionArn);
         List<DurableOperation> operations;
         synchronized (lockFor(arn)) {
-            DurableExecution execution = load(arn);
-            requireCurrentToken(execution, checkpointToken);
+            DurableExecution execution = loadWithCurrentToken(arn, checkpointToken);
             operations = new ArrayList<>(execution.getOperations().values());
         }
         List<Cursored<DurableOperation>> indexed = new ArrayList<>(operations.size());
@@ -613,14 +612,21 @@ public class DurableExecutionService implements Resettable {
         });
     }
 
-    private void requireCurrentToken(DurableExecution execution, String checkpointToken) {
+    /** Checkpoint and state calls answer an unknown execution as a bad token, not as ResourceNotFoundException. */
+    private DurableExecution loadWithCurrentToken(ArnParts arn, String checkpointToken) {
         Optional<DurableTokens.CheckpointToken> token = DurableTokens.parseCheckpointToken(checkpointToken);
-        if (token.isEmpty() || execution.isClosed() || execution.getCurrentInvocationId() == null
-                || !token.get().executionArn().equals(execution.getExecutionArn())
+        if (token.isPresent() && !token.get().executionArn().equals(arn.arn())) {
+            throw new AwsException("InvalidParameterValueException", TOKEN_FOR_OTHER_EXECUTION, 400);
+        }
+        DurableExecution execution = store.getForAccount(arn.accountId(), arn.storeKey())
+                .filter(candidate -> candidate.getExecutionArn().equals(arn.arn()))
+                .orElse(null);
+        if (token.isEmpty() || execution == null || execution.isClosed() || execution.getCurrentInvocationId() == null
                 || !token.get().invocationId().equals(execution.getCurrentInvocationId())
                 || token.get().sequence() != execution.getCheckpointSequence()) {
             throw new AwsException("InvalidParameterValueException", INVALID_TOKEN, 400);
         }
+        return execution;
     }
 
     private void save(DurableExecution execution) {
