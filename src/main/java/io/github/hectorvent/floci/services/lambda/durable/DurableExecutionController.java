@@ -66,7 +66,7 @@ public class DurableExecutionController {
     @Path("/durable-executions/{arn: .+}/checkpoint")
     public Response checkpoint(@PathParam("arn") String arn, String body) {
         Map<String, Object> request = readObject(body);
-        DurableExecutionService.CheckpointResult result = service.checkpoint(arn,
+        DurableExecutionService.CheckpointResult result = service.checkpoint(ownedArn(arn),
                 stringMember(request, "CheckpointToken"), DurableWire.parseUpdates(request.get("Updates")));
         ObjectNode response = objectMapper.createObjectNode();
         if (result.checkpointToken() != null) {
@@ -82,7 +82,7 @@ public class DurableExecutionController {
                              @QueryParam("CheckpointToken") String checkpointToken,
                              @QueryParam("Marker") String marker,
                              @QueryParam("MaxItems") String maxItems) {
-        DurableExecutionService.StatePage page = service.getState(arn, checkpointToken, marker,
+        DurableExecutionService.StatePage page = service.getState(ownedArn(arn), checkpointToken, marker,
                 parseMaxItems(maxItems));
         return Response.ok(DurableWire.operations(page.operations(), page.nextMarker())).build();
     }
@@ -94,7 +94,7 @@ public class DurableExecutionController {
                                @QueryParam("Marker") String marker,
                                @QueryParam("MaxItems") String maxItems,
                                @QueryParam("ReverseOrder") String reverseOrder) {
-        PaginatedResult<DurableHistoryEvent> page = service.history(arn, parseMaxItems(maxItems), marker,
+        PaginatedResult<DurableHistoryEvent> page = service.history(ownedArn(arn), parseMaxItems(maxItems), marker,
                 Boolean.parseBoolean(reverseOrder));
         boolean includeData = Boolean.parseBoolean(includeExecutionData);
         ObjectNode response = objectMapper.createObjectNode();
@@ -116,7 +116,7 @@ public class DurableExecutionController {
                 && error.getErrorData() == null && error.getStackTrace() == null) {
             error = null;
         }
-        DurableExecution execution = service.stop(arn, error);
+        DurableExecution execution = service.stop(ownedArn(arn), error);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("StopTimestamp", execution.getEndTimestamp() / 1000.0);
         return Response.ok(response).build();
@@ -128,7 +128,7 @@ public class DurableExecutionController {
     public Response getExecution(@PathParam("arn") String arn,
                                  @QueryParam("IncludeExecutionData") String includeExecutionData) {
         boolean includeData = includeExecutionData == null || Boolean.parseBoolean(includeExecutionData);
-        return Response.ok(DurableWire.execution(service.get(arn), includeData)).build();
+        return Response.ok(DurableWire.execution(service.get(ownedArn(arn)), includeData)).build();
     }
 
     @GET
@@ -162,6 +162,14 @@ public class DurableExecutionController {
             response.put("NextMarker", page.nextToken());
         }
         return Response.ok(response).build();
+    }
+
+    /** An execution of another account is not found, as AWS gives no cross-account access to executions. */
+    private String ownedArn(String arn) {
+        if (!DurableExecutionService.parseArn(arn).accountId().equals(regionResolver.getAccountId())) {
+            throw new AwsException("ResourceNotFoundException", DurableExecutionService.NOT_FOUND, 404);
+        }
+        return arn;
     }
 
     private Map<String, Object> readObject(String body) {
