@@ -30,8 +30,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * a description, pattern or retention change updates the archive in place, a property removed
  * from the template keeps its value, and a later resource failing rolls the change back; a source
  * change replaces the archive, and is refused for an explicitly named one, as is declaring a
- * generated name explicitly; and the stack delete removes it. Custom source buses are created
- * through the EventBridge API so the stacks hold only archives.
+ * generated name explicitly; an update of a stack whose archive was stubbed creates a real one;
+ * and the stack delete removes it. Custom source buses are created through the EventBridge API so
+ * the stacks hold only archives.
  */
 @QuarkusTest
 class CloudFormationEventsArchiveIntegrationTest {
@@ -227,6 +228,28 @@ class CloudFormationEventsArchiveIntegrationTest {
         assertEquals("orders archive", archive.getString("Description"));
         assertEquals(7, archive.getInt("RetentionDays"));
         assertArchiveGone(broken);
+    }
+
+    @Test
+    void updateAfterStubUpgradeProvisionsTheRealArchive() throws Exception {
+        // A stack created before AWS::Events::Archive had a provisioner holds the dispatcher's stub
+        // for it, a <logicalId>-<8 hex> physical id naming no archive. Its next update must create
+        // the archive instead of failing to describe that id.
+        String stack = createStack(MAPPER.writeValueAsString(Map.of("Resources",
+                Map.of("Archive", Map.of("Type", "AWS::Foo::Bar", "Properties", Map.of())))), "CREATE_COMPLETE");
+        String stubId = XmlParser.extractFirst(cfn(stack, "DescribeStackResources", null).then().statusCode(200)
+                .extract().asString(), "PhysicalResourceId", null);
+        assertTrue(stubId != null && stubId.startsWith("Archive-"), stubId);
+
+        updateStack(stack, template(archiveProperties(null, busArnSub("default"))));
+        String name = output(awaitStatus(stack, "UPDATE_COMPLETE"), "ArchiveRef");
+
+        assertNotEquals(stubId, name);
+        assertTrue(name.startsWith(stack + "-Archive-"), name);
+        String defaultBus = events("DescribeEventBus", Map.of("Name", "default")).then().statusCode(200)
+                .extract().jsonPath().getString("Arn");
+        assertEquals(defaultBus, describeArchive(name).then().statusCode(200)
+                .extract().jsonPath().getString("EventSourceArn"));
     }
 
     @Test

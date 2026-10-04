@@ -85,7 +85,10 @@ public class EventsArchiveCfnProvisioner implements CfnResourceProvisioner {
         }
         Integer retentionDays = retentionDays(props, ctx);
 
-        Archive prior = ctx.isUpdate()
+        // A stack from before this type had a provisioner holds the dispatcher's stub here, which
+        // names no archive and never recorded a name mode, so the archive is created as on a first deploy.
+        boolean updatesArchive = ctx.isUpdate() && attributesBefore.containsKey(NAME_MODE_ATTR);
+        Archive prior = updatesArchive
                 ? eventBridgeService.describeArchive(ctx.priorPhysicalId(), ctx.region())
                 : null;
         boolean sourceChanged = prior != null && !sourceArn.equals(prior.getEventSourceArn());
@@ -95,10 +98,10 @@ public class EventsArchiveCfnProvisioner implements CfnResourceProvisioner {
                     "CloudFormation cannot update a stack when a custom-named resource requires "
                             + "replacing. Rename " + explicitName + " and update the stack again.", 400);
         }
-        String name = physicalName(r, ctx, explicitName, hasExplicitName, sourceChanged);
+        String name = physicalName(r, ctx, explicitName, hasExplicitName, updatesArchive, sourceChanged);
 
         Archive archive;
-        if (ctx.reusesPriorEntity(name)) {
+        if (updatesArchive && ctx.reusesPriorEntity(name)) {
             snapshotBeforeUpdate(r, prior, ctx.region());
             archive = eventBridgeService.updateArchive(name, description, eventPattern, retentionDays, ctx.region());
         } else {
@@ -138,16 +141,16 @@ public class EventsArchiveCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The template's name when it gives one; otherwise the generated name the archive already has,
      * unless the previous name was explicit or the source changed, since either replaces the
-     * archive on AWS; and a fresh generated name failing both.
+     * archive on AWS, or the prior resource names no archive; and a fresh generated name otherwise.
      */
     private static String physicalName(StackResource r, ProvisionContext ctx, String explicitName,
-                                       boolean hasExplicitName, boolean sourceChanged) {
+                                       boolean hasExplicitName, boolean updatesArchive, boolean sourceChanged) {
         if (hasExplicitName) {
             return explicitName;
         }
         boolean explicitNameRemoved = ctx.isUpdate()
                 && NAME_MODE_EXPLICIT.equals(r.getAttributes().get(NAME_MODE_ATTR));
-        if (ctx.isUpdate() && !explicitNameRemoved && !sourceChanged) {
+        if (updatesArchive && !explicitNameRemoved && !sourceChanged) {
             return ctx.priorPhysicalId();
         }
         return ctx.generatePhysicalName(r.getLogicalId(), ARCHIVE_NAME_MAX_LENGTH, false);
