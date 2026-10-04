@@ -29,6 +29,8 @@ import jakarta.ws.rs.core.Response;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.EnumSet;
 import java.util.List;
@@ -147,14 +149,18 @@ public class DurableExecutionController {
                                    @QueryParam("Marker") String marker,
                                    @QueryParam("MaxItems") String maxItems) {
         String region = regionResolver.resolveRegion(headers);
+        // AWS converts types first, then checks values, then the single-status rule, then the function.
+        Long after = parseTimestamp(startedAfter);
+        Long before = parseTimestamp(startedBefore);
+        Integer pageSize = parseMaxItems(maxItems);
+        DurableExecutionService.pageSize(pageSize);
         Set<DurableExecutionStatus> statusFilter = parseStatuses(statuses);
         LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
         boolean qualified = (qualifier != null && !qualifier.isBlank())
                 || LambdaArnUtils.resolve(functionName).qualifier() != null;
         DurableExecutionService.ListRequest request = new DurableExecutionService.ListRequest(fn.getAccountId(),
                 region, fn.getFunctionName(), qualified ? fn.getVersion() : null, durableExecutionName, statusFilter,
-                parseTimestamp(startedAfter, "startedAfter"), parseTimestamp(startedBefore, "startedBefore"),
-                Boolean.parseBoolean(reverseOrder), parseMaxItems(maxItems), marker);
+                after, before, Boolean.parseBoolean(reverseOrder), pageSize, marker);
         PaginatedResult<DurableExecution> page = service.list(request);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode executions = response.putArray("DurableExecutions");
@@ -235,27 +241,33 @@ public class DurableExecutionController {
                                 + "Member must not be null]", 400);
             }
         }
+        if (statuses.size() > 1) {
+            throw new AwsException("InvalidParameterValueException", "Cannot filter by more than one status", 400);
+        }
         return parsed;
     }
 
-    private static Long parseTimestamp(String value, String field) {
+    /** AWS takes ISO 8601, a plain date or epoch seconds. */
+    private static Long parseTimestamp(String value) {
         if (value == null || value.isBlank()) {
             return null;
         }
         try {
             return Instant.parse(value).toEpochMilli();
-        } catch (DateTimeParseException expected) {
-            // Not ISO 8601. Some SDKs send epoch seconds instead.
-            double seconds;
+        } catch (DateTimeParseException notInstant) {
             try {
-                seconds = Double.parseDouble(value);
-            } catch (NumberFormatException e) {
-                throw new AwsException("InvalidParameterValueException", field + " must be a timestamp", 400);
+                return LocalDate.parse(value).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+            } catch (DateTimeParseException notDate) {
+                try {
+                    double seconds = Double.parseDouble(value);
+                    if (Double.isFinite(seconds)) {
+                        return (long) (seconds * 1000);
+                    }
+                } catch (NumberFormatException notNumber) {
+                    // Falls through to the error AWS gives for every unreadable timestamp.
+                }
+                throw new AwsException("SerializationException", "'" + value + "' can not be converted to Date", 400);
             }
-            if (!Double.isFinite(seconds)) {
-                throw new AwsException("InvalidParameterValueException", field + " must be a timestamp", 400);
-            }
-            return (long) (seconds * 1000);
         }
     }
 }

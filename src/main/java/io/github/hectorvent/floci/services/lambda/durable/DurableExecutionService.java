@@ -741,7 +741,7 @@ public class DurableExecutionService implements Resettable {
         return startLocks.computeIfAbsent(accountId + ":" + region, ignored -> new Object());
     }
 
-    private static int pageSize(Integer maxItems) {
+    static int pageSize(Integer maxItems) {
         if (maxItems == null || maxItems == 0) {
             return DEFAULT_PAGE_SIZE;
         }

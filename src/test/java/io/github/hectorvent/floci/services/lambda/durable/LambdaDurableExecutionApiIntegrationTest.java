@@ -202,7 +202,23 @@ class LambdaDurableExecutionApiIntegrationTest {
             .get(DURABLE + "/functions/api-durable-fn/durable-executions?StartedAfter=NaN")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"));
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("'NaN' can not be converted to Date"));
+
+        given()
+        .when()
+            .get(DURABLE + "/functions/no-such-durable-fn/durable-executions?Statuses=RUNNING&Statuses=FAILED")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", equalTo("Cannot filter by more than one status"));
+
+        given()
+        .when()
+            .get(DURABLE + "/functions/no-such-durable-fn/durable-executions?MaxItems=5000")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
 
         given()
         .when()
