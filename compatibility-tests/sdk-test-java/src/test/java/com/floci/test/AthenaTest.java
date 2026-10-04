@@ -345,7 +345,7 @@ class AthenaTest {
 
         ListTagsForResourceResponse response = athena.listTagsForResource(
                 ListTagsForResourceRequest.builder()
-                        .resourceARN("arn:aws:athena:us-east-1:000000000000:workgroup/" + groupName)
+                        .resourceARN(TestFixtures.arn("athena", "000000000000", "workgroup/" + groupName))
                         .build());
 
         assertThat(response.tags()).hasSize(1);

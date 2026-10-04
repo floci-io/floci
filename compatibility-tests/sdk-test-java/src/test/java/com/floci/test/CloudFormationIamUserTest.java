@@ -84,7 +84,8 @@ class CloudFormationIamUserTest {
 
         assertThat(outputs).containsEntry("UserRef", userName);
         String userArn = outputs.get("UserArn");
-        assertThat(userArn).startsWith("arn:aws:iam::").endsWith(":user/initial/" + userName);
+        assertThat(userArn).startsWith("arn:" + TestFixtures.partition() + ":iam::")
+                .endsWith(":user/initial/" + userName);
 
         GetUserResponse userResponse = iam.getUser(GetUserRequest.builder().userName(userName).build());
         User user = userResponse.user();

@@ -63,7 +63,7 @@ class CodeDeployTest {
 
     static final String DEPLOY_FUNCTION = "cd-deploy-fn";
     static final String DEPLOY_ALIAS = "live";
-    static final String ROLE = "arn:aws:iam::000000000000:role/lambda-role";
+    static final String ROLE = TestFixtures.globalArn("iam", "000000000000", "role/lambda-role");
     static String deploymentId;
     static String v1;
     static String v2;
@@ -163,7 +163,7 @@ class CodeDeployTest {
                 .applicationName("sdk-lambda-app")
                 .deploymentGroupName("sdk-lambda-dg")
                 .deploymentConfigName("CodeDeployDefault.LambdaAllAtOnce")
-                .serviceRoleArn("arn:aws:iam::000000000000:role/codedeploy-role")
+                .serviceRoleArn(TestFixtures.globalArn("iam", "000000000000", "role/codedeploy-role"))
                 .deploymentStyle(DeploymentStyle.builder()
                         .deploymentType(DeploymentType.BLUE_GREEN)
                         .deploymentOption(DeploymentOption.WITH_TRAFFIC_CONTROL)
@@ -236,7 +236,7 @@ class CodeDeployTest {
     @Test
     @Order(14)
     void tagAndListTags() {
-        String arn = "arn:aws:codedeploy:us-east-1:000000000000:application:sdk-lambda-app";
+        String arn = TestFixtures.arn("codedeploy", "000000000000", "application:sdk-lambda-app");
         codedeploy.tagResource(r -> r
                 .resourceArn(arn)
                 .tags(Tag.builder().key("team").value("platform").build(),
@@ -250,7 +250,7 @@ class CodeDeployTest {
     @Test
     @Order(15)
     void untagResource() {
-        String arn = "arn:aws:codedeploy:us-east-1:000000000000:application:sdk-lambda-app";
+        String arn = TestFixtures.arn("codedeploy", "000000000000", "application:sdk-lambda-app");
         codedeploy.untagResource(r -> r.resourceArn(arn).tagKeys("project"));
 
         ListTagsForResourceResponse resp = codedeploy.listTagsForResource(r -> r.resourceArn(arn));
@@ -331,7 +331,7 @@ class CodeDeployTest {
                 .applicationName("cd-lambda-app")
                 .deploymentGroupName("cd-lambda-dg")
                 .deploymentConfigName("CodeDeployDefault.LambdaAllAtOnce")
-                .serviceRoleArn("arn:aws:iam::000000000000:role/codedeploy-role"));
+                .serviceRoleArn(TestFixtures.globalArn("iam", "000000000000", "role/codedeploy-role")));
     }
 
     @Test

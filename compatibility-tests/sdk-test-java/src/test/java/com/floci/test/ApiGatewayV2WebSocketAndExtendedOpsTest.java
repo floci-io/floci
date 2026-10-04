@@ -437,7 +437,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
                 .tags(Map.of("initial", "tag"))
                 .build());
         String tagApiId = createRes.apiId();
-        String arn = "arn:aws:apigateway:us-east-1::/apis/" + tagApiId;
+        String arn = TestFixtures.arn("apigateway", "", "/apis/" + tagApiId);
 
         try {
             // Verify tags on create
@@ -478,7 +478,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
                 .protocolType(ProtocolType.HTTP)
                 .build());
         String noTagApiId = createRes.apiId();
-        String arn = "arn:aws:apigateway:us-east-1::/apis/" + noTagApiId;
+        String arn = TestFixtures.arn("apigateway", "", "/apis/" + noTagApiId);
 
         try {
             Map<String, String> tags = gw.getTags(GetTagsRequest.builder().resourceArn(arn).build()).tags();
@@ -492,7 +492,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("TagResource on non-existent API returns 404")
     void tagResourceNotFound() {
         assertThatThrownBy(() -> gw.tagResource(TagResourceRequest.builder()
-                .resourceArn("arn:aws:apigateway:us-east-1::/apis/nonexistent999")
+                .resourceArn(TestFixtures.arn("apigateway", "", "/apis/nonexistent999"))
                 .tags(Map.of("k", "v"))
                 .build()))
                 .isInstanceOf(NotFoundException.class);

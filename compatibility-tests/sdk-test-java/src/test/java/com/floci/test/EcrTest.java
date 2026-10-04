@@ -52,7 +52,7 @@ class EcrTest {
 
         Repository repo = resp.repository();
         assertThat(repo.repositoryName()).isEqualTo(REPO_NAME);
-        assertThat(repo.repositoryArn()).startsWith("arn:aws:ecr:");
+        assertThat(repo.repositoryArn()).startsWith("arn:" + TestFixtures.partition() + ":ecr:");
         assertThat(repo.repositoryArn()).contains(":repository/" + REPO_NAME);
         assertThat(repo.repositoryUri()).contains("/" + REPO_NAME);
         // Hostname must resolve to loopback so docker auto-trusts it as insecure.
@@ -209,7 +209,7 @@ class EcrTest {
                     .containsExactly(firstPrefix);
 
             String credentialArn =
-                    "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/sdk";
+                    TestFixtures.arn("secretsmanager", "000000000000", "secret:ecr-pullthroughcache/sdk");
             UpdatePullThroughCacheRuleResponse updated = ecr.updatePullThroughCacheRule(builder -> builder
                     .ecrRepositoryPrefix(firstPrefix)
                     .credentialArn(credentialArn));

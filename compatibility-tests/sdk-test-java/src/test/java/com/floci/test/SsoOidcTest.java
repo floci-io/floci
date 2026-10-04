@@ -108,7 +108,7 @@ class SsoOidcTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(TestFixtures.globalArn("sso", "aws", "applicationProvider/custom"))
                     .name("Floci IAM OIDC SDK"))
                     .applicationArn();
 
