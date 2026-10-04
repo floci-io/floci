@@ -3477,16 +3477,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Optional<String> resolveCallerUserId(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+
+        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        if (akOpt.isPresent()) {
+            String userName = akOpt.get().getUserName();
+            return users.get(userName).map(IamUser::getUserId);
+        }
+
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
-        if (sessionOpt.isEmpty()) {
-            return Optional.empty();
+        if (sessionOpt.isPresent()) {
+            SessionCredential session = sessionOpt.get();
+            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+                deleteSession(accessKeyId, session);
+                return Optional.empty();
+            }
+            if (session.getAssumedRoleId() != null) {
+                return Optional.of(session.getAssumedRoleId());
+            } else if (session.getEc2RoleId() != null && session.getEc2InstanceId() != null) {
+                return Optional.of(session.getEc2RoleId() + ":" + session.getEc2InstanceId());
+            }
         }
-        SessionCredential session = sessionOpt.get();
-        if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
-            deleteSession(accessKeyId, session);
-            return Optional.empty();
-        }
-        return Optional.ofNullable(session.getAssumedRoleId());
+
+        return Optional.empty();
     }
 
     /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */

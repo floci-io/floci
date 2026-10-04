@@ -32,6 +32,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -2334,11 +2335,12 @@ class IamServiceTest {
      * changes: otherwise a changed password would still report the original creation time.
      */
     @Test
-    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() {
+    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() throws InterruptedException {
         iamService.createUser("cred-report-changed-user", "/");
         iamService.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
         Instant createdAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
 
+        Thread.sleep(20);
         iamService.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
         Instant changedAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
 
@@ -2399,4 +2401,39 @@ class IamServiceTest {
                 generation.description());
         assertDoesNotThrow(withExpiredReport::getCredentialReport);
     }
+
+    @Test
+    void resolveCallerUserIdReturnsUserIdForIamUser() {
+        IamUser user = iamService.createUser("testuser", "/");
+        AccessKey ak = iamService.createAccessKey("testuser");
+        Optional<String> userIdOpt = iamService.resolveCallerUserId(ak.getAccessKeyId());
+        assertTrue(userIdOpt.isPresent());
+        assertEquals(user.getUserId(), userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdReturnsAssumedRoleIdForSession() {
+        iamService.registerSession("ASIATESTKEY", "test-secret", "token",
+                "arn:aws:iam::000000000000:role/testrole", Instant.now().plusSeconds(3600), null,
+                "000000000000", "my-session", "AROATESTROLE:my-session");
+
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIATESTKEY");
+        assertTrue(userIdOpt.isPresent());
+        assertEquals("AROATESTROLE:my-session", userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdReturnsEc2AssumedRoleIdForEc2Session() {
+        SessionCredential session = new SessionCredential(
+                "ASIAEC2KEY", "test-secret", "token", "arn:aws:iam::000000000000:role/ec2role",
+                Instant.now().plusSeconds(3600), null, "000000000000");
+        session.setEc2InstanceId("i-1234567890abcdef0");
+        session.setEc2RoleId("AROAEC2ROLE");
+        iamService.registerEc2InstanceSession(session);
+
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIAEC2KEY");
+        assertTrue(userIdOpt.isPresent());
+        assertEquals("AROAEC2ROLE:i-1234567890abcdef0", userIdOpt.get());
+    }
 }
+
