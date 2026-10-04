@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.ses.model.DashboardOptions;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.GuardianOptions;
+import io.github.hectorvent.floci.services.ses.model.MessageSecurityOptions;
+import io.github.hectorvent.floci.services.ses.model.SigningScheme;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
@@ -61,6 +63,7 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
 public class SesConfigurationSetController {
 
     private static final Logger LOG = Logger.getLogger(SesConfigurationSetController.class);
+    private static final String SIGNATURE_FORMAT_DETACHED = "DETACHED";
 
     private final SesConfigurationSetService configSetService;
     private final SesService sesService;
@@ -134,6 +137,10 @@ public class SesConfigurationSetController {
             JsonNode vdmNode = request.path("VdmOptions");
             if (!vdmNode.isMissingNode() && !vdmNode.isNull()) {
                 cs.setVdmOptions(parseVdmOptions(vdmNode));
+            }
+            JsonNode messageSecurityNode = request.path("MessageSecurityOptions");
+            if (!messageSecurityNode.isMissingNode() && !messageSecurityNode.isNull()) {
+                cs.setMessageSecurityOptions(parseMessageSecurityOptions(messageSecurityNode));
             }
             sesService.createConfigurationSet(cs, region);
             LOG.infov("SES V2 CreateConfigurationSet: {0}", name);
@@ -230,6 +237,10 @@ public class SesConfigurationSetController {
             }
             if (cs.getVdmOptions() != null) {
                 result.set("VdmOptions", objectMapper.valueToTree(cs.getVdmOptions()));
+            }
+            if (cs.getMessageSecurityOptions() != null) {
+                result.set("MessageSecurityOptions",
+                        objectMapper.valueToTree(cs.getMessageSecurityOptions()));
             }
             return Response.ok(result).build();
         } catch (AwsException e) {
@@ -363,6 +374,27 @@ public class SesConfigurationSetController {
         }
     }
 
+    @POST
+    @Path("/update-configuration-sets")
+    public Response updateConfigurationSet(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(objectMapper, body);
+            String name = stringMemberOrAbsent(request, "ConfigurationSetName");
+            if (name == null || name.isBlank()) {
+                throw new AwsException("BadRequestException", "ConfigurationSetName is required.", 400);
+            }
+            JsonNode messageSecurityNode = request.path("MessageSecurityOptions");
+            MessageSecurityOptions options = (messageSecurityNode.isMissingNode() || messageSecurityNode.isNull())
+                    ? null : parseMessageSecurityOptions(messageSecurityNode);
+            configSetService.updateMessageSecurityOptions(name, options, region);
+            LOG.infov("SES V2 UpdateConfigurationSet on {0}", name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
     /** Reject a non-object option block, mirroring the AWS deserialization layer. */
     private static void requireOptionObject(JsonNode node) {
         if (!node.isObject()) {
@@ -424,6 +456,37 @@ public class SesConfigurationSetController {
             return null;
         }
         return a;
+    }
+
+    // Probed 2026-10-04: SES leaves the stored value alone when SigningScheme is absent, resets an
+    // empty union to DefaultScheme, lets SmimeScheme win when both members are sent, and stores a
+    // missing SignatureFormat as DETACHED. Returns null for "no change".
+    private static MessageSecurityOptions parseMessageSecurityOptions(JsonNode node) {
+        requireOptionObject(node);
+        JsonNode schemeNode = node.path("SigningScheme");
+        if (schemeNode.isMissingNode() || schemeNode.isNull()) {
+            return null;
+        }
+        requireOptionObject(schemeNode);
+        JsonNode defaultNode = schemeNode.path("DefaultScheme");
+        if (!defaultNode.isMissingNode() && !defaultNode.isNull()) {
+            requireOptionObject(defaultNode);
+        }
+        JsonNode smimeNode = schemeNode.path("SmimeScheme");
+        if (smimeNode.isMissingNode() || smimeNode.isNull()) {
+            return new MessageSecurityOptions(SigningScheme.defaultScheme());
+        }
+        requireOptionObject(smimeNode);
+        String format = stringMemberOrAbsent(smimeNode, "SignatureFormat");
+        if (format == null) {
+            format = SIGNATURE_FORMAT_DETACHED;
+        } else if (!SIGNATURE_FORMAT_DETACHED.equals(format)) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at "
+                            + "'messageSecurityOptions.signingScheme.smimeScheme.signatureFormat' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [DETACHED]", 400);
+        }
+        return new MessageSecurityOptions(SigningScheme.smime(format));
     }
 
     private static VdmOptions parseVdmOptions(JsonNode node) {

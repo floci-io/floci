@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EventBridgeDestination;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
+import io.github.hectorvent.floci.services.ses.model.MessageSecurityOptions;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -420,6 +421,22 @@ public class SesConfigurationSetService {
         cs.setArchivingOptions(options);
         configSetStore.put(configSetKey(region, configSetName), cs);
         LOG.infov("Updated ArchivingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    /**
+     * UpdateConfigurationSet: a partial update, so a null {@code options} keeps the stored value
+     * while the set must still exist.
+     */
+    public void updateMessageSecurityOptions(String configSetName, MessageSecurityOptions options,
+                                             String region) {
+        ConfigurationSet cs = get(configSetName, region);
+        if (options == null) {
+            return;
+        }
+        cs.setMessageSecurityOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated MessageSecurityOptions on configuration set {0} in region {1}",
+                configSetName, region);
     }
 
     public void setVdmOptions(String configSetName, VdmOptions options, String region) {

@@ -15,12 +15,14 @@ import software.amazon.awssdk.services.sesv2.model.DashboardOptions;
 import software.amazon.awssdk.services.sesv2.model.GuardianOptions;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateDedicatedIpPoolRequest;
+import software.amazon.awssdk.services.sesv2.model.DefaultSigningScheme;
 import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteDedicatedIpPoolRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeliveryOptions;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetResponse;
+import software.amazon.awssdk.services.sesv2.model.MessageSecurityOptions;
 import software.amazon.awssdk.services.sesv2.model.NotFoundException;
 import software.amazon.awssdk.services.sesv2.model.PutConfigurationSetArchivingOptionsRequest;
 import software.amazon.awssdk.services.sesv2.model.PutConfigurationSetDeliveryOptionsRequest;
@@ -28,7 +30,10 @@ import software.amazon.awssdk.services.sesv2.model.PutConfigurationSetReputation
 import software.amazon.awssdk.services.sesv2.model.PutConfigurationSetTrackingOptionsRequest;
 import software.amazon.awssdk.services.sesv2.model.ReputationOptions;
 import software.amazon.awssdk.services.sesv2.model.PutConfigurationSetVdmOptionsRequest;
+import software.amazon.awssdk.services.sesv2.model.SignatureFormat;
+import software.amazon.awssdk.services.sesv2.model.SigningScheme;
 import software.amazon.awssdk.services.sesv2.model.TrackingOptions;
+import software.amazon.awssdk.services.sesv2.model.UpdateConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.VdmOptions;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -41,6 +46,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   - {@code putConfigurationSetTrackingOptions}   / {@code TrackingOptions}
  *   - {@code putConfigurationSetDeliveryOptions}   / {@code DeliveryOptions}
  *   - {@code putConfigurationSetArchivingOptions}  / {@code ArchivingOptions}
+ *   - {@code updateConfigurationSet}               / {@code MessageSecurityOptions}
  * and the {@code GetConfigurationSet} response carrying each block, plus the
  * server-side validation errors surfaced as {@link BadRequestException} /
  * {@link NotFoundException}.
@@ -52,6 +58,7 @@ class SesConfigurationSetOptionsTest {
     private static final String CS_NAME = "compat-cs-options";
     private static final String CREATE_CS = "compat-cs-options-create";
     private static final String CREATE_CS_BAD = "compat-cs-options-create-bad";
+    private static final String CREATE_CS_SMIME = "compat-cs-options-create-smime";
     private static final String TRACK_DOMAIN = "compat-track.example.com";
     private static final String ARCHIVE_ARN =
             "arn:aws:ses:us-east-1:123456789012:mailmanager-archive/a-abcdefghijklmnopqrstuvwx";
@@ -64,6 +71,7 @@ class SesConfigurationSetOptionsTest {
         deleteConfigSetQuietly(CS_NAME);
         deleteConfigSetQuietly(CREATE_CS);
         deleteConfigSetQuietly(CREATE_CS_BAD);
+        deleteConfigSetQuietly(CREATE_CS_SMIME);
         sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSetName(CS_NAME).build());
         TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, TRACK_DOMAIN);
@@ -75,6 +83,7 @@ class SesConfigurationSetOptionsTest {
             deleteConfigSetQuietly(CS_NAME);
             deleteConfigSetQuietly(CREATE_CS);
             deleteConfigSetQuietly(CREATE_CS_BAD);
+            deleteConfigSetQuietly(CREATE_CS_SMIME);
             try {
                 sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
                         .emailIdentity(TRACK_DOMAIN).build());
@@ -257,5 +266,57 @@ class SesConfigurationSetOptionsTest {
         } finally {
             sesV2.deleteDedicatedIpPool(DeleteDedicatedIpPoolRequest.builder().poolName(pool).build());
         }
+    }
+
+    @Test
+    @Order(13)
+    void updateConfigurationSet_signingScheme_roundTrips() {
+        assertThat(getConfigSet().messageSecurityOptions()).isNull();
+
+        sesV2.updateConfigurationSet(UpdateConfigurationSetRequest.builder()
+                .configurationSetName(CS_NAME)
+                .messageSecurityOptions(MessageSecurityOptions.builder()
+                        .signingScheme(SigningScheme.fromSmimeScheme(s -> s.signatureFormat(SignatureFormat.DETACHED)))
+                        .build())
+                .build());
+        SigningScheme stored = getConfigSet().messageSecurityOptions().signingScheme();
+        assertThat(stored.type()).isEqualTo(SigningScheme.Type.SMIME_SCHEME);
+        assertThat(stored.smimeScheme().signatureFormat()).isEqualTo(SignatureFormat.DETACHED);
+
+        sesV2.updateConfigurationSet(UpdateConfigurationSetRequest.builder()
+                .configurationSetName(CS_NAME)
+                .messageSecurityOptions(MessageSecurityOptions.builder()
+                        .signingScheme(SigningScheme.fromDefaultScheme(DefaultSigningScheme.builder().build()))
+                        .build())
+                .build());
+        assertThat(getConfigSet().messageSecurityOptions().signingScheme().type())
+                .isEqualTo(SigningScheme.Type.DEFAULT_SCHEME);
+    }
+
+    @Test
+    @Order(14)
+    void createConfigurationSet_withSigningScheme_roundTrips() {
+        sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
+                .configurationSetName(CREATE_CS_SMIME)
+                .messageSecurityOptions(MessageSecurityOptions.builder()
+                        .signingScheme(SigningScheme.fromSmimeScheme(s -> s.signatureFormat(SignatureFormat.DETACHED)))
+                        .build())
+                .build());
+        SigningScheme stored = sesV2.getConfigurationSet(GetConfigurationSetRequest.builder()
+                .configurationSetName(CREATE_CS_SMIME).build()).messageSecurityOptions().signingScheme();
+        assertThat(stored.type()).isEqualTo(SigningScheme.Type.SMIME_SCHEME);
+        assertThat(stored.smimeScheme().signatureFormat()).isEqualTo(SignatureFormat.DETACHED);
+    }
+
+    @Test
+    @Order(15)
+    void updateConfigurationSet_missingSet_throwsNotFound() {
+        assertThatThrownBy(() -> sesV2.updateConfigurationSet(UpdateConfigurationSetRequest.builder()
+                .configurationSetName("compat-cs-options-missing")
+                .messageSecurityOptions(MessageSecurityOptions.builder()
+                        .signingScheme(SigningScheme.fromDefaultScheme(DefaultSigningScheme.builder().build()))
+                        .build())
+                .build()))
+                .isInstanceOf(NotFoundException.class);
     }
 }
