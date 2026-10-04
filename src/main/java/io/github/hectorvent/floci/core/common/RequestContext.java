@@ -14,6 +14,7 @@ public class RequestContext {
     private String region;
     private String partition;
     private String accessKeyId;
+    private String sessionToken;
 
     public String getAccountId() {
         return accountId;
@@ -50,5 +51,13 @@ public class RequestContext {
 
     public void setAccessKeyId(String accessKeyId) {
         this.accessKeyId = accessKeyId;
+    }
+
+    public String getSessionToken() {
+        return sessionToken;
+    }
+
+    public void setSessionToken(String sessionToken) {
+        this.sessionToken = sessionToken;
     }
 }

@@ -3487,6 +3487,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Optional<String> resolveCallerUserId(String accessKeyId) {
+        return resolveCallerUserId(accessKeyId, null);
+    }
+
+    public Optional<String> resolveCallerUserId(String accessKeyId, String sessionToken) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
             return Optional.empty();
         }
@@ -3502,6 +3506,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
                 deleteSession(accessKeyId, session);
+                return Optional.empty();
+            }
+            if (isTemporaryAccessKey(accessKeyId) && session.getSessionToken() != null
+                    && !hasMatchingSessionToken(session, sessionToken)) {
                 return Optional.empty();
             }
             if (session.getAssumedRoleId() != null) {

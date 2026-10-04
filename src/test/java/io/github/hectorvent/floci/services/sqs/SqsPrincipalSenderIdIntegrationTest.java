@@ -12,6 +12,7 @@ import java.util.List;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -61,6 +62,8 @@ class SqsPrincipalSenderIdIntegrationTest {
 
             String accessKeyId = assumed.extract().xmlPath().getString(
                     "AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+            String sessionToken = assumed.extract().xmlPath().getString(
+                    "AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken");
             String assumedRoleId = assumed.extract().xmlPath().getString(
                     "AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.AssumedRoleId");
 
@@ -79,6 +82,7 @@ class SqsPrincipalSenderIdIntegrationTest {
             given()
                     .contentType("application/x-www-form-urlencoded")
                     .header("Authorization", authHeader)
+                    .header("X-Amz-Security-Token", sessionToken)
                     .formParam("Action", "SendMessage")
                     .formParam("QueueUrl", queueUrl)
                     .formParam("MessageBody", "hello-from-assumed-role")
@@ -208,6 +212,8 @@ class SqsPrincipalSenderIdIntegrationTest {
 
             String roleAccessKeyId = assumed.extract().xmlPath().getString(
                     "AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+            String roleSessionToken = assumed.extract().xmlPath().getString(
+                    "AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken");
             String expectedAssumedRoleId = roleId + ":" + sessionName;
 
             XmlPath userResp = given()
@@ -243,6 +249,7 @@ class SqsPrincipalSenderIdIntegrationTest {
             given()
                     .contentType("application/x-www-form-urlencoded")
                     .header("Authorization", roleAuth)
+                    .header("X-Amz-Security-Token", roleSessionToken)
                     .formParam("Action", "SendMessage")
                     .formParam("QueueUrl", queueUrl)
                     .formParam("MessageBody", "msg-assumed-role")
@@ -376,6 +383,91 @@ class SqsPrincipalSenderIdIntegrationTest {
                         .when().post("/");
             }
             deleteQueue(queueUrl);
+        }
+    }
+
+    @Test
+    void senderIdIsNotAttributedToRoleWhenSessionTokenIsMissingOrInvalid() {
+        String roleName = "sqs-sender-untrusted-role-test";
+        String sessionName = "test-untrusted-session";
+        String queueName = "sqs-untrusted-role-queue";
+        String queueUrl = null;
+
+        try {
+            ValidatableResponse roleResp = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateRole")
+                    .formParam("RoleName", roleName)
+                    .formParam("AssumeRolePolicyDocument", ASSUME_ROLE_POLICY_DOCUMENT)
+                    .header("Authorization", IAM_AUTHORIZATION)
+                    .when().post("/").then().statusCode(200);
+
+            String roleId = roleResp.extract().xmlPath().getString(
+                    "CreateRoleResponse.CreateRoleResult.Role.RoleId");
+            String roleArn = roleResp.extract().xmlPath().getString(
+                    "CreateRoleResponse.CreateRoleResult.Role.Arn");
+
+            ValidatableResponse assumed = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "AssumeRole")
+                    .formParam("RoleArn", roleArn)
+                    .formParam("RoleSessionName", sessionName)
+                    .header("Authorization", STS_AUTHORIZATION)
+                    .when().post("/").then().statusCode(200);
+
+            String roleAccessKeyId = assumed.extract().xmlPath().getString(
+                    "AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+            String assumedRoleId = roleId + ":" + sessionName;
+
+            queueUrl = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateQueue")
+                    .formParam("QueueName", queueName)
+                    .when().post("/").then().statusCode(200)
+                    .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+            String roleAuth = "AWS4-HMAC-SHA256 Credential=" + roleAccessKeyId
+                    + "/20261001/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=abc";
+
+            // 1. SendMessage without X-Amz-Security-Token -> must not be attributed to assumedRoleId
+            given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .header("Authorization", roleAuth)
+                    .formParam("Action", "SendMessage")
+                    .formParam("QueueUrl", queueUrl)
+                    .formParam("MessageBody", "msg-no-token")
+                    .when().post("/").then().statusCode(200);
+
+            // 2. SendMessage with invalid X-Amz-Security-Token -> must not be attributed to assumedRoleId
+            given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .header("Authorization", roleAuth)
+                    .header("X-Amz-Security-Token", "invalid-token")
+                    .formParam("Action", "SendMessage")
+                    .formParam("QueueUrl", queueUrl)
+                    .formParam("MessageBody", "msg-bad-token")
+                    .when().post("/").then().statusCode(200);
+
+            XmlPath xml = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ReceiveMessage")
+                    .formParam("QueueUrl", queueUrl)
+                    .formParam("MaxNumberOfMessages", "10")
+                    .formParam("VisibilityTimeout", "0")
+                    .formParam("AttributeName.1", "SenderId")
+                    .when().post("/").then().statusCode(200)
+                    .extract().xmlPath();
+
+            List<String> senderIds = xml.getList(
+                    "ReceiveMessageResponse.ReceiveMessageResult.Message.Attribute.Value", String.class);
+            assertEquals(2, senderIds.size());
+            for (String senderId : senderIds) {
+                assertNotEquals(assumedRoleId, senderId);
+                assertEquals("000000000000", senderId);
+            }
+        } finally {
+            deleteQueue(queueUrl);
+            deleteRole(roleName);
         }
     }
 

@@ -71,14 +71,17 @@ public class AccountContextFilter implements ContainerRequestFilter {
         if (pinnedAccount != null) {
             requestContext.setAccountId(pinnedAccount.toString());
             requestContext.setAccessKeyId(null);
+            requestContext.setSessionToken(null);
             applyRegion(regionResolver.resolveRegionFromAuth(null));
             return;
         }
+        String sessionToken = extractSessionToken(ctx);
         String auth = ctx.getHeaderString("Authorization");
         String akid = auth != null && !auth.isEmpty() ? accountResolver.extractAccessKeyId(auth) : null;
         if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
             requestContext.setAccessKeyId(akid);
+            requestContext.setSessionToken(sessionToken);
             String region = regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
             rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
@@ -90,6 +93,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
                 requestContext.setAccountId(
                         resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
                 requestContext.setAccessKeyId(presignedAkid);
+                requestContext.setSessionToken(sessionToken);
                 String region = regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));
@@ -98,9 +102,22 @@ public class AccountContextFilter implements ContainerRequestFilter {
             } else {
                 requestContext.setAccountId(accountResolver.resolve(null));
                 requestContext.setAccessKeyId(null);
+                requestContext.setSessionToken(null);
                 applyRegion(regionResolver.resolveRegionFromAuth(null));
             }
         }
+    }
+
+    private String extractSessionToken(ContainerRequestContext ctx) {
+        String token = ctx.getHeaderString("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token.trim();
+        }
+        token = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token.trim();
+        }
+        return null;
     }
 
     /**

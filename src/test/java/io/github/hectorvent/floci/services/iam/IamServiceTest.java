@@ -139,7 +139,7 @@ class IamServiceTest {
         sessions.put(accessKeyId, restored);
         assertEquals("arn:aws:sts::123456789012:assumed-role/TestRole/my-custom-session-name",
                 service.resolveCallerArn(accessKeyId).orElseThrow());
-        assertEquals(restored.getAssumedRoleId(), service.resolveCallerUserId(accessKeyId).orElseThrow());
+        assertEquals(restored.getAssumedRoleId(), service.resolveCallerUserId(accessKeyId, restored.getSessionToken()).orElseThrow());
     }
 
     @Test
@@ -2417,7 +2417,7 @@ class IamServiceTest {
                 "arn:aws:iam::000000000000:role/testrole", Instant.now().plusSeconds(3600), null,
                 "000000000000", "my-session", "AROATESTROLE:my-session");
 
-        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIATESTKEY");
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIATESTKEY", "token");
         assertTrue(userIdOpt.isPresent());
         assertEquals("AROATESTROLE:my-session", userIdOpt.get());
     }
@@ -2431,7 +2431,7 @@ class IamServiceTest {
         session.setEc2RoleId("AROAEC2ROLE");
         iamService.registerEc2InstanceSession(session);
 
-        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIAEC2KEY");
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIAEC2KEY", "token");
         assertTrue(userIdOpt.isPresent());
         assertEquals("AROAEC2ROLE:i-1234567890abcdef0", userIdOpt.get());
     }
@@ -2444,7 +2444,7 @@ class IamServiceTest {
                 Instant.now().plusSeconds(3600), null, "000000000000",
                 "custom-session", null);
 
-        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIAROLEARNKEY");
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIAROLEARNKEY", "token");
         assertTrue(userIdOpt.isPresent());
         assertEquals(role.getRoleId() + ":custom-session", userIdOpt.get());
     }
@@ -2457,9 +2457,32 @@ class IamServiceTest {
                 "000000000000", "ASIALAMBDAKEY", "secret", "token", role.getArn(),
                 "my-function", assumedRoleId);
 
-        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIALAMBDAKEY");
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIALAMBDAKEY", "token");
         assertTrue(userIdOpt.isPresent());
         assertEquals(assumedRoleId, userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdRejectsTemporaryCredentialsWhenSessionTokenMismatchesOrMissing() {
+        IamRole role = iamService.createRole("TokenCheckRole", "/", "{}", null, 3600, null);
+        String assumedRoleId = role.getRoleId() + ":token-check-session";
+        iamService.registerSession(
+                "ASIATOKENCHECKKEY", "test-secret", "correct-token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000",
+                "token-check-session", assumedRoleId);
+
+        // Matching token -> resolves
+        Optional<String> validOpt = iamService.resolveCallerUserId("ASIATOKENCHECKKEY", "correct-token");
+        assertTrue(validOpt.isPresent());
+        assertEquals(assumedRoleId, validOpt.get());
+
+        // Wrong token -> empty
+        Optional<String> wrongOpt = iamService.resolveCallerUserId("ASIATOKENCHECKKEY", "wrong-token");
+        assertTrue(wrongOpt.isEmpty());
+
+        // Null token -> empty
+        Optional<String> nullOpt = iamService.resolveCallerUserId("ASIATOKENCHECKKEY", null);
+        assertTrue(nullOpt.isEmpty());
     }
 }
 

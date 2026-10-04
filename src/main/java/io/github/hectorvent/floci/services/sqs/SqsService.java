@@ -802,7 +802,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 if (ctx != null) {
                     String akid = ctx.getAccessKeyId();
                     if (akid != null && iamService != null) {
-                        Optional<String> principalId = iamService.resolveCallerUserId(akid);
+                        Optional<String> principalId = iamService.resolveCallerUserId(akid, ctx.getSessionToken());
                         if (principalId.isPresent()) {
                             return principalId.get();
                         }
