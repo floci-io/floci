@@ -119,10 +119,28 @@ class RedshiftServerlessRuntimeTest {
 
     @Test
     void changeMasterPasswordUpdatesTheRoleAndTheProxyBackendLeg() {
-        runtime.changeMasterPassword(ACCOUNT, REGION, "my-wg", "root", "analytics", "Changed123");
+        runtime.changeMasterPassword(ACCOUNT, REGION, "my-wg", "root", "analytics", "Secret123", "Changed123");
 
         verify(containers).alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Changed123", "analytics");
         verify(proxies).updateMasterPassword(RELAY_KEY, "Changed123");
+    }
+
+    @Test
+    void aProxyUpdateThatFailsPutsTheRolePasswordBack() {
+        doThrow(new RuntimeException("proxy gone")).when(proxies).updateMasterPassword(RELAY_KEY, "Changed123");
+
+        assertThrows(RuntimeException.class, () -> runtime.changeMasterPassword(
+                ACCOUNT, REGION, "my-wg", "root", "analytics", "Secret123", "Changed123"));
+
+        verify(containers).alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics");
+    }
+
+    @Test
+    void restoreMasterPasswordResetsTheRoleAndTheProxy() {
+        runtime.restoreMasterPassword(ACCOUNT, REGION, "my-wg", "root", "analytics", "Secret123");
+
+        verify(containers).alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics");
+        verify(proxies).updateMasterPassword(RELAY_KEY, "Secret123");
     }
 
     @Test

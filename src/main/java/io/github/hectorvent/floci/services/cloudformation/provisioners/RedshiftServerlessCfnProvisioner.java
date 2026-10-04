@@ -112,7 +112,15 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
 
         Namespace namespace;
         if (ctx.reusesPriorEntity(name)) {
-            namespace = service.updateNamespace(name, adminUsername, adminUserPassword, kmsKeyId,
+            String dbName = ctx.resolveOptional(props, "DbName");
+            String currentDbName = service.getNamespace(name, ctx.region()).getDbName();
+            if (dbName != null && !dbName.equals(currentDbName)) {
+                throw new AwsException("ValidationException",
+                        "DbName cannot be changed in place; it is fixed when the namespace is created, so "
+                                + "remove the namespace from the template and add it back",
+                        400);
+            }
+            namespace = service.reconcileNamespace(name, adminUsername, adminUserPassword, kmsKeyId,
                     defaultIamRoleArn, iamRoles, logExports, ctx.region());
             reconcileTags(namespace.getNamespaceArn(), tags, ctx);
         } else {

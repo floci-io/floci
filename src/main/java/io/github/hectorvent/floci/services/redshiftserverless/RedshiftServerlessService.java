@@ -249,26 +249,47 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     /**
-     * A new {@code adminUserPassword} is applied to the running workgroup backend before the
-     * namespace is stored, so a password the backend refuses leaves the namespace unchanged.
+     * A new {@code adminUserPassword} is applied to the running workgroup backend last, once every
+     * other field has validated, and rolled back if the namespace cannot be stored. The backend
+     * therefore never holds a password the stored namespace does not.
      */
     public synchronized Namespace updateNamespace(String namespaceName, String adminUsername,
                                                   String adminUserPassword, String kmsKeyId,
                                                   String defaultIamRoleArn, List<String> iamRoles,
                                                   List<String> logExports, String region) {
+        return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, region, false);
+    }
+
+    /**
+     * As {@link #updateNamespace} for CloudFormation, which drives a namespace to the template: an
+     * omitted {@code kmsKeyId} returns to the AWS-owned key and an omitted {@code defaultIamRoleArn}
+     * is cleared, where the API call would keep the stored value.
+     */
+    public synchronized Namespace reconcileNamespace(String namespaceName, String adminUsername,
+                                                     String adminUserPassword, String kmsKeyId,
+                                                     String defaultIamRoleArn, List<String> iamRoles,
+                                                     List<String> logExports, String region) {
+        return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, region, true);
+    }
+
+    private Namespace applyNamespaceUpdate(String namespaceName, String adminUsername,
+                                           String adminUserPassword, String kmsKeyId,
+                                           String defaultIamRoleArn, List<String> iamRoles,
+                                           List<String> logExports, String region, boolean resetOmitted) {
         String key = storageKey(region, namespaceName);
-        Namespace updated = new Namespace(getNamespace(namespaceName, region));
+        Namespace current = getNamespace(namespaceName, region);
+        Namespace updated = new Namespace(current);
         if (adminUsername != null) {
             updated.setAdminUsername(adminUsername);
         }
-        if (adminUserPassword != null && !adminUserPassword.isBlank()) {
-            applyNewAdminPassword(updated, adminUserPassword, region);
-            updated.setAdminUserPassword(adminUserPassword);
-        }
         if (kmsKeyId != null && !kmsKeyId.isBlank()) {
             updated.setKmsKeyId(kmsKeyId);
+        } else if (resetOmitted) {
+            updated.setKmsKeyId(AWS_OWNED_KMS_KEY);
         }
-        if (defaultIamRoleArn != null) {
+        if (defaultIamRoleArn != null || resetOmitted) {
             updated.setDefaultIamRoleArn(defaultIamRoleArn);
         }
         if (iamRoles != null) {
@@ -277,7 +298,19 @@ public class RedshiftServerlessService implements Resettable {
         if (logExports != null) {
             updated.setLogExports(validateLogExports(logExports));
         }
-        namespaces.put(key, updated);
+        boolean rotated = adminUserPassword != null && !adminUserPassword.isBlank();
+        if (rotated) {
+            applyNewAdminPassword(current, adminUserPassword, region);
+            updated.setAdminUserPassword(adminUserPassword);
+        }
+        try {
+            namespaces.put(key, updated);
+        } catch (RuntimeException e) {
+            if (rotated) {
+                restoreAdminPassword(current, region);
+            }
+            throw e;
+        }
         return updated;
     }
 
@@ -581,13 +614,24 @@ public class RedshiftServerlessService implements Resettable {
         }
         try {
             runtime.changeMasterPassword(workgroups.accountId(), region, attached.get().getWorkgroupName(),
-                    attached.get().getMasterUsername(), namespace.getDbName(), newPassword);
+                    attached.get().getMasterUsername(), namespace.getDbName(), namespace.getAdminUserPassword(),
+                    newPassword);
         } catch (AwsException e) {
             if ("InvalidParameterValue".equals(e.getErrorCode())) {
                 throw new AwsException("ValidationException", e.getMessage(), 400);
             }
             throw e;
         }
+    }
+
+    private void restoreAdminPassword(Namespace previous, String region) {
+        Optional<Workgroup> attached = workgroupOf(previous.getNamespaceName(), region);
+        if (attached.isEmpty() || attached.get().getRuntimeHost() == null
+                || previous.getAdminUserPassword() == null) {
+            return;
+        }
+        runtime.restoreMasterPassword(workgroups.accountId(), region, attached.get().getWorkgroupName(),
+                attached.get().getMasterUsername(), previous.getDbName(), previous.getAdminUserPassword());
     }
 
     private static String blankToNull(String value) {
@@ -605,11 +649,13 @@ public class RedshiftServerlessService implements Resettable {
         for (AccountAwareStorageBackend.AccountEntry<Workgroup> entry : workgroups.scanAllAccountEntries(key -> true)) {
             try {
                 runtime.stop(entry.accountId(), regionOf(entry.key()), entry.value().getWorkgroupName());
+                endpoints.release(entry.value().getEndpoint());
             } catch (RuntimeException e) {
-                LOG.warnv(e, "Could not stop the runtime of workgroup {0} while clearing state",
-                        entry.value().getWorkgroupName());
+                // The listener may still be bound, so the endpoint stays reserved rather than being
+                // handed to a later cluster or workgroup whose proxy could not bind it.
+                LOG.warnv(e, "Could not stop the runtime of workgroup {0} while clearing state; "
+                        + "its endpoint stays reserved", entry.value().getWorkgroupName());
             }
-            endpoints.release(entry.value().getEndpoint());
         }
         namespaces.clear();
         workgroups.clear();

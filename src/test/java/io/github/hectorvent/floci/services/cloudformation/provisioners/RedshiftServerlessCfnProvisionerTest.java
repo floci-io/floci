@@ -146,7 +146,8 @@ class RedshiftServerlessCfnProvisionerTest {
         assertTrue(generated.startsWith("my-stack-myresource-"), generated);
         assertEquals(generated, generated.toLowerCase());
 
-        when(service.updateNamespace(eq(generated), any(), any(), any(), any(), anyList(), anyList(), eq(REGION)))
+        when(service.getNamespace(generated, REGION)).thenReturn(namespace(generated));
+        when(service.reconcileNamespace(eq(generated), any(), any(), any(), any(), anyList(), anyList(), eq(REGION)))
                 .thenReturn(namespace(generated));
         when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
         StackResource updated = resource(NAMESPACE_TYPE, generated);
@@ -154,12 +155,13 @@ class RedshiftServerlessCfnProvisionerTest {
         provisioner.provision(updated, mapper.createObjectNode(), ctx(generated));
 
         assertEquals(generated, updated.getPhysicalId());
-        verify(service).updateNamespace(eq(generated), any(), any(), any(), any(), anyList(), anyList(), eq(REGION));
+        verify(service).reconcileNamespace(eq(generated), any(), any(), any(), any(), anyList(), anyList(), eq(REGION));
     }
 
     @Test
     void updateNamespaceUpdatesInPlaceAndRemovesTagsTheTemplateDropped() {
-        when(service.updateNamespace(eq("my-ns"), isNull(), isNull(), eq("custom-key"), isNull(), anyList(),
+        when(service.getNamespace("my-ns", REGION)).thenReturn(namespace("my-ns"));
+        when(service.reconcileNamespace(eq("my-ns"), isNull(), isNull(), eq("custom-key"), isNull(), anyList(),
                 anyList(), eq(REGION))).thenReturn(namespace("my-ns"));
         when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of("old", "1", "keep", "2"));
         ObjectNode props = mapper.createObjectNode();
@@ -175,6 +177,37 @@ class RedshiftServerlessCfnProvisionerTest {
         verify(service).untagResource(NAMESPACE_ARN, List.of("old"), REGION);
         verify(service).tagResource(NAMESPACE_ARN, Map.of("keep", "2"), REGION);
         assertEquals("my-ns", r.getPhysicalId());
+    }
+
+    @Test
+    void updateNamespaceRejectsADbNameChangeBecauseItIsFixedAtCreation() {
+        when(service.getNamespace("my-ns", REGION)).thenReturn(namespace("my-ns"));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("NamespaceName", "my-ns");
+        props.put("DbName", "analytics");
+        StackResource r = resource(NAMESPACE_TYPE, "my-ns");
+
+        AwsException rejected = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("my-ns")));
+
+        assertEquals("ValidationException", rejected.getErrorCode());
+        verify(service, never()).reconcileNamespace(any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void updateNamespaceSendsOmittedKmsKeyAndDefaultRoleAsNullSoTheServiceResetsThem() {
+        when(service.getNamespace("my-ns", REGION)).thenReturn(namespace("my-ns"));
+        when(service.reconcileNamespace(eq("my-ns"), isNull(), isNull(), isNull(), isNull(), anyList(), anyList(),
+                eq(REGION))).thenReturn(namespace("my-ns"));
+        when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
+        ObjectNode props = mapper.createObjectNode();
+        props.put("NamespaceName", "my-ns");
+        props.put("DbName", "dev");
+        StackResource r = resource(NAMESPACE_TYPE, "my-ns");
+
+        provisioner.provision(r, props, ctx("my-ns"));
+
+        verify(service).reconcileNamespace(eq("my-ns"), isNull(), isNull(), isNull(), isNull(), anyList(),
+                anyList(), eq(REGION));
     }
 
     @Test

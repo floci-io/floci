@@ -92,12 +92,42 @@ public class RedshiftServerlessRuntime {
         credentialBroker.revokeCluster(accountId, backendId);
     }
 
-    /** Applies a new master password to the PostgreSQL role and to the proxy's backend leg. */
+    /**
+     * Applies a new master password to the PostgreSQL role and to the proxy's backend leg. When the
+     * proxy step fails the role is put back to {@code oldPassword}, so the backend never requires a
+     * password the stored namespace does not hold.
+     */
     public void changeMasterPassword(String accountId, String region, String workgroupName,
-                                     String masterUsername, String dbName, String newPassword) {
+                                     String masterUsername, String dbName, String oldPassword,
+                                     String newPassword) {
         String backendId = backendId(region, workgroupName);
         containerManager.alterUserPassword(accountId, backendId, masterUsername, newPassword, dbName);
-        proxyManager.updateMasterPassword(relayKey(accountId, backendId), newPassword);
+        try {
+            proxyManager.updateMasterPassword(relayKey(accountId, backendId), newPassword);
+        } catch (RuntimeException e) {
+            restorePassword(accountId, backendId, masterUsername, dbName, oldPassword);
+            throw e;
+        }
+    }
+
+    /** Puts the role and the proxy back to {@code password} after a rotation the caller could not store. */
+    public void restoreMasterPassword(String accountId, String region, String workgroupName,
+                                      String masterUsername, String dbName, String password) {
+        String backendId = backendId(region, workgroupName);
+        restorePassword(accountId, backendId, masterUsername, dbName, password);
+        proxyManager.updateMasterPassword(relayKey(accountId, backendId), password);
+    }
+
+    private void restorePassword(String accountId, String backendId, String masterUsername, String dbName,
+                                 String password) {
+        if (password == null) {
+            return;
+        }
+        try {
+            containerManager.alterUserPassword(accountId, backendId, masterUsername, password, dbName);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not restore the master password of workgroup backend {0}", backendId);
+        }
     }
 
     public TempCredential issueCredential(String accountId, String region, String workgroupName,

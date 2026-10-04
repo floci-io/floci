@@ -611,7 +611,7 @@ class RedshiftServerlessServiceTest {
 
         service.updateNamespace("pw-ns", null, "Changed123", null, null, null, null, REGION);
 
-        verify(runtime).changeMasterPassword(ACCOUNT_ID, REGION, "pw-wg", "root", "dev", "Changed123");
+        verify(runtime).changeMasterPassword(ACCOUNT_ID, REGION, "pw-wg", "root", "dev", "Secret123", "Changed123");
         assertEquals("Changed123", store.get(REGION + "::pw-ns").orElseThrow().getAdminUserPassword());
     }
 
@@ -620,7 +620,7 @@ class RedshiftServerlessServiceTest {
         service.createNamespace("bad-pw-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
         createWorkgroup("bad-pw-wg", "bad-pw-ns");
         doThrow(new AwsException("InvalidParameterValue", "too short", 400)).when(runtime)
-                .changeMasterPassword(any(), any(), any(), any(), any(), eq("short"));
+                .changeMasterPassword(any(), any(), any(), any(), any(), any(), eq("short"));
 
         AwsException rejected = assertThrows(AwsException.class,
                 () -> service.updateNamespace("bad-pw-ns", null, "short", null, null, null, null, REGION));
@@ -630,12 +630,58 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void aNamespaceThatCannotBeStoredPutsTheBackendPasswordBack() {
+        service.createNamespace("undo-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("undo-wg", "undo-ns");
+        doThrow(new IllegalStateException("disk full")).when(store)
+                .put(eq(REGION + "::undo-ns"), any(Namespace.class));
+
+        assertThrows(IllegalStateException.class,
+                () -> service.updateNamespace("undo-ns", null, "Changed123", null, null, null, null, REGION));
+
+        verify(runtime).restoreMasterPassword(ACCOUNT_ID, REGION, "undo-wg", "root", "dev", "Secret123");
+    }
+
+    @Test
+    void reconcileNamespaceResetsAnOmittedKmsKeyAndDefaultRole() {
+        service.createNamespace("rec-ns", "root", null, null, "custom-key", "arn:aws:iam::000000000000:role/r",
+                null, null, Map.of(), REGION);
+
+        Namespace reconciled = service.reconcileNamespace("rec-ns", null, null, null, null, null, null, REGION);
+
+        assertEquals(RedshiftServerlessService.AWS_OWNED_KMS_KEY, reconciled.getKmsKeyId());
+        assertNull(reconciled.getDefaultIamRoleArn());
+    }
+
+    @Test
+    void updateNamespaceKeepsAnOmittedKmsKeyAndDefaultRole() {
+        service.createNamespace("keep-ns", "root", null, null, "custom-key", "arn:aws:iam::000000000000:role/r",
+                null, null, Map.of(), REGION);
+
+        Namespace updated = service.updateNamespace("keep-ns", null, null, null, null, null, null, REGION);
+
+        assertEquals("custom-key", updated.getKmsKeyId());
+        assertEquals("arn:aws:iam::000000000000:role/r", updated.getDefaultIamRoleArn());
+    }
+
+    @Test
+    void clearKeepsTheEndpointReservedWhenTheRuntimeCannotBeStopped() {
+        create("hold-ns");
+        Workgroup created = createWorkgroup("hold-wg", "hold-ns");
+        doThrow(new RuntimeException("listener still bound")).when(runtime).stop(ACCOUNT_ID, REGION, "hold-wg");
+
+        service.clear();
+
+        verify(endpoints, never()).release(created.getEndpoint());
+    }
+
+    @Test
     void anAdminPasswordChangeWithNoWorkgroupJustStoresIt() {
         service.createNamespace("solo-ns", "root", null, null, null, null, null, null, Map.of(), REGION);
 
         service.updateNamespace("solo-ns", null, "Changed123", null, null, null, null, REGION);
 
-        verify(runtime, never()).changeMasterPassword(any(), any(), any(), any(), any(), any());
+        verify(runtime, never()).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
         assertEquals("Changed123", store.get(REGION + "::solo-ns").orElseThrow().getAdminUserPassword());
     }
 
