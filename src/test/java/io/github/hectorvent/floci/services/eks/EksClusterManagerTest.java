@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.Logging;
+import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import io.github.hectorvent.floci.testutil.LogCapture;
@@ -68,6 +69,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -2294,6 +2296,206 @@ class EksClusterManagerTest {
             List<String> cmd = cmdCaptor.getValue();
 
             assertFalse(cmd.stream().anyMatch(arg -> arg.startsWith("--kubelet-arg=node-labels=")));
+        }
+
+        @Test
+        void nodegroupLabelsAppearOnNode() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("worker-group-1");
+            nodegroup.setCapacityType("ON_DEMAND");
+            nodegroup.setInstanceTypes(List.of("m5.xlarge"));
+            nodegroup.setLabels(Map.of("environment", "production", "team", "platform"));
+            cluster.setNodegroups(List.of(nodegroup));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+
+            assertEquals("us-west-2a", labels.get("topology.kubernetes.io/zone"));
+            assertEquals("us-west-2", labels.get("topology.kubernetes.io/region"));
+            assertEquals("worker-group-1", labels.get("eks.amazonaws.com/nodegroup"));
+            assertEquals("ON_DEMAND", labels.get("eks.amazonaws.com/capacityType"));
+            assertEquals("ami-eks-k3s", labels.get("eks.amazonaws.com/nodegroup-image"));
+            assertEquals("m5.xlarge", labels.get("node.kubernetes.io/instance-type"));
+            assertEquals("production", labels.get("environment"));
+            assertEquals("platform", labels.get("team"));
+        }
+
+        @Test
+        void nodegroupTaintsAppearWithKubernetesEffectSpelling() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("gpu-group");
+            nodegroup.setTaints(List.of(
+                    Map.of("key", "dedicated", "value", "gpu", "effect", "NO_SCHEDULE"),
+                    Map.of("key", "evict", "value", "true", "effect", "NO_EXECUTE"),
+                    Map.of("key", "spot", "value", "preemptible", "effect", "PREFER_NO_SCHEDULE")
+            ));
+            cluster.setNodegroups(List.of(nodegroup));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertTrue(cmd.contains("--kubelet-arg=register-with-taints="
+                    + "dedicated=gpu:NoSchedule,evict=true:NoExecute,spot=preemptible:PreferNoSchedule"));
+        }
+
+        @Test
+        void nodegroupCapacityTypeSpot() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("spot-group");
+            nodegroup.setCapacityType("SPOT");
+            cluster.setNodegroups(List.of(nodegroup));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+            assertEquals("SPOT", labels.get("eks.amazonaws.com/capacityType"));
+            assertEquals("spot-group", labels.get("eks.amazonaws.com/nodegroup"));
+        }
+
+        @Test
+        void clusterWithNoNodegroupsProducesSameArgumentsAsBefore() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String expectedAz = manager.deriveClusterNodeAvailabilityZone(cluster, "us-west-2");
+            assertTrue(cmd.contains("--kubelet-arg=node-labels=topology.kubernetes.io/zone=" + expectedAz
+                    + ",topology.kubernetes.io/region=us-west-2"));
+            assertFalse(cmd.stream().anyMatch(arg -> arg.startsWith("--kubelet-arg=register-with-taints=")));
+            assertFalse(cmd.stream().anyMatch(arg -> arg.contains("eks.amazonaws.com/")));
+        }
+
+        @Test
+        void multipleNodegroupsAppliesFirstAndIgnoresLater() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Instant now = Instant.now();
+            Nodegroup first = new Nodegroup();
+            first.setNodegroupName("first-ng");
+            first.setCreatedAt(now.minusSeconds(60));
+            first.setLabels(Map.of("role", "frontend"));
+            first.setTaints(List.of(Map.of("key", "tier", "value", "frontend", "effect", "NO_SCHEDULE")));
+
+            Nodegroup second = new Nodegroup();
+            second.setNodegroupName("second-ng");
+            second.setCreatedAt(now);
+            second.setLabels(Map.of("role", "backend", "secondary", "true"));
+            second.setTaints(List.of(Map.of("key", "tier", "value", "backend", "effect", "NO_SCHEDULE")));
+
+            cluster.setNodegroups(List.of(second, first));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+
+            assertEquals("first-ng", labels.get("eks.amazonaws.com/nodegroup"));
+            assertEquals("frontend", labels.get("role"));
+            assertNull(labels.get("secondary"));
+
+            String taintsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=register-with-taints="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("register-with-taints arg missing"));
+            assertEquals("--kubelet-arg=register-with-taints=tier=frontend:NoSchedule", taintsArg);
+        }
+
+        @Test
+        void topologyLabelsAndProviderIdPreservedWithNodegroup() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("app-workers");
+            nodegroup.setLabels(Map.of("app", "test"));
+            cluster.setNodegroups(List.of(nodegroup));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String expectedProviderId = manager.deriveClusterNodeProviderId(cluster);
+            assertTrue(cmd.contains("--kubelet-arg=provider-id=" + expectedProviderId));
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+            assertEquals("us-west-2a", labels.get("topology.kubernetes.io/zone"));
+            assertEquals("us-west-2", labels.get("topology.kubernetes.io/region"));
+        }
+
+        private static Map<String, String> parseNodeLabels(String nodeLabelsArg) {
+            String raw = nodeLabelsArg.substring("--kubelet-arg=node-labels=".length());
+            Map<String, String> map = new LinkedHashMap<>();
+            for (String pair : raw.split(",")) {
+                String[] kv = pair.split("=", 2);
+                map.put(kv[0], kv.length > 1 ? kv[1] : "");
+            }
+            return map;
         }
 
         @Test

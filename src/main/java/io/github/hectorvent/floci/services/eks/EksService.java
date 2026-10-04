@@ -134,6 +134,7 @@ public class EksService implements TagHandler, ResourceProvider {
         this.addons = addons;
         if (this.clusterManager != null) {
             this.clusterManager.setEc2Service(this.ec2Service);
+            this.clusterManager.setNodegroupSupplier(this::listNodeGroupsForCluster);
         }
     }
 
@@ -214,6 +215,9 @@ public class EksService implements TagHandler, ResourceProvider {
                     firstNodeGroup(cluster.getName(), entry.accountId()).ifPresent(group ->
                             cluster.setNodeInstanceType(selectedNodeInstanceType(group)));
                 }
+                if (cluster.getNodegroups() == null || cluster.getNodegroups().isEmpty()) {
+                    cluster.setNodegroups(listNodeGroupsForCluster(cluster.getName(), entry.accountId()));
+                }
                 clusterManager.restoreCluster(cluster);
             } catch (Exception e) {
                 if (!clusterManager.isDockerReachable()) {
@@ -257,6 +261,16 @@ public class EksService implements TagHandler, ResourceProvider {
                 .min(Comparator.comparing(Nodegroup::getCreatedAt,
                         Comparator.nullsLast(Comparator.naturalOrder()))
                 .thenComparing(Nodegroup::getNodegroupName));
+    }
+
+    List<Nodegroup> listNodeGroupsForCluster(String clusterName, String accountId) {
+        String prefix = clusterName + "/";
+        if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
+            return aware.scanAllAccountEntries(key -> key.startsWith(prefix)).stream()
+                    .filter(entry -> accountId == null || accountId.equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value).toList();
+        }
+        return nodeGroupStorage.scan(key -> key.startsWith(prefix));
     }
 
     /**
@@ -790,6 +804,10 @@ public class EksService implements TagHandler, ResourceProvider {
             boolean firstGroup = firstNodeGroup(clusterName, accountId).isEmpty() && pendingFirst == null;
             if (firstGroup && !config.services().eks().mock() && clusterManager != null) {
                 applyFirstNodeGroupCapacity(clusterName, nodegroupName, currentCluster, nodeGroup);
+                if (currentCluster.getContainerId() != null && currentCluster.getStatus() == ClusterStatus.ACTIVE) {
+                    LOG.infov("EKS cluster {0} is already running; nodegroup {1} labels and taints will be applied when the cluster is restarted or restored",
+                            clusterName, nodegroupName);
+                }
             } else if (!firstGroup && pendingFirst == null
                     && !config.services().eks().mock() && clusterManager != null) {
                 if (currentCluster.getNodeInstanceType() == null) {
@@ -802,6 +820,21 @@ public class EksService implements TagHandler, ResourceProvider {
                     LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} cannot change its capacity from {2}",
                             clusterName, nodegroupName, currentCluster.getNodeInstanceType());
                 }
+                firstNodeGroup(clusterName, accountId).ifPresent(first -> {
+                    if (!nodegroupName.equals(first.getNodegroupName())) {
+                        LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) "
+                                + "is not applied to the node (already represented by nodegroup {2})",
+                                clusterName, nodegroupName, first.getNodegroupName());
+                    }
+                });
+            }
+
+            if (currentCluster.getNodegroups() == null) {
+                currentCluster.setNodegroups(new ArrayList<>());
+            }
+            if (currentCluster.getNodegroups().stream().noneMatch(g -> nodegroupName.equals(g.getNodegroupName()))) {
+                currentCluster.getNodegroups().add(nodeGroup);
+                storage.put(clusterName, currentCluster);
             }
 
             if (nodeGroup.getStatus() == NodegroupStatus.ACTIVE && (hasUserData || pendingFirst != null)) {
@@ -956,6 +989,11 @@ public class EksService implements TagHandler, ResourceProvider {
             nodeGroup.setStatus(NodegroupStatus.DELETING);
             nodeGroup.setModifiedAt(Instant.now());
             nodeGroupStorage.delete(nodeGroupKey(clusterName, nodegroupName));
+            Cluster cluster = storage.get(clusterName).orElse(null);
+            if (cluster != null && cluster.getNodegroups() != null) {
+                cluster.getNodegroups().removeIf(g -> nodegroupName.equals(g.getNodegroupName()));
+                storage.put(clusterName, cluster);
+            }
             return nodeGroup;
         }
     }

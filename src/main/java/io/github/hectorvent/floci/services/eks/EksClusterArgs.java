@@ -61,7 +61,8 @@ public final class EksClusterArgs {
             "nodelabels",
             "systemreserved",
             "kubereserved",
-            "evictionhard"
+            "evictionhard",
+            "registerwithtaints"
     );
 
     /**

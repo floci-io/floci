@@ -37,6 +37,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.VpcRouteTableListener;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -46,6 +47,8 @@ import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Nodegroup;
+import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -73,6 +76,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -83,6 +87,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -167,6 +172,7 @@ public class EksClusterManager
     @Inject
     jakarta.enterprise.inject.Instance<Ec2Service> ec2ServiceInstance;
     private Ec2Service ec2Service;
+    private BiFunction<String, String, List<Nodegroup>> nodegroupSupplier;
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
 
@@ -176,6 +182,10 @@ public class EksClusterManager
 
     public void setEc2Service(Ec2Service ec2Service) {
         this.ec2Service = ec2Service;
+    }
+
+    public void setNodegroupSupplier(BiFunction<String, String, List<Nodegroup>> nodegroupSupplier) {
+        this.nodegroupSupplier = nodegroupSupplier;
     }
 
     private Ec2Service ec2Service() {
@@ -530,8 +540,15 @@ public class EksClusterManager
         try {
             String region = clusterRegion(cluster);
             String az = deriveClusterNodeAvailabilityZone(cluster, region);
-            serverArgs.add("--kubelet-arg=node-labels=topology.kubernetes.io/zone=" + az
-                    + ",topology.kubernetes.io/region=" + region);
+            Nodegroup nodegroup = selectFirstNodegroup(cluster);
+            String nodeLabels = buildNodeLabels(cluster, nodegroup, az, region);
+            if (nodeLabels != null && !nodeLabels.isBlank()) {
+                serverArgs.add("--kubelet-arg=node-labels=" + nodeLabels);
+            }
+            String taints = buildRegisterWithTaints(nodegroup);
+            if (taints != null && !taints.isBlank()) {
+                serverArgs.add("--kubelet-arg=register-with-taints=" + taints);
+            }
         } catch (Exception e) {
             String clusterName = cluster != null ? cluster.getName() : "unknown";
             LOG.warnv("EKS node topology labels injection disabled for cluster {0}: could not derive topology labels: {1}",
@@ -2432,6 +2449,180 @@ public class EksClusterManager
         }
         // Reached only by a test constructor that wires neither the resolver nor the config.
         return "us-east-1"; // partition-literal: unreachable under CDI, where the resolver or config answers
+    }
+
+    Nodegroup selectFirstNodegroup(Cluster cluster) {
+        List<Nodegroup> groups = cluster != null ? cluster.getNodegroups() : null;
+        if ((groups == null || groups.isEmpty()) && nodegroupSupplier != null && cluster != null) {
+            groups = nodegroupSupplier.apply(cluster.getName(), resolveClusterAccountId(cluster));
+        }
+        if (groups == null || groups.isEmpty()) {
+            return null;
+        }
+        List<Nodegroup> active = groups.stream()
+                .filter(g -> g.getStatus() == null || g.getStatus() == NodegroupStatus.ACTIVE)
+                .sorted(Comparator.comparing(Nodegroup::getCreatedAt,
+                                Comparator.nullsLast(Comparator.naturalOrder()))
+                        .thenComparing(Nodegroup::getNodegroupName,
+                                Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+        if (active.isEmpty()) {
+            return null;
+        }
+        Nodegroup first = active.getFirst();
+        if (active.size() > 1) {
+            String clusterName = cluster != null ? cluster.getName() : "unknown";
+            for (int i = 1; i < active.size(); i++) {
+                Nodegroup later = active.get(i);
+                LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) "
+                        + "is not applied to the node (already represented by nodegroup {2})",
+                        clusterName, later.getNodegroupName(), first.getNodegroupName());
+            }
+        }
+        return first;
+    }
+
+    String buildNodeLabels(Cluster cluster, Nodegroup nodegroup, String az, String region) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        if (az != null && !az.isBlank()) {
+            labels.put("topology.kubernetes.io/zone", az);
+        }
+        if (region != null && !region.isBlank()) {
+            labels.put("topology.kubernetes.io/region", region);
+        }
+
+        if (nodegroup != null) {
+            String capacityType = nodegroup.getCapacityType() != null && !nodegroup.getCapacityType().isBlank()
+                    ? nodegroup.getCapacityType() : "ON_DEMAND";
+            labels.put("eks.amazonaws.com/capacityType", capacityType); // partition-literal: Kubernetes node label key is partition-invariant
+
+            if (nodegroup.getNodegroupName() != null && !nodegroup.getNodegroupName().isBlank()) {
+                labels.put("eks.amazonaws.com/nodegroup", nodegroup.getNodegroupName()); // partition-literal: Kubernetes node label key is partition-invariant
+            }
+
+            String imageId = resolveNodegroupImageId(nodegroup);
+            if (imageId != null && !imageId.isBlank()) {
+                labels.put("eks.amazonaws.com/nodegroup-image", imageId); // partition-literal: Kubernetes node label key is partition-invariant
+            }
+
+            String instanceType = resolveNodegroupInstanceType(cluster, nodegroup);
+            if (instanceType != null && !instanceType.isBlank()) {
+                labels.put("node.kubernetes.io/instance-type", instanceType);
+            }
+
+            if (nodegroup.getLabels() != null) {
+                for (Map.Entry<String, String> entry : nodegroup.getLabels().entrySet()) {
+                    String k = entry.getKey();
+                    String v = entry.getValue();
+                    if (k != null && !k.isBlank() && v != null && !k.startsWith("topology.kubernetes.io/")) {
+                        labels.put(k, v);
+                    }
+                }
+            }
+        }
+
+        if (labels.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String> entry : labels.entrySet()) {
+            if (!sb.isEmpty()) {
+                sb.append(",");
+            }
+            sb.append(entry.getKey()).append("=").append(entry.getValue());
+        }
+        return sb.toString();
+    }
+
+    private String resolveNodegroupInstanceType(Cluster cluster, Nodegroup nodegroup) {
+        if (nodegroup != null && nodegroup.getInstanceTypes() != null && !nodegroup.getInstanceTypes().isEmpty()) {
+            String first = nodegroup.getInstanceTypes().getFirst();
+            if (first != null && !first.isBlank()) {
+                return first;
+            }
+        }
+        return nodeInstanceType(cluster);
+    }
+
+    private String resolveNodegroupImageId(Nodegroup nodegroup) {
+        if (nodegroup != null && nodegroup.getLaunchTemplate() instanceof Map<?, ?> map) {
+            Object directImage = map.get("imageId");
+            if (directImage != null && !directImage.toString().isBlank()) {
+                return directImage.toString().trim();
+            }
+            Ec2Service ec2 = ec2Service();
+            if (ec2 != null) {
+                String id = map.get("id") != null ? map.get("id").toString().trim() : null;
+                String name = map.get("name") != null ? map.get("name").toString().trim() : null;
+                String version = map.get("version") != null ? map.get("version").toString().trim() : null;
+                if ((id != null && !id.isBlank()) || (name != null && !name.isBlank())) {
+                    try {
+                        LaunchTemplateData data = ec2.resolveLaunchTemplateData(null, id, name, version);
+                        if (data != null && data.getImageId() != null && !data.getImageId().isBlank()) {
+                            return data.getImageId().trim();
+                        }
+                    } catch (Exception ignored) {
+                        // Swallowing is safe because falling back to default image id is standard
+                    }
+                }
+            }
+        }
+        return "ami-eks-k3s";
+    }
+
+    String buildRegisterWithTaints(Nodegroup nodegroup) {
+        if (nodegroup == null || nodegroup.getTaints() == null || nodegroup.getTaints().isEmpty()) {
+            return null;
+        }
+        List<String> taints = new ArrayList<>();
+        for (Object taintObj : nodegroup.getTaints()) {
+            String formatted = formatTaint(taintObj);
+            if (formatted != null && !formatted.isBlank()) {
+                taints.add(formatted);
+            }
+        }
+        if (taints.isEmpty()) {
+            return null;
+        }
+        return String.join(",", taints);
+    }
+
+    static String formatTaint(Object taintObj) {
+        if (taintObj == null) {
+            return null;
+        }
+        if (taintObj instanceof Map<?, ?> map) {
+            Object k = map.get("key");
+            if (k == null || k.toString().isBlank()) {
+                return null;
+            }
+            String key = k.toString().trim();
+            Object v = map.get("value");
+            String val = (v != null) ? v.toString().trim() : null;
+            Object eff = map.get("effect");
+            String effect = mapTaintEffect(eff != null ? eff.toString() : null);
+            if (val != null && !val.isEmpty()) {
+                return key + "=" + val + ":" + effect;
+            } else {
+                return key + ":" + effect;
+            }
+        } else if (taintObj instanceof String str && !str.isBlank()) {
+            return str.trim();
+        }
+        return null;
+    }
+
+    static String mapTaintEffect(String awsEffect) {
+        if (awsEffect == null || awsEffect.isBlank()) {
+            return "NoSchedule";
+        }
+        String normalized = awsEffect.trim().toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "NO_SCHEDULE", "NOSCHEDULE" -> "NoSchedule";
+            case "NO_EXECUTE", "NOEXECUTE" -> "NoExecute";
+            case "PREFER_NO_SCHEDULE", "PREFERNOSCHEDULE" -> "PreferNoSchedule";
+            default -> awsEffect.trim();
+        };
     }
 
     String deriveClusterNodeAvailabilityZone(Cluster cluster, String region) {
