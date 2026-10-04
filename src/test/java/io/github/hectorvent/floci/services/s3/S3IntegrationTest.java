@@ -2342,7 +2342,7 @@ class S3IntegrationTest {
     @Test
     @Order(95)
     void notificationDeliveredToQueueInDifferentRegion() {
-        String sqsAuth = "Credential=AKID/20260507/ap-southeast-2/s3/aws4_request";
+        String sqsAuth = "AWS4-HMAC-SHA256 Credential=AKID/20260507/ap-southeast-2/s3/aws4_request";
 
         String queueUrl = given()
             .header("Authorization", sqsAuth)

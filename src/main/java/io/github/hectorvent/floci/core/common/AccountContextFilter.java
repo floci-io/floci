@@ -9,7 +9,6 @@ import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.core.MediaType;
-import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
@@ -75,27 +74,21 @@ public class AccountContextFilter implements ContainerRequestFilter {
             return;
         }
         String auth = ctx.getHeaderString("Authorization");
-        if (auth != null && !auth.isEmpty()) {
-            // Only a SigV4/SigV4A scheme selects an account; any other header still feeds region.
-            String akid = accountResolver.extractAccessKeyId(auth);
+        String akid = auth != null && !auth.isEmpty() ? accountResolver.extractAccessKeyId(auth) : null;
+        if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
             String region = regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
             rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
             rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
         } else {
-            MultivaluedMap<String, String> queryParams = ctx.getUriInfo().getQueryParameters();
-            String credential = queryParams.getFirst("X-Amz-Credential");
+            String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
             if (credential != null && !credential.isEmpty()) {
-                // Without X-Amz-Algorithm this is not presigned auth: only the region is taken.
-                String algorithm = queryParams.getFirst("X-Amz-Algorithm");
-                if (algorithm != null && !algorithm.isEmpty()) {
-                    String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
-                    requestContext.setAccountId(resolveAccount(presignedAkid,
-                            accountResolver.resolveFromPresignedCredential(credential)));
-                } else {
-                    requestContext.setAccountId(accountResolver.resolve(null));
-                }
+                // Floci's own download URLs (Lambda layers, Kubernetes init containers) carry only
+                // X-Amz-Credential, so it must steer the account without an algorithm.
+                String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
+                requestContext.setAccountId(
+                        resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
                 String region = regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));

@@ -401,21 +401,21 @@ class AccountContextFilterTest {
     }
 
     @Test
-    void bareCredentialHeaderDoesNotSelectAccountButKeepsRegion() {
+    void bareCredentialHeaderSelectsNeitherAccountNorRegion() {
         ContainerRequestContext ctx = mockContext(
                 "Credential=111122223333/20260617/us-west-2/s3/aws4_request",
                 null);
         filter.filter(ctx);
         assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
-        assertEquals("us-west-2", requestContext.getRegion());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
     }
 
     @Test
-    void presignedCredentialWithoutAlgorithmDoesNotSelectAccountButKeepsRegion() {
+    void presignedCredentialWithoutAlgorithmStillRoutesInternalDownloadUrls() {
         ContainerRequestContext ctx = mockContext(null,
                 "111122223333/20260617/eu-west-1/s3/aws4_request", null);
         filter.filter(ctx);
-        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals("111122223333", requestContext.getAccountId());
         assertEquals("eu-west-1", requestContext.getRegion());
     }
 
