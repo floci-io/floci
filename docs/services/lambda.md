@@ -172,6 +172,9 @@ other than the `{Status, Result, Error}` envelope fails its execution with
 1, 2, 4 and 8 seconds, and then fails the execution with its error. AWS does the same over a few
 minutes.
 
+`GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
+API reference names `true` as the default, but AWS answers this way.
+
 The public `public.ecr.aws/lambda` images do not bundle the SDK that the managed runtimes carry.
 Add `aws-durable-execution-sdk-python` or `@aws/durable-execution-sdk-js` to your deployment
 package.
