@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsT
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -215,6 +216,44 @@ class EventBridgeServiceTest {
 
         List<EventBus> result = service.listEventBuses("prod-", REGION);
         assertEquals(2, result.size());
+    }
+
+    // ──────────────────────────── Archives ────────────────────────────
+
+    @Test
+    void createArchiveAcceptsTheDefaultBusAndAnExistingCustomBus() {
+        String custom = service.createEventBus("orders", null, null, REGION).getArn();
+
+        assertEquals("arn:aws:events:us-east-1:000000000000:event-bus/default", service.createArchive(
+                "on-default", "arn:aws:events:us-east-1:000000000000:event-bus/default", null, null, 0, REGION)
+                .getEventSourceArn());
+        assertEquals(custom, service.createArchive("on-custom", custom, null, null, 0, REGION)
+                .getEventSourceArn());
+    }
+
+    /** The messages AWS returns; the account is checked before the region. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "arn:aws:events:us-east-1:000000000000:event-bus/missing|ResourceNotFoundException|"
+                    + "Event bus missing does not exist.",
+            "arn:aws:events:eu-west-1:000000000000:event-bus/default|ValidationException|"
+                    + "Parameter EventSourceArn is not valid. Reason: Creating cross-region archive is not permitted.",
+            "arn:aws:events:us-east-1:111111111111:event-bus/default|AccessDeniedException|"
+                    + "Archive event source arn:aws:events:us-east-1:111111111111:event-bus/default "
+                    + "does not belong to account 000000000000.",
+            "arn:aws:events:eu-west-1:111111111111:event-bus/missing|AccessDeniedException|"
+                    + "Archive event source arn:aws:events:eu-west-1:111111111111:event-bus/missing "
+                    + "does not belong to account 000000000000."
+    })
+    void createArchiveRejectsASourceThatIsNotAnExistingBusOfThisAccountAndRegion(
+            String sourceArn, String code, String message) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createArchive("orders-archive", sourceArn, null, null, 0, REGION));
+
+        assertEquals(code, error.getErrorCode());
+        assertEquals(message, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listArchives(null, null, null, REGION).isEmpty());
     }
 
     // ──────────────────────────── Rules ────────────────────────────

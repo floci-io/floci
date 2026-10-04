@@ -201,7 +201,8 @@ failed stack update from leaving the live bus in the rejected configuration.
 
 ## EventBridge archives
 
-`AWS::Events::Archive` creates a real archive of the events sent to `SourceArn`. `ArchiveName` is
+`AWS::Events::Archive` creates a real archive of the events sent to `SourceArn`, which must be an
+existing event bus in the stack's account and region, as `CreateArchive` requires. `ArchiveName` is
 optional; when omitted, CloudFormation generates a name and keeps it across updates. `Ref` returns
 the archive name and `Fn::GetAtt Arn` the archive ARN. A missing `RetentionDays` stores 0, and an
 `EventPattern` object reads back from `DescribeArchive` as a compact JSON string.

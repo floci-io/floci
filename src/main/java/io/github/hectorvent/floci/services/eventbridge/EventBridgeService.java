@@ -1191,6 +1191,7 @@ public class EventBridgeService implements ResourceProvider {
         if (eventSourceArn == null || eventSourceArn.isBlank()) {
             throw new AwsException("ValidationException", "EventSourceArn is required.", 400);
         }
+        requireArchiveSource(eventSourceArn, region);
         String key = archiveKey(region, archiveName);
         if (archiveStore.get(key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
@@ -1208,6 +1209,32 @@ public class EventBridgeService implements ResourceProvider {
         archiveStore.put(key, archive);
         LOG.infov("Created archive: {0} for source {1}", archiveName, eventSourceArn);
         return archive;
+    }
+
+    /**
+     * Checked as AWS does, before the name: the source's account, then its region, then that it is
+     * the ARN of an existing bus. Anything else, a malformed ARN included, is reported as a missing
+     * bus, since an archive on it could never capture an event.
+     */
+    private void requireArchiveSource(String eventSourceArn, String region) {
+        String accountId = regionResolver.getAccountId();
+        AwsArnUtils.Arn source = AwsArnUtils.isArn(eventSourceArn) ? AwsArnUtils.parse(eventSourceArn) : null;
+        if (source != null && !accountId.equals(source.accountId())) {
+            throw new AwsException("AccessDeniedException", "Archive event source " + eventSourceArn
+                    + " does not belong to account " + accountId + ".", 400);
+        }
+        if (source != null && !region.equals(source.region())) {
+            throw new AwsException("ValidationException",
+                    "Parameter EventSourceArn is not valid. Reason: Creating cross-region archive is not permitted.",
+                    400);
+        }
+        String busName = eventSourceArn.substring(eventSourceArn.indexOf('/') + 1);
+        EventBus bus = "default".equals(busName)
+                ? getOrCreateDefaultBus(region)
+                : busStore.get(busKey(region, busName)).orElse(null);
+        if (bus == null || !eventSourceArn.equals(bus.getArn())) {
+            throw new AwsException("ResourceNotFoundException", "Event bus " + busName + " does not exist.", 400);
+        }
     }
 
     public Archive describeArchive(String archiveName, String region) {
