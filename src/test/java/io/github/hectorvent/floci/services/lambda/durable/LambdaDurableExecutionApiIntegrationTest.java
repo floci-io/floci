@@ -174,6 +174,13 @@ class LambdaDurableExecutionApiIntegrationTest {
 
         given()
         .when()
+            .get(DURABLE + "/functions/api-durable-fn/durable-executions?Statuses=PAUSED")
+        .then()
+            .statusCode(200)
+            .body("DurableExecutions", empty());
+
+        given()
+        .when()
             .get(DURABLE + "/functions/api-plain-fn/durable-executions?Statuses=BOGUS")
         .then()
             .statusCode(400)

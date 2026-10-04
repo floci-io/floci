@@ -48,6 +48,9 @@ import java.util.Set;
 @Consumes(MediaType.WILDCARD)
 public class DurableExecutionController {
 
+    /** Valid Statuses filters for a state Floci never puts an execution in. */
+    private static final Set<String> UNMODELLED_STATUSES = Set.of("PAUSED", "PAUSING", "DELETING");
+
     private final DurableExecutionService service;
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
@@ -145,6 +148,7 @@ public class DurableExecutionController {
                                    @QueryParam("MaxItems") String maxItems) {
         String region = regionResolver.resolveRegion(headers);
         Set<DurableExecutionStatus> statusFilter = parseStatuses(statuses);
+        boolean onlyUnmodelledStatuses = statuses != null && !statuses.isEmpty() && statusFilter.isEmpty();
         LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
         boolean qualified = (qualifier != null && !qualifier.isBlank())
                 || LambdaArnUtils.resolve(functionName).qualifier() != null;
@@ -152,7 +156,8 @@ public class DurableExecutionController {
                 region, fn.getFunctionName(), qualified ? fn.getVersion() : null, durableExecutionName, statusFilter,
                 parseTimestamp(startedAfter, "startedAfter"), parseTimestamp(startedBefore, "startedBefore"),
                 Boolean.parseBoolean(reverseOrder), parseMaxItems(maxItems), marker);
-        PaginatedResult<DurableExecution> page = service.list(request);
+        PaginatedResult<DurableExecution> page = onlyUnmodelledStatuses
+                ? new PaginatedResult<>(List.of(), null) : service.list(request);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode executions = response.putArray("DurableExecutions");
         for (DurableExecution execution : page.items()) {
@@ -205,6 +210,9 @@ public class DurableExecutionController {
             return parsed;
         }
         for (String status : statuses) {
+            if (UNMODELLED_STATUSES.contains(status)) {
+                continue;
+            }
             try {
                 parsed.add(DurableExecutionStatus.valueOf(status));
             } catch (IllegalArgumentException e) {
