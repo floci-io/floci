@@ -2117,7 +2117,7 @@ public class S3Controller {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             String raw = new String(body, StandardCharsets.ISO_8859_1);
             int pos = 0;
-            boolean sawFinalChunk = false;
+            boolean complete = false;
             while (pos < raw.length()) {
                 int lineEnd = raw.indexOf('\n', pos);
                 if (lineEnd < 0) break;
@@ -2126,7 +2126,8 @@ public class S3Controller {
                 String hexSize = semiColon >= 0 ? line.substring(0, semiColon) : line;
                 int chunkSize = Integer.parseInt(hexSize.trim(), 16);
                 if (chunkSize == 0) {
-                    sawFinalChunk = true;
+                    // A streaming body ends with an empty line, after any trailer headers.
+                    complete = !declaresStreamingPayload || reachesEmptyLine(raw, lineEnd + 1);
                     break;
                 }
 
@@ -2137,9 +2138,13 @@ public class S3Controller {
 
                 pos = dataStart + chunkSize;
                 if (pos < raw.length() && raw.charAt(pos) == '\r') pos++;
-                if (pos < raw.length() && raw.charAt(pos) == '\n') pos++;
+                boolean lineBreak = pos < raw.length() && raw.charAt(pos) == '\n';
+                if (lineBreak) pos++;
+                if (declaresStreamingPayload && !lineBreak) {
+                    throw new IllegalArgumentException("aws-chunked chunk is not followed by a line break");
+                }
             }
-            if (!sawFinalChunk) {
+            if (!complete) {
                 throw new IllegalArgumentException("aws-chunked body ends before its final chunk");
             }
             return out.toByteArray();
@@ -2156,6 +2161,20 @@ public class S3Controller {
             LOG.debugv("Failed to decode aws-chunked body, using raw: {0}", e.getMessage());
             return body;
         }
+    }
+
+    private static boolean reachesEmptyLine(String raw, int pos) {
+        while (pos < raw.length()) {
+            int lineEnd = raw.indexOf('\n', pos);
+            if (lineEnd < 0) {
+                return false;
+            }
+            if (raw.substring(pos, lineEnd).trim().isEmpty()) {
+                return true;
+            }
+            pos = lineEnd + 1;
+        }
+        return false;
     }
 
     /**

@@ -70,6 +70,57 @@ class S3AwsChunkedIntegrationTest {
     }
 
     @Test
+    void putObject_chunkNotFollowedByItsLineBreak_isIncompleteBodyAndNotStored() {
+        String bucket = createBucket("chunked-delimiter");
+
+        given()
+            .header("x-amz-content-sha256", STREAMING_UNSIGNED)
+            .header("Content-Encoding", "aws-chunked")
+            .body("5\r\nhello0\r\n\r\n")
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>IncompleteBody</Code>"));
+
+        assertObjectAbsent(bucket, "object.txt");
+    }
+
+    @Test
+    void putObject_bodyEndingBeforeItsTrailerIsComplete_isIncompleteBodyAndNotStored() {
+        String bucket = createBucket("chunked-trailer");
+
+        given()
+            .header("x-amz-content-sha256", STREAMING_UNSIGNED)
+            .header("Content-Encoding", "aws-chunked")
+            .body("5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n")
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>IncompleteBody</Code>"));
+
+        assertObjectAbsent(bucket, "object.txt");
+    }
+
+    @Test
+    void putObject_bodyEndingRightAfterItsFinalChunkLine_isIncompleteBodyAndNotStored() {
+        String bucket = createBucket("chunked-final-line");
+
+        given()
+            .header("x-amz-content-sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+            .header("Content-Encoding", "aws-chunked")
+            .body("5;chunk-signature=abc\r\nhello\r\n0;chunk-signature=def\r\n")
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>IncompleteBody</Code>"));
+
+        assertObjectAbsent(bucket, "object.txt");
+    }
+
+    @Test
     void putObject_malformedBodyDoesNotReplaceExistingObject() {
         String bucket = createBucket("chunked-overwrite");
         given().body("original").when().put("/" + bucket + "/object.txt").then().statusCode(200);
