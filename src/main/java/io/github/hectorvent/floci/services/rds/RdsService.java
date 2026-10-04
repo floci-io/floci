@@ -32,6 +32,7 @@ import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
@@ -66,6 +67,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -80,6 +82,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
@@ -172,6 +176,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, String> snapshotData;
     private StorageBackend<String, RdsEvent> events = new InMemoryStorage<>();
     private final StorageBackend<String, EventSubscription> eventSubscriptions;
+    private final StorageBackend<String, DbClusterEndpoint> dbClusterEndpoints;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     // CreateDBCluster/CreateDBInstance register the new resource only after the
@@ -245,6 +250,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 new TypeReference<Map<String, DbInstance>>() {});
         this.eventSubscriptions = storageFactory.create("rds", "rds-event-subscriptions.json",
                 new TypeReference<Map<String, EventSubscription>>() {});
+        this.dbClusterEndpoints = storageFactory.create("rds", "rds-cluster-endpoints.json",
+                new TypeReference<Map<String, DbClusterEndpoint>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
                 new TypeReference<Map<String, DbCluster>>() {});
         this.parameterGroups = storageFactory.create("rds", "rds-parameter-groups.json",
@@ -406,6 +413,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.clusterSnapshots = new InMemoryStorage<>();
         this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
         this.eventSubscriptions = new InMemoryStorage<>();
+        this.dbClusterEndpoints = new InMemoryStorage<>();
     }
 
     public void restorePersistedRuntime() {
@@ -2339,6 +2347,13 @@ public class RdsService implements Resettable, ResourceProvider {
                     putSnapshotForScope(currentAccountId(), effectiveRegion, resourceId, snapshot);
                 });
             }
+            case "cluster-endpoint" -> {
+                DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, resourceId);
+                yield new TagHandle(endpoint.getTags(), updated -> {
+                    endpoint.setTags(updated);
+                    dbClusterEndpoints.put(clusterEndpointKey(effectiveRegion, resourceId), endpoint);
+                });
+            }
             case "es" -> {
                 EventSubscription subscription = eventSubscriptions
                         .get(eventSubscriptionKey(effectiveRegion, resourceId))
@@ -3781,6 +3796,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 // Losing the writer promotes a remaining member, as Aurora fails over on its own.
                 cluster.setClusterWriterIdentifier(cluster.resolveWriterIdentifier());
                 putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+                dropInstanceFromClusterEndpoints(effectiveRegion, cluster.getDbClusterIdentifier(), id);
             }
         }
 
@@ -4495,6 +4511,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         releaseProxyPort(cluster.getProxyPort());
+        deleteClusterEndpointsOf(effectiveRegion, cluster.getDbClusterIdentifier());
         deleteClusterForScope(currentAccountId(), effectiveRegion, id);
         LOG.infov("DB cluster {0} deleted", id);
     }
@@ -9303,4 +9320,320 @@ public class RdsService implements Resettable, ResourceProvider {
         return "es::" + region + "::" + subscriptionName;
     }
 
+    private static final int MAX_CLUSTER_ENDPOINTS_PER_CLUSTER = 5;
+    private static final int MAX_CLUSTER_ENDPOINT_IDENTIFIER = 63;
+    private static final Pattern CLUSTER_ENDPOINT_IDENTIFIER_PATTERN =
+            Pattern.compile("[a-zA-Z](?:-?[a-zA-Z0-9]+)*");
+    private static final Set<String> CUSTOM_ENDPOINT_TYPES = Set.of("READER", "ANY");
+    private static final String BUILT_IN_WRITER = "WRITER";
+    private static final String BUILT_IN_READER = "READER";
+    private static final String CUSTOM_ENDPOINT = "CUSTOM";
+
+    /**
+     * Custom endpoints are modelled, not routed: the endpoint host is the cluster's own, so a client
+     * connects where the cluster endpoint sends it, whatever members the endpoint names.
+     */
+    public synchronized DbClusterEndpoint createDbClusterEndpoint(
+            String region, String clusterId, String endpointId, String endpointType,
+            List<String> staticMembers, List<String> excludedMembers, Map<String, String> tags) {
+        if (clusterId == null || clusterId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "DBClusterIdentifier is required.", 400);
+        }
+        if (endpointId == null || endpointId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "DBClusterEndpointIdentifier is required.", 400);
+        }
+        if (endpointType == null || endpointType.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "EndpointType is required.", 400);
+        }
+        if (endpointId.length() > MAX_CLUSTER_ENDPOINT_IDENTIFIER
+                || !CLUSTER_ENDPOINT_IDENTIFIER_PATTERN.matcher(endpointId).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "DBClusterEndpointIdentifier must contain 1 to " + MAX_CLUSTER_ENDPOINT_IDENTIFIER
+                    + " letters, numbers or hyphens, start with a letter, and not end with or contain "
+                    + "two consecutive hyphens.", 400);
+        }
+        String customType = requireCustomEndpointType(endpointType);
+        requireOneMemberList(staticMembers, excludedMembers);
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAuroraCluster(cluster);
+        String id = endpointId.toLowerCase(Locale.ROOT);
+        if (dbClusterEndpoints.get(clusterEndpointKey(effectiveRegion, id)).isPresent()
+                || findClusterForScope(currentAccountId(), effectiveRegion, id) != null) {
+            throw new AwsException("DBClusterEndpointAlreadyExistsFault",
+                    "DB cluster endpoint " + id + " already exists.", 400);
+        }
+        if (clusterEndpointsOf(effectiveRegion, cluster.getDbClusterIdentifier()).size()
+                >= MAX_CLUSTER_ENDPOINTS_PER_CLUSTER) {
+            throw new AwsException("DBClusterEndpointQuotaExceededFault",
+                    "DB cluster " + cluster.getDbClusterIdentifier() + " already has "
+                    + MAX_CLUSTER_ENDPOINTS_PER_CLUSTER + " custom endpoints.", 403);
+        }
+        List<String> resolvedStatic = resolveClusterMembers(cluster, staticMembers);
+        List<String> resolvedExcluded = resolveClusterMembers(cluster, excludedMembers);
+        requireReaderExcludesWriter(cluster, customType, resolvedStatic);
+
+        DbClusterEndpoint stored = new DbClusterEndpoint();
+        stored.setDbClusterEndpointIdentifier(id);
+        stored.setDbClusterIdentifier(cluster.getDbClusterIdentifier());
+        stored.setDbClusterEndpointResourceIdentifier(
+                "cluster-endpoint-" + UUID.randomUUID().toString().replace("-", "")
+                        .substring(0, 26).toUpperCase(Locale.ROOT));
+        stored.setStatus("available");
+        stored.setEndpointType(CUSTOM_ENDPOINT);
+        stored.setCustomEndpointType(customType);
+        stored.setStaticMembers(resolvedStatic);
+        stored.setExcludedMembers(resolvedExcluded);
+        stored.setDbClusterEndpointArn(AwsArnUtils.Arn.of("rds", effectiveRegion, currentAccountId(),
+                "cluster-endpoint:" + id).toString());
+        stored.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
+        dbClusterEndpoints.put(clusterEndpointKey(effectiveRegion, id), stored);
+        return clusterEndpointView(cluster, stored, "creating");
+    }
+
+    /**
+     * Supplying a non-empty member list replaces whichever list the endpoint carried, so the two
+     * never coexist. A present but empty list clears that list, and a null one leaves it alone.
+     */
+    public synchronized DbClusterEndpoint modifyDbClusterEndpoint(
+            String region, String endpointId, String endpointType,
+            List<String> staticMembers, List<String> excludedMembers) {
+        if (endpointId == null || endpointId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "DBClusterEndpointIdentifier is required.", 400);
+        }
+        String effectiveRegion = effectiveRegion(region);
+        DbClusterEndpoint stored = requireClusterEndpoint(effectiveRegion, endpointId);
+        String customType = endpointType == null || endpointType.isBlank()
+                ? stored.getCustomEndpointType() : requireCustomEndpointType(endpointType);
+        requireOneMemberList(staticMembers, excludedMembers);
+        DbCluster cluster = getDbCluster(stored.getDbClusterIdentifier(), effectiveRegion);
+        List<String> newStatic = new ArrayList<>(stored.getStaticMembers());
+        List<String> newExcluded = new ArrayList<>(stored.getExcludedMembers());
+        if (staticMembers != null) {
+            newStatic = resolveClusterMembers(cluster, staticMembers);
+            if (!newStatic.isEmpty()) {
+                newExcluded = new ArrayList<>();
+            }
+        }
+        if (excludedMembers != null) {
+            newExcluded = resolveClusterMembers(cluster, excludedMembers);
+            if (!newExcluded.isEmpty()) {
+                newStatic = new ArrayList<>();
+            }
+        }
+        requireReaderExcludesWriter(cluster, customType, newStatic);
+        stored.setCustomEndpointType(customType);
+        stored.setStaticMembers(newStatic);
+        stored.setExcludedMembers(newExcluded);
+        dbClusterEndpoints.put(clusterEndpointKey(effectiveRegion, stored.getDbClusterEndpointIdentifier()), stored);
+        return clusterEndpointView(cluster, stored, "modifying");
+    }
+
+    public synchronized DbClusterEndpoint deleteDbClusterEndpoint(String region, String endpointId) {
+        if (endpointId == null || endpointId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "DBClusterEndpointIdentifier is required.", 400);
+        }
+        String effectiveRegion = effectiveRegion(region);
+        DbClusterEndpoint stored = requireClusterEndpoint(effectiveRegion, endpointId);
+        DbCluster cluster = findClusterForScope(
+                currentAccountId(), effectiveRegion, stored.getDbClusterIdentifier());
+        dbClusterEndpoints.delete(clusterEndpointKey(effectiveRegion, stored.getDbClusterEndpointIdentifier()));
+        return clusterEndpointView(cluster, stored, "deleting");
+    }
+
+    /** One page of endpoints, plus the marker to continue from, or null at the end. */
+    public record ClusterEndpointPage(List<DbClusterEndpoint> endpoints, String marker) {}
+
+    /**
+     * Lists the built-in WRITER and READER endpoints of each cluster in scope along with its custom
+     * ones. The model declares only DBClusterNotFoundFault for this operation, so an identifier
+     * that matches no endpoint answers an empty list.
+     */
+    public synchronized ClusterEndpointPage describeDbClusterEndpoints(
+            String region, String clusterId, String endpointId, Map<String, List<String>> filters,
+            Integer maxRecords, String marker) {
+        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
+        }
+        String effectiveRegion = effectiveRegion(region);
+        Collection<DbCluster> scope = clusterId == null || clusterId.isBlank()
+                ? listDbClusters(null, effectiveRegion)
+                : List.of(getDbCluster(clusterId, effectiveRegion));
+        Map<String, DbClusterEndpoint> byKey = new TreeMap<>();
+        for (DbCluster cluster : scope) {
+            String clusterName = cluster.getDbClusterIdentifier();
+            byKey.put(clusterName + "|0|" + clusterName,
+                    builtInClusterEndpoint(cluster, effectiveRegion, BUILT_IN_WRITER));
+            byKey.put(clusterName + "|1|" + clusterName,
+                    builtInClusterEndpoint(cluster, effectiveRegion, BUILT_IN_READER));
+            for (DbClusterEndpoint stored : clusterEndpointsOf(effectiveRegion, clusterName)) {
+                byKey.put(clusterName + "|2|" + stored.getDbClusterEndpointIdentifier(),
+                        clusterEndpointView(cluster, stored, stored.getStatus()));
+            }
+        }
+        List<Map.Entry<String, DbClusterEndpoint>> matching = byKey.entrySet().stream()
+                .filter(entry -> matchesClusterEndpoint(entry.getValue(), endpointId, filters))
+                .filter(entry -> marker == null || marker.isBlank() || entry.getKey().compareTo(marker) > 0)
+                .toList();
+        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
+        List<Map.Entry<String, DbClusterEndpoint>> page = matching.subList(0, Math.min(limit, matching.size()));
+        String next = page.size() < matching.size() ? page.get(page.size() - 1).getKey() : null;
+        return new ClusterEndpointPage(page.stream().map(Map.Entry::getValue).toList(), next);
+    }
+
+    private static boolean matchesClusterEndpoint(
+            DbClusterEndpoint endpoint, String endpointId, Map<String, List<String>> filters) {
+        if (endpointId != null && !endpointId.isBlank()
+                && !endpoint.getDbClusterEndpointIdentifier().equalsIgnoreCase(endpointId)) {
+            return false;
+        }
+        return filterMatches(filters, "db-cluster-endpoint-type", endpoint.getEndpointType())
+                && filterMatches(filters, "db-cluster-endpoint-custom-type", endpoint.getCustomEndpointType())
+                && filterMatches(filters, "db-cluster-endpoint-id", endpoint.getDbClusterEndpointIdentifier())
+                && filterMatches(filters, "db-cluster-endpoint-status", endpoint.getStatus());
+    }
+
+    private static boolean filterMatches(Map<String, List<String>> filters, String name, String actual) {
+        List<String> wanted = filters == null ? null : filters.get(name);
+        if (wanted == null || wanted.isEmpty()) {
+            return true;
+        }
+        return actual != null && wanted.stream().anyMatch(actual::equalsIgnoreCase);
+    }
+
+    private DbClusterEndpoint builtInClusterEndpoint(DbCluster cluster, String region, String type) {
+        DbClusterEndpoint endpoint = new DbClusterEndpoint();
+        endpoint.setDbClusterEndpointIdentifier(cluster.getDbClusterIdentifier());
+        endpoint.setDbClusterIdentifier(cluster.getDbClusterIdentifier());
+        endpoint.setDbClusterEndpointResourceIdentifier("cluster-endpoint-" + UUID.nameUUIDFromBytes(
+                (cluster.getDbClusterArn() + type).getBytes(StandardCharsets.UTF_8)).toString().replace("-", "")
+                .substring(0, 26).toUpperCase(Locale.ROOT));
+        endpoint.setStatus("available");
+        endpoint.setEndpointType(type);
+        DbEndpoint host = BUILT_IN_READER.equals(type) && cluster.getReaderEndpoint() != null
+                ? cluster.getReaderEndpoint() : cluster.getEndpoint();
+        endpoint.setEndpoint(host == null ? null : host.address());
+        return endpoint;
+    }
+
+    /**
+     * A copy carrying the cluster's current endpoint host and only the members the cluster still
+     * has, so a response never reports an instance that has been deleted.
+     */
+    private DbClusterEndpoint clusterEndpointView(DbCluster cluster, DbClusterEndpoint stored, String status) {
+        DbClusterEndpoint view = new DbClusterEndpoint();
+        view.setDbClusterEndpointIdentifier(stored.getDbClusterEndpointIdentifier());
+        view.setDbClusterIdentifier(stored.getDbClusterIdentifier());
+        view.setDbClusterEndpointResourceIdentifier(stored.getDbClusterEndpointResourceIdentifier());
+        view.setStatus(status);
+        view.setEndpointType(stored.getEndpointType());
+        view.setCustomEndpointType(stored.getCustomEndpointType());
+        view.setDbClusterEndpointArn(stored.getDbClusterEndpointArn());
+        view.setTags(stored.getTags());
+        if (cluster != null) {
+            List<String> members = cluster.getDbClusterMembers();
+            String writer = cluster.resolveWriterIdentifier();
+            boolean reader = "READER".equals(stored.getCustomEndpointType());
+            view.setStaticMembers(stored.getStaticMembers().stream()
+                    .filter(members::contains)
+                    .filter(member -> !(reader && member.equals(writer)))
+                    .toList());
+            view.setExcludedMembers(stored.getExcludedMembers().stream().filter(members::contains).toList());
+            view.setEndpoint(cluster.getEndpoint() == null ? null : cluster.getEndpoint().address());
+        }
+        return view;
+    }
+
+    private static void requireAuroraCluster(DbCluster cluster) {
+        String engine = cluster.getEngineIdentifier() != null
+                ? cluster.getEngineIdentifier()
+                : cluster.getEngine() != null ? cluster.getEngine().name() : "";
+        if (!engine.toLowerCase(Locale.ROOT).startsWith("aurora")) {
+            throw new AwsException("InvalidParameterValue",
+                    "Custom endpoints are supported only for Aurora DB clusters.", 400);
+        }
+    }
+
+    private static String requireCustomEndpointType(String endpointType) {
+        String normalized = endpointType.trim().toUpperCase(Locale.ROOT);
+        if (!CUSTOM_ENDPOINT_TYPES.contains(normalized)) {
+            throw new AwsException("InvalidParameterValue",
+                    "EndpointType must be one of READER or ANY.", 400);
+        }
+        return normalized;
+    }
+
+    private static boolean hasEntries(List<String> members) {
+        return members != null && !members.isEmpty();
+    }
+
+    private static void requireOneMemberList(List<String> staticMembers, List<String> excludedMembers) {
+        if (hasEntries(staticMembers) && hasEntries(excludedMembers)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "StaticMembers and ExcludedMembers can't both be specified.", 400);
+        }
+    }
+
+    private static void requireReaderExcludesWriter(DbCluster cluster, String customType, List<String> staticMembers) {
+        String writer = cluster.resolveWriterIdentifier();
+        if ("READER".equals(customType) && writer != null && staticMembers.contains(writer)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A READER endpoint can't include the writer instance " + writer + ".", 400);
+        }
+    }
+
+    private static List<String> resolveClusterMembers(DbCluster cluster, List<String> requested) {
+        List<String> resolved = new ArrayList<>();
+        if (requested == null) {
+            return resolved;
+        }
+        for (String instanceId : requested) {
+            String member = cluster.getDbClusterMembers().stream()
+                    .filter(candidate -> candidate.equalsIgnoreCase(instanceId))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("DBInstanceNotFound",
+                            "DB instance " + instanceId + " is not a member of DB cluster "
+                            + cluster.getDbClusterIdentifier() + ".", 404));
+            if (!resolved.contains(member)) {
+                resolved.add(member);
+            }
+        }
+        return resolved;
+    }
+
+    private DbClusterEndpoint requireClusterEndpoint(String region, String endpointId) {
+        return dbClusterEndpoints.get(clusterEndpointKey(region, endpointId))
+                .orElseThrow(() -> new AwsException("DBClusterEndpointNotFoundFault",
+                        "DB cluster endpoint " + endpointId + " not found.", 404));
+    }
+
+    private List<DbClusterEndpoint> clusterEndpointsOf(String region, String clusterId) {
+        String prefix = clusterEndpointKey(region, "");
+        return dbClusterEndpoints.scan(k -> k.startsWith(prefix)).stream()
+                .filter(endpoint -> clusterId.equals(endpoint.getDbClusterIdentifier()))
+                .sorted(Comparator.comparing(DbClusterEndpoint::getDbClusterEndpointIdentifier))
+                .toList();
+    }
+
+    private void deleteClusterEndpointsOf(String region, String clusterId) {
+        for (DbClusterEndpoint endpoint : clusterEndpointsOf(region, clusterId)) {
+            dbClusterEndpoints.delete(clusterEndpointKey(region, endpoint.getDbClusterEndpointIdentifier()));
+        }
+    }
+
+    private void dropInstanceFromClusterEndpoints(String region, String clusterId, String instanceId) {
+        for (DbClusterEndpoint endpoint : clusterEndpointsOf(region, clusterId)) {
+            boolean changed = endpoint.getStaticMembers().remove(instanceId);
+            changed |= endpoint.getExcludedMembers().remove(instanceId);
+            if (changed) {
+                dbClusterEndpoints.put(
+                        clusterEndpointKey(region, endpoint.getDbClusterEndpointIdentifier()), endpoint);
+            }
+        }
+    }
+
+    private static String clusterEndpointKey(String region, String endpointId) {
+        return "cluster-endpoint::" + region + "::" + endpointId.toLowerCase(Locale.ROOT);
+    }
 }

@@ -126,6 +126,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `FailoverGlobalCluster` | Promote a secondary to primary (failover with `AllowDataLoss`, or switchover) |
 | `SwitchoverGlobalCluster` | Promote a secondary to primary and demote the current primary to a secondary |
 | `FailoverDBCluster` | Move a DB cluster's writer role to a reader instance, the named one or the first |
+| `CreateDBClusterEndpoint` | Create an Aurora custom cluster endpoint of type `READER` or `ANY`; see [Custom cluster endpoints](#custom-cluster-endpoints) |
+| `DescribeDBClusterEndpoints` | List the built-in `WRITER` and `READER` endpoints of each cluster along with its custom ones |
+| `ModifyDBClusterEndpoint` | Change a custom endpoint's type or replace its static or excluded member list |
+| `DeleteDBClusterEndpoint` | Delete a custom endpoint |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
@@ -585,6 +589,26 @@ global cluster with deletion protection off.
 the first reader when none is named; a cluster with no reader has nothing to fail over to and is
 refused. `DescribeDBClusters` reports the role as `IsClusterWriter`, and deleting the writer
 promotes a remaining member, as Aurora does on its own.
+
+## Custom cluster endpoints
+
+A custom endpoint is its own resource: `DBClusterEndpointIdentifier` is stored lowercase, follows the
+RDS identifier rules (up to 63 characters), is unique in the region across clusters, and a cluster
+holds at most five. `EndpointType` is `READER` or `ANY`, case-insensitive. `StaticMembers` and
+`ExcludedMembers` are mutually exclusive, each member must be an instance of the cluster, and a
+`READER` endpoint cannot name the writer in `StaticMembers`. Tags given on create work through the
+endpoint ARN (`arn:<partition>:rds:<region>:<account>:cluster-endpoint:<id>`) with
+`ListTagsForResource`, `AddTagsToResource` and `RemoveTagsFromResource`.
+
+`DescribeDBClusterEndpoints` lists each cluster's built-in `WRITER` and `READER` endpoints and its
+custom ones, in that order, and supports `DBClusterIdentifier`, `DBClusterEndpointIdentifier`, the
+`db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`, `db-cluster-endpoint-id` and
+`db-cluster-endpoint-status` filters, and `MaxRecords` / `Marker`. Create, modify and delete answer
+with `creating`, `modifying` and `deleting`; a describe afterwards reports `available`. Deleting a
+cluster deletes its custom endpoints, and a deleted instance leaves the member lists that named it.
+
+Custom endpoints are modelled, not routed: `Endpoint` is the cluster's own endpoint host, so
+connections through it go where the cluster endpoint sends them, whatever members the endpoint names.
 
 ## Persistence
 

@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
@@ -8422,5 +8423,233 @@ class RdsServiceTest {
         // Losing the writer promotes the remaining member.
         rdsService.deleteDbInstance("writer");
         assertEquals("reader", rdsService.getDbCluster("aurora").resolveWriterIdentifier());
+    }
+
+    private void auroraClusterWithMembers(String cluster, String... members) {
+        rdsService.createDbCluster(cluster, "aurora-postgresql", "16.3", "admin", "password", "appdb", false, null);
+        for (String member : members) {
+            rdsService.createDbInstance(member, "aurora-postgresql", "16.3", null, null, null,
+                    "db.r6g.large", 0, false, null, null, cluster, null, false);
+        }
+    }
+
+    private static String clusterEndpointFault(Runnable call) {
+        return assertThrows(AwsException.class, call::run).getErrorCode();
+    }
+
+    @Test
+    void createDbClusterEndpointStoresLowercaseTypedEndpointWithClusterHost() {
+        auroraClusterWithMembers("ce-aurora", "ce-writer", "ce-reader");
+
+        DbClusterEndpoint created = rdsService.createDbClusterEndpoint("us-east-1", "ce-aurora", "Analytics",
+                "reader", List.of("CE-READER"), List.of(), Map.of("team", "data"));
+
+        assertEquals("analytics", created.getDbClusterEndpointIdentifier());
+        assertEquals("CUSTOM", created.getEndpointType());
+        assertEquals("READER", created.getCustomEndpointType());
+        assertEquals("creating", created.getStatus());
+        assertEquals(List.of("ce-reader"), created.getStaticMembers());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:cluster-endpoint:analytics",
+                created.getDbClusterEndpointArn());
+        assertEquals(rdsService.getDbCluster("ce-aurora").getEndpoint().address(), created.getEndpoint());
+        assertEquals(Map.of("team", "data"), rdsService.listTagsForResource(created.getDbClusterEndpointArn()));
+    }
+
+    @Test
+    void createDbClusterEndpointEnforcesMemberAndTypeRules() {
+        auroraClusterWithMembers("ce-rules", "rules-writer", "rules-reader");
+
+        assertEquals("InvalidParameterCombination", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-rules", "both", "ANY",
+                        List.of("rules-reader"), List.of("rules-writer"), null)));
+        assertEquals("DBInstanceNotFound", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-rules", "stranger", "ANY",
+                        List.of("not-a-member"), List.of(), null)));
+        assertEquals("InvalidParameterCombination", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-rules", "reads-writer", "READER",
+                        List.of("rules-writer"), List.of(), null)));
+        assertEquals("InvalidParameterValue", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-rules", "wrong-type", "WRITER",
+                        List.of(), List.of(), null)));
+        assertEquals("InvalidParameterValue", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-rules", "bad--name", "ANY",
+                        List.of(), List.of(), null)));
+        assertEquals("DBClusterNotFoundFault", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "no-such-cluster", "orphan", "ANY",
+                        List.of(), List.of(), null)));
+        assertEquals("ANY", rdsService.createDbClusterEndpoint("us-east-1", "ce-rules", "writer-ok", "ANY",
+                List.of("rules-writer"), List.of(), null).getCustomEndpointType());
+    }
+
+    @Test
+    void createDbClusterEndpointIsUniquePerRegionAndCappedAtFivePerCluster() {
+        auroraClusterWithMembers("ce-quota-a", "quota-a-1");
+        auroraClusterWithMembers("ce-quota-b", "quota-b-1");
+        for (int i = 1; i <= 5; i++) {
+            rdsService.createDbClusterEndpoint("us-east-1", "ce-quota-a", "quota-" + i, "ANY",
+                    List.of(), List.of(), null);
+        }
+
+        AwsException quota = assertThrows(AwsException.class, () ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-quota-a", "quota-6", "ANY",
+                        List.of(), List.of(), null));
+        assertEquals("DBClusterEndpointQuotaExceededFault", quota.getErrorCode());
+        assertEquals(403, quota.getHttpStatus());
+        assertEquals("DBClusterEndpointAlreadyExistsFault", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-quota-b", "QUOTA-1", "ANY",
+                        List.of(), List.of(), null)));
+    }
+
+    @Test
+    void customEndpointCannotTakeAClusterIdentifierThatBuiltInEndpointsCarry() {
+        auroraClusterWithMembers("ce-named-a", "named-a-1");
+        auroraClusterWithMembers("ce-named-b", "named-b-1");
+
+        assertEquals("DBClusterEndpointAlreadyExistsFault", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-named-a", "CE-NAMED-B", "ANY",
+                        List.of(), List.of(), null)));
+        assertEquals("DBClusterEndpointAlreadyExistsFault", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-named-a", "ce-named-a", "ANY",
+                        List.of(), List.of(), null)));
+    }
+
+    @Test
+    void modifyDbClusterEndpointReplacesTheMemberListAndChecksTheWriter() {
+        auroraClusterWithMembers("ce-modify", "mod-writer", "mod-reader");
+        rdsService.createDbClusterEndpoint("us-east-1", "ce-modify", "tuned", "ANY",
+                List.of("mod-reader"), List.of(), null);
+
+        DbClusterEndpoint modified = rdsService.modifyDbClusterEndpoint("us-east-1", "tuned", "READER",
+                List.of(), List.of("mod-writer"));
+
+        assertEquals("READER", modified.getCustomEndpointType());
+        assertEquals(List.of(), modified.getStaticMembers());
+        assertEquals(List.of("mod-writer"), modified.getExcludedMembers());
+        assertEquals("InvalidParameterCombination", clusterEndpointFault(() ->
+                rdsService.modifyDbClusterEndpoint("us-east-1", "tuned", null,
+                        List.of("mod-writer"), List.of())));
+        assertEquals("DBClusterEndpointNotFoundFault", clusterEndpointFault(() ->
+                rdsService.modifyDbClusterEndpoint("us-east-1", "missing", "ANY", List.of(), List.of())));
+    }
+
+    @Test
+    void describeDbClusterEndpointsListsBuiltInAndCustomEndpointsWithFiltersAndPaging() {
+        auroraClusterWithMembers("ce-describe", "desc-1");
+        rdsService.createDbClusterEndpoint("us-east-1", "ce-describe", "alpha", "READER", List.of(), List.of(), null);
+        rdsService.createDbClusterEndpoint("us-east-1", "ce-describe", "beta", "ANY", List.of(), List.of(), null);
+
+        List<DbClusterEndpoint> all = rdsService.describeDbClusterEndpoints(
+                "us-east-1", "ce-describe", null, Map.of(), null, null).endpoints();
+        assertEquals(List.of("WRITER", "READER", "CUSTOM", "CUSTOM"),
+                all.stream().map(DbClusterEndpoint::getEndpointType).toList());
+        assertEquals(List.of("ce-describe", "ce-describe", "alpha", "beta"),
+                all.stream().map(DbClusterEndpoint::getDbClusterEndpointIdentifier).toList());
+
+        assertEquals(List.of("beta"), rdsService.describeDbClusterEndpoints("us-east-1", "ce-describe", null,
+                Map.of("db-cluster-endpoint-custom-type", List.of("any")), null, null).endpoints().stream()
+                .map(DbClusterEndpoint::getDbClusterEndpointIdentifier).toList());
+        assertEquals(2, rdsService.describeDbClusterEndpoints("us-east-1", "ce-describe", null,
+                Map.of("db-cluster-endpoint-type", List.of("custom")), null, null).endpoints().size());
+        assertEquals(1, rdsService.describeDbClusterEndpoints("us-east-1", "ce-describe", "ALPHA",
+                Map.of(), null, null).endpoints().size());
+        assertEquals("DBClusterNotFoundFault", clusterEndpointFault(() ->
+                rdsService.describeDbClusterEndpoints("us-east-1", "nope", null, Map.of(), null, null)));
+        assertEquals("InvalidParameterValue", clusterEndpointFault(() ->
+                rdsService.describeDbClusterEndpoints("us-east-1", "ce-describe", null, Map.of(), 5, null)));
+    }
+
+    @Test
+    void describeDbClusterEndpointsPagesWithTheMarker() {
+        for (int cluster = 1; cluster <= 4; cluster++) {
+            String clusterId = "ce-paging-" + cluster;
+            auroraClusterWithMembers(clusterId, "paging-member-" + cluster);
+            for (int i = 1; i <= 5; i++) {
+                rdsService.createDbClusterEndpoint("us-east-1", clusterId, "page-" + cluster + "-" + i, "ANY",
+                        List.of(), List.of(), null);
+            }
+        }
+
+        RdsService.ClusterEndpointPage first = rdsService.describeDbClusterEndpoints(
+                "us-east-1", null, null, Map.of(), 20, null);
+        assertEquals(20, first.endpoints().size());
+        assertNotNull(first.marker());
+        RdsService.ClusterEndpointPage second = rdsService.describeDbClusterEndpoints(
+                "us-east-1", null, null, Map.of(), 20, first.marker());
+        assertEquals(8, second.endpoints().size());
+        assertNull(second.marker());
+        assertTrue(second.endpoints().stream().noneMatch(first.endpoints()::contains));
+    }
+
+    @Test
+    void deletedInstanceDropsOutOfEndpointMemberListsAndDeletedClusterTakesEndpointsAlong() {
+        auroraClusterWithMembers("ce-cascade", "casc-writer", "casc-reader");
+        rdsService.createDbClusterEndpoint("us-east-1", "ce-cascade", "keeps", "ANY",
+                List.of("casc-writer", "casc-reader"), List.of(), null);
+
+        rdsService.deleteDbInstance("casc-reader");
+        DbClusterEndpoint described = rdsService.describeDbClusterEndpoints("us-east-1", "ce-cascade", "keeps",
+                Map.of(), null, null).endpoints().get(0);
+        assertEquals(List.of("casc-writer"), described.getStaticMembers());
+
+        rdsService.deleteDbInstance("casc-writer");
+        rdsService.deleteDbCluster("ce-cascade");
+        assertEquals("DBClusterNotFoundFault", clusterEndpointFault(() ->
+                rdsService.describeDbClusterEndpoints("us-east-1", "ce-cascade", null, Map.of(), null, null)));
+        assertEquals("DBClusterEndpointNotFoundFault", clusterEndpointFault(() ->
+                rdsService.deleteDbClusterEndpoint("us-east-1", "keeps")));
+    }
+
+    @Test
+    void deleteDbClusterEndpointReportsDeletingAndFreesTheIdentifier() {
+        auroraClusterWithMembers("ce-delete", "del-1");
+        rdsService.createDbClusterEndpoint("us-east-1", "ce-delete", "short-lived", "ANY",
+                List.of(), List.of(), null);
+
+        assertEquals("deleting", rdsService.deleteDbClusterEndpoint("us-east-1", "short-lived").getStatus());
+        assertEquals("short-lived", rdsService.createDbClusterEndpoint("us-east-1", "ce-delete", "short-lived",
+                "ANY", List.of(), List.of(), null).getDbClusterEndpointIdentifier());
+    }
+
+    @Test
+    void readerEndpointNeverReportsTheCurrentWriterAfterFailover() {
+        auroraClusterWithMembers("ce-failover", "fo-writer", "fo-reader");
+        rdsService.createDbClusterEndpoint("us-east-1", "ce-failover", "readers", "READER",
+                List.of("fo-reader"), List.of(), null);
+
+        rdsService.failoverDbCluster("ce-failover", "fo-reader", null);
+
+        DbClusterEndpoint described = rdsService.describeDbClusterEndpoints("us-east-1", "ce-failover",
+                "readers", Map.of(), null, null).endpoints().get(0);
+        assertEquals(List.of(), described.getStaticMembers());
+    }
+
+    @Test
+    void modifyDbClusterEndpointClearsAListGivenEmptyAndKeepsAnOmittedOne() {
+        auroraClusterWithMembers("ce-clear", "clear-writer", "clear-reader");
+        rdsService.createDbClusterEndpoint("us-east-1", "ce-clear", "clearable", "ANY",
+                List.of("clear-reader"), List.of(), null);
+
+        DbClusterEndpoint untouched = rdsService.modifyDbClusterEndpoint("us-east-1", "clearable", "ANY",
+                null, null);
+        assertEquals(List.of("clear-reader"), untouched.getStaticMembers());
+
+        DbClusterEndpoint cleared = rdsService.modifyDbClusterEndpoint("us-east-1", "clearable", null,
+                List.of(), null);
+        assertEquals(List.of(), cleared.getStaticMembers());
+        assertEquals(List.of(), cleared.getExcludedMembers());
+    }
+
+    @Test
+    void createDbClusterEndpointRejectsNonAuroraClustersButDescribeStillListsTheirBuiltIns() {
+        rdsService.createDbCluster("ce-multi-az", "postgres", "17.5", "admin", "password", "appdb", false, null);
+
+        assertEquals("InvalidParameterValue", clusterEndpointFault(() ->
+                rdsService.createDbClusterEndpoint("us-east-1", "ce-multi-az", "nope", "ANY",
+                        List.of(), List.of(), null)));
+        List<DbClusterEndpoint> builtIns = rdsService.describeDbClusterEndpoints(
+                "us-east-1", "ce-multi-az", null, Map.of(), null, null).endpoints();
+        assertEquals(List.of("WRITER", "READER"),
+                builtIns.stream().map(DbClusterEndpoint::getEndpointType).toList());
+        assertNull(builtIns.get(0).getDbClusterEndpointArn());
     }
 }

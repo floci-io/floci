@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
@@ -162,6 +163,10 @@ public class RdsQueryHandler {
                 case "FailoverGlobalCluster" -> handleFailoverGlobalCluster(params, region);
                 case "SwitchoverGlobalCluster" -> handleSwitchoverGlobalCluster(params, region);
                 case "FailoverDBCluster" -> handleFailoverDbCluster(params, region);
+                case "CreateDBClusterEndpoint" -> handleCreateDbClusterEndpoint(params, region);
+                case "DescribeDBClusterEndpoints" -> handleDescribeDbClusterEndpoints(params, region);
+                case "ModifyDBClusterEndpoint" -> handleModifyDbClusterEndpoint(params, region);
+                case "DeleteDBClusterEndpoint" -> handleDeleteDbClusterEndpoint(params, region);
                 case "AddTagsToResource" -> handleAddTagsToResource(params, region);
                 case "ListTagsForResource" -> handleListTagsForResource(params, region);
                 case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params, region);
@@ -383,6 +388,91 @@ public class RdsQueryHandler {
         }
         xml.end("EventCategoriesList");
         return xml.end("EventSubscription").build();
+    }
+
+    private static final List<String> CLUSTER_ENDPOINT_FILTERS = List.of(
+            "db-cluster-endpoint-type", "db-cluster-endpoint-custom-type",
+            "db-cluster-endpoint-id", "db-cluster-endpoint-status");
+
+    private Response handleCreateDbClusterEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbClusterEndpoint endpoint = service.createDbClusterEndpoint(region,
+                params.getFirst("DBClusterIdentifier"),
+                params.getFirst("DBClusterEndpointIdentifier"),
+                params.getFirst("EndpointType"),
+                memberList(params, "StaticMembers"),
+                memberList(params, "ExcludedMembers"),
+                parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("CreateDBClusterEndpoint", AwsNamespaces.RDS,
+                clusterEndpointFieldsXml(endpoint))).build();
+    }
+
+    private Response handleModifyDbClusterEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbClusterEndpoint endpoint = service.modifyDbClusterEndpoint(region,
+                params.getFirst("DBClusterEndpointIdentifier"),
+                params.getFirst("EndpointType"),
+                optionalMemberList(params, "StaticMembers"),
+                optionalMemberList(params, "ExcludedMembers"));
+        return Response.ok(AwsQueryResponse.envelope("ModifyDBClusterEndpoint", AwsNamespaces.RDS,
+                clusterEndpointFieldsXml(endpoint))).build();
+    }
+
+    private Response handleDeleteDbClusterEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbClusterEndpoint endpoint = service.deleteDbClusterEndpoint(region,
+                params.getFirst("DBClusterEndpointIdentifier"));
+        return Response.ok(AwsQueryResponse.envelope("DeleteDBClusterEndpoint", AwsNamespaces.RDS,
+                clusterEndpointFieldsXml(endpoint))).build();
+    }
+
+    private Response handleDescribeDbClusterEndpoints(MultivaluedMap<String, String> params, String region) {
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (String name : CLUSTER_ENDPOINT_FILTERS) {
+            filters.put(name, extractRdsFilterValues(params, name));
+        }
+        RdsService.ClusterEndpointPage page = service.describeDbClusterEndpoints(region,
+                params.getFirst("DBClusterIdentifier"),
+                params.getFirst("DBClusterEndpointIdentifier"),
+                filters,
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("DBClusterEndpoints");
+        for (DbClusterEndpoint endpoint : page.endpoints()) {
+            xml.start("DBClusterEndpointList").raw(clusterEndpointFieldsXml(endpoint))
+                    .end("DBClusterEndpointList");
+        }
+        xml.end("DBClusterEndpoints");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterEndpoints", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    private static String clusterEndpointFieldsXml(DbClusterEndpoint e) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("DBClusterEndpointIdentifier", e.getDbClusterEndpointIdentifier())
+                .elem("DBClusterIdentifier", e.getDbClusterIdentifier())
+                .elem("DBClusterEndpointResourceIdentifier", e.getDbClusterEndpointResourceIdentifier());
+        if (e.getEndpoint() != null) {
+            xml.elem("Endpoint", e.getEndpoint());
+        }
+        xml.elem("Status", e.getStatus())
+                .elem("EndpointType", e.getEndpointType());
+        if (e.getCustomEndpointType() != null) {
+            xml.elem("CustomEndpointType", e.getCustomEndpointType());
+        }
+        xml.start("StaticMembers");
+        for (String member : e.getStaticMembers()) {
+            xml.elem("member", member);
+        }
+        xml.end("StaticMembers").start("ExcludedMembers");
+        for (String member : e.getExcludedMembers()) {
+            xml.elem("member", member);
+        }
+        xml.end("ExcludedMembers");
+        if (e.getDbClusterEndpointArn() != null) {
+            xml.elem("DBClusterEndpointArn", e.getDbClusterEndpointArn());
+        }
+        return xml.build();
     }
 
     private Response handleDescribeEvents(MultivaluedMap<String, String> params, String region) {
@@ -2987,6 +3077,13 @@ public class RdsQueryHandler {
                 .map(params::getFirst)
                 .filter(value -> value != null && !value.isBlank())
                 .toList();
+    }
+
+    private static List<String> optionalMemberList(MultivaluedMap<String, String> params, String baseName) {
+        if (!hasMemberKeys(params, baseName) && !params.containsKey(baseName)) {
+            return null;
+        }
+        return memberList(params, baseName);
     }
 
     private static boolean hasMemberKeys(MultivaluedMap<String, String> params, String baseName) {

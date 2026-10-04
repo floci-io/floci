@@ -12,16 +12,21 @@ import software.amazon.awssdk.services.ec2.model.DescribeSubnetsResponse;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo;
 import software.amazon.awssdk.services.rds.model.CreateDbClusterResponse;
+import software.amazon.awssdk.services.rds.model.CreateDbClusterEndpointResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.DBCluster;
+import software.amazon.awssdk.services.rds.model.DBClusterEndpoint;
 import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
 import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DBSnapshot;
+import software.amazon.awssdk.services.rds.model.DbClusterEndpointAlreadyExistsException;
+import software.amazon.awssdk.services.rds.model.DbClusterEndpointNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
@@ -861,6 +866,97 @@ class RdsControlPlaneTest {
                             .isEqualTo("default:postgres-16"));
         } finally {
             deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    @Test
+    void sdkRoundTripsAuroraCustomClusterEndpoints() {
+        String clusterName = TestFixtures.uniqueName("rds-endpoints");
+        String writerName = clusterName + "-writer";
+        String readerName = clusterName + "-reader";
+        String endpointName = TestFixtures.uniqueName("analytics");
+        try {
+            rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .masterUsername("admin")
+                    .masterUserPassword("password"));
+            for (String instance : List.of(writerName, readerName)) {
+                rds.createDBInstance(b -> b
+                        .dbInstanceIdentifier(instance)
+                        .dbClusterIdentifier(clusterName)
+                        .engine("aurora-postgresql")
+                        .dbInstanceClass("db.r6g.large"));
+            }
+
+            CreateDbClusterEndpointResponse created = rds.createDBClusterEndpoint(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .dbClusterEndpointIdentifier(endpointName)
+                    .endpointType("READER")
+                    .staticMembers(readerName)
+                    .tags(Tag.builder().key("team").value("data").build()));
+            assertThat(created.dbClusterEndpointIdentifier()).isEqualTo(endpointName);
+            assertThat(created.endpointType()).isEqualTo("CUSTOM");
+            assertThat(created.customEndpointType()).isEqualTo("READER");
+            assertThat(created.staticMembers()).containsExactly(readerName);
+            assertThat(created.dbClusterEndpointArn()).contains(":cluster-endpoint:" + endpointName);
+
+            assertThat(rds.listTagsForResource(b -> b.resourceName(created.dbClusterEndpointArn())).tagList())
+                    .extracting(Tag::key, Tag::value)
+                    .containsExactly(tuple("team", "data"));
+
+            List<DBClusterEndpoint> listed = rds.describeDBClusterEndpoints(b -> b
+                    .dbClusterIdentifier(clusterName)).dbClusterEndpoints();
+            assertThat(listed).extracting(DBClusterEndpoint::endpointType)
+                    .containsExactly("WRITER", "READER", "CUSTOM");
+            assertThat(listed.get(2).status()).isEqualTo("available");
+
+            assertThat(rds.describeDBClusterEndpoints(b -> b
+                    .filters(f -> f.name("db-cluster-endpoint-type").values("custom"))).dbClusterEndpoints())
+                    .extracting(DBClusterEndpoint::dbClusterEndpointIdentifier)
+                    .contains(endpointName);
+
+            assertThatThrownBy(() -> rds.createDBClusterEndpoint(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .dbClusterEndpointIdentifier(endpointName)
+                    .endpointType("ANY")))
+                    .isInstanceOf(DbClusterEndpointAlreadyExistsException.class);
+            assertThatThrownBy(() -> rds.createDBClusterEndpoint(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .dbClusterEndpointIdentifier(endpointName + "-ghost")
+                    .endpointType("ANY")
+                    .staticMembers("no-such-instance")))
+                    .isInstanceOf(DbInstanceNotFoundException.class);
+
+            rds.modifyDBClusterEndpoint(b -> b
+                    .dbClusterEndpointIdentifier(endpointName)
+                    .endpointType("ANY")
+                    .excludedMembers(writerName));
+            DBClusterEndpoint modified = rds.describeDBClusterEndpoints(b -> b
+                    .dbClusterEndpointIdentifier(endpointName)).dbClusterEndpoints().get(0);
+            assertThat(modified.customEndpointType()).isEqualTo("ANY");
+            assertThat(modified.staticMembers()).isEmpty();
+            assertThat(modified.excludedMembers()).containsExactly(writerName);
+
+            rds.modifyDBClusterEndpoint(b -> b
+                    .dbClusterEndpointIdentifier(endpointName)
+                    .excludedMembers(List.of()));
+            assertThat(rds.describeDBClusterEndpoints(b -> b
+                    .dbClusterEndpointIdentifier(endpointName)).dbClusterEndpoints().get(0).excludedMembers())
+                    .isEmpty();
+
+            rds.deleteDBClusterEndpoint(b -> b.dbClusterEndpointIdentifier(endpointName));
+            assertThatThrownBy(() -> rds.deleteDBClusterEndpoint(b -> b
+                    .dbClusterEndpointIdentifier(endpointName)))
+                    .isInstanceOf(DbClusterEndpointNotFoundException.class);
+        } finally {
+            deleteDbInstance(rds, writerName);
+            deleteDbInstance(rds, readerName);
+            try {
+                rds.deleteDBCluster(b -> b.dbClusterIdentifier(clusterName).skipFinalSnapshot(true));
+            } catch (Exception e) {
+                LOG.log(Level.FINE, "RDS cluster already absent during cleanup " + clusterName, e);
+            }
         }
     }
 
