@@ -256,7 +256,7 @@ class S3ValidateSignaturesIntegrationTest {
 
     @Test
     @Order(33)
-    void sigV4AHeaderIsNotRejectedAsMalformed() {
+    void sigV4AHeaderIsRejectedWhenSignatureValidationEnabled() {
         String authSigV4A = "AWS4-ECDSA-P256-SHA256 Credential=test/" + CREDENTIAL_DATE
                 + "/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=30450220abc";
         given()
@@ -264,7 +264,8 @@ class S3ValidateSignaturesIntegrationTest {
         .when()
             .get("/" + BUCKET + "/" + KEY)
         .then()
-            .statusCode(200);
+            .statusCode(400)
+            .body(containsString("<Code>AuthorizationHeaderMalformed</Code>"));
     }
 
     private static void createIamUser(String userName) {

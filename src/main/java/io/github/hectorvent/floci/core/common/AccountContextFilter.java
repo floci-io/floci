@@ -85,8 +85,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
         } else {
             MultivaluedMap<String, String> queryParams = ctx.getUriInfo().getQueryParameters();
             String credential = queryParams.getFirst("X-Amz-Credential");
-            String algorithm = queryParams.getFirst("X-Amz-Algorithm");
-            if (credential != null && !credential.isEmpty() && algorithm != null && !algorithm.isEmpty()) {
+            if (credential != null && !credential.isEmpty()) {
                 String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
                         resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));

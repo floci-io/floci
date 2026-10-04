@@ -213,8 +213,9 @@ class PreSignedUrlFilterTest {
 
     @Test
     void abortsWhenPresignedParamPresentWithoutAlgorithm() {
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null);
-        filter.resourceInfo = s3ResourceInfo();
+        PreSignedUrlGenerator presignGenerator = mock(PreSignedUrlGenerator.class);
+        when(presignGenerator.shouldValidateSignatures()).thenReturn(true);
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(presignGenerator, null, null, null, s3ResourceInfo());
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
@@ -236,9 +237,23 @@ class PreSignedUrlFilterTest {
     }
 
     @Test
+    void allowsPresignedParamWithoutAlgorithmWhenValidationDisabled() {
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null, s3ResourceInfo());
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.add("X-Amz-Credential", "111122223333/20261001/us-east-1/s3/aws4_request");
+        when(uriInfo.getQueryParameters()).thenReturn(queryParams);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+
+        filter.filter(ctx);
+
+        verify(ctx, never()).abortWith(any());
+    }
+
+    @Test
     void allowsRequestWithoutAnyPresignedParams() {
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null);
-        filter.resourceInfo = s3ResourceInfo();
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null, s3ResourceInfo());
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
@@ -253,8 +268,7 @@ class PreSignedUrlFilterTest {
 
     @Test
     void allowsHeaderSignedRequestWithDateOrExpiresQueryParam() {
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null);
-        filter.resourceInfo = s3ResourceInfo();
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null, s3ResourceInfo());
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
@@ -270,10 +284,9 @@ class PreSignedUrlFilterTest {
 
     @Test
     void allowsNonS3Routes() {
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null);
         ResourceInfo nonS3Info = mock(ResourceInfo.class);
         doReturn(Object.class).when(nonS3Info).getResourceClass();
-        filter.resourceInfo = nonS3Info;
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null, nonS3Info);
 
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);

@@ -75,7 +75,6 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(S3HeaderSignatureFilter.class);
 
     private static final String ALGORITHM = "AWS4-HMAC-SHA256";
-    private static final String SIGV4A_ALGORITHM = "AWS4-ECDSA-P256-SHA256";
     private static final String SIGNING_SERVICE = "s3";
     private static final String TERMINATOR = "aws4_request";
     private static final Duration MAX_CLOCK_SKEW = Duration.ofMinutes(15);
@@ -86,37 +85,40 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     private final PreSignedUrlGenerator presignGenerator;
     private final IamService iamService;
     private final CurrentVertxRequest currentVertxRequest;
-
-    @Context
-    ResourceInfo resourceInfo;
+    private final ResourceInfo resourceInfo;
 
     @Inject
-    public S3HeaderSignatureFilter(S3Service s3Service, PreSignedUrlGenerator presignGenerator,
-                                   IamService iamService, CurrentVertxRequest currentVertxRequest) {
+    public S3HeaderSignatureFilter(S3Service s3Service,
+                                   PreSignedUrlGenerator presignGenerator,
+                                   IamService iamService,
+                                   CurrentVertxRequest currentVertxRequest,
+                                   @Context ResourceInfo resourceInfo) {
         this.s3Service = s3Service;
         this.presignGenerator = presignGenerator;
         this.iamService = iamService;
         this.currentVertxRequest = currentVertxRequest;
+        this.resourceInfo = resourceInfo;
+    }
+
+    S3HeaderSignatureFilter(S3Service s3Service,
+                            PreSignedUrlGenerator presignGenerator,
+                            IamService iamService,
+                            CurrentVertxRequest currentVertxRequest) {
+        this(s3Service, presignGenerator, iamService, currentVertxRequest, null);
     }
 
     @Override
     public void filter(ContainerRequestContext ctx) throws IOException {
-        if (!routedToS3()) {
+        if (!routedToS3() || !verifiesSignatures()) {
             return;
         }
         String authorization = ctx.getHeaderString("Authorization");
         if (authorization == null || authorization.isBlank()) {
             return;
         }
-        if (!authorization.startsWith(ALGORITHM + " ") && !authorization.startsWith(SIGV4A_ALGORITHM + " ")) {
+        if (!authorization.startsWith(ALGORITHM + " ")) {
             abort(ctx, 400, "AuthorizationHeaderMalformed",
                     "The authorization header you provided is invalid.");
-            return;
-        }
-        if (authorization.startsWith(SIGV4A_ALGORITHM + " ")) {
-            return;
-        }
-        if (!verifiesSignatures()) {
             return;
         }
 

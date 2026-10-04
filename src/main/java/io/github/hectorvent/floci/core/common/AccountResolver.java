@@ -48,7 +48,9 @@ public class AccountResolver {
             return null;
         }
         String trimmed = authorizationHeader.trim();
-        if (!trimmed.startsWith(SIGV4_PREFIX) && !trimmed.startsWith(SIGV4A_PREFIX)) {
+        if (!trimmed.startsWith(SIGV4_PREFIX)
+                && !trimmed.startsWith(SIGV4A_PREFIX)
+                && !trimmed.startsWith("Credential=")) {
             return null;
         }
         Matcher m = AKID_PATTERN.matcher(trimmed);

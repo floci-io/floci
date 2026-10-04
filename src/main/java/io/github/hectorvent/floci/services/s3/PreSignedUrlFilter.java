@@ -55,22 +55,34 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private final S3Service s3Service;
     private final IamService iamService;
     private final CurrentVertxRequest currentVertxRequest;
-
-    @Context
-    ResourceInfo resourceInfo;
+    private final ResourceInfo resourceInfo;
 
     @Inject
     public PreSignedUrlFilter(PreSignedUrlGenerator presignGenerator,
                               S3Service s3Service,
                               IamService iamService,
-                              CurrentVertxRequest currentVertxRequest) {
+                              CurrentVertxRequest currentVertxRequest,
+                              @Context ResourceInfo resourceInfo) {
         this.presignGenerator = presignGenerator;
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.currentVertxRequest = currentVertxRequest;
+        this.resourceInfo = resourceInfo;
     }
 
-    boolean routedToS3() {
+    PreSignedUrlFilter(PreSignedUrlGenerator presignGenerator,
+                       S3Service s3Service,
+                       IamService iamService,
+                       CurrentVertxRequest currentVertxRequest) {
+        this(presignGenerator, s3Service, iamService, currentVertxRequest, null);
+    }
+
+    private boolean verifiesSignatures() {
+        return (s3Service != null && s3Service.isAuthEnforced())
+                || (presignGenerator != null && presignGenerator.shouldValidateSignatures());
+    }
+
+    private boolean routedToS3() {
         return resourceInfo != null && S3Controller.class.equals(resourceInfo.getResourceClass());
     }
 
@@ -103,13 +115,15 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         // Only process if this is a pre-signed URL request
         String algorithm = queryParams.getFirst("X-Amz-Algorithm");
         if (algorithm == null) {
-            requestContext.abortWith(
-                errorResponse(
-                    400,
-                    "AuthorizationQueryParametersError",
-                    "Query-string authentication requires the X-Amz-Algorithm query parameter"
-                )
-            );
+            if (verifiesSignatures() && queryParams.containsKey("X-Amz-Credential")) {
+                requestContext.abortWith(
+                    errorResponse(
+                        400,
+                        "AuthorizationQueryParametersError",
+                        "Query-string authentication requires the X-Amz-Algorithm query parameter"
+                    )
+                );
+            }
             return;
         }
 
