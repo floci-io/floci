@@ -34,14 +34,19 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.containsString;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 @QuarkusTest
 class CloudFormationSchedulerScheduleIntegrationTest {
@@ -382,7 +387,7 @@ class CloudFormationSchedulerScheduleIntegrationTest {
     }
 
     @Test
-    void failedStackDeletionDoesNotForgetAnExhaustedGroupMoveOrphan() {
+    void boundedStackDeletionAbandonsAnExhaustedGroupMoveOrphanWithoutAFourthAttempt() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-schedule-orphan-delete-" + suffix;
         String name = "orphan-delete-" + suffix;
@@ -400,25 +405,41 @@ class CloudFormationSchedulerScheduleIntegrationTest {
         getSchedule(name, "default").then().statusCode(200);
         getSchedule(name, group).then().statusCode(200).body("State", equalTo("DISABLED"));
 
-        cloudFormation(stack, "DeleteStack", null, Map.of());
-        outputs(stack, "DELETE_FAILED");
-        assertTrue(scheduleResource(stack).getAttributes().containsKey("__FlociReplacementCleanup"));
-        getSchedule(name, group).then().statusCode(200);
+        boolean deleted = false;
+        clearInvocations(scheduler);
+        try {
+            cloudFormation(stack, "DeleteStack", null, Map.of());
+            outputs(stack, "DELETE_FAILED");
+            assertAll(
+                    () -> assertFalse(scheduleResource(stack).getAttributes().containsKey("__FlociReplacementCleanup")),
+                    () -> verify(scheduler, times(3)).deleteSchedule(name, group, "us-east-1"),
+                    () -> verify(scheduler, times(1)).deleteSchedule(name, "default", "us-east-1"),
+                    () -> getSchedule(name, group).then().statusCode(200).body("State", equalTo("DISABLED")));
 
-        doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
-        deleteStack(stack);
-        getSchedule(name, "default").then().statusCode(404);
-        getSchedule(name, group).then().statusCode(404);
-        assertTrue(sqs.getQueueAttributes(queue.getQueueUrl(), List.of("QueueArn"), "us-east-1")
-                .get("QueueArn").endsWith(":external-" + suffix));
-        deleteGroup(group);
-        sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+            doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
+            deleteStack(stack);
+            deleted = true;
+            getSchedule(name, "default").then().statusCode(404);
+            getSchedule(name, group).then().statusCode(200);
+            verify(scheduler, times(3)).deleteSchedule(name, group, "us-east-1");
+            assertTrue(sqs.getQueueAttributes(queue.getQueueUrl(), List.of("QueueArn"), "us-east-1")
+                    .get("QueueArn").endsWith(":external-" + suffix));
+        } finally {
+            doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
+            if (!deleted) {
+                deleteStack(stack);
+            }
+            given().queryParam("groupName", group).delete("/schedules/" + name);
+            deleteGroup(group);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
     }
 
     @Test
-    void deletionRetryDeletesTheRecreatedScheduleAtItsTrackedOrphanAddress() throws Exception {
+    void boundedDeletionRetryPreservesAnotherStacksScheduleAtAnExhaustedAddress() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-schedule-old-owner-" + suffix;
+        String secondStack = "cfn-schedule-new-owner-" + suffix;
         String name = "recreated-" + suffix;
         String group = "recreated-group-" + suffix;
         createGroup(group);
@@ -433,17 +454,35 @@ class CloudFormationSchedulerScheduleIntegrationTest {
         outputs(stack, "UPDATE_ROLLBACK_FAILED");
         cloudFormation(stack, "DeleteStack", null, Map.of());
         outputs(stack, "DELETE_FAILED");
-        assertTrue(scheduleResource(stack).getAttributes().containsKey("__FlociReplacementCleanup"));
-
-        doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
-        recreateScheduleViaApi(name, group);
-        getSchedule(name, group).then().statusCode(200).body("Target.Input", equalTo("out-of-band"));
-
+        boolean secondCreated = false;
+        boolean deleted = false;
         try {
+            doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
+            given().queryParam("groupName", group).delete("/schedules/" + name).then().statusCode(200);
+            cloudFormation(secondStack, "CreateStack", externalQueueTemplate("", queue),
+                    Map.of("Name", name, "Group", group, "Payload", "second-stack"));
+            outputs(secondStack, "CREATE_COMPLETE");
+            secondCreated = true;
+            getSchedule(name, group).then().statusCode(200)
+                    .body("Target.Input", equalTo("payload:second-stack"));
+            clearInvocations(scheduler);
+
             deleteStack(stack);
-            getSchedule(name, group).then().statusCode(404);
-            getSchedule(name, "default").then().statusCode(404);
+            deleted = true;
+            assertAll(
+                    () -> getSchedule(name, group).then().statusCode(200)
+                            .body("Target.Input", equalTo("payload:second-stack")),
+                    () -> verify(scheduler, never()).deleteSchedule(name, group, "us-east-1"),
+                    () -> outputs(secondStack, "CREATE_COMPLETE"),
+                    () -> getSchedule(name, "default").then().statusCode(404));
         } finally {
+            doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
+            if (secondCreated) {
+                deleteStack(secondStack);
+            }
+            if (!deleted) {
+                deleteStack(stack);
+            }
             given().queryParam("groupName", group).delete("/schedules/" + name);
             deleteGroup(group);
             sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");

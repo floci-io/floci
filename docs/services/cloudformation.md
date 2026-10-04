@@ -196,9 +196,13 @@ original configuration if the stack update rolls back.
 or time-window fields. `ScheduleExpression`, `Target`, `FlexibleTimeWindow`, and their required
 fields still must be present and valid.
 
-If `DeleteStack` cannot remove a failed update's schedule orphan, it leaves the stack in
-`DELETE_FAILED` and keeps the orphan's address for a later deletion retry. This is separate from
-committed update cleanup, which abandons an old schedule after three failed attempts.
+Floci uses its main engine's bounded replacement-cleanup policy for committed updates and
+`DeleteStack`: each displaced address has up to three cleanup attempts, and exhausted entries are
+dropped. A failed cleanup leaves the first stack deletion in `DELETE_FAILED`, even if the current
+schedule was deleted; a later retry does not retry the dropped addresses. Schedules left after
+exhausted cleanup require manual deletion through the Scheduler API. A failed current-schedule
+delete preserves pending recovery state for a later deletion retry. This is Floci's shared cleanup
+policy, not a claim that AWS guarantees three attempts for `DeleteStack`.
 `UpdateReplacePolicy: Retain` keeps a name replacement's old schedule, but does not keep a group
 move's old address or an orphan created by a failed update.
 
@@ -206,6 +210,8 @@ Schedules are addressed by group and name, as in the Scheduler API. If another c
 managed schedule and recreates the same address, an in-place stack update applies the template to
 the current schedule there. Stack deletion and replacement cleanup delete the current schedule
 at a tracked address, and rollback restores its saved configuration at that address.
+A historical cleanup entry with attempts remaining can still affect a new occupant of its
+address. Dropping exhausted debt prevents later retries, but does not establish resource ownership.
 
 ## EventBridge Event Buses
 

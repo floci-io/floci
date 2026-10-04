@@ -164,15 +164,6 @@ public final class ReplacementCleanup {
      * stack delete.
      */
     static void clear(StackResource r) {
-        clear(r, true);
-    }
-
-    /** Stack deletion must leave failed entities tracked for a later DeleteStack retry. */
-    static void clearForDelete(StackResource r) {
-        clear(r, false);
-    }
-
-    private static void clear(StackResource r, boolean discardExhausted) {
         ObjectNode cleanup = read(r);
         if (cleanup == null) {
             return;
@@ -180,7 +171,7 @@ public final class ReplacementCleanup {
         ArrayNode displaced = cleanup.withArray("displaced");
         ArrayNode kept = MAPPER.createArrayNode();
         for (JsonNode entry : displaced) {
-            if (!discardExhausted || entry.path("cleanupAttempts").asInt(0) < MAX_ATTEMPTS) {
+            if (entry.path("cleanupAttempts").asInt(0) < MAX_ATTEMPTS) {
                 kept.add(entry);
             }
         }
@@ -204,19 +195,6 @@ public final class ReplacementCleanup {
      * displaced, not a replacement a failed update created.
      */
     static UpdateCleanupResult complete(StackResource r, Deleter deleter) {
-        return complete(r, deleter, false);
-    }
-
-    /**
-     * Attempts deletion even when an earlier DeleteStack exhausted its cleanup budget. Keep the
-     * accumulated attempts so the engine's bounded retry loop still terminates on failure.
-     * Committed update cleanup continues to use {@link #complete} and its three-attempt limit.
-     */
-    static UpdateCleanupResult completeForDelete(StackResource r, Deleter deleter) {
-        return complete(r, deleter, true);
-    }
-
-    private static UpdateCleanupResult complete(StackResource r, Deleter deleter, boolean retryExhausted) {
         ObjectNode cleanup = read(r);
         if (cleanup == null) {
             return UpdateCleanupResult.notApplicable();
@@ -232,7 +210,7 @@ public final class ReplacementCleanup {
                 continue;
             }
             int entryAttempts = entry.path("cleanupAttempts").asInt(0);
-            if (retryExhausted || entryAttempts < MAX_ATTEMPTS) {
+            if (entryAttempts < MAX_ATTEMPTS) {
                 try {
                     deleter.delete(entry.path("resourceType").asText(r.getResourceType()), physicalId,
                             entry.path("region").asText(null));

@@ -707,7 +707,7 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @Test
-    void exhaustedDeleteCleanupKeepsEveryOwedAddressForTheNextStackDelete() throws Exception {
+    void boundedDeleteCleanupDoesNotMakeAFourthAttemptDuringPhysicalDeletion() throws Exception {
         StackResource resource = resource();
         provisioner.provision(resource, properties("current", "a"), context(null));
         ReplacementCleanup.recordOrphan(resource, "b/orphan-one", resource.getResourceType(), REGION);
@@ -724,24 +724,17 @@ class SchedulerScheduleCfnProvisionerTest {
         }
         provisioner.clearDeleteCleanup(resource);
 
-        assertTrue(provisioner.hasReplacementUpdate(resource));
-        assertEquals("b/orphan-one", provisioner.updateCleanupPhysicalId(resource));
-        assertThrows(IllegalStateException.class, () -> provisioner.delete(resource, REGION));
-        assertTrue(provisioner.hasReplacementUpdate(resource));
-        doNothing().when(scheduler).deleteSchedule("orphan-one", "b", REGION);
-        UpdateCleanupResult partlyRecovered = provisioner.completeDeleteCleanup(resource);
-        assertFalse(partlyRecovered.complete());
-        assertEquals("c/orphan-two", partlyRecovered.previousPhysicalId());
-        assertEquals("c/orphan-two", provisioner.updateCleanupPhysicalId(resource));
-        doNothing().when(scheduler).deleteSchedule("orphan-two", "c", REGION);
-        assertTrue(provisioner.completeDeleteCleanup(resource).complete());
-        provisioner.clearDeleteCleanup(resource);
-        assertFalse(provisioner.hasReplacementUpdate(resource));
-        verify(scheduler, times(1)).deleteSchedule("current", "a", REGION);
+        assertAll(
+                () -> assertFalse(provisioner.hasReplacementUpdate(resource)),
+                () -> assertNull(provisioner.updateCleanupPhysicalId(resource)),
+                () -> provisioner.delete(resource, REGION),
+                () -> verify(scheduler, times(3)).deleteSchedule("orphan-one", "b", REGION),
+                () -> verify(scheduler, times(3)).deleteSchedule("orphan-two", "c", REGION),
+                () -> verify(scheduler, times(1)).deleteSchedule("current", "a", REGION));
     }
 
     @Test
-    void deleteRetryRetainsTheOldNameButStillDeletesFailedUpdateOrphans() throws Exception {
+    void boundedDeleteCleanupRetainsTheOldNameAndAbandonsExhaustedOrphans() throws Exception {
         StackResource resource = resource();
         resource.setUpdateReplacePolicy("Retain");
         provisioner.provision(resource, properties("retained-old", "a"), context(null));
@@ -755,18 +748,128 @@ class SchedulerScheduleCfnProvisionerTest {
             assertFalse(provisioner.completeDeleteCleanup(resource).complete());
         }
         provisioner.clearDeleteCleanup(resource);
-        assertEquals("true", resource.getAttributes().get("__FlociSchedulerNameReplacement"));
-        assertEquals("c/orphan", provisioner.updateCleanupPhysicalId(resource));
-        verify(scheduler, never()).deleteSchedule("retained-old", "a", REGION);
-        verify(scheduler, never()).deleteSchedule("current", "b", REGION);
+        assertAll(
+                () -> assertFalse(resource.getAttributes().containsKey("__FlociSchedulerNameReplacement")),
+                () -> assertFalse(provisioner.hasReplacementUpdate(resource)),
+                () -> assertNull(provisioner.updateCleanupPhysicalId(resource)),
+                () -> verify(scheduler, never()).deleteSchedule("current", "b", REGION),
+                () -> provisioner.delete(resource, REGION),
+                () -> verify(scheduler, times(3)).deleteSchedule("orphan", "c", REGION),
+                () -> verify(scheduler, times(1)).deleteSchedule("current", "b", REGION),
+                () -> verify(scheduler, never()).deleteSchedule("retained-old", "a", REGION));
+    }
 
-        doNothing().when(scheduler).deleteSchedule("orphan", "c", REGION);
-        assertTrue(provisioner.completeDeleteCleanup(resource).complete());
+    @Test
+    void boundedDeleteCleanupSkipsAnAlreadyExhaustedAddress() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "a"), context(null));
+        ReplacementCleanup.recordOrphan(resource, "b/orphan", resource.getResourceType(), REGION);
+        setCleanupAttempts(resource, "b/orphan", 3, "historical deletion failed");
+        Map<String, String> before = Map.copyOf(resource.getAttributes());
+        doThrow(new AwsException("InternalServerException", "unexpected fourth attempt", 500))
+                .when(scheduler).deleteSchedule("orphan", "b", REGION);
+        clearInvocations(scheduler);
+
+        UpdateCleanupResult result = provisioner.completeDeleteCleanup(resource);
+
+        assertAll(
+                () -> assertFalse(result.complete()),
+                () -> assertEquals("b/orphan", result.previousPhysicalId()),
+                () -> assertEquals(3, result.attempts()),
+                () -> assertEquals("historical deletion failed", result.failureReason()),
+                () -> assertEquals(before, resource.getAttributes()),
+                () -> verifyNoInteractions(scheduler));
+    }
+
+    @Test
+    void boundedDeleteCleanupClearsOnlyExhaustedDebtAndPreservesTheSnapshot() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "a"), context(null));
+        provisioner.provision(resource,
+                properties("current", "a").put("ScheduleExpression", "rate(10 minutes)"), context("current"));
+        String snapshot = resource.getAttributes().get("__FlociSchedulerUpdateSnapshot");
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+        ReplacementCleanup.recordOrphan(resource, "b/exhausted", resource.getResourceType(), REGION);
+        ReplacementCleanup.recordOrphan(resource, "c/pending", resource.getResourceType(), "eu-west-1");
+        setCleanupAttempts(resource, "b/exhausted", 3, "exhausted failure");
+        setCleanupAttempts(resource, "c/pending", 1, "pending failure");
+        resource.getAttributes().put("ExistingAttribute", "unchanged");
+        clearInvocations(scheduler);
+
         provisioner.clearDeleteCleanup(resource);
-        assertFalse(resource.getAttributes().containsKey("__FlociSchedulerNameReplacement"));
-        provisioner.delete(resource, REGION);
-        verify(scheduler).deleteSchedule("current", "b", REGION);
-        verify(scheduler, never()).deleteSchedule("retained-old", "a", REGION);
+
+        JsonNode debt = mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"))
+                .path("displaced");
+        assertAll(
+                () -> assertEquals(1, debt.size()),
+                () -> assertEquals("c/pending", debt.get(0).path("physicalId").asText()),
+                () -> assertEquals(1, debt.get(0).path("cleanupAttempts").asInt()),
+                () -> assertEquals("pending failure", debt.get(0).path("cleanupFailureReason").asText()),
+                () -> assertEquals("eu-west-1", debt.get(0).path("region").asText()),
+                () -> assertEquals(resource.getResourceType(), debt.get(0).path("resourceType").asText()),
+                () -> assertFalse(debt.get(0).path("retainable").asBoolean()),
+                () -> assertEquals(snapshot, resource.getAttributes().get("__FlociSchedulerUpdateSnapshot")),
+                () -> assertEquals("unchanged", resource.getAttributes().get("ExistingAttribute")),
+                () -> verifyNoInteractions(scheduler));
+    }
+
+    @Test
+    void boundedDeleteCleanupUsesEachRemainingBudgetAndRegion() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "a"), context(null));
+        ReplacementCleanup.recordOrphan(resource, "b/exhausted", resource.getResourceType(), REGION);
+        ReplacementCleanup.recordOrphan(resource, "c/pending", resource.getResourceType(), "eu-west-1");
+        ReplacementCleanup.recordOrphan(resource, "d/fresh", resource.getResourceType(), REGION);
+        setCleanupAttempts(resource, "b/exhausted", 3, "historical failure");
+        setCleanupAttempts(resource, "c/pending", 1, "earlier failure");
+        doThrow(new AwsException("InternalServerException", "pending failure", 500))
+                .when(scheduler).deleteSchedule("pending", "c", "eu-west-1");
+        doThrow(new AwsException("InternalServerException", "fresh failure", 500))
+                .when(scheduler).deleteSchedule("fresh", "d", REGION);
+        clearInvocations(scheduler);
+
+        UpdateCleanupResult result = provisioner.completeDeleteCleanup(resource);
+        JsonNode debt = mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"))
+                .path("displaced");
+
+        assertAll(
+                () -> assertFalse(result.complete()),
+                () -> assertEquals("d/fresh", result.previousPhysicalId()),
+                () -> assertEquals(1, result.attempts()),
+                () -> assertEquals("fresh failure", result.failureReason()),
+                () -> assertEquals(3, debt.size()),
+                () -> assertEquals(3, debt.get(0).path("cleanupAttempts").asInt()),
+                () -> assertEquals("historical failure", debt.get(0).path("cleanupFailureReason").asText()),
+                () -> assertEquals(2, debt.get(1).path("cleanupAttempts").asInt()),
+                () -> assertEquals("pending failure", debt.get(1).path("cleanupFailureReason").asText()),
+                () -> assertEquals(1, debt.get(2).path("cleanupAttempts").asInt()),
+                () -> verify(scheduler, never()).deleteSchedule("exhausted", "b", REGION),
+                () -> verify(scheduler, times(1)).deleteSchedule("pending", "c", "eu-west-1"),
+                () -> verify(scheduler, times(1)).deleteSchedule("fresh", "d", REGION),
+                () -> verify(scheduler, never()).deleteSchedule("current", "a", REGION));
+    }
+
+    @Test
+    void boundedPhysicalDeleteDoesNotRetryExhaustedDebtWithoutTheCleanupHook() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "a"), context(null));
+        provisioner.provision(resource,
+                properties("current", "a").put("ScheduleExpression", "rate(10 minutes)"), context("current"));
+        String snapshot = resource.getAttributes().get("__FlociSchedulerUpdateSnapshot");
+        ReplacementCleanup.recordOrphan(resource, "b/orphan", resource.getResourceType(), REGION);
+        setCleanupAttempts(resource, "b/orphan", 3, "historical deletion failed");
+        doThrow(new AwsException("InternalServerException", "unexpected fourth attempt", 500))
+                .when(scheduler).deleteSchedule("orphan", "b", REGION);
+        clearInvocations(scheduler);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> provisioner.delete(resource, REGION));
+
+        assertAll(
+                () -> assertEquals("historical deletion failed", failure.getMessage()),
+                () -> assertEquals(snapshot, resource.getAttributes().get("__FlociSchedulerUpdateSnapshot")),
+                () -> verify(scheduler, times(1)).deleteSchedule("current", "a", REGION),
+                () -> verify(scheduler, never()).deleteSchedule("orphan", "b", REGION));
     }
 
     @Test
@@ -865,6 +968,17 @@ class SchedulerScheduleCfnProvisionerTest {
         doThrow(new AwsException("InternalServerException", "failed", 500))
                 .when(scheduler).deleteSchedule("same", "custom", REGION);
         assertThrows(AwsException.class, () -> provisioner.delete(resource, REGION));
+    }
+
+    private void setCleanupAttempts(StackResource resource, String physicalId, int attempts, String reason)
+            throws Exception {
+        ObjectNode cleanup = (ObjectNode) mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"));
+        for (JsonNode entry : cleanup.path("displaced")) {
+            if (physicalId.equals(entry.path("physicalId").asText())) {
+                ((ObjectNode) entry).put("cleanupAttempts", attempts).put("cleanupFailureReason", reason);
+            }
+        }
+        resource.getAttributes().put("__FlociReplacementCleanup", cleanup.toString());
     }
 
     private ObjectNode properties(String name, String group) throws Exception {
