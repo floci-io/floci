@@ -257,4 +257,34 @@ class IotAuthorizerIntegrationTest {
 
         delete("it-auth-tags");
     }
+
+    @Test
+    void authorizerTextOutsideTheArnResourceIsTaggedLikeAnyOtherIotArn() {
+        for (String arn : List.of("arn:aws:iot:authorizer/:000000000000:x", "arn:aws:iot:us-east-1:000000000000:x")) {
+            given().queryParam("resourceArn", arn)
+            .when().get("/tags")
+            .then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo("Invalid resource ARN: " + arn));
+            given().contentType("application/json")
+                .body("{\"resourceArn\": \"" + arn + "\", \"tags\": [{\"Key\": \"k\", \"Value\": \"v\"}]}")
+            .when().post("/tags")
+            .then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo("Invalid resource ARN: " + arn));
+            given().contentType("application/json")
+                .body("{\"resourceArn\": \"" + arn + "\", \"tagKeys\": [\"k\"]}")
+            .when().post("/untag")
+            .then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo("Invalid resource ARN: " + arn));
+        }
+
+        given().contentType("application/json")
+            .body("{\"resourceArn\": \"not-an-arn\", \"tagKeys\": [\"k\"]}")
+        .when().post("/untag")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo("Invalid resource ARN: not-an-arn"));
+    }
 }

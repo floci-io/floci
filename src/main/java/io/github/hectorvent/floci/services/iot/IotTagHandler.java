@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iot;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -70,6 +71,6 @@ public class IotTagHandler implements TagHandler {
     }
 
     private static boolean isAuthorizer(String arn) {
-        return arn != null && arn.contains(":authorizer/");
+        return AwsArnUtils.isArn(arn) && AwsArnUtils.parse(arn).resource().startsWith("authorizer/");
     }
 }
