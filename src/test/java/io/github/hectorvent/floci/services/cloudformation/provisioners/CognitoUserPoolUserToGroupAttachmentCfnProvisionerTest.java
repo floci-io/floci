@@ -7,11 +7,16 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
+import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
+import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -20,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -30,7 +36,8 @@ import static org.mockito.Mockito.when;
 /**
  * {@code AWS::Cognito::UserPoolUserToGroupAttachment} in isolation: Ref is
  * {@code <UserPoolId>|<GroupName>|<Username>}, every property is createOnly so any change is a
- * replacement, and delete removes the membership from the id alone.
+ * replacement, a user already in the group is refused as AlreadyExists, a change that keeps the Ref is
+ * refused as a custom-named replacement, and delete removes the membership from its recorded parts.
  */
 class CognitoUserPoolUserToGroupAttachmentCfnProvisionerTest {
 
@@ -43,6 +50,12 @@ class CognitoUserPoolUserToGroupAttachmentCfnProvisionerTest {
     private final CognitoUserPoolUserToGroupAttachmentCfnProvisioner provisioner =
             new CognitoUserPoolUserToGroupAttachmentCfnProvisioner(cognito);
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void everyUserExistsUnderItsOwnNameAndEveryGroupStartsEmpty() {
+        when(cognito.adminGetUser(any(), any())).thenAnswer(inv -> user(inv.getArgument(1)));
+        when(cognito.getGroup(any(), any())).thenAnswer(inv -> group(inv.getArgument(1)));
+    }
 
     @Test
     void servesTheAttachmentType() {
@@ -86,8 +99,97 @@ class CognitoUserPoolUserToGroupAttachmentCfnProvisionerTest {
     }
 
     @Test
+    void createRefusesAUserAlreadyInTheGroupNamingTheCanonicalUser() {
+        when(cognito.adminGetUser("pool", "alice@example.com")).thenReturn(user("alice"));
+        when(cognito.getGroup("pool", "g")).thenReturn(group("g", "alice"));
+        StackResource r = resource(null);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props("pool", "g", "alice@example.com"), ctx(null)));
+
+        assertEquals("AlreadyExists", failure.getErrorCode());
+        assertEquals("User with name alice already exists in Group g.", failure.getMessage());
+        verify(cognito, never()).adminAddUserToGroup(any(), any(), any());
+    }
+
+    @Test
+    void anAliasToCanonicalReplacementOfAMemberFailsAndItsRollbackRemovesNothing() {
+        when(cognito.adminGetUser("pool", "alice@example.com")).thenReturn(user("alice"));
+        StackResource r = created("pool", "g", "alice@example.com");
+        String aliasId = "pool|g|alice@example.com";
+        when(cognito.getGroup("pool", "g")).thenReturn(group("g", "alice"));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props("pool", "g", "alice"), ctx(aliasId)));
+
+        assertEquals("AlreadyExists", failure.getErrorCode());
+        assertEquals("User with name alice already exists in Group g.", failure.getMessage());
+        assertEquals(aliasId, r.getPhysicalId());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(cognito, never()).adminRemoveUserFromGroup(any(), any(), any());
+        assertEquals(aliasId, r.getPhysicalId());
+    }
+
+    @Test
+    void aChangeThatKeepsTheRefIsRefusedAsACustomNamedReplacement() {
+        StackResource r = created("pool", "a", "b|c");
+        clearInvocations(cognito);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props("pool", "a|b", "c"), ctx("pool|a|b|c")));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename pool|a|b|c and update the stack again.", failure.getMessage());
+        assertEquals("pool|a|b|c", r.getPhysicalId());
+        verify(cognito, never()).adminAddUserToGroup(any(), any(), any());
+        verify(cognito, never()).adminRemoveUserFromGroup(any(), any(), any());
+    }
+
+    @Test
+    void deleteRemovesAMembershipWhoseGroupNameHoldsAPipe() {
+        StackResource r = created("pool", "a|b", "c");
+
+        provisioner.delete(r, "us-east-1");
+
+        verify(cognito).adminRemoveUserFromGroup("pool", "a|b", "c");
+    }
+
+    @Test
+    void aReplacementAwayFromAPipedGroupNameRemovesTheRecordedMembership() {
+        StackResource r = created("pool", "a|b", "c");
+        provisioner.provision(r, props("pool", "x", "c"), ctx("pool|a|b|c"));
+
+        assertTrue(provisioner.completeUpdate(r).complete());
+
+        verify(cognito).adminRemoveUserFromGroup("pool", "a|b", "c");
+        verify(cognito, never()).adminRemoveUserFromGroup("pool", "a", "b|c");
+        verify(cognito, never()).adminRemoveUserFromGroup("pool", "x", "c");
+    }
+
+    @Test
+    void theMembershipRecordKeepsOnlyTheCurrentIdAndTheIdsStillOwedADelete() throws Exception {
+        String idC = POOL + "|grp-c|user-one";
+        StackResource r = created(POOL, "grp-a", "user-one");
+        provisioner.provision(r, props(POOL, "grp-b", "user-one"), ctx(ID_A));
+        assertTrue(provisioner.completeUpdate(r).complete());
+        provisioner.clearUpdate(r);
+
+        provisioner.provision(r, props(POOL, "grp-c", "user-one"), ctx(ID_B));
+
+        assertEquals(Set.of(ID_B, idC), recordedIds(r));
+        assertTrue(provisioner.completeUpdate(r).complete());
+        provisioner.clearUpdate(r);
+        verify(cognito).adminRemoveUserFromGroup(POOL, "grp-b", "user-one");
+        provisioner.provision(r, props(POOL, "grp-c", "user-one"), ctx(idC));
+        assertEquals(Set.of(idC), recordedIds(r));
+    }
+
+    @Test
     void aGroupNameChangeIsAReplacementWhoseCleanupRemovesOnlyTheOldMembership() {
-        StackResource r = resource(ID_A);
+        StackResource r = created(POOL, "grp-a", "user-one");
 
         provisioner.provision(r, props(POOL, "grp-b", "user-one"), ctx(ID_A));
 
@@ -106,7 +208,7 @@ class CognitoUserPoolUserToGroupAttachmentCfnProvisionerTest {
 
     @Test
     void rollingBackAReplacementRemovesTheNewMembershipAndRestoresThePriorId() {
-        StackResource r = resource(ID_A);
+        StackResource r = created(POOL, "grp-a", "user-one");
         provisioner.provision(r, props(POOL, "grp-b", "user-one"), ctx(ID_A));
 
         assertTrue(provisioner.rollbackUpdate(r));
@@ -129,8 +231,10 @@ class CognitoUserPoolUserToGroupAttachmentCfnProvisionerTest {
     }
 
     @Test
-    void deleteRemovesTheMembershipFromTheIdAlone() {
-        provisioner.delete(TYPE, ID_A, "us-east-1");
+    void deleteRemovesTheRecordedMembership() {
+        StackResource r = created(POOL, "grp-a", "user-one");
+
+        provisioner.delete(r, "us-east-1");
 
         verify(cognito).adminRemoveUserFromGroup(POOL, "grp-a", "user-one");
     }
@@ -138,28 +242,55 @@ class CognitoUserPoolUserToGroupAttachmentCfnProvisionerTest {
     @ParameterizedTest
     @ValueSource(strings = {"UserNotFoundException", "ResourceNotFoundException"})
     void deleteToleratesAMembershipThatIsAlreadyGone(String code) {
+        StackResource r = created(POOL, "grp-a", "user-one");
         doThrow(new AwsException(code, "gone", 400))
                 .when(cognito).adminRemoveUserFromGroup(POOL, "grp-a", "user-one");
 
-        assertDoesNotThrow(() -> provisioner.delete(TYPE, ID_A, "us-east-1"));
+        assertDoesNotThrow(() -> provisioner.delete(r, "us-east-1"));
     }
 
     @Test
     void deleteSurfacesAnyOtherFailure() {
+        StackResource r = created(POOL, "grp-a", "user-one");
         doThrow(new AwsException("InternalFailure", "storage unavailable", 500))
                 .when(cognito).adminRemoveUserFromGroup(POOL, "grp-a", "user-one");
 
         AwsException thrown = assertThrows(AwsException.class,
-                () -> provisioner.delete(TYPE, ID_A, "us-east-1"));
+                () -> provisioner.delete(r, "us-east-1"));
 
         assertEquals("InternalFailure", thrown.getErrorCode());
     }
 
     @Test
-    void deleteOfAMalformedIdCallsNothing() {
-        provisioner.delete(TYPE, "not-a-composite-id", "us-east-1");
+    void deleteOfAnIdNeverRecordedCallsNothing() {
+        provisioner.delete(resource(ID_A), "us-east-1");
 
         verifyNoInteractions(cognito);
+    }
+
+    private StackResource created(String userPoolId, String groupName, String username) {
+        StackResource r = resource(null);
+        provisioner.provision(r, props(userPoolId, groupName, username), ctx(null));
+        return r;
+    }
+
+    private Set<String> recordedIds(StackResource r) throws Exception {
+        Set<String> ids = new HashSet<>();
+        mapper.readTree(r.getAttributes().get("__FlociCognitoMemberships")).fieldNames().forEachRemaining(ids::add);
+        return ids;
+    }
+
+    private static CognitoUser user(String username) {
+        CognitoUser user = new CognitoUser();
+        user.setUsername(username);
+        return user;
+    }
+
+    private static CognitoGroup group(String groupName, String... members) {
+        CognitoGroup group = new CognitoGroup();
+        group.setGroupName(groupName);
+        group.setUserNames(List.of(members));
+        return group;
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {

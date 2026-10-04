@@ -1,11 +1,16 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -16,12 +21,19 @@ import java.util.Set;
  * returns {@code <UserPoolId>|<GroupName>|<Username>}, with the Username as the template gives it.
  *
  * <p>Every property is createOnly, so any change is a replacement: the new membership is added and
- * the old one is removed once the update commits, through {@link ReplacementCleanup}.
+ * the old one is removed once the update commits, through {@link ReplacementCleanup}. The parts are
+ * recorded per physical id, because a group name or username may contain {@code |}, and a membership
+ * is removed from its recorded parts, as on AWS. Adding a user who is already in the group is refused
+ * as AlreadyExists, and a change that keeps the Ref is refused as a custom-named replacement, as on AWS.
  */
 @ApplicationScoped
 public class CognitoUserPoolUserToGroupAttachmentCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final Logger LOG = Logger.getLogger(CognitoUserPoolUserToGroupAttachmentCfnProvisioner.class);
     private static final String TYPE = "AWS::Cognito::UserPoolUserToGroupAttachment";
+    /** Physical id to its [UserPoolId, GroupName, Username], because names may contain {@code |}. */
+    private static final String MEMBERSHIPS_ATTR = "__FlociCognitoMemberships";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final CognitoService cognitoService;
 
@@ -43,11 +55,25 @@ public class CognitoUserPoolUserToGroupAttachmentCfnProvisioner implements CfnRe
 
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String physicalId = userPoolId + "|" + groupName + "|" + username;
-        if (!ctx.reusesPriorEntity(physicalId)) {
+        ArrayNode membership = MAPPER.createArrayNode().add(userPoolId).add(groupName).add(username);
+        if (ctx.reusesPriorEntity(physicalId)) {
+            JsonNode prior = memberships(attributesBefore).get(physicalId);
+            if (prior != null && !prior.equals(membership)) {
+                throw new AwsException("ValidationError",
+                        "CloudFormation cannot update a stack when a custom-named resource requires replacing. Rename "
+                                + physicalId + " and update the stack again.", 400);
+            }
+        } else {
+            String member = cognitoService.adminGetUser(userPoolId, username).getUsername();
+            if (cognitoService.getGroup(userPoolId, groupName).getUserNames().contains(member)) {
+                throw new AwsException("AlreadyExists",
+                        "User with name " + member + " already exists in Group " + groupName + ".", 400);
+            }
             cognitoService.adminAddUserToGroup(userPoolId, groupName, username);
         }
         r.setPhysicalId(physicalId);
         ReplacementCleanup.record(r, ctx, attributesBefore);
+        recordMembership(r, attributesBefore, membership);
     }
 
     private static String require(JsonNode props, String name, ProvisionContext ctx) {
@@ -59,14 +85,8 @@ public class CognitoUserPoolUserToGroupAttachmentCfnProvisioner implements CfnRe
     }
 
     @Override
-    public void delete(String resourceType, String physicalId, String region) {
-        String[] parts = physicalId == null ? new String[0] : physicalId.split("\\|", 3);
-        if (parts.length != 3) {
-            return;
-        }
-        CfnDeletes.safeDelete("Cognito group membership", physicalId,
-                () -> cognitoService.adminRemoveUserFromGroup(parts[0], parts[1], parts[2]),
-                "UserNotFoundException", "ResourceNotFoundException");
+    public void delete(StackResource resource, String region) {
+        removeMembership(resource.getAttributes(), resource.getPhysicalId());
     }
 
     @Override
@@ -81,7 +101,8 @@ public class CognitoUserPoolUserToGroupAttachmentCfnProvisioner implements CfnRe
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
-        return ReplacementCleanup.complete(resource, this::delete);
+        return ReplacementCleanup.complete(resource, (type, physicalId, region) ->
+                removeMembership(resource.getAttributes(), physicalId));
     }
 
     @Override
@@ -91,8 +112,56 @@ public class CognitoUserPoolUserToGroupAttachmentCfnProvisioner implements CfnRe
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        ReplacementCleanup.rollback(resource, this::delete);
-        // Every property is createOnly, so without a replacement nothing changed.
+        ReplacementCleanup.rollback(resource, (type, physicalId, region) ->
+                removeMembership(resource.getAttributes(), physicalId));
+        // Every property is createOnly, so without a replacement nothing changed, including an
+        // update refused as AlreadyExists or as a custom-named replacement.
         return true;
+    }
+
+    private void removeMembership(Map<String, String> attributes, String physicalId) {
+        JsonNode parts = physicalId == null ? null : memberships(attributes).get(physicalId);
+        if (parts == null || !parts.isArray() || parts.size() != 3) {
+            return;
+        }
+        String userPoolId = parts.get(0).asText();
+        String groupName = parts.get(1).asText();
+        String username = parts.get(2).asText();
+        CfnDeletes.safeDelete("Cognito group membership", physicalId,
+                () -> cognitoService.adminRemoveUserFromGroup(userPoolId, groupName, username),
+                "UserNotFoundException", "ResourceNotFoundException");
+    }
+
+    /**
+     * Keeps the parts of the membership the resource now names and of every membership still owed a
+     * delete, from this update or an earlier one, so each is removed from its own parts. Every other
+     * entry is dropped, so the record stays bounded across repeated replacements. Call after
+     * {@link ReplacementCleanup#record}, so the membership this update displaced is already owed.
+     */
+    private static void recordMembership(StackResource r, Map<String, String> attributesBefore, ArrayNode membership) {
+        ObjectNode prior = memberships(attributesBefore);
+        ObjectNode memberships = MAPPER.createObjectNode();
+        for (String owed : ReplacementCleanup.owedPhysicalIds(r)) {
+            JsonNode parts = prior.get(owed);
+            if (parts != null) {
+                memberships.set(owed, parts);
+            }
+        }
+        memberships.set(r.getPhysicalId(), membership);
+        r.getAttributes().put(MEMBERSHIPS_ATTR, memberships.toString());
+    }
+
+    private static ObjectNode memberships(Map<String, String> attributes) {
+        String recorded = attributes.get(MEMBERSHIPS_ATTR);
+        if (recorded != null) {
+            try {
+                if (MAPPER.readTree(recorded) instanceof ObjectNode memberships) {
+                    return memberships;
+                }
+            } catch (JsonProcessingException e) {
+                LOG.warnv("Unreadable Cognito group membership record, ignoring it: {0}", e.getMessage());
+            }
+        }
+        return MAPPER.createObjectNode();
     }
 }
