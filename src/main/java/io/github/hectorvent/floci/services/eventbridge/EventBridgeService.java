@@ -59,7 +59,7 @@ public class EventBridgeService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final RuleScheduler ruleScheduler;
-    private final EventBridgeInvoker invoker;
+    private final TargetDispatcher dispatcher;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
     private final ReplayDispatcher replayDispatcher;
 
@@ -69,7 +69,7 @@ public class EventBridgeService implements ResourceProvider {
                               RegionResolver regionResolver,
                               ObjectMapper objectMapper,
                               RuleScheduler ruleScheduler,
-                              EventBridgeInvoker invoker,
+                              TargetDispatcher dispatcher,
                               ReplayDispatcher replayDispatcher,
                               ResourceGroupsTaggingService resourceGroupsTaggingService) {
         this(
@@ -87,7 +87,7 @@ public class EventBridgeService implements ResourceProvider {
                         new TypeReference<Map<String, Replay>>() {}),
                 storageFactory.create("eventbridge", "eventbridge-connections.json",
                         new TypeReference<Map<String, Connection>>() {}),
-                regionResolver, objectMapper, ruleScheduler, invoker, replayDispatcher,
+                regionResolver, objectMapper, ruleScheduler, dispatcher, replayDispatcher,
                 resourceGroupsTaggingService
         );
     }
@@ -102,7 +102,7 @@ public class EventBridgeService implements ResourceProvider {
                        RegionResolver regionResolver,
                        ObjectMapper objectMapper,
                        RuleScheduler ruleScheduler,
-                       EventBridgeInvoker invoker,
+                       TargetDispatcher dispatcher,
                        ReplayDispatcher replayDispatcher,
                        ResourceGroupsTaggingService resourceGroupsTaggingService) {
         this.busStore = busStore;
@@ -115,7 +115,7 @@ public class EventBridgeService implements ResourceProvider {
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.ruleScheduler = ruleScheduler;
-        this.invoker = invoker;
+        this.dispatcher = dispatcher;
         this.replayDispatcher = replayDispatcher;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
     }
@@ -406,19 +406,71 @@ public class EventBridgeService implements ResourceProvider {
     // ──────────────────────────── Targets ────────────────────────────
 
     public int putTargets(String ruleName, String busName, List<Target> newTargets, String region) {
+        validateTargetSettings(newTargets);
         String effectiveBus = resolvedBusName(busName);
         String key = ruleKey(region, effectiveBus, ruleName);
-        ruleStore.get(key)
+        Rule rule = ruleStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + ruleName, 400));
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
         for (Target newTarget : newTargets) {
+            if (newTarget.getRoleArn() == null && isCrossAccountEventBus(newTarget.getArn(), rule)) {
+                existing.stream()
+                        .filter(t -> t.getId().equals(newTarget.getId()) && newTarget.getArn().equals(t.getArn()))
+                        .findFirst()
+                        .ifPresent(t -> newTarget.setRoleArn(t.getRoleArn()));
+            }
             existing.removeIf(t -> t.getId().equals(newTarget.getId()));
             existing.add(newTarget);
         }
         targetStore.put(key, existing);
         LOG.infov("Put {0} targets on rule {1}", newTargets.size(), ruleName);
         return 0;
+    }
+
+    private boolean isCrossAccountEventBus(String targetArn, Rule rule) {
+        if (!AwsArnUtils.isArnFor(targetArn, "events")) {
+            return false;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(targetArn);
+        String accountId = rule.getAccountId() != null ? rule.getAccountId() : regionResolver.getAccountId();
+        return arn.resource().startsWith("event-bus/") && AwsArnUtils.isForeignAccount(arn, accountId);
+    }
+
+    private static void validateTargetSettings(List<Target> targets) {
+        for (int i = 0; i < targets.size(); i++) {
+            Target target = targets.get(i);
+            Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;
+            Integer age = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumEventAgeInSeconds() : null;
+            String arn = target.getDeadLetterConfig() != null ? target.getDeadLetterConfig().arn() : null;
+            String field = null;
+            Object value = null;
+            String constraint = null;
+            if (attempts != null && (attempts < 0 || attempts > 185)) {
+                field = "retryPolicy.maximumRetryAttempts";
+                value = attempts;
+                constraint = attempts < 0 ? "value greater than or equal to 0" : "value less than or equal to 185";
+            } else if (age != null && (age < 60 || age > 86400)) {
+                field = "retryPolicy.maximumEventAgeInSeconds";
+                value = age;
+                constraint = age < 60 ? "value greater than or equal to 60" : "value less than or equal to 86400";
+            } else if (arn != null && (arn.isEmpty() || arn.length() > 1600)) {
+                field = "deadLetterConfig.arn";
+                value = arn;
+                constraint = arn.isEmpty() ? "length greater than or equal to 1" : "length less than or equal to 1600";
+            } else if (target.getRoleArn() != null
+                    && (target.getRoleArn().isEmpty() || target.getRoleArn().length() > 1600)) {
+                field = "roleArn";
+                value = target.getRoleArn();
+                constraint = target.getRoleArn().isEmpty()
+                        ? "length greater than or equal to 1" : "length less than or equal to 1600";
+            }
+            if (field != null) {
+                throw new AwsException("ValidationException", "1 validation error detected: Value '" + value
+                        + "' at 'targets." + (i + 1) + ".member." + field
+                        + "' failed to satisfy constraint: Member must have " + constraint, 400);
+            }
+        }
     }
 
     public record RemoveTargetsResult(int successfulCount, int failedCount) {}
@@ -435,6 +487,7 @@ public class EventBridgeService implements ResourceProvider {
             }
         }
         targetStore.put(key, existing);
+        ruleStore.get(key).ifPresent(rule -> dispatcher.dropPendingRetries(rule.getArn(), ids));
         return new RemoveTargetsResult(removed, ids.size() - removed);
     }
 
@@ -753,7 +806,8 @@ public class EventBridgeService implements ResourceProvider {
                     List<Target> targets = accountGet(targetStore, accountId, ruleKey).orElse(List.of());
                     String eventJson = buildEventEnvelope(entry, effectiveBus, eventId, region, accountId);
                     for (Target target : targets) {
-                        invoker.invokeTarget(target, eventJson, region);
+                        dispatcher.dispatch(rule.getArn(), target, eventJson, region,
+                                () -> accountGet(targetStore, accountId, ruleKey).orElse(List.of()));
                     }
                 }
             }

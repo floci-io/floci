@@ -53,7 +53,7 @@ public class ContainerHandle {
     public RuntimeApiServer getRuntimeApiServer() { return runtimeApiServer; }
     public long getCreatedAt() { return createdAt; }
     public long getLastUsedMs() { return lastUsedMs; }
-    public void touchLastUsed() { this.lastUsedMs = System.currentTimeMillis(); }
+    public void touchLastUsed(long nowMs) { this.lastUsedMs = nowMs; }
     public ContainerState getState() { return state; }
     public void setState(ContainerState state) { this.state = state; }
 

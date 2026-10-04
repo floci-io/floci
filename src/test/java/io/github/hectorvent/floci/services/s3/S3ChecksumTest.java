@@ -3,15 +3,19 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
 import io.github.hectorvent.floci.services.s3.model.ChecksumType;
+import io.github.hectorvent.floci.services.s3.model.Part;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Random;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -107,6 +111,88 @@ class S3ChecksumTest {
         assertEquals(ChecksumAlgorithm.CRC64NVME, checksum.algorithm());
         assertEquals(S3Checksum.crc64NvmeBase64(data), checksum.getChecksumCRC64NVME());
         assertEquals(ChecksumType.FULL_OBJECT, checksum.getChecksumType());
+    }
+
+    @Test
+    void fullObjectCombinedFromPartsMatchesTheChecksumOfTheWholeObject() {
+        Random random = new Random(4145);
+        List<int[]> splits = List.of(
+                new int[]{0},
+                new int[]{1},
+                new int[]{5 * 1024 * 1024, 17},
+                new int[]{0, 9, 0, 64, 1},
+                new int[]{1023, 1024, 1025, 65537, 3});
+        for (ChecksumAlgorithm algorithm : List.of(ChecksumAlgorithm.CRC32, ChecksumAlgorithm.CRC32C,
+                ChecksumAlgorithm.CRC64NVME)) {
+            for (int[] sizes : splits) {
+                ByteArrayOutputStream whole = new ByteArrayOutputStream();
+                List<Part> parts = new ArrayList<>();
+                for (int i = 0; i < sizes.length; i++) {
+                    byte[] data = new byte[sizes[i]];
+                    random.nextBytes(data);
+                    whole.writeBytes(data);
+                    parts.add(part(i + 1, algorithm, data));
+                }
+
+                S3Checksum combined = S3Checksum.fullObject(algorithm, parts);
+
+                assertEquals(algorithm.compute(whole.toByteArray()), combined.valueFor(algorithm),
+                        algorithm + " " + Arrays.toString(sizes));
+                assertEquals(ChecksumType.FULL_OBJECT, combined.getChecksumType());
+            }
+        }
+    }
+
+    @Test
+    void fullObjectCombinesPartsLongerThanAnArrayCanHold() {
+        long zeroRunLength = (1L << 31) + 13;
+        byte[] head = "head".getBytes(StandardCharsets.UTF_8);
+        byte[] tail = "tail".getBytes(StandardCharsets.UTF_8);
+        CRC32C zeroRun = new CRC32C();
+        CRC32C whole = new CRC32C();
+        whole.update(head);
+        byte[] zeros = new byte[1 << 20];
+        for (long remaining = zeroRunLength; remaining > 0; remaining -= zeros.length) {
+            int chunk = (int) Math.min(zeros.length, remaining);
+            zeroRun.update(zeros, 0, chunk);
+            whole.update(zeros, 0, chunk);
+        }
+        whole.update(tail);
+        Part middle = new Part(2, "\"etag\"", zeroRunLength);
+        middle.getChecksum().setChecksumCRC32C(crc32Base64(zeroRun.getValue()));
+
+        S3Checksum combined = S3Checksum.fullObject(ChecksumAlgorithm.CRC32C, List.of(
+                part(1, ChecksumAlgorithm.CRC32C, head), middle, part(3, ChecksumAlgorithm.CRC32C, tail)));
+
+        assertEquals(crc32Base64(whole.getValue()), combined.getChecksumCRC32C());
+    }
+
+    @Test
+    void fullObjectFromPartsWithoutDeclaredAlgorithmGetsCrc64Nvme() {
+        byte[] first = "part1".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "part2".getBytes(StandardCharsets.UTF_8);
+
+        S3Checksum combined = S3Checksum.fullObject(null, List.of(part(1, null, first), part(2, null, second)));
+
+        assertEquals(S3Checksum.crc64NvmeBase64("part1part2".getBytes(StandardCharsets.UTF_8)),
+                combined.getChecksumCRC64NVME());
+    }
+
+    @Test
+    void fullObjectFromPartsRejectsShaAlgorithms() {
+        List<Part> parts = List.of(part(1, ChecksumAlgorithm.SHA256, "data".getBytes(StandardCharsets.UTF_8)));
+
+        assertThrows(IllegalArgumentException.class, () -> S3Checksum.fullObject(ChecksumAlgorithm.SHA256, parts));
+    }
+
+    private static Part part(int partNumber, ChecksumAlgorithm algorithm, byte[] data) {
+        Part part = new Part(partNumber, "\"etag\"", data.length);
+        part.setChecksum(S3Checksum.of(algorithm, data));
+        return part;
+    }
+
+    private static String crc32Base64(long value) {
+        return Base64.getEncoder().encodeToString(ByteBuffer.allocate(Integer.BYTES).putInt((int) value).array());
     }
 
     @Test

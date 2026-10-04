@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
@@ -383,6 +384,11 @@ public class SnsService implements Resettable, ResourceProvider {
     }
 
     public boolean topicExists(String topicArn, String region) {
+        if (topicStore instanceof AccountAwareStorageBackend<Topic> aware) {
+            String accountId = AwsArnUtils.accountOrDefault(topicArn, regionResolver.getAccountId());
+            return aware.getForAccountMigratingLegacy(accountId, topicKey(region, topicArn),
+                    topic -> topicArn.equals(topic.getTopicArn())).isPresent();
+        }
         return topicStore.get(topicKey(region, topicArn)).isPresent();
     }
 
@@ -390,7 +396,7 @@ public class SnsService implements Resettable, ResourceProvider {
         String key = topicKey(region, topicArn);
         Topic topic = topicStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
-        var attrs = new java.util.LinkedHashMap<>(topic.getAttributes());
+        LinkedHashMap<String, String> attrs = new LinkedHashMap<>(topic.getAttributes());
         List<Subscription> subs = subscriptionsByTopic(topicArn, region);
         long confirmed = subs.stream()
                 .filter(s -> !"true".equals(s.getAttributes().get("PendingConfirmation")))
@@ -1082,7 +1088,7 @@ public class SnsService implements Resettable, ResourceProvider {
         String key = subKey(region, subscriptionArn);
         Subscription sub = subscriptionStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFound", "Subscription does not exist.", 404));
-        var attrs = new java.util.LinkedHashMap<>(sub.getAttributes());
+        LinkedHashMap<String, String> attrs = new LinkedHashMap<>(sub.getAttributes());
         attrs.put("SubscriptionArn", sub.getSubscriptionArn());
         attrs.put("TopicArn", sub.getTopicArn());
         attrs.put("Protocol", sub.getProtocol());
@@ -1339,9 +1345,9 @@ public class SnsService implements Resettable, ResourceProvider {
             }
             return false;
         }
-        var fields = policy.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = policy.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
+            Map.Entry<String, JsonNode> entry = fields.next();
             String key = entry.getKey();
             JsonNode ruleOrNested = entry.getValue();
             if (isOrOperator(key, ruleOrNested)) {
@@ -1836,7 +1842,7 @@ public class SnsService implements Resettable, ResourceProvider {
                     String body = rawDelivery
                             ? protocolMessage
                             : buildSnsHttpNotification(protocolMessage, subject, messageAttributes, topicArn, messageId, sub.getSubscriptionArn());
-                    var requestBuilder = HttpRequest.newBuilder()
+                    HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                             .uri(URI.create(sub.getEndpoint()))
                             .timeout(Duration.ofSeconds(5))
                             .header("Content-Type", "text/plain; charset=UTF-8")
@@ -2023,7 +2029,7 @@ public class SnsService implements Resettable, ResourceProvider {
             snsNode.put("UnsubscribeUrl", "EXAMPLE");
             ObjectNode attrs = snsNode.putObject("MessageAttributes");
             if (messageAttributes != null) {
-                for (var entry : messageAttributes.entrySet()) {
+                for (Map.Entry<String, MessageAttributeValue> entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
                     if (entry.getValue().getBinaryValue() != null) {
@@ -2078,7 +2084,7 @@ public class SnsService implements Resettable, ResourceProvider {
             node.put("Message", message);
             ObjectNode attrs = node.putObject("MessageAttributes");
             if (messageAttributes != null) {
-                for (var entry : messageAttributes.entrySet()) {
+                for (Map.Entry<String, MessageAttributeValue> entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
                     if (entry.getValue().getBinaryValue() != null) {
@@ -2115,7 +2121,7 @@ public class SnsService implements Resettable, ResourceProvider {
             node.put("UnsubscribeURL", baseUrl + "/?Action=Unsubscribe&SubscriptionArn=" + subscriptionArn);
             ObjectNode attrs = node.putObject("MessageAttributes");
             if (messageAttributes != null) {
-                for (var entry : messageAttributes.entrySet()) {
+                for (Map.Entry<String, MessageAttributeValue> entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
                     if (entry.getValue().getBinaryValue() != null) {

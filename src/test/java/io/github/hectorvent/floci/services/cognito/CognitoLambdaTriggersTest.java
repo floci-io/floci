@@ -34,6 +34,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -91,7 +92,7 @@ class CognitoLambdaTriggersTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 "http://localhost:4566", regionResolver, lambdaService, mock(AcmService.class),
-                verificationCodeService, new CognitoMessageDispatcher(ses, sns),
+                verificationCodeService, new CognitoMessageDispatcher(ses, sns, "us-east-1"),
                 mock(TlsCertificateManager.class));
     }
 
@@ -854,9 +855,9 @@ class CognitoLambdaTriggersTest {
     }
 
     /**
-     * Nothing checks an authorization request's scopes against the client's AllowedOAuthScopes when the
-     * code is issued, so the stored code can name a scope the client may not use. A V2 trigger may grant
-     * claims or scopes from what it is told was requested, so it must never be told about one.
+     * The authorize endpoint refuses a scope the client may not use, but a client's AllowedOAuthScopes
+     * can change before its code is redeemed. A V2 trigger may grant claims or scopes from what it is
+     * told was requested, so it must never be told about one the client no longer allows.
      */
     @Test
     @SuppressWarnings("unchecked")
@@ -914,7 +915,7 @@ class CognitoLambdaTriggersTest {
     void redemptionKeepsTheRequestNonceOverATriggerThatTriesToChangeIt() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
         seedUser(pool, "alice", "Perm1234!");
-        UserPoolClient client = createClient(pool);
+        UserPoolClient client = createOAuthClient(pool, List.of("openid"));
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
                 .thenReturn(ok(Map.of("claimsOverrideDetails", Map.of(
@@ -940,7 +941,7 @@ class CognitoLambdaTriggersTest {
     void redemptionMintsTokensWhenNoPreTokenGenerationTriggerIsConfigured() {
         UserPool pool = createPoolWithLambdaConfig(Map.of());
         seedUser(pool, "alice", "Perm1234!");
-        UserPoolClient client = createClient(pool);
+        UserPoolClient client = createOAuthClient(pool, List.of("openid"));
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
         Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
@@ -958,6 +959,127 @@ class CognitoLambdaTriggersTest {
         }
         assertEquals("request-nonce", idClaims.get("nonce"));
         verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
+    }
+
+    /**
+     * AWS grants every scope the client allows to a request that names none, and that grant is what
+     * the trigger is told and what the access token carries.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aRequestWithoutScopesIsGrantedEveryAllowedScope() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email", "aws.cognito.signin.user.admin"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+
+        List<String> granted = CognitoService.grantedScopes(client, List.of());
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, granted);
+
+        assertEquals(List.of("openid", "email", "aws.cognito.signin.user.admin"), granted);
+        Map<String, Object> event;
+        Map<String, Object> accessClaims;
+        try {
+            event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals(granted, ((Map<String, Object>) event.get("request")).get("scopes"));
+        assertEquals(Set.copyOf(granted), Set.of(((String) accessClaims.get("scope")).split(" ")));
+        assertNotNull(auth.get("IdToken"));
+    }
+
+    /** Redemption issues the code's grant and never widens it, even when that grant is empty. */
+    @Test
+    void redemptionNeverWidensTheCodesGrant() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of());
+
+        Map<String, Object> accessClaims;
+        try {
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertFalse(accessClaims.containsKey("scope"), "an empty grant stays empty: " + accessClaims);
+        assertFalse(auth.containsKey("IdToken"));
+    }
+
+    /** A V2 trigger that suppresses every scope of the grant leaves no scope claim. */
+    @Test
+    void preTokenGenerationV2SuppressingTheWholeCodeGrantRemovesTheScopeClaim() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of("scopesToSuppress", List.of("email"))))));
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("email"));
+
+        Map<String, Object> accessClaims;
+        try {
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertFalse(accessClaims.containsKey("scope"), "suppressing the only granted scope leaves none: " + accessClaims);
+    }
+
+    /** Only a grant with {@code openid} gets an ID token, and the access token carries just the grant. */
+    @Test
+    void redemptionWithoutOpenidMintsNoIdToken() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("email"));
+
+        Map<String, Object> accessClaims;
+        try {
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("email", accessClaims.get("scope"));
+        assertFalse(auth.containsKey("IdToken"), "no openid, no ID token: " + auth.keySet());
+        assertNotNull(auth.get("RefreshToken"));
+    }
+
+    /** V2 scope changes apply on top of the grant, not on top of a fixed default scope. */
+    @Test
+    void preTokenGenerationV2ScopeChangesApplyOnTopOfTheCodeGrant() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email", "profile"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "scopesToSuppress", List.of("email"),
+                                "scopesToAdd", List.of("aws.cognito.signin.user.admin"))))));
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null,
+                List.of("openid", "email"));
+
+        Map<String, Object> accessClaims;
+        try {
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals(Set.of("openid", "aws.cognito.signin.user.admin"),
+                Set.of(((String) accessClaims.get("scope")).split(" ")));
     }
 
     @Test

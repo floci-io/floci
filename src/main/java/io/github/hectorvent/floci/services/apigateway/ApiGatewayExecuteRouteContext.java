@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.RequestScoped;
+import jakarta.inject.Inject;
 import jakarta.ws.rs.core.UriInfo;
 
 /**
@@ -9,6 +12,22 @@ import jakarta.ws.rs.core.UriInfo;
  */
 @RequestScoped
 public class ApiGatewayExecuteRouteContext {
+
+    private final CurrentVertxRequest currentVertxRequest;
+
+    public ApiGatewayExecuteRouteContext() {
+        this(null);
+    }
+
+    @Inject
+    public ApiGatewayExecuteRouteContext(CurrentVertxRequest currentVertxRequest) {
+        this.currentVertxRequest = currentVertxRequest;
+    }
+
+    String sourceIp() {
+        RoutingContext context = currentVertxRequest != null ? currentVertxRequest.getCurrent() : null;
+        return context != null ? context.request().connection().remoteAddress().hostAddress() : "127.0.0.1";
+    }
 
     private String httpApiRegion;
     private boolean restApiRoute;

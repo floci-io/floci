@@ -13,8 +13,7 @@ import static org.assertj.core.api.Assertions.*;
 class PipesTest {
 
     private static final String ACCOUNT_ID = "000000000000";
-    private static final String REGION = "us-east-1";
-    private static final String ROLE_ARN = "arn:aws:iam::" + ACCOUNT_ID + ":role/pipe-role";
+    private static final String ROLE_ARN = TestFixtures.globalArn("iam", ACCOUNT_ID, "role/pipe-role");
 
     private static PipesClient pipes;
     private static SqsClient sqs;
@@ -25,11 +24,11 @@ class PipesTest {
     private static String tgtQueueUrl;
 
     private static String sqsArn(String queueName) {
-        return "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":" + queueName;
+        return TestFixtures.arn("sqs", ACCOUNT_ID, queueName);
     }
 
     private static String kinesisArn(String streamName) {
-        return "arn:aws:kinesis:" + REGION + ":" + ACCOUNT_ID + ":stream/" + streamName;
+        return TestFixtures.arn("kinesis", ACCOUNT_ID, "stream/" + streamName);
     }
 
     @BeforeAll

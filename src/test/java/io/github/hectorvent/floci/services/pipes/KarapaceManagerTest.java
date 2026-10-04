@@ -119,6 +119,25 @@ class KarapaceManagerTest {
     }
 
     @Test
+    void bridgeContainerCarriesThePipesIdentityAndItsComponent() throws Exception {
+        int hostPort = startFakeRestServer();
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(portAllocator.allocate(9500, 9599)).thenReturn(hostPort);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-1",
+                Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))));
+
+        manager.ensureStarted("broker-1:9092");
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        // The legacy floci.component alias is added where every container is created, not here.
+        assertEquals(
+                Map.of("io.floci", "aws", "io.floci.service", "pipes",
+                        "io.floci.component", "pipes-kafka-rest-bridge"),
+                specCaptor.getValue().labels());
+    }
+
+    @Test
     void ensureStartedReusesTheSameContainerForTheSameTarget() throws Exception {
         int hostPort = startFakeRestServer();
         when(containerDetector.isRunningInContainer()).thenReturn(false);

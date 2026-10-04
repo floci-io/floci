@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ssm;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -110,7 +111,7 @@ public class SsmDirectCommandExecutor {
     private ExecutionResult executeInContainer(String containerId, String script, String workingDirectory, int timeoutSeconds)
             throws InterruptedException {
         String[] cmd = {"sh", "-c", timeoutWrappedScript(script, timeoutSeconds)};
-        var create = dockerClient.execCreateCmd(containerId)
+        ExecCreateCmd create = dockerClient.execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdout(true)
                 .withAttachStderr(true);
@@ -204,7 +205,7 @@ public class SsmDirectCommandExecutor {
     }
 
     private String collectFailureDiagnostics(String containerId) throws InterruptedException {
-        var create = dockerClient.execCreateCmd(containerId)
+        ExecCreateCmd create = dockerClient.execCreateCmd(containerId)
                 .withCmd("sh", "-c", failureDiagnosticsScript())
                 .withAttachStdout(true)
                 .withAttachStderr(true);

@@ -1,18 +1,15 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 
 import java.io.IOException;
 import java.io.StringWriter;
-import java.math.BigInteger;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
 import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPublicKey;
-import java.security.spec.RSAPublicKeySpec;
 import java.util.Base64;
 import java.util.HexFormat;
 
@@ -100,99 +97,34 @@ public final class Ec2KeyMaterial {
      * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/verify-keys.html">Verify the fingerprint of your key pair</a>
      */
     public static String fingerprintOf(String openSshPublicKey) {
-        byte[] blob = decodeOpenSshBlob(openSshPublicKey);
+        byte[] blob = SshPublicKeys.decodeBlob(openSshPublicKey);
         if (blob == null) {
             return null;
         }
         try {
-            byte[] der = blob;
-            SshReader reader = new SshReader(blob);
-            String type = new String(reader.readBytes(), StandardCharsets.UTF_8);
+            SshPublicKeys.Reader reader = SshPublicKeys.reader(blob);
+            String type = new String(reader.readField(), StandardCharsets.UTF_8);
             if ("ssh-ed25519".equals(type)) {
-                if (reader.readBytes().length != ED25519_KEY_LENGTH) {
+                if (reader.readField().length != ED25519_KEY_LENGTH) {
                     return null;
                 }
                 return Base64.getEncoder().encodeToString(
                         MessageDigest.getInstance("SHA-256").digest(blob));
             }
-            if ("ssh-rsa".equals(type)) {
-                BigInteger exponent = new BigInteger(reader.readBytes());
-                BigInteger modulus = new BigInteger(reader.readBytes());
-                der = KeyFactory.getInstance("RSA")
-                        .generatePublic(new RSAPublicKeySpec(modulus, exponent))
-                        .getEncoded();
-            }
-            return colonHex(MessageDigest.getInstance("MD5").digest(der));
+            // EC2 documents its ssh-rsa fingerprint as the MD5 of the DER, which is not the
+            // OpenSSH fingerprint of the same key. SshPublicKeys keeps the two apart on purpose.
+            byte[] der = "ssh-rsa".equals(type) ? SshPublicKeys.rsaKeyOf(blob).getEncoded() : blob;
+            return SshPublicKeys.md5ColonHex(der);
         } catch (Exception e) {  // malformed material is the caller's problem, not a crash
             return null;
         }
     }
 
     static String openSshPublicKey(RSAPublicKey key) {
-        byte[] type = "ssh-rsa".getBytes(StandardCharsets.US_ASCII);
-        byte[] exponent = key.getPublicExponent().toByteArray();
-        byte[] modulus = key.getModulus().toByteArray();
-        ByteBuffer blob = ByteBuffer.allocate(
-                12 + type.length + exponent.length + modulus.length);
-        for (byte[] field : new byte[][]{type, exponent, modulus}) {
-            blob.putInt(field.length).put(field);
-        }
-        return "ssh-rsa " + Base64.getEncoder().encodeToString(blob.array());
-    }
-
-    private static byte[] decodeOpenSshBlob(String openSshPublicKey) {
-        if (openSshPublicKey == null) {
-            return null;
-        }
-        // "ssh-rsa AAAAB3Nza... comment" -- the middle field is the blob.
-        String[] fields = openSshPublicKey.trim().split("\\s+");
-        if (fields.length < 2) {
-            return null;
-        }
-        try {
-            return Base64.getDecoder().decode(fields[1]);
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
+        return SshPublicKeys.toOpenSsh(key);
     }
 
     private static String colonHex(byte[] digest) {
         return HexFormat.of().withDelimiter(":").formatHex(digest);
-    }
-
-    /** Reads the length-prefixed fields of an OpenSSH public key blob. */
-    private static final class SshReader {
-
-        /**
-         * Absolute ceiling on a single field, well clear of anything a real key carries: the
-         * largest is the modulus of a 16384-bit RSA key, 2049 bytes with its sign byte.
-         */
-        private static final int MAX_FIELD_LENGTH = 64 * 1024;
-
-        private final ByteBuffer buffer;
-
-        SshReader(byte[] blob) {
-            this.buffer = ByteBuffer.wrap(blob);
-        }
-
-        byte[] readBytes() {
-            if (buffer.remaining() < Integer.BYTES) {
-                throw new IllegalArgumentException("truncated OpenSSH key blob");
-            }
-            int length = buffer.getInt();
-            // ImportKeyPair hands the caller's PublicKeyMaterial straight to this parser, so
-            // the declared length is attacker-controlled and has to be checked before it is
-            // allocated. Reading it first meant an eleven-byte blob could declare a
-            // two-gigabyte field and the array was built before anything noticed the bytes
-            // were not there; the resulting OutOfMemoryError is an Error, so the catch around
-            // fingerprintOf did not contain it either. Bounding by what is left in the buffer
-            // ties the allocation to the size of the request that carried it.
-            if (length < 0 || length > MAX_FIELD_LENGTH || length > buffer.remaining()) {
-                throw new IllegalArgumentException("invalid OpenSSH key field length: " + length);
-            }
-            byte[] field = new byte[length];
-            buffer.get(field);
-            return field;
-        }
     }
 }

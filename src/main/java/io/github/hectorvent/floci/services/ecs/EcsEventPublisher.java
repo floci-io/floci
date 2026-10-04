@@ -102,11 +102,11 @@ public class EcsEventPublisher {
         }
     }
 
-    /** Emits one ECS Deployment State Change (eventType INFO). */
+    /** Emits one ECS Deployment State Change. */
     public void emitDeploymentStateChange(EcsServiceModel svc, String eventName, String reason, String region) {
         try {
             ObjectNode detail = objectMapper.createObjectNode();
-            detail.put("eventType", "INFO");
+            detail.put("eventType", "SERVICE_DEPLOYMENT_FAILED".equals(eventName) ? "ERROR" : "INFO");
             detail.put("eventName", eventName);
             detail.put("deploymentId", svc.getDeploymentId());
             detail.put("updatedAt", Instant.now().toString());

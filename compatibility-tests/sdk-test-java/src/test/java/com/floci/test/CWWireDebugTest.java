@@ -5,9 +5,11 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.interceptor.*;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatch.model.*;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 class CWWireDebugTest {
@@ -19,7 +21,7 @@ class CWWireDebugTest {
             @Override
             public void beforeTransmission(Context.BeforeTransmission context, ExecutionAttributes attrs) {
                 try {
-                    var body = context.requestBody();
+                    Optional<RequestBody> body = context.requestBody();
                     if (body.isPresent()) {
                         String b = new String(body.get().contentStreamProvider().newStream().readAllBytes());
                         if (b.contains("PutMetricData")) {

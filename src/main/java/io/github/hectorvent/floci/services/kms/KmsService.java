@@ -43,6 +43,7 @@ public class KmsService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(KmsService.class);
 
     private static final String AWS_KMS_ORIGIN = "AWS_KMS";
+    private static final String AWS_KEY_MANAGER = "AWS";
     private static final String EXTERNAL_ORIGIN = "EXTERNAL";
     private static final String PENDING_IMPORT = "PendingImport";
     private static final String PENDING_DELETION = "PendingDeletion";
@@ -63,6 +64,9 @@ public class KmsService implements ResourceProvider {
     // Guards the check-generate-put sequence in ensureBackingKeyMaterial so two concurrent
     // first uses of the same legacy key cannot each mint a different backing key.
     private final Object backingKeyMaterialLock = new Object();
+    // Guards the scan-and-mint sequence in ensureAwsManagedKeys so two concurrent first reads of
+    // a region's alias namespace cannot each mint a key for the same alias/aws/* name.
+    private final Object awsManagedKeyLock = new Object();
 
     @Inject
     public KmsService(StorageFactory storageFactory, RegionResolver regionResolver) {
@@ -366,6 +370,11 @@ public class KmsService implements ResourceProvider {
     }
 
     public List<KmsKey> listKeys(String region) {
+        // Real AWS returns the AWS managed keys from ListKeys unconditionally. Without this, a
+        // caller that filters on KeyManager (cloud-nuke reads ListKeys, then DescribeKey, then
+        // skips anything that is not CUSTOMER) would see them or not depending on whether
+        // something else had read the alias namespace earlier in the same process.
+        ensureAwsManagedKeys(region);
         String prefix = region + "::";
         return keyStore.scan(k -> k.startsWith(prefix));
     }
@@ -491,6 +500,9 @@ public class KmsService implements ResourceProvider {
         validateGrantConstraints(constraints);
 
         KmsKey key = resolveKey(keyId, region);
+        // An AWS managed key's policy allows kms:CreateGrant only through the service that owns
+        // it (a kms:ViaService condition), never to the account directly.
+        requireCustomerManaged(key, "kms:CreateGrant");
         requireNotPendingDeletion(key);
         String grantId = UUID.randomUUID().toString();
         byte[] tokenBytes = new byte[32];
@@ -684,6 +696,7 @@ public class KmsService implements ResourceProvider {
 
     public void scheduleKeyDeletion(String keyId, int pendingWindowInDays, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:ScheduleKeyDeletion");
         requireNotPendingDeletion(key);
         key.setKeyState("PendingDeletion");
         key.setDeletionDate(Instant.now().plusSeconds((long) pendingWindowInDays * 86400).getEpochSecond());
@@ -697,6 +710,7 @@ public class KmsService implements ResourceProvider {
      */
     public void cancelKeyDeletion(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:CancelKeyDeletion");
         if (lacksImportedKeyMaterial(key)) {
             key.setKeyState(PENDING_IMPORT);
             key.setEnabled(false);
@@ -721,6 +735,7 @@ public class KmsService implements ResourceProvider {
 
     public void putKeyPolicy(String keyId, String policy, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:PutKeyPolicy");
         key.setPolicy(policy);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
@@ -749,6 +764,7 @@ public class KmsService implements ResourceProvider {
 
     public void updateKeyDescription(String keyId, String description, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:UpdateKeyDescription");
         requireNotPendingDeletion(key);
         key.setDescription(description);
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -768,6 +784,7 @@ public class KmsService implements ResourceProvider {
 
     public void enableKeyRotation(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:EnableKeyRotation");
         validateRotationOrigin(key);
         validateKeyIsUsableForCryptoOperations(key);
         validateRotationKeySpec(key);
@@ -778,6 +795,7 @@ public class KmsService implements ResourceProvider {
 
     public void disableKeyRotation(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:DisableKeyRotation");
         validateRotationOrigin(key);
         validateKeyIsUsableForCryptoOperations(key);
         key.setKeyRotationEnabled(false);
@@ -787,6 +805,7 @@ public class KmsService implements ResourceProvider {
 
     public void enableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:EnableKey");
         requireNotPendingDeletion(key);
         requireImportedKeyMaterial(key);
         key.setEnabled(true);
@@ -797,6 +816,7 @@ public class KmsService implements ResourceProvider {
 
     public void disableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:DisableKey");
         requireNotPendingDeletion(key);
         requireImportedKeyMaterial(key);
         key.setEnabled(false);
@@ -809,6 +829,7 @@ public class KmsService implements ResourceProvider {
     public String rotateKeyOnDemand(String keyId, String region) {
         synchronized (backingKeyMaterialLock) {
             KmsKey key = resolveKey(keyId, region);
+            requireCustomerManaged(key, "kms:RotateKeyOnDemand");
             validateKeyIsUsableForCryptoOperations(key);
             if (MULTI_REGION_REPLICA.equals(key.getMultiRegionKeyType())) {
                 throw new AwsException("UnsupportedOperationException",
@@ -1163,13 +1184,178 @@ public class KmsService implements ResourceProvider {
         }
     }
 
+    // ──────────────────────── AWS Managed Keys ───────────────────────
+
+    /**
+     * Materializes this region's AWS managed keys, the per-service keys every account has under
+     * the reserved {@code alias/aws/*} aliases.
+     *
+     * <p>Nothing creates these: AWS ships them, and a module that leaves a service's encryption at
+     * its default resolves one through a data source. Without them a lookup that succeeds against
+     * any real account fails here, which is what makes their absence expensive: no template
+     * declares them, so no dependency analysis reports them missing.
+     *
+     * <p>They are minted on first read of a region's key or alias namespace rather than at
+     * startup, which keeps an unused region free and mirrors AWS, where the key for a service
+     * appears once the account first uses that service. The entry points are the three reads of
+     * those namespaces: {@link #listKeys}, {@link #listAliases(String, String)} and
+     * {@link #resolveKey} for an identifier naming a reserved alias. The keys are written to the
+     * key store rather than held beside it as the IAM managed policy catalog is, because unlike a
+     * policy document a key carries per-account state: an id, an ARN and backing key material
+     * that ciphertext is bound to. A few dozen keys of state is a different proposition from a
+     * megabyte of policy documents.
+     *
+     * <p>An entry is skipped only when its alias is present <em>and</em> the key that alias
+     * targets is present. Gating on the alias alone is not enough, because the two live in
+     * different files and {@code PersistentStorage} quarantines an unreadable one and starts that
+     * store empty on its own: a lost key store would leave every alias dangling for the life of
+     * the instance, with {@code DescribeKey alias/aws/s3} reporting NotFoundException while
+     * {@code ListAliases} still advertised it. The catalog is checked into the repository, so this
+     * is the one part of a damaged store that can rebuild itself, and it does. This follows
+     * {@link #ensureBackingKeyMaterial}, which self-heals a key persisted before the backing-key
+     * envelope existed the same way.
+     *
+     * <p>Both stores are written once, as a batch, rather than per entry: {@code PersistentStorage}
+     * serialises its whole map on every {@code put}, so per-entry writes cost two file rewrites per
+     * catalog entry, on the first read of every region, while holding this lock. The aliases are
+     * written before the keys deliberately, for the case of a crash between the two batches: it
+     * then leaves aliases whose target is missing, which the gate above repairs on the next read,
+     * where the other order would leave keys with no alias that sit in ListKeys forever. The order
+     * does not cover {@code kms-aliases.json} alone being lost; for that, a surviving AWS managed
+     * key no reserved alias targets is re-aliased by description rather than minted again. A
+     * reserved alias whose target is a customer key (one created before the namespace was
+     * reserved) counts as missing and is re-pointed.
+     */
+    private void ensureAwsManagedKeys(String region) {
+        synchronized (awsManagedKeyLock) {
+            Map<String, KmsKey> newKeys = new LinkedHashMap<>();
+            Map<String, KmsAlias> newAliases = new LinkedHashMap<>();
+            Map<String, KmsKey> orphans = null;
+            for (AwsManagedKeys.AwsManagedKeyDef def : AwsManagedKeys.KEYS) {
+                String aliasStorageKey = region + "::" + def.aliasName();
+                if (resolvesToAnAwsManagedKey(aliasStore.get(aliasStorageKey), region)) {
+                    continue;
+                }
+                if (orphans == null) {
+                    orphans = unaliasedAwsManagedKeysByDescription(region);
+                }
+                KmsKey orphan = orphans.remove(def.description());
+                if (orphan != null) {
+                    newAliases.put(aliasStorageKey, new KmsAlias(def.aliasName(),
+                            regionResolver.buildArn("kms", region, def.aliasName()), orphan.getKeyId()));
+                    continue;
+                }
+                String keyId = UUID.randomUUID().toString();
+                KmsKey key = new KmsKey();
+                key.setKeyId(keyId);
+                key.setArn(regionResolver.buildArn("kms", region, "key/" + keyId));
+                key.setDescription(def.description());
+                key.setKeyManager(AWS_KEY_MANAGER);
+                key.setPolicy(buildDefaultKeyPolicy());
+                // AWS rotates its own keys yearly and the customer cannot turn that off, so
+                // GetKeyRotationStatus reports true for every AWS managed key.
+                key.setKeyRotationEnabled(true);
+                generateKeyMaterial(key, region);
+                newKeys.put(region + "::" + keyId, key);
+                newAliases.put(aliasStorageKey, new KmsAlias(def.aliasName(),
+                        regionResolver.buildArn("kms", region, def.aliasName()), keyId));
+            }
+            if (newAliases.isEmpty()) {
+                return;
+            }
+            aliasStore.putAll(newAliases);
+            keyStore.putAll(newKeys);
+            LOG.debugv("Minted {0} AWS managed keys in {1}", newKeys.size(), region);
+        }
+    }
+
+    /**
+     * Whether a reserved alias already points at an AWS managed key. Presence of the target alone
+     * is not enough: before {@code alias/aws/*} was reserved a customer could create
+     * {@code alias/aws/s3} on their own key, and a store persisted then would otherwise keep that
+     * customer key behind a reserved alias, where the AWS managed key guards do not apply.
+     */
+    private boolean resolvesToAnAwsManagedKey(Optional<KmsAlias> alias, String region) {
+        return alias.filter(a -> a.getTargetKeyId() != null)
+                .flatMap(a -> keyStore.get(region + "::" + a.getTargetKeyId()))
+                .map(k -> AWS_KEY_MANAGER.equals(k.getKeyManager()))
+                .orElse(false);
+    }
+
+    /**
+     * AWS managed keys no reserved alias targets, keyed by description. They are what a lost
+     * {@code kms-aliases.json} leaves behind; re-aliasing them instead of minting keeps ciphertext
+     * bound to them decryptable through the alias and keeps ListKeys free of duplicates. The
+     * catalog's descriptions are unique per service, which is what makes them usable as the key.
+     */
+    private Map<String, KmsKey> unaliasedAwsManagedKeysByDescription(String region) {
+        String prefix = region + "::";
+        Set<String> aliased = new HashSet<>();
+        for (KmsAlias a : aliasStore.scan(k -> k.startsWith(prefix + AwsManagedKeys.RESERVED_ALIAS_PREFIX))) {
+            aliased.add(a.getTargetKeyId());
+        }
+        Map<String, KmsKey> byDescription = new HashMap<>();
+        for (KmsKey k : keyStore.scan(key -> key.startsWith(prefix))) {
+            if (AWS_KEY_MANAGER.equals(k.getKeyManager()) && !aliased.contains(k.getKeyId())) {
+                byDescription.putIfAbsent(k.getDescription(), k);
+            }
+        }
+        return byDescription;
+    }
+
+    private static boolean referencesReservedAlias(String keyIdOrArn) {
+        return keyIdOrArn != null
+                && (keyIdOrArn.startsWith(AwsManagedKeys.RESERVED_ALIAS_PREFIX)
+                        || keyIdOrArn.contains(":" + AwsManagedKeys.RESERVED_ALIAS_PREFIX));
+    }
+
+    /**
+     * Refuses an operation that only a key's owner may perform when the key is AWS managed.
+     *
+     * <p>AWS states it plainly: you cannot manage an AWS managed key. You cannot rotate it,
+     * change its key policy, edit its description, enable or disable it, tag it, or schedule it
+     * for deletion. Cryptographic operations are unaffected, which is the entire point of the
+     * key existing. The single error code here is a deliberate simplification: the customer is
+     * not a principal the key's policy grants these actions to, so access denied is the honest
+     * answer for all of them, even though AWS distinguishes some as unsupported operations.
+     */
+    private static void requireCustomerManaged(KmsKey key, String operation) {
+        if (AWS_KEY_MANAGER.equals(key.getKeyManager())) {
+            throw new AwsException("AccessDeniedException",
+                    "User is not authorized to perform " + operation + " on resource "
+                            + key.getArn() + " because it is an AWS managed key.", 400);
+        }
+    }
+
+    private static void requireUnreservedAlias(String aliasName, String operation) {
+        if (AwsManagedKeys.isReservedAlias(aliasName)) {
+            throw new AwsException("AccessDeniedException",
+                    "User is not authorized to perform " + operation + " on alias " + aliasName
+                            + " because the " + AwsManagedKeys.RESERVED_ALIAS_PREFIX
+                            + " namespace is reserved for AWS managed keys.", 400);
+        }
+    }
+
     // ──────────────────────────── Aliases ────────────────────────────
 
     public void createAlias(String aliasName, String targetKeyId, String region) {
         if (!aliasName.startsWith("alias/")) {
             throw new AwsException("InvalidAliasNameException", "Alias name must begin with 'alias/'", 400);
         }
+        if (AwsManagedKeys.isReservedAlias(aliasName)) {
+            // AWS reserves the whole alias/aws/ namespace for its own keys and rejects the name
+            // outright, so a module that tries to claim one fails here exactly as it would there.
+            throw new AwsException("InvalidAliasNameException",
+                    "Alias name cannot begin with '" + AwsManagedKeys.RESERVED_ALIAS_PREFIX + "'", 400);
+        }
         KmsKey key = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
+        // AWS managed keys already carry the only alias they may have, the reserved one, and
+        // CreateAlias cannot give them a second. Letting it through would be the same class of
+        // error as seeding a key AWS does not have: the call succeeds here and fails there.
+        // AccessDeniedException rather than a CreateAlias-specific code, because the refusal is an
+        // authorization outcome (the key's policy grants the account nothing) and CreateAlias
+        // publishes no error for this case.
+        requireCustomerManaged(key, "kms:CreateAlias");
         requireNotPendingDeletion(key);
 
         String aliasArn = regionResolver.buildArn("kms", region, aliasName);
@@ -1179,6 +1365,7 @@ public class KmsService implements ResourceProvider {
     }
 
     public void updateAlias(String aliasName, String targetKeyId, String region) {
+        requireUnreservedAlias(aliasName, "kms:UpdateAlias");
         String storageKey = region + "::" + aliasName;
         KmsAlias existing = aliasStore.get(storageKey)
                 .orElseThrow(() -> aliasNotFound(aliasName, region));
@@ -1186,6 +1373,9 @@ public class KmsService implements ResourceProvider {
         KmsKey currentKey = resolveKey(existing.getTargetKeyId(), region);
         KmsKey newKey = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
 
+        // Same reason as CreateAlias: repointing a customer alias at an AWS managed key would
+        // succeed here and fail against AWS.
+        requireCustomerManaged(newKey, "kms:UpdateAlias");
         requireNotPendingDeletion(newKey);
         if (currentKey.getKeyUsage() != newKey.getKeyUsage() || !sameKeyFamily(currentKey.getKeySpec(), newKey.getKeySpec())) {
             throw new AwsException("ValidationException",
@@ -1200,6 +1390,7 @@ public class KmsService implements ResourceProvider {
     }
 
     public void deleteAlias(String aliasName, String region) {
+        requireUnreservedAlias(aliasName, "kms:DeleteAlias");
         String key = region + "::" + aliasName;
         if (aliasStore.get(key).isEmpty()) {
             throw aliasNotFound(aliasName, region);
@@ -1212,6 +1403,7 @@ public class KmsService implements ResourceProvider {
     }
 
     public List<KmsAlias> listAliases(String keyId, String region) {
+        ensureAwsManagedKeys(region);
         String prefix = region + "::";
         List<KmsAlias> all = aliasStore.scan(k -> k.startsWith(prefix));
         if (keyId == null || keyId.isBlank()) {
@@ -1880,6 +2072,7 @@ public class KmsService implements ResourceProvider {
 
     public void tagResource(String keyId, Map<String, String> tags, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:TagResource");
         requireNotPendingDeletion(key);
         ReservedTags.rejectReservedTagsOnUpdate(tags);
         key.getTags().putAll(tags);
@@ -1888,6 +2081,7 @@ public class KmsService implements ResourceProvider {
 
     public void untagResource(String keyId, List<String> tagKeys, String region) {
         KmsKey key = resolveKey(keyId, region);
+        requireCustomerManaged(key, "kms:UntagResource");
         requireNotPendingDeletion(key);
         tagKeys.forEach(key.getTags()::remove);
         keyStore.put(region + "::" + key.getKeyId(), key);
@@ -1896,6 +2090,9 @@ public class KmsService implements ResourceProvider {
     // ──────────────────────────── Helpers ────────────────────────────
 
     private KmsKey resolveKey(String keyIdOrArn, String region) {
+        if (referencesReservedAlias(keyIdOrArn)) {
+            ensureAwsManagedKeys(region);
+        }
         if (AwsArnUtils.isArnFor(keyIdOrArn, "kms")) {
             String arnRegion = AwsArnUtils.parse(keyIdOrArn).region();
             if (!region.equals(arnRegion)) {

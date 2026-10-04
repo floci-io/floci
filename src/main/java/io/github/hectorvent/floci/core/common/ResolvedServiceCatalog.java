@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.appconfig.AppConfigDataController;
 import io.github.hectorvent.floci.services.batch.BatchController;
 import io.github.hectorvent.floci.services.bedrock.BedrockController;
 import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeController;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactMavenController;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactPypiController;
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import io.github.hectorvent.floci.services.eks.EksController;
@@ -257,7 +259,9 @@ public class ResolvedServiceCatalog {
                 descriptor("apigatewayv2", "apigatewayv2", config.services().apigatewayv2().enabled(), true,
                         "apigatewayv2", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("AmazonApiGatewayV2."), Set.of("apigatewayv2"), Set.of(), Set.of()),
+                        // No credential scope: every SDK signs API Gateway v2 as apigateway, which the
+                        // apigateway descriptor declares; REST /v2/apis routes by its resource class.
+                        Set.of("AmazonApiGatewayV2."), Set.of(), Set.of(), Set.of()),
                 descriptor("kinesis", "kinesis", config.services().kinesis().enabled(), true,
                         "kinesis", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
@@ -308,7 +312,8 @@ public class ResolvedServiceCatalog {
                 descriptor("email", "ses", config.services().ses().enabled(), true,
                         "ses", config.storage().mode(), 5000L, AwsNamespaces.SES, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON, ServiceProtocol.QUERY),
-                        Set.of(), Set.of("email", "ses", "sesv2"), Set.of(),
+                        // SES v2 signs as ses in every SDK, so sesv2 is not a credential scope.
+                        Set.of(), Set.of("email", "ses"), Set.of(),
                         Set.of(SesAccountController.class, SesConfigurationSetController.class,
                                 SesContactController.class, SesCvetController.class,
                                 SesDedicatedIpController.class, SesExportJobController.class,
@@ -743,7 +748,9 @@ public class ResolvedServiceCatalog {
                         "codeartifact", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("codeartifact"), Set.of(),
-                        Set.of(io.github.hectorvent.floci.services.codeartifact.CodeArtifactController.class)),
+                        Set.of(io.github.hectorvent.floci.services.codeartifact.CodeArtifactController.class,
+                                CodeArtifactMavenController.class,
+                                CodeArtifactPypiController.class)),
                 descriptor("verifiedpermissions", "verifiedpermissions", config.services().verifiedpermissions().enabled(), true,
                         "verifiedpermissions", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

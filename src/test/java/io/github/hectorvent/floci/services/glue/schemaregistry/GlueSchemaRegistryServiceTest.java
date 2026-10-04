@@ -11,8 +11,20 @@ import io.github.hectorvent.floci.services.glue.schemaregistry.model.SchemaVersi
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -20,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class GlueSchemaRegistryServiceTest {
 
@@ -376,6 +389,309 @@ class GlueSchemaRegistryServiceTest {
 
         assertEquals(v1.getSchemaVersionId(), same.getSchemaVersionId());
         assertEquals(1L, same.getVersionNumber());
+    }
+
+    @Test
+    void recordLevelCustomAttributesReuseExistingVersionAndRemainDiscoverable() {
+        preCreateRegistry();
+        SchemaVersion first = service.createSchema(new RegistryId("reg", null),
+                "users", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION).firstVersion();
+        SchemaId schemaId = new SchemaId("reg", "users", null);
+
+        for (String attribute : List.of("\"order\":\"descending\"", "\"default\":\"unused\"",
+                "\"symbols\":[\"IGNORED\"]", "\"size\":8")) {
+            String definition = AVRO_V1.replace("\"fields\"", attribute + ",\"fields\"");
+            assertEquals(first.getSchemaVersionId(),
+                    service.registerSchemaVersion(schemaId, definition, REGION).getSchemaVersionId(), attribute);
+            assertEquals(first.getSchemaVersionId(),
+                    service.getSchemaByDefinition(schemaId, definition, REGION).getSchemaVersionId(), attribute);
+        }
+        assertEquals(1, service.listSchemaVersions(schemaId, REGION).size());
+    }
+
+    @Test
+    void legacyAvroDuplicatesPreferEarliestVersionAndSurviveDeletion() {
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
+        InMemoryStorage<String, Registry> registryStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Schema> schemaStore = new InMemoryStorage<>();
+        InMemoryStorage<String, SchemaVersion> versionStore = new InMemoryStorage<>() {
+            @Override
+            public List<SchemaVersion> scan(Predicate<String> keyFilter) {
+                List<SchemaVersion> versions = super.scan(keyFilter);
+                versions.sort((left, right) -> left.getVersionNumber().compareTo(right.getVersionNumber()));
+                return versions;
+            }
+        };
+        service = new GlueSchemaRegistryService(registryStore, schemaStore, versionStore,
+                new InMemoryStorage<>(), regionResolver);
+        service.createRegistry("reg", null, null, REGION);
+        SchemaVersion first = service.createSchema(new RegistryId("reg", null),
+                "users", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION).firstVersion();
+        SchemaId schemaId = new SchemaId("reg", "users", null);
+        SchemaVersion second = service.registerSchemaVersion(schemaId, AVRO_V2_BACKWARD_OK, REGION);
+        String withCustomAttribute = AVRO_V1.replace("\"type\":\"long\"",
+                "\"type\":\"long\",\"x-field\":\"legacy\"");
+        second.setSchemaDefinition(withCustomAttribute);
+        versionStore.put(second.getSchemaVersionId(), second);
+
+        service = new GlueSchemaRegistryService(registryStore, schemaStore, versionStore,
+                new InMemoryStorage<>(), regionResolver);
+        service.afterCdiInit();
+
+        assertEquals(first.getSchemaVersionId(),
+                service.getSchemaByDefinition(schemaId, withCustomAttribute, REGION).getSchemaVersionId());
+        assertEquals(first.getSchemaVersionId(),
+                service.registerSchemaVersion(schemaId, withCustomAttribute, REGION).getSchemaVersionId());
+
+        service.updateSchema(schemaId, null, null, 2L, REGION);
+        assertNull(service.deleteSchemaVersions(schemaId, "1", REGION).get(0).errorCode());
+        assertEquals(second.getSchemaVersionId(),
+                service.getSchemaByDefinition(schemaId, AVRO_V1, REGION).getSchemaVersionId());
+        assertEquals(second.getSchemaVersionId(),
+                service.registerSchemaVersion(schemaId, AVRO_V1, REGION).getSchemaVersionId());
+    }
+
+    @Test
+    void lookupWaitsForLegacyDuplicateHashReplacement() throws Exception {
+        CountDownLatch replacementStarted = new CountDownLatch(1);
+        CountDownLatch finishReplacement = new CountDownLatch(1);
+        AtomicReference<String> replacementId = new AtomicReference<>();
+        AtomicReference<Thread> deletingThread = new AtomicReference<>();
+        OrderedVersionStore versionStore = new OrderedVersionStore() {
+            @Override
+            public Optional<SchemaVersion> get(String key) {
+                if (Thread.currentThread() == deletingThread.get() && key.equals(replacementId.get())) {
+                    replacementStarted.countDown();
+                    awaitRelease(finishReplacement);
+                }
+                return super.get(key);
+            }
+        };
+        LegacyAvroVersions versions = legacyAvroVersions(versionStore);
+        replacementId.set(versions.second().getSchemaVersionId());
+        service.updateSchema(versions.schemaId(), null, null, 2L, REGION);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<List<GlueSchemaRegistryService.VersionDeletionResult>> deletion = pool.submit(() -> {
+                deletingThread.set(Thread.currentThread());
+                return service.deleteSchemaVersions(versions.schemaId(), "1", REGION);
+            });
+            assertTrue(replacementStarted.await(5, TimeUnit.SECONDS));
+            CountDownLatch lookupStarted = new CountDownLatch(1);
+            AtomicReference<Thread> lookupThread = new AtomicReference<>();
+            Future<SchemaVersion> lookup = pool.submit(() -> {
+                lookupThread.set(Thread.currentThread());
+                lookupStarted.countDown();
+                return service.getSchemaByDefinition(versions.schemaId(), AVRO_V1, REGION);
+            });
+            assertTrue(lookupStarted.await(5, TimeUnit.SECONDS));
+            assertBlockedOnService(lookupThread.get(), lookup);
+
+            finishReplacement.countDown();
+            assertNull(deletion.get(5, TimeUnit.SECONDS).get(0).errorCode());
+            assertEquals(versions.second().getSchemaVersionId(),
+                    lookup.get(5, TimeUnit.SECONDS).getSchemaVersionId());
+        } finally {
+            finishReplacement.countDown();
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void deletionWaitsForLookupThatAlreadyReadLegacyVersionId() throws Exception {
+        CountDownLatch lookupReadingVersion = new CountDownLatch(1);
+        CountDownLatch finishLookup = new CountDownLatch(1);
+        AtomicReference<String> firstId = new AtomicReference<>();
+        AtomicReference<Thread> lookupThread = new AtomicReference<>();
+        OrderedVersionStore versionStore = new OrderedVersionStore() {
+            @Override
+            public Optional<SchemaVersion> get(String key) {
+                if (Thread.currentThread() == lookupThread.get() && key.equals(firstId.get())) {
+                    lookupReadingVersion.countDown();
+                    awaitRelease(finishLookup);
+                }
+                return super.get(key);
+            }
+        };
+        LegacyAvroVersions versions = legacyAvroVersions(versionStore);
+        firstId.set(versions.first().getSchemaVersionId());
+        service.updateSchema(versions.schemaId(), null, null, 2L, REGION);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<SchemaVersion> lookup = pool.submit(() -> {
+                lookupThread.set(Thread.currentThread());
+                return service.getSchemaByDefinition(versions.schemaId(), AVRO_V1, REGION);
+            });
+            assertTrue(lookupReadingVersion.await(5, TimeUnit.SECONDS));
+            CountDownLatch deletionStarted = new CountDownLatch(1);
+            AtomicReference<Thread> deletingThread = new AtomicReference<>();
+            Future<List<GlueSchemaRegistryService.VersionDeletionResult>> deletion = pool.submit(() -> {
+                deletingThread.set(Thread.currentThread());
+                deletionStarted.countDown();
+                return service.deleteSchemaVersions(versions.schemaId(), "1", REGION);
+            });
+            assertTrue(deletionStarted.await(5, TimeUnit.SECONDS));
+            assertBlockedOnService(deletingThread.get(), deletion);
+
+            finishLookup.countDown();
+            assertEquals(versions.first().getSchemaVersionId(),
+                    lookup.get(5, TimeUnit.SECONDS).getSchemaVersionId());
+            assertNull(deletion.get(5, TimeUnit.SECONDS).get(0).errorCode());
+            assertEquals(versions.second().getSchemaVersionId(),
+                    service.getSchemaByDefinition(versions.schemaId(), AVRO_V1, REGION).getSchemaVersionId());
+        } finally {
+            finishLookup.countDown();
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void lookupRehashesAfterSchemaIsRecreatedWithDifferentFormat() throws Exception {
+        String definition = "{\"type\":\"string\",\"x-note\":\"both formats\"}";
+        assertTrue(service.checkSchemaVersionValidity("AVRO", definition).valid());
+        assertTrue(service.checkSchemaVersionValidity("JSON", definition).valid());
+        assertLookupFindsRecreatedSchema(definition, definition);
+    }
+
+    @Test
+    void lookupFindsDefinitionInvalidForOldFormatAfterRecreation() throws Exception {
+        String jsonDefinition = "{ \"type\": \"object\", \"properties\": { \"k\": { \"type\": \"string\" } } }";
+        assertFalse(service.checkSchemaVersionValidity("AVRO", jsonDefinition).valid());
+        assertTrue(service.checkSchemaVersionValidity("JSON", jsonDefinition).valid());
+        assertFalse(jsonDefinition.equals(SchemaCompatibilityChecker.canonicalize(jsonDefinition, "JSON")));
+        assertLookupFindsRecreatedSchema(AVRO_V1, jsonDefinition);
+    }
+
+    @Test
+    void lookupReportsInternalErrorWhenSchemaFormatKeepsChanging() {
+        String definition = "{\"type\":\"string\"}";
+        AtomicBoolean alternateFormat = new AtomicBoolean();
+        AtomicInteger reads = new AtomicInteger();
+        InMemoryStorage<String, Schema> schemaStore = new InMemoryStorage<>() {
+            @Override
+            public Optional<Schema> get(String key) {
+                Optional<Schema> schema = super.get(key);
+                if (alternateFormat.get() && schema.isPresent()) {
+                    schema.get().setDataFormat(reads.getAndIncrement() % 2 == 0 ? "AVRO" : "JSON");
+                }
+                return schema;
+            }
+        };
+        service = new GlueSchemaRegistryService(new InMemoryStorage<>(), schemaStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new RegionResolver(REGION, ACCOUNT_ID));
+        service.createRegistry("reg", null, null, REGION);
+        service.createSchema(new RegistryId("reg", null), "users", "AVRO", "NONE",
+                null, definition, null, REGION);
+
+        alternateFormat.set(true);
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.getSchemaByDefinition(new SchemaId("reg", "users", null), definition, REGION));
+        assertEquals("InternalServiceException", error.getErrorCode());
+        assertEquals(500, error.getHttpStatus());
+    }
+
+    private void assertLookupFindsRecreatedSchema(String oldDefinition, String replacementDefinition) throws Exception {
+        CountDownLatch firstSchemaRead = new CountDownLatch(1);
+        CountDownLatch finishLookup = new CountDownLatch(1);
+        AtomicBoolean paused = new AtomicBoolean();
+        AtomicReference<Thread> lookupThread = new AtomicReference<>();
+        InMemoryStorage<String, Schema> schemaStore = new InMemoryStorage<>() {
+            @Override
+            public Optional<Schema> get(String key) {
+                Optional<Schema> schema = super.get(key);
+                if (Thread.currentThread() == lookupThread.get()
+                        && key.equals("reg:users") && paused.compareAndSet(false, true)) {
+                    firstSchemaRead.countDown();
+                    awaitRelease(finishLookup);
+                }
+                return schema;
+            }
+        };
+        service = new GlueSchemaRegistryService(new InMemoryStorage<>(), schemaStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new RegionResolver(REGION, ACCOUNT_ID));
+        service.createRegistry("reg", null, null, REGION);
+        SchemaId schemaId = new SchemaId("reg", "users", null);
+        service.createSchema(new RegistryId("reg", null), "users", "AVRO", "BACKWARD",
+                null, oldDefinition, null, REGION);
+
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<SchemaVersion> lookup = pool.submit(() -> {
+                lookupThread.set(Thread.currentThread());
+                return service.getSchemaByDefinition(schemaId, replacementDefinition, REGION);
+            });
+            assertTrue(firstSchemaRead.await(5, TimeUnit.SECONDS));
+            service.deleteSchema(schemaId, REGION);
+            SchemaVersion replacement = service.createSchema(new RegistryId("reg", null),
+                    "users", "JSON", "BACKWARD", null, replacementDefinition, null, REGION).firstVersion();
+
+            finishLookup.countDown();
+            assertEquals(replacement.getSchemaVersionId(), lookup.get(5, TimeUnit.SECONDS).getSchemaVersionId());
+        } finally {
+            finishLookup.countDown();
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    private LegacyAvroVersions legacyAvroVersions(OrderedVersionStore versionStore) {
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
+        InMemoryStorage<String, Registry> registryStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Schema> schemaStore = new InMemoryStorage<>();
+        service = new GlueSchemaRegistryService(registryStore, schemaStore, versionStore,
+                new InMemoryStorage<>(), regionResolver);
+        service.createRegistry("reg", null, null, REGION);
+        SchemaVersion first = service.createSchema(new RegistryId("reg", null),
+                "users", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION).firstVersion();
+        SchemaId schemaId = new SchemaId("reg", "users", null);
+        SchemaVersion second = service.registerSchemaVersion(schemaId, AVRO_V2_BACKWARD_OK, REGION);
+        String withCustomAttribute = AVRO_V1.replace("\"type\":\"long\"",
+                "\"type\":\"long\",\"x-field\":\"legacy\"");
+        second.setSchemaDefinition(withCustomAttribute);
+        versionStore.put(second.getSchemaVersionId(), second);
+
+        service = new GlueSchemaRegistryService(registryStore, schemaStore, versionStore,
+                new InMemoryStorage<>(), regionResolver);
+        service.afterCdiInit();
+        return new LegacyAvroVersions(schemaId, first, second);
+    }
+
+    private static void awaitRelease(CountDownLatch release) {
+        try {
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
+    }
+
+    private void assertBlockedOnService(Thread worker, Future<?> task) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline && !task.isDone()) {
+            ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(worker.threadId());
+            if (info != null && info.getThreadState() == Thread.State.BLOCKED
+                    && info.getLockInfo() != null
+                    && info.getLockInfo().getIdentityHashCode() == System.identityHashCode(service)) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        fail("Expected worker to block on the schema service monitor");
+    }
+
+    private record LegacyAvroVersions(SchemaId schemaId, SchemaVersion first, SchemaVersion second) {}
+
+    private static class OrderedVersionStore extends InMemoryStorage<String, SchemaVersion> {
+        @Override
+        public List<SchemaVersion> scan(Predicate<String> keyFilter) {
+            List<SchemaVersion> versions = super.scan(keyFilter);
+            versions.sort((left, right) -> left.getVersionNumber().compareTo(right.getVersionNumber()));
+            return versions;
+        }
     }
 
     @Test

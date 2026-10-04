@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.time.Instant;
 import java.util.List;
@@ -19,6 +21,9 @@ class SesListPagingTest {
 
     private static final String REGION = "us-east-1";
     private static final List<String> ITEMS = List.of("a", "b", "c");
+    private static final String EMPTY_TOKEN_VIOLATION = "Value '' at 'nextToken' failed to satisfy constraint: "
+            + "Member must have length greater than or equal to 1";
+    private static final String EMPTY_TOKEN_MESSAGE = "1 validation error detected: " + EMPTY_TOKEN_VIOLATION;
 
     @Test
     void pageSize_defaultsPerOperation() {
@@ -129,6 +134,27 @@ class SesListPagingTest {
     }
 
     @Test
+    void aTokenFromAnotherScope_isRefusedAsUnreadable() {
+        SesListPaging paging = SesListPaging.V2_LIST_SUPPRESSED_DESTINATIONS;
+        String token = paging.page(REGION, "BOUNCE", ITEMS, Function.identity(), 1, null).nextToken();
+
+        assertThat(paging.page(REGION, "BOUNCE", ITEMS, Function.identity(), 1, token).items(), contains("b"));
+        assertError("InvalidNextTokenException", "Token is invalid.",
+                () -> paging.page(REGION, "COMPLAINT", ITEMS, Function.identity(), 1, token));
+        assertError("InvalidNextTokenException", "Token is invalid.",
+                () -> paging.page(REGION, ITEMS, Function.identity(), 1, token));
+    }
+
+    @Test
+    void contactsDefaultToFiftyAndTheUnmeasuredListsToTheirBound() {
+        assertEquals(50, SesListPaging.V2_LIST_CONTACTS.pageSize(null));
+        assertEquals(1000, SesListPaging.V2_LIST_CONTACT_LISTS.pageSize(null));
+        assertEquals(1000, SesListPaging.V2_LIST_DEDICATED_IP_POOLS.pageSize(null));
+        assertEquals(1000, SesListPaging.V2_GET_DEDICATED_IPS.pageSize(null));
+        assertEquals(1000, SesListPaging.V2_LIST_SUPPRESSED_DESTINATIONS.pageSize(null));
+    }
+
+    @Test
     void invalidToken_messagesQuoteTheToken() {
         assertError("BadRequestException", "Invalid PageToken <garbage>.",
                 () -> page(SesListPaging.V2_LIST_EMAIL_TEMPLATES, 1, "garbage"));
@@ -189,6 +215,123 @@ class SesListPagingTest {
                 () -> SesListPaging.V2_LIST_EXPORT_JOBS.page(REGION, ITEMS, Function.identity(), 0, ""));
         assertError("BadRequestException", "The page size must be between 1 and 100",
                 () -> SesListPaging.V2_LIST_EMAIL_TEMPLATES.page(REGION, ITEMS, Function.identity(), 0, "garbage"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("tenantStyleLists")
+    void tenantStyle_pageSizeDefaultsToTheBound(SesListPaging paging) {
+        assertEquals(100, paging.pageSize(null));
+        assertEquals(1, paging.pageSize(1));
+        assertEquals(100, paging.pageSize(100));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("tenantStyleLists")
+    void tenantStyle_outOfRangePageSizeAnswersTheSmithyMessageWithTheValue(SesListPaging paging) {
+        assertError("BadRequestException", pageSizeMessage(0, "greater than or equal to 1"),
+                () -> paging.pageSize(0));
+        assertError("BadRequestException", pageSizeMessage(-7, "greater than or equal to 1"),
+                () -> paging.pageSize(-7));
+        assertError("BadRequestException", pageSizeMessage(101, "less than or equal to 100"),
+                () -> paging.pageSize(101));
+        assertError("BadRequestException", pageSizeMessage(0, "greater than or equal to 1"),
+                () -> page(paging, 0, "garbage"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("tenantStyleLists")
+    void tenantStyle_unreadableAndEmptyTokensAreRefusedDifferently(SesListPaging paging) {
+        assertError("BadRequestException", "Invalid Next Token", () -> page(paging, 1, "garbage"));
+        assertError("BadRequestException", EMPTY_TOKEN_MESSAGE, () -> page(paging, 1, ""));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("tenantStyleLists")
+    void tenantStyle_aTokenIsRefusedByEveryOtherKind(SesListPaging minting) {
+        String token = page(minting, 1, null).nextToken();
+
+        assertThat(page(minting, 1, token).items(), contains("b"));
+        for (SesListPaging other : tenantStyleLists()) {
+            if (other != minting) {
+                assertError("BadRequestException", "Invalid Next Token", () -> page(other, 1, token));
+            }
+        }
+        assertError("BadRequestException", "Failed to deserialize token. ",
+                () -> page(SesListPaging.V2_LIST_EXPORT_JOBS, 1, token));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("tenantStyleLists")
+    void tenantStyle_aBadPageSizeAndAnEmptyTokenAreReportedTogether(SesListPaging paging) {
+        assertError("BadRequestException", "2 validation errors detected: " + EMPTY_TOKEN_VIOLATION + "; "
+                + pageSizeViolation(0, "greater than or equal to 1"), () -> page(paging, 0, ""));
+        assertError("BadRequestException", "2 validation errors detected: " + EMPTY_TOKEN_VIOLATION + "; "
+                + pageSizeViolation(101, "less than or equal to 100"), () -> page(paging, 101, ""));
+    }
+
+    @Test
+    void scope_bindsATokenToWhatTheRequestSelected() {
+        SesListPaging paging = SesListPaging.V2_LIST_TENANT_RESOURCES;
+        String token = paging.page(REGION, "tenant-a", ITEMS, Function.identity(), 1, null).nextToken();
+
+        assertThat(paging.page(REGION, "tenant-a", ITEMS, Function.identity(), 1, token).items(), contains("b"));
+        assertError("BadRequestException", "Invalid Next Token",
+                () -> paging.page(REGION, "tenant-b", ITEMS, Function.identity(), 1, token));
+        assertError("BadRequestException", "Invalid Next Token", () -> page(paging, 1, token));
+
+        // A request that selected nothing has an empty scope, and its token is refused once one is added.
+        String unscoped = page(paging, 1, null).nextToken();
+        assertError("BadRequestException", "Invalid Next Token",
+                () -> paging.page(REGION, "tenant-a", ITEMS, Function.identity(), 1, unscoped));
+    }
+
+    @Test
+    void scope_isNotMatchedByAScopeItMerelyStartsWith() {
+        SesListPaging paging = SesListPaging.V2_LIST_RESOURCE_TENANTS;
+        // An identity name may hold the separator the token ends its scope with.
+        String longer = paging.page(REGION, "identity/a:b", ITEMS, Function.identity(), 1, null).nextToken();
+        String shorter = paging.page(REGION, "identity/a", ITEMS, Function.identity(), 1, null).nextToken();
+
+        assertError("BadRequestException", "Invalid Next Token",
+                () -> paging.page(REGION, "identity/a", ITEMS, Function.identity(), 1, longer));
+        assertError("BadRequestException", "Invalid Next Token",
+                () -> paging.page(REGION, "identity/a:b", ITEMS, Function.identity(), 1, shorter));
+        assertThat(paging.page(REGION, "identity/a:b", ITEMS, Function.identity(), 1, longer).items(),
+                contains("b"));
+    }
+
+    @Test
+    void oldestFirst_ordersByTimeAscendingThenById() {
+        Instant earlier = Instant.parse("2026-09-25T00:00:00Z");
+        Instant later = earlier.plusMillis(1);
+
+        assertThat(SesListPaging.oldestFirst(earlier, "z"),
+                lessThan(SesListPaging.oldestFirst(later, "a")));
+        assertThat(SesListPaging.oldestFirst(later, "a"),
+                lessThan(SesListPaging.oldestFirst(later, "b")));
+        // The cursor is compared as text, so a stamp with fewer digits must still sort first.
+        assertThat(SesListPaging.oldestFirst(Instant.ofEpochSecond(9), "a"),
+                lessThan(SesListPaging.oldestFirst(Instant.ofEpochSecond(10), "a")));
+        // Two stamps inside one millisecond keep their order, whatever the ids.
+        assertThat(SesListPaging.oldestFirst(earlier.plusNanos(1), "z"),
+                lessThan(SesListPaging.oldestFirst(earlier.plusNanos(2), "a")));
+        // A missing stamp sorts last, as the unpaged lists order it.
+        assertThat(SesListPaging.oldestFirst(later, "z"),
+                lessThan(SesListPaging.oldestFirst(null, "a")));
+    }
+
+    private static List<SesListPaging> tenantStyleLists() {
+        return List.of(SesListPaging.V2_LIST_TENANTS, SesListPaging.V2_LIST_TENANT_RESOURCES,
+                SesListPaging.V2_LIST_RESOURCE_TENANTS, SesListPaging.V2_LIST_IMPORT_JOBS);
+    }
+
+    private static String pageSizeMessage(int value, String constraint) {
+        return "1 validation error detected: " + pageSizeViolation(value, constraint);
+    }
+
+    private static String pageSizeViolation(int value, String constraint) {
+        return "Value '" + value + "' at 'pageSize' failed to satisfy constraint: Member must have value "
+                + constraint;
     }
 
     private static PaginatedResult<String> page(SesListPaging paging, int size, String token) {

@@ -49,13 +49,13 @@ public class KubernetesPodLogStreamer {
         InputStream logStreamBody = client.openPodLogStream(namespace, podName, "runtime");
 
         // Virtual thread: one blocking reader per warm pod is near-free this way.
-        var reader = Thread.ofVirtual().name("lambda-pod-logs-" + podName).start(() -> {
-            try (var lines = new BufferedReader(new InputStreamReader(logStreamBody, StandardCharsets.UTF_8))) {
+        Thread reader = Thread.ofVirtual().name("lambda-pod-logs-" + podName).start(() -> {
+            try (BufferedReader lines = new BufferedReader(new InputStreamReader(logStreamBody, StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = lines.readLine()) != null) {
                     // Match the docker log path: trim trailing whitespace and drop blank
                     // lines so both executors write identical CloudWatch events.
-                    var trimmed = line.stripTrailing();
+                    String trimmed = line.stripTrailing();
                     if (trimmed.isEmpty()) {
                         continue;
                     }

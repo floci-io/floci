@@ -6,14 +6,20 @@ import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
 import software.amazon.awssdk.services.identitystore.model.AlternateIdentifier;
 import software.amazon.awssdk.services.identitystore.model.AttributeOperation;
 import software.amazon.awssdk.services.identitystore.model.CreateGroupMembershipRequest;
+import software.amazon.awssdk.services.identitystore.model.CreateGroupMembershipResponse;
 import software.amazon.awssdk.services.identitystore.model.CreateGroupRequest;
+import software.amazon.awssdk.services.identitystore.model.CreateGroupResponse;
 import software.amazon.awssdk.services.identitystore.model.CreateUserRequest;
+import software.amazon.awssdk.services.identitystore.model.CreateUserResponse;
 import software.amazon.awssdk.services.identitystore.model.DeleteGroupMembershipRequest;
 import software.amazon.awssdk.services.identitystore.model.DeleteGroupRequest;
 import software.amazon.awssdk.services.identitystore.model.DeleteUserRequest;
 import software.amazon.awssdk.services.identitystore.model.DescribeGroupMembershipRequest;
+import software.amazon.awssdk.services.identitystore.model.DescribeGroupMembershipResponse;
 import software.amazon.awssdk.services.identitystore.model.DescribeGroupRequest;
+import software.amazon.awssdk.services.identitystore.model.DescribeGroupResponse;
 import software.amazon.awssdk.services.identitystore.model.DescribeUserRequest;
+import software.amazon.awssdk.services.identitystore.model.DescribeUserResponse;
 import software.amazon.awssdk.services.identitystore.model.Email;
 import software.amazon.awssdk.services.identitystore.model.Filter;
 import software.amazon.awssdk.services.identitystore.model.GetGroupIdRequest;
@@ -40,7 +46,7 @@ class IdentityStoreTest {
     @Test
     void completeIdentityStoreApiUsesAwsSdk() {
         try (IdentitystoreClient client = TestFixtures.identityStoreClient()) {
-            var group = client.createGroup(CreateGroupRequest.builder()
+            CreateGroupResponse group = client.createGroup(CreateGroupRequest.builder()
                     .identityStoreId(STORE)
                     .displayName("PlatformAdmins")
                     .description("Platform administrators")
@@ -48,7 +54,7 @@ class IdentityStoreTest {
             assertTrue(group.groupId().startsWith("1234567890-"));
             assertEquals(STORE, group.identityStoreId());
 
-            var user = client.createUser(CreateUserRequest.builder()
+            CreateUserResponse user = client.createUser(CreateUserRequest.builder()
                     .identityStoreId(STORE)
                     .userName("identitystore-sdk@example.com")
                     .displayName("Identity Store SDK")
@@ -57,12 +63,12 @@ class IdentityStoreTest {
             assertTrue(user.userId().startsWith("1234567890-"));
             assertEquals(STORE, user.identityStoreId());
 
-            var describedGroup = client.describeGroup(DescribeGroupRequest.builder()
+            DescribeGroupResponse describedGroup = client.describeGroup(DescribeGroupRequest.builder()
                     .identityStoreId(STORE).groupId(group.groupId()).build());
             assertEquals("PlatformAdmins", describedGroup.displayName());
             assertNotNull(describedGroup.createdAt());
 
-            var describedUser = client.describeUser(DescribeUserRequest.builder()
+            DescribeUserResponse describedUser = client.describeUser(DescribeUserRequest.builder()
                     .identityStoreId(STORE).userId(user.userId()).build());
             assertEquals("identitystore-sdk@example.com", describedUser.userName());
             assertEquals("identitystore-sdk@example.com", describedUser.emails().get(0).value());
@@ -117,7 +123,7 @@ class IdentityStoreTest {
                     .identityStoreId(STORE).memberId(member).groupIds(group.groupId()).build())
                     .results().get(0).membershipExists());
 
-            var membership = client.createGroupMembership(CreateGroupMembershipRequest.builder()
+            CreateGroupMembershipResponse membership = client.createGroupMembership(CreateGroupMembershipRequest.builder()
                     .identityStoreId(STORE).groupId(group.groupId()).memberId(member).build());
             assertTrue(membership.membershipId().startsWith("1234567890-"));
 
@@ -125,7 +131,7 @@ class IdentityStoreTest {
                     .identityStoreId(STORE).memberId(member).groupIds(group.groupId()).build())
                     .results().get(0).membershipExists());
 
-            var describedMembership = client.describeGroupMembership(DescribeGroupMembershipRequest.builder()
+            DescribeGroupMembershipResponse describedMembership = client.describeGroupMembership(DescribeGroupMembershipRequest.builder()
                     .identityStoreId(STORE).membershipId(membership.membershipId()).build());
             assertEquals(group.groupId(), describedMembership.groupId());
             assertEquals(user.userId(), describedMembership.memberId().userId());

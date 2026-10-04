@@ -19,6 +19,7 @@ import software.amazon.awssdk.services.s3.model.ListObjectAnnotationsResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchAnnotationException;
 import software.amazon.awssdk.services.s3.model.PutBucketVersioningRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectAnnotationRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectAnnotationResponse;
 import software.amazon.awssdk.services.s3.model.VersioningConfiguration;
 
 import static org.assertj.core.api.Assertions.*;
@@ -60,7 +61,7 @@ class S3AnnotationsTest {
     @Test
     @Order(1)
     void putObjectAnnotation() {
-        var response = s3.putObjectAnnotation(PutObjectAnnotationRequest.builder()
+        PutObjectAnnotationResponse response = s3.putObjectAnnotation(PutObjectAnnotationRequest.builder()
                         .bucket(BUCKET)
                         .key(KEY)
                         .annotationName("classification")
@@ -128,7 +129,7 @@ class S3AnnotationsTest {
     @Test
     @Order(5)
     void putObjectAnnotationWithChecksum() {
-        var response = s3.putObjectAnnotation(PutObjectAnnotationRequest.builder()
+        PutObjectAnnotationResponse response = s3.putObjectAnnotation(PutObjectAnnotationRequest.builder()
                         .bucket(BUCKET).key(KEY).annotationName("hashed")
                         .checksumAlgorithm(software.amazon.awssdk.services.s3.model.ChecksumAlgorithm.SHA256)
                         .build(),
@@ -187,7 +188,7 @@ class S3AnnotationsTest {
     @Order(11)
     void annotationAttachesToSpecificVersion() {
         s3.putObject(r -> r.bucket(BUCKET).key(KEY), RequestBody.fromString("version one"));
-        var v1 = s3.putObjectAnnotation(PutObjectAnnotationRequest.builder()
+        PutObjectAnnotationResponse v1 = s3.putObjectAnnotation(PutObjectAnnotationRequest.builder()
                         .bucket(BUCKET).key(KEY).annotationName("v1-note")
                         .build(),
                 RequestBody.fromString("on version one"));

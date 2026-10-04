@@ -204,13 +204,13 @@ public class LambdaLayerController {
      * by a non-default account resolves the default-account bucket and 404s.
      */
     private String tasksLocation(LambdaLayerVersion lv, String region, UriInfo uriInfo) {
-        var base = uriInfo.getBaseUri().toString();
+        String base = uriInfo.getBaseUri().toString();
         if (base.endsWith("/")) {
             base = base.substring(0, base.length() - 1);
         }
-        var account = AwsArnUtils.accountOrDefault(lv.getLayerVersionArn(), "000000000000");
-        var bucket = LambdaService.tasksBucketName(region);
-        var key = LambdaService.layerObjectKey(account, lv.getLayerName(), lv.getVersion());
+        String account = AwsArnUtils.accountOrDefault(lv.getLayerVersionArn(), "000000000000");
+        String bucket = LambdaService.tasksBucketName(region);
+        String key = LambdaService.layerObjectKey(account, lv.getLayerName(), lv.getVersion());
         return base + "/" + LambdaService.encodeObjectPath(bucket)
                 + "/" + LambdaService.encodeObjectPath(key)
                 + "?X-Amz-Credential=" + account + "%2F00010101%2F" + region + "%2Fs3%2Faws4_request";

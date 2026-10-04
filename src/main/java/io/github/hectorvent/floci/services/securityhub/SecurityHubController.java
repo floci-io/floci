@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.securityhub;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
@@ -58,7 +59,7 @@ public class SecurityHubController {
         }
         SecurityHubState state = securityHubService.organizationAdminState(region(headers));
         ObjectNode response = objectMapper.createObjectNode();
-        var accounts = response.putArray("AdminAccounts");
+        ArrayNode accounts = response.putArray("AdminAccounts");
         String requestedFeature = securityHubService.normalizeFeature(feature);
         if (state.getAdminAccountId() != null && requestedFeature.equals(state.getAdminFeature())) {
             accounts.addObject()
@@ -122,7 +123,7 @@ public class SecurityHubController {
         }
         SecurityHubState state = securityHubService.state(region(headers));
         ObjectNode response = objectMapper.createObjectNode();
-        var items = response.putArray("FindingAggregators");
+        ArrayNode items = response.putArray("FindingAggregators");
         if (state.getAggregatorArn() != null) {
             items.addObject().put("FindingAggregatorArn", state.getAggregatorArn());
         }
@@ -185,7 +186,7 @@ public class SecurityHubController {
         PaginatedResult<java.util.Map.Entry<String, JsonNode>> page =
                 securityHubService.policyPage(region, maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
-        var items = response.putArray("ConfigurationPolicySummaries");
+        ArrayNode items = response.putArray("ConfigurationPolicySummaries");
         page.items().forEach(entry -> items.add(policySummary(region, entry.getKey(), entry.getValue())));
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());
@@ -246,7 +247,7 @@ public class SecurityHubController {
         String region = region(headers);
         PaginatedResult<SecurityHubAssociation> page = securityHubService.associationPage(region, readTree(body));
         ObjectNode response = objectMapper.createObjectNode();
-        var items = response.putArray("ConfigurationPolicyAssociationSummaries");
+        ArrayNode items = response.putArray("ConfigurationPolicyAssociationSummaries");
         page.items().forEach(entry -> items.add(association(entry)));
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());

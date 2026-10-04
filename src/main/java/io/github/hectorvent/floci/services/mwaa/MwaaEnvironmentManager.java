@@ -10,17 +10,15 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -33,6 +31,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -60,6 +59,19 @@ public class MwaaEnvironmentManager {
     /** The OS user the stock apache/airflow image runs its process as (uid 50000) — distinct from
      *  the Airflow web-UI admin login username configured via {@code _AIRFLOW_WWW_USER_USERNAME}. */
     private static final String CONTAINER_OS_USER = "airflow";
+    private static final Set<String> MWAA_CLI_COMMANDS = Set.of("cheat-sheet", "version");
+    private static final Map<String, Set<String>> MWAA_CLI_SUBCOMMANDS = Map.of(
+            "connections", Set.of("add", "delete"),
+            "dags", Set.of("backfill", "delete", "list", "list-import-errors", "list-jobs",
+                    "list-runs", "next-execution", "pause", "report", "reserialize", "show",
+                    "state", "test", "trigger", "unpause"),
+            "db", Set.of("clean"),
+            "providers", Set.of("behaviours", "get", "hooks", "links", "list", "notifications",
+                    "secrets", "triggerer", "widgets"),
+            "roles", Set.of("add-perms", "create", "del-perms", "list"),
+            "tasks", Set.of("clear", "failed-deps", "list", "render", "run", "state",
+                    "states-for-dag-run", "test"),
+            "variables", Set.of("delete", "get", "list", "set"));
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -111,7 +123,7 @@ public class MwaaEnvironmentManager {
                 .withExposedPort(POSTGRES_PORT)
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "mwaa", name, environmentAccount(environment), environmentRegion(environment)))
+                        "mwaa", name, environmentAccount(environment), regionOf(environment)))
                 .build();
 
         String dbContainerId = lifecycleManager.create(dbSpec);
@@ -148,7 +160,7 @@ public class MwaaEnvironmentManager {
         // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
         // Lambda/ECS containers already do via LaunchedContainerAwsEnv — otherwise a real DAG's
         // boto3.client("s3") etc. would target real AWS instead of this emulator.
-        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(environmentRegion(environment), Optional.empty()));
+        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(regionOf(environment), Optional.empty()));
         env.addAll(List.of(
                 "AIRFLOW__CORE__EXECUTOR=LocalExecutor",
                 "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=" + sqlAlchemyConn,
@@ -175,7 +187,7 @@ public class MwaaEnvironmentManager {
                 .withDockerNetwork(config.services().mwaa().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "mwaa", name, environmentAccount(environment), environmentRegion(environment)));
+                        "mwaa", name, environmentAccount(environment), regionOf(environment)));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(AIRFLOW_WEBSERVER_PORT);
@@ -373,10 +385,25 @@ public class MwaaEnvironmentManager {
      * {@code ;}, {@code |} or {@code $(...)} reaches Airflow as plain arguments.
      */
     public ContainerExec.Result runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
+        List<String> arguments = splitCliArguments(cliCommand);
+        if (!isSupportedCliCommand(arguments)) {
+            return new ContainerExec.Result(1, "", "Command is not supported by Amazon MWAA\n", false);
+        }
         List<String> argv = new ArrayList<>();
         argv.add("airflow");
-        argv.addAll(splitCliArguments(cliCommand));
+        argv.addAll(arguments);
         return execInContainer(airflowContainerId, argv.toArray(new String[0]));
+    }
+
+    static boolean isSupportedCliCommand(List<String> arguments) {
+        if (arguments.isEmpty()) {
+            return false;
+        }
+        if (MWAA_CLI_COMMANDS.contains(arguments.getFirst())) {
+            return true;
+        }
+        Set<String> subcommands = MWAA_CLI_SUBCOMMANDS.get(arguments.getFirst());
+        return arguments.size() >= 2 && subcommands != null && subcommands.contains(arguments.get(1));
     }
 
     /**
@@ -457,16 +484,18 @@ public class MwaaEnvironmentManager {
      *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
      *  that as "no namespace configured" and applies only the {@code floci-aws-} prefix. */
     static String dbContainerName(EmulatorConfig config, Environment environment) {
-        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(environment) + "-db");
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(config, environment) + "-db");
     }
 
     static String airflowContainerName(EmulatorConfig config, Environment environment) {
         return ContainerStorageHelper.dockerName(config,
-                "mwaa-" + environmentIdentity(environment) + "-airflow");
+                "mwaa-" + environmentIdentity(config, environment) + "-airflow");
     }
 
-    private static String environmentIdentity(Environment environment) {
-        return environmentAccount(environment) + "." + environmentRegion(environment) + "." + environment.getName();
+    private static String environmentIdentity(EmulatorConfig config, Environment environment) {
+        String defaultRegion = config != null ? config.defaultRegion() : null;
+        return environmentAccount(environment) + "." + environmentRegion(environment, defaultRegion) + "."
+                + environment.getName();
     }
 
     static String environmentAccount(Environment environment) {
@@ -475,8 +504,13 @@ public class MwaaEnvironmentManager {
                 : AwsArnUtils.accountOrDefault(environment.getArn(), "000000000000");
     }
 
-    static String environmentRegion(Environment environment) {
-        return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+    private String regionOf(Environment environment) {
+        return environmentRegion(environment, config.defaultRegion());
+    }
+
+    /** The region the environment's ARN names; {@code defaultRegion} answers for one without an ARN. */
+    static String environmentRegion(Environment environment, String defaultRegion) {
+        return AwsArnUtils.regionOrDefault(environment.getArn(), defaultRegion);
     }
 
     /**
@@ -657,32 +691,12 @@ public class MwaaEnvironmentManager {
             return false;
         }
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(relativePath, content)))
-                    .withRemotePath(remoteDir)
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, remoteDir,
+                    relativePath, content, 0644);
             return true;
         } catch (Exception e) {
             LOG.warnv("Could not copy {0} into MWAA container {1}: {2}", relativePath, containerId, e.getMessage());
             return false;
-        }
-    }
-
-    private static byte[] tarSingleFile(String entryName, byte[] content) {
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
-                TarArchiveEntry entry = new TarArchiveEntry(entryName);
-                entry.setSize(content.length);
-                entry.setMode(0644);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
-            }
-            return out.toByteArray();
-        } catch (IOException e) {
-            throw new IllegalStateException("Could not build in-memory tar for " + entryName, e);
         }
     }
 

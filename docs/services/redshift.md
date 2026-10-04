@@ -251,7 +251,8 @@ CREATE EXTERNAL TABLE <schema>.<table> (<name> <type>, ...)
 ```
 
 Supported column types are `VARCHAR`, `CHAR`, `INTEGER`, `BIGINT`, `DECIMAL`, `BOOLEAN`, `DATE`,
-and `TIMESTAMP`. CSV reads support `DELIMITER`, `QUOTE`, `ESCAPE`, `NULL AS`, and
+and `TIMESTAMP`. `CHAR` defaults to length 1 and `VARCHAR` defaults to length 256 when no length
+is specified. CSV reads support `DELIMITER`, `QUOTE`, `ESCAPE`, `NULL AS`, and
 `skip.header.line.count`. Objects under the location are read in lexicographic key order.
 
 The query path supports `SELECT *`, explicit column projections, and simple `WHERE` predicates

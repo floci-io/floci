@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -65,11 +66,16 @@ public class S3Object {
     }
 
     public S3Object(String bucketName, String key, byte[] data, String contentType, String eTag) {
+        this(bucketName, key, data.length, contentType, eTag);
+        this.data = data;
+    }
+
+    /** An object whose {@code size}-byte body is stored on disk rather than held in memory. */
+    public S3Object(String bucketName, String key, long size, String contentType, String eTag) {
         this.bucketName = bucketName;
         this.key = key;
-        this.data = data;
         this.contentType = contentType != null ? contentType : "application/octet-stream";
-        this.size = data.length;
+        this.size = size;
         this.lastModified = Instant.now().truncatedTo(ChronoUnit.MILLIS);
         this.eTag = eTag;
         this.metadata = new HashMap<>();
@@ -163,9 +169,9 @@ public class S3Object {
 
     public static String computeETag(byte[] data) {
         try {
-            var md = java.security.MessageDigest.getInstance("MD5");
+            MessageDigest md = MessageDigest.getInstance("MD5");
             byte[] digest = md.digest(data);
-            var sb = new StringBuilder("\"");
+            StringBuilder sb = new StringBuilder("\"");
             for (byte b : digest) {
                 sb.append(String.format("%02x", b));
             }

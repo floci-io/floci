@@ -33,6 +33,9 @@ import java.net.URI;
 @ApplicationScoped
 public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
 
+    /** Set on requests this filter rewrote, so later Host filters do not claim them again. */
+    public static final String ROUTED_PROPERTY = ApiGatewayCustomDomainFilter.class.getName() + ".routed";
+
     private static final Logger LOG = Logger.getLogger(ApiGatewayCustomDomainFilter.class);
     private static final String REGIONAL_SUFFIX = ".regional.local";
 
@@ -120,6 +123,7 @@ public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
             routeContext.routeToRestApi();
         }
         routeContext.recordSignedRequestPath(path);
+        requestContext.setProperty(ROUTED_PROPERTY, Boolean.TRUE);
         requestContext.setRequestUri(newUri);
     }
 

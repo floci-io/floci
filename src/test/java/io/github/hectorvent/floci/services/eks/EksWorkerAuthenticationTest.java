@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -26,6 +27,9 @@ import static org.mockito.Mockito.*;
 
 class EksWorkerAuthenticationTest {
     private static final String ACCOUNT = "123456789012";
+    private static final String OTHER_ACCOUNT = "111122223333";
+    private static final String DEFAULT_ACCOUNT = "000000000000";
+    private static final String LONG_TERM_KEY = "AKIAUSERKEY";
     private static final String REGION = "us-east-1";
     private static final String ROLE = "arn:aws:iam::" + ACCOUNT + ":role/path/worker";
     private static final String KEY = "ASIAWORKER";
@@ -37,11 +41,13 @@ class EksWorkerAuthenticationTest {
     private final Cluster cluster = new Cluster();
     private final Instance instance = new Instance();
     private final IamRole role = new IamRole("AROA-original", "worker", "/path/", ROLE, "{}");
-    private final EksWorkerAuthentication auth = new EksWorkerAuthentication(iam, eks, ec2, entries);
+    private final EmulatorConfig config = mock(EmulatorConfig.class);
+    private final EksWorkerAuthentication auth = new EksWorkerAuthentication(iam, eks, ec2, entries, config);
     private final EksTokenValidator.VerifiedToken verified = new EksTokenValidator.VerifiedToken(KEY, REGION);
 
     @BeforeEach
     void setup() {
+        when(config.defaultAccountId()).thenReturn(DEFAULT_ACCOUNT);
         cluster.setName("demo");
         cluster.setArn("arn:aws:eks:" + REGION + ":" + ACCOUNT + ":cluster/demo");
         cluster.setCreatedAt(CREATED);
@@ -65,7 +71,7 @@ class EksWorkerAuthenticationTest {
 
     @Test
     void signedWorkerTokenProducesNodeIdentityWithoutAdministratorGroup() throws Exception {
-        when(iam.findSecretKey(KEY, "session-token")).thenReturn(Optional.of("worker-secret"));
+        when(iam.findSecretKeyInAnyAccount(KEY, "session-token")).thenReturn(Optional.of("worker-secret"));
         String token = SigV4TokenTestHelper.createEksToken("demo", KEY, "worker-secret", Instant.now(), 60, "session-token");
         EksTokenWebhookController controller = new EksTokenWebhookController(new EksTokenValidator(iam), auth);
         Map<?, ?> response = (Map<?, ?>) controller.review("demo", ACCOUNT, REGION, CREATED.toString(),
@@ -75,10 +81,46 @@ class EksWorkerAuthenticationTest {
         Map<?, ?> user = (Map<?, ?>) status.get("user");
         assertEquals("system:node:ip-10-0-0-1.ec2.internal", user.get("username"));
         assertEquals(List.of("system:bootstrappers", "system:nodes"), user.get("groups"));
-        when(iam.findSecretKey(KEY, "session-token")).thenReturn(Optional.empty());
+        when(iam.findSecretKeyInAnyAccount(KEY, "session-token")).thenReturn(Optional.empty());
         response = (Map<?, ?>) controller.review("demo", ACCOUNT, REGION, CREATED.toString(),
                 Map.of("spec", Map.of("token", token))).getEntity();
         assertEquals(Map.of("authenticated", false), response.get("status"));
+    }
+
+    @Test
+    void longTermKeyOfTheClustersAccountGetsTheLegacyIdentity() {
+        when(iam.findEksSessionIdentity(LONG_TERM_KEY)).thenReturn(Optional.empty());
+        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.of(ACCOUNT));
+        Optional<Map<String, Object>> user = auth.authenticate(longTermToken(), "demo", ACCOUNT, REGION, CREATED.toString());
+        assertEquals(List.of("system:masters"), user.orElseThrow().get("groups"));
+    }
+
+    @Test
+    void longTermKeyOfAnotherAccountIsRejected() {
+        when(iam.findEksSessionIdentity(LONG_TERM_KEY)).thenReturn(Optional.empty());
+        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.of(OTHER_ACCOUNT));
+        assertTrue(auth.authenticate(longTermToken(), "demo", ACCOUNT, REGION, CREATED.toString()).isEmpty());
+    }
+
+    @Test
+    void longTermKeyOfNoKnownAccountIsRejected() {
+        when(iam.findEksSessionIdentity(LONG_TERM_KEY)).thenReturn(Optional.empty());
+        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.empty());
+        assertTrue(auth.authenticate(longTermToken(), "demo", ACCOUNT, REGION, CREATED.toString()).isEmpty());
+    }
+
+    @Test
+    void unscopedWebhookAdmitsOnlyTheDefaultAccountsKeys() {
+        // Clusters created before scoped webhook paths call it without an account.
+        when(iam.findEksSessionIdentity(LONG_TERM_KEY)).thenReturn(Optional.empty());
+        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.of(DEFAULT_ACCOUNT));
+        assertTrue(auth.authenticate(longTermToken(), "demo", null, null, null).isPresent());
+        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.of(OTHER_ACCOUNT));
+        assertTrue(auth.authenticate(longTermToken(), "demo", null, null, null).isEmpty());
+    }
+
+    private static EksTokenValidator.VerifiedToken longTermToken() {
+        return new EksTokenValidator.VerifiedToken(LONG_TERM_KEY, REGION);
     }
 
     @Test

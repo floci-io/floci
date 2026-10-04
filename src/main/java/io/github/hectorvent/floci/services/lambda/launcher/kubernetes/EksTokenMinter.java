@@ -94,9 +94,9 @@ final class EksTokenMinter {
         if (!isAwsEksGetToken(exec)) {
             return Optional.empty();
         }
-        var execEnv = execEnv(exec);
+        Map<String, String> execEnv = execEnv(exec);
         UnaryOperator<String> env = name -> execEnv.getOrDefault(name, System.getenv(name));
-        var args = parseArgs(exec, env);
+        ExecArgs args = parseArgs(exec, env);
         return Optional.of(new CachingTokenSupplier(args.clusterName(), args.region(), execEnv));
     }
 
@@ -109,14 +109,14 @@ final class EksTokenMinter {
      * profile-scoped kubeconfig silently resolves the wrong AWS identity.
      */
     private static Map<String, String> execEnv(JsonNode exec) {
-        var envNode = exec.path("env");
+        JsonNode envNode = exec.path("env");
         if (!envNode.isArray()) {
             return Map.of();
         }
-        var result = new LinkedHashMap<String, String>();
-        for (var entry : envNode) {
-            var name = entry.path("name").asText(null);
-            var value = entry.path("value").asText(null);
+        LinkedHashMap<String, String> result = new LinkedHashMap<>();
+        for (JsonNode entry : envNode) {
+            String name = entry.path("name").asText(null);
+            String value = entry.path("value").asText(null);
             if (name != null && value != null) {
                 result.put(name, value);
             }
@@ -125,13 +125,13 @@ final class EksTokenMinter {
     }
 
     static boolean isAwsEksGetToken(JsonNode exec) {
-        var command = exec.path("command").asText("");
+        String command = exec.path("command").asText("");
         if (command.isBlank()) {
             return false;
         }
-        var fileName = Path.of(command).getFileName();
-        var commandName = fileName == null ? command : fileName.toString();
-        if (!"aws".equals(commandName)) {
+        Path fileName = Path.of(command).getFileName();
+        String commandName = fileName == null ? command : fileName.toString();
+        if (!"aws".equals(commandName)) { // partition-literal: kubeconfig exec command
             return false;
         }
         return findSubcommandIndex(exec.path("args")) >= 0;
@@ -148,7 +148,7 @@ final class EksTokenMinter {
         if (!args.isArray()) {
             return -1;
         }
-        for (var i = 0; i + 1 < args.size(); i++) {
+        for (int i = 0; i + 1 < args.size(); i++) {
             if ("eks".equals(args.get(i).asText()) && "get-token".equals(args.get(i + 1).asText())) {
                 return i;
             }
@@ -165,15 +165,15 @@ final class EksTokenMinter {
      * the region fallback is deterministically testable regardless of the host's own environment.
      */
     static ExecArgs parseArgs(JsonNode exec, UnaryOperator<String> env) {
-        var args = exec.path("args");
-        var subcommandIndex = findSubcommandIndex(args);
+        JsonNode args = exec.path("args");
+        int subcommandIndex = findSubcommandIndex(args);
         String clusterName = null;
         String region = null;
-        for (var i = 0; i < args.size(); i++) {
+        for (int i = 0; i < args.size(); i++) {
             if (i == subcommandIndex || i == subcommandIndex + 1) {
                 continue;
             }
-            var arg = args.get(i).asText();
+            String arg = args.get(i).asText();
             if (isRoleOption(arg)) {
                 throw new IllegalStateException(
                         "kubeconfig exec plugin 'aws eks get-token --role-arn' is not supported: the "
@@ -182,7 +182,7 @@ final class EksTokenMinter {
                                 + "that already have cluster access.");
             }
             if (("--cluster-name".equals(arg) || "--region".equals(arg)) && i + 1 < args.size()) {
-                var value = args.get(++i).asText();
+                String value = args.get(++i).asText();
                 if ("--cluster-name".equals(arg)) {
                     clusterName = value;
                 } else {
@@ -222,7 +222,7 @@ final class EksTokenMinter {
      * with or without a {@code --flag=value} suffix, is rejected explicitly.
      */
     private static boolean isRoleOption(String arg) {
-        var name = arg.split("=", 2)[0];
+        String name = arg.split("=", 2)[0];
         return name.length() >= "--role".length() && "--role-arn".startsWith(name);
     }
 
@@ -241,7 +241,7 @@ final class EksTokenMinter {
 
         @Override
         public synchronized String get() {
-            var now = Instant.now();
+            Instant now = Instant.now();
             if (token == null || !now.isBefore(expiresAt.minusSeconds(REFRESH_MARGIN_SECONDS))) {
                 token = mint(clusterName, region, execEnv);
                 expiresAt = now.plusSeconds(TOKEN_VALIDITY_SECONDS);
@@ -265,14 +265,14 @@ final class EksTokenMinter {
      * can only ever be checked for shape, never against a hard-coded expected value.
      */
     static String mint(String clusterName, String region, AwsCredentials credentials, Clock clock) {
-        var now = clock.instant();
-        var amzDate = AMZ_DATE.format(now);
-        var dateStamp = AMZ_DATE_STAMP.format(now);
-        var host = stsHost(region);
-        var credentialScope = dateStamp + "/" + region + "/sts/aws4_request";
-        var signedHeaders = "host;" + CLUSTER_ID_HEADER;
+        Instant now = clock.instant();
+        String amzDate = AMZ_DATE.format(now);
+        String dateStamp = AMZ_DATE_STAMP.format(now);
+        String host = stsHost(region);
+        String credentialScope = dateStamp + "/" + region + "/sts/aws4_request";
+        String signedHeaders = "host;" + CLUSTER_ID_HEADER;
 
-        var queryParams = new TreeMap<String, String>();
+        TreeMap<String, String> queryParams = new TreeMap<>();
         queryParams.put("Action", "GetCallerIdentity");
         queryParams.put("Version", "2011-06-15");
         queryParams.put("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
@@ -284,21 +284,21 @@ final class EksTokenMinter {
             queryParams.put("X-Amz-Security-Token", credentials.sessionToken());
         }
 
-        var canonicalQueryString = queryParams.entrySet().stream()
+        String canonicalQueryString = queryParams.entrySet().stream()
                 .map(e -> uriEncode(e.getKey()) + "=" + uriEncode(e.getValue()))
                 .collect(Collectors.joining("&"));
 
         // Sorted by header name ("host" < "x-k8s-aws-id"), matching X-Amz-SignedHeaders above.
-        var canonicalHeaders = "host:" + host + "\n" + CLUSTER_ID_HEADER + ":" + clusterName + "\n";
-        var canonicalRequest = "GET\n/\n" + canonicalQueryString + "\n"
+        String canonicalHeaders = "host:" + host + "\n" + CLUSTER_ID_HEADER + ":" + clusterName + "\n";
+        String canonicalRequest = "GET\n/\n" + canonicalQueryString + "\n"
                 + canonicalHeaders + "\n" + signedHeaders + "\n" + EMPTY_BODY_SHA256;
 
-        var stringToSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + credentialScope + "\n"
+        String stringToSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + credentialScope + "\n"
                 + sha256Hex(canonicalRequest);
-        var signingKey = deriveSigningKey(credentials.secretAccessKey(), dateStamp, region, "sts");
-        var signature = hexEncode(hmacSha256(signingKey, stringToSign));
+        byte[] signingKey = deriveSigningKey(credentials.secretAccessKey(), dateStamp, region, "sts");
+        String signature = hexEncode(hmacSha256(signingKey, stringToSign));
 
-        var url = "https://" + host + "/?" + canonicalQueryString + "&X-Amz-Signature=" + signature;
+        String url = "https://" + host + "/?" + canonicalQueryString + "&X-Amz-Signature=" + signature;
         return TOKEN_PREFIX + Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(url.getBytes(StandardCharsets.UTF_8));
     }
@@ -344,8 +344,8 @@ final class EksTokenMinter {
         // execEnv has neither key at this point (the check above already rejected exactly one
         // being present), so these are necessarily ambient-sourced; the session token must be
         // too, for the same reason as the exec.env branch above.
-        var accessKeyId = ambientEnv.apply("AWS_ACCESS_KEY_ID");
-        var secretAccessKey = ambientEnv.apply("AWS_SECRET_ACCESS_KEY");
+        String accessKeyId = ambientEnv.apply("AWS_ACCESS_KEY_ID");
+        String secretAccessKey = ambientEnv.apply("AWS_SECRET_ACCESS_KEY");
         if (hasPairedKeys("the environment", accessKeyId, secretAccessKey)) {
             return new AwsCredentials(accessKeyId, secretAccessKey, ambientEnv.apply("AWS_SESSION_TOKEN"));
         }
@@ -361,8 +361,8 @@ final class EksTokenMinter {
      * intended to supply.
      */
     private static boolean hasPairedKeys(String source, String accessKeyId, String secretAccessKey) {
-        var hasAccessKeyId = accessKeyId != null && !accessKeyId.isBlank();
-        var hasSecretAccessKey = secretAccessKey != null && !secretAccessKey.isBlank();
+        boolean hasAccessKeyId = accessKeyId != null && !accessKeyId.isBlank();
+        boolean hasSecretAccessKey = secretAccessKey != null && !secretAccessKey.isBlank();
         if (hasAccessKeyId != hasSecretAccessKey) {
             throw new IllegalStateException(
                     "Partial AWS credentials in " + source + ": "
@@ -374,8 +374,8 @@ final class EksTokenMinter {
     }
 
     private static AwsCredentials resolveFromSharedCredentialsFile(UnaryOperator<String> env, String profileEnv) {
-        var pathValue = env.apply("AWS_SHARED_CREDENTIALS_FILE");
-        var path = (pathValue != null && !pathValue.isBlank())
+        String pathValue = env.apply("AWS_SHARED_CREDENTIALS_FILE");
+        Path path = (pathValue != null && !pathValue.isBlank())
                 ? Path.of(pathValue)
                 : Path.of(System.getProperty("user.home"), ".aws", "credentials");
         if (!Files.exists(path)) {
@@ -385,10 +385,10 @@ final class EksTokenMinter {
                             + path + ". Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or "
                             + "AWS_SHARED_CREDENTIALS_FILE.");
         }
-        var profile = (profileEnv == null || profileEnv.isBlank()) ? "default" : profileEnv;
-        var section = readIniSection(path, profile);
-        var accessKeyId = section.get("aws_access_key_id");
-        var secretAccessKey = section.get("aws_secret_access_key");
+        String profile = (profileEnv == null || profileEnv.isBlank()) ? "default" : profileEnv;
+        Map<String, String> section = readIniSection(path, profile);
+        String accessKeyId = section.get("aws_access_key_id");
+        String secretAccessKey = section.get("aws_secret_access_key");
         if (accessKeyId == null || secretAccessKey == null) {
             throw new IllegalStateException(
                     "AWS credentials profile '" + profile + "' in " + path
@@ -398,12 +398,12 @@ final class EksTokenMinter {
     }
 
     private static Map<String, String> readIniSection(Path path, String profile) {
-        var target = "[" + profile + "]";
-        var result = new LinkedHashMap<String, String>();
+        String target = "[" + profile + "]";
+        LinkedHashMap<String, String> result = new LinkedHashMap<>();
         try {
-            var inSection = false;
-            for (var raw : Files.readAllLines(path, StandardCharsets.UTF_8)) {
-                var line = raw.strip();
+            boolean inSection = false;
+            for (String raw : Files.readAllLines(path, StandardCharsets.UTF_8)) {
+                String line = raw.strip();
                 if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
                     continue;
                 }
@@ -414,7 +414,7 @@ final class EksTokenMinter {
                 if (!inSection) {
                     continue;
                 }
-                var eq = line.indexOf('=');
+                int eq = line.indexOf('=');
                 if (eq > 0) {
                     result.put(line.substring(0, eq).strip(), line.substring(eq + 1).strip());
                 }
@@ -430,9 +430,9 @@ final class EksTokenMinter {
 
     /** RFC 3986 percent-encoding, byte-wise over UTF-8, per the SigV4 spec (not {@link java.net.URLEncoder}). */
     private static String uriEncode(String input) {
-        var result = new StringBuilder();
-        for (var b : input.getBytes(StandardCharsets.UTF_8)) {
-            var c = (char) (b & 0xFF);
+        StringBuilder result = new StringBuilder();
+        for (byte b : input.getBytes(StandardCharsets.UTF_8)) {
+            char c = (char) (b & 0xFF);
             if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
                     || c == '-' || c == '_' || c == '.' || c == '~') {
                 result.append(c);
@@ -444,16 +444,16 @@ final class EksTokenMinter {
     }
 
     private static byte[] deriveSigningKey(String secretKey, String date, String region, String service) {
-        var kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
-        var kDate = hmacSha256(kSecret, date);
-        var kRegion = hmacSha256(kDate, region);
-        var kService = hmacSha256(kRegion, service);
+        byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
+        byte[] kDate = hmacSha256(kSecret, date);
+        byte[] kRegion = hmacSha256(kDate, region);
+        byte[] kService = hmacSha256(kRegion, service);
         return hmacSha256(kService, "aws4_request");
     }
 
     private static byte[] hmacSha256(byte[] key, String data) {
         try {
-            var mac = Mac.getInstance("HmacSHA256");
+            Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(key, "HmacSHA256"));
             return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
         } catch (GeneralSecurityException e) {
@@ -463,7 +463,7 @@ final class EksTokenMinter {
 
     private static String sha256Hex(String input) {
         try {
-            var digest = MessageDigest.getInstance("SHA-256");
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
             return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("Could not compute SHA-256: " + e.getMessage(), e);
@@ -471,8 +471,8 @@ final class EksTokenMinter {
     }
 
     private static String hexEncode(byte[] bytes) {
-        var sb = new StringBuilder(bytes.length * 2);
-        for (var b : bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
             sb.append(String.format("%02x", b));
         }
         return sb.toString();

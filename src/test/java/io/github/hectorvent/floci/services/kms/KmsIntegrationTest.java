@@ -29,6 +29,7 @@ import java.util.List;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
@@ -36,6 +37,8 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class KmsIntegrationTest {
@@ -189,7 +192,7 @@ class KmsIntegrationTest {
 
     @Test
     void updateKeyDescriptionRoundTripThroughJsonHandler() {
-        var key = given()
+        JsonPath key = given()
             .header("X-Amz-Target", "TrentService.CreateKey")
             .contentType(KMS_CONTENT_TYPE)
             .body("""
@@ -2785,7 +2788,7 @@ class KmsIntegrationTest {
         String keyId = createRsaEncryptionKey();
         String plaintext = Base64.getEncoder().encodeToString("secret payload".getBytes(StandardCharsets.UTF_8));
 
-        var encryptResponse = given()
+        JsonPath encryptResponse = given()
                 .header("X-Amz-Target", "TrentService.Encrypt")
                 .contentType(KMS_CONTENT_TYPE)
                 .body("{\"KeyId\":\"%s\",\"Plaintext\":\"%s\",\"EncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
@@ -2833,9 +2836,9 @@ class KmsIntegrationTest {
                 .body("EncryptionAlgorithms", equalTo(List.of("RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256")))
                 .extract().path("PublicKey");
 
-        var publicKey = java.security.KeyFactory.getInstance("RSA").generatePublic(
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(
                 new java.security.spec.X509EncodedKeySpec(Base64.getDecoder().decode(publicKeyBase64)));
-        var cipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding");
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
         cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
                 "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256,
                 javax.crypto.spec.PSource.PSpecified.DEFAULT));
@@ -2928,7 +2931,7 @@ class KmsIntegrationTest {
                 .then().statusCode(200)
                 .extract().path("CiphertextBlob");
 
-        var reEncryptResponse = given()
+        JsonPath reEncryptResponse = given()
                 .header("X-Amz-Target", "TrentService.ReEncrypt")
                 .contentType(KMS_CONTENT_TYPE)
                 .body(("{\"CiphertextBlob\":\"%s\",\"SourceKeyId\":\"%s\",\"DestinationKeyId\":\"%s\","
@@ -2986,7 +2989,7 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("KMSInvalidStateException"));
 
-        var parameters = given()
+        JsonPath parameters = given()
                 .header("X-Amz-Target", "TrentService.GetParametersForImport")
                 .contentType(KMS_CONTENT_TYPE)
                 .body("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSAES_OAEP_SHA_256\",\"WrappingKeySpec\":\"RSA_2048\"}"
@@ -3086,7 +3089,7 @@ class KmsIntegrationTest {
                 .body("KeyMetadata.KeyState", equalTo("PendingImport"))
                 .extract().path("KeyMetadata.KeyId");
 
-        var parameters = given()
+        JsonPath parameters = given()
                 .header("X-Amz-Target", "TrentService.GetParametersForImport")
                 .contentType(KMS_CONTENT_TYPE)
                 .body(("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSA_AES_KEY_WRAP_SHA_256\","
@@ -3217,7 +3220,7 @@ class KmsIntegrationTest {
     }
 
     private void importFreshMaterial(String keyId) throws Exception {
-        var parameters = given()
+        JsonPath parameters = given()
                 .header("X-Amz-Target", "TrentService.GetParametersForImport")
                 .contentType(KMS_CONTENT_TYPE)
                 .body("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSAES_OAEP_SHA_256\",\"WrappingKeySpec\":\"RSA_2048\"}"
@@ -3239,6 +3242,145 @@ class KmsIntegrationTest {
                         .formatted(keyId, parameters.getString("ImportToken"), wrapped))
                 .when().post("/")
                 .then().statusCode(200);
+    }
+
+    /**
+     * The alias/aws/* keys, over the wire. DescribeKey's KeyManager was a constant "CUSTOMER"
+     * before these keys existed, so an AWS managed key has to be asked for through the handler
+     * to prove the field now tracks the key rather than the code path.
+     */
+    @Test
+    void listAliasesExposesTheAwsManagedAliasesWithTargetKeys() {
+        JsonPath aliases = given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath();
+
+        List<String> names = aliases.getList("Aliases.AliasName");
+        assertTrue(names.contains("alias/aws/s3"), "alias/aws/s3 missing from " + names);
+        assertTrue(names.contains("alias/aws/ebs"), "alias/aws/ebs missing from " + names);
+
+        int index = names.indexOf("alias/aws/s3");
+        String targetKeyId = aliases.getList("Aliases.TargetKeyId", String.class).get(index);
+        assertNotNull(targetKeyId, "alias/aws/s3 resolves to nothing");
+        assertFalse(targetKeyId.isBlank(), "alias/aws/s3 resolves to nothing");
+        assertTrue(aliases.getList("Aliases.AliasArn", String.class).get(index).endsWith(":alias/aws/s3"));
+    }
+
+    @Test
+    void describeKeyReportsKeyManagerPerKey() {
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"alias/aws/s3\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("KeyMetadata.KeyManager", equalTo("AWS"))
+                .body("KeyMetadata.Enabled", equalTo(true))
+                .body("KeyMetadata.KeyState", equalTo("Enabled"));
+
+        String customerKeyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\": \"customer managed\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"" + customerKeyId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("KeyMetadata.KeyManager", equalTo("CUSTOMER"));
+    }
+
+    /**
+     * The lookup a module actually performs: encrypt under the service default key and read it
+     * back. A resolvable alias whose key could not encrypt would satisfy DescribeKey and still
+     * fail the caller.
+     */
+    @Test
+    void encryptsAndDecryptsUnderAnAwsManagedAlias() {
+        String ciphertext = given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"alias/aws/secretsmanager\", \"Plaintext\": \""
+                        + Base64.getEncoder().encodeToString("default key payload".getBytes(StandardCharsets.UTF_8))
+                        + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("CiphertextBlob");
+
+        String plaintext = given()
+                .header("X-Amz-Target", "TrentService.Decrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"CiphertextBlob\": \"" + ciphertext + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("Plaintext");
+
+        assertEquals("default key payload",
+                new String(Base64.getDecoder().decode(plaintext), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * CreateAlias must not hand an AWS managed key a second alias. AWS excludes them as a target,
+     * so accepting one here would make a template succeed against Floci and fail against AWS,
+     * which is the one failure mode nothing downstream reports.
+     */
+    @Test
+    void refusesToPointACustomerAliasAtAnAwsManagedKey() {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\": \"alias/borrowed-from-aws\", \"TargetKeyId\": \"alias/aws/s3\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("AccessDeniedException"));
+
+        given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Aliases.AliasName", not(hasItem("alias/borrowed-from-aws")));
+    }
+
+    /**
+     * An AWS managed key is AWS's, not the account's. ScheduleKeyDeletion takes a key id rather
+     * than an alias, so the refusal has to be reached through the id the alias resolves to.
+     */
+    @Test
+    void refusesToScheduleDeletionOfAnAwsManagedKey() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"alias/aws/ebs\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.ScheduleKeyDeletion")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"" + keyId + "\", \"PendingWindowInDays\": 7}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("AccessDeniedException"));
+
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"" + keyId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("KeyMetadata.KeyState", equalTo("Enabled"));
     }
 
     /**

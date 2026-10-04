@@ -427,7 +427,7 @@ class SnsMobilePushTest {
         String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
         snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
 
-        var result = snsService.publishBatch(topicArn, List.of(
+        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, List.of(
                 Map.of("Id", "bad", "Message", "{\"GCM\":\"only gcm\"}", "MessageStructure", "json"),
                 Map.of("Id", "good", "Message", "{\"default\":\"ok body\"}", "MessageStructure", "json")),
                 REGION);
@@ -454,7 +454,7 @@ class SnsMobilePushTest {
         String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
         snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
 
-        var result = snsService.publishBatch(topicArn, List.of(
+        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, List.of(
                 Map.of("Id", "bad", "Message", "not json at all", "MessageStructure", "json"),
                 Map.of("Id", "good", "Message", "plain text")),
                 REGION);

@@ -110,6 +110,16 @@ public final class LambdaUtils {
     }
 
     /**
+     * ZIP containing a Node.js handler that always throws, for asynchronous failure handling tests.
+     */
+    public static byte[] failingZip() {
+        String code = """
+                exports.handler = async () => { throw new Error('boom'); };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
      * Minimal valid ZIP containing a stub index.js.
      */
     public static byte[] minimalZip() {

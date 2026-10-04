@@ -28,7 +28,7 @@ final class DynamoDbAttributeValueValidator {
         if (!value.isObject()) {
             throw serializationEx("Unexpected value type in payload");
         }
-        var types = TYPES.stream().filter(value::has).toList();
+        List<String> types = TYPES.stream().filter(value::has).toList();
         if (types.isEmpty()) {
             throw validationEx("Supplied AttributeValue is empty, must contain exactly one of the supported datatypes");
         }
@@ -69,7 +69,7 @@ final class DynamoDbAttributeValueValidator {
         if (attributes == null || !attributes.isObject()) {
             return true;
         }
-        for (var value : attributes) {
+        for (JsonNode value : attributes) {
             if (!valueNestingWithinLimit(value)) {
                 return false;
             }
@@ -81,12 +81,12 @@ final class DynamoDbAttributeValueValidator {
         if (!value.isObject()) {
             return 1;
         }
-        var children = value.has("M") ? value.get("M") : value.get("L");
+        JsonNode children = value.has("M") ? value.get("M") : value.get("L");
         if (children == null) {
             return 1;
         }
-        var deepest = 0;
-        for (var child : children) {
+        int deepest = 0;
+        for (JsonNode child : children) {
             deepest = Math.max(deepest, depthOf(child));
         }
         return 1 + deepest;
@@ -123,7 +123,7 @@ final class DynamoDbAttributeValueValidator {
         if (!encoded.isTextual()) {
             throw serializationEx("only base-64-encoded strings are convertible to bytes");
         }
-        var text = encoded.asText();
+        String text = encoded.asText();
         if (text.length() % 4 != 0) {
             throw serializationEx("Base64 encoded length is expected a multiple of 4 bytes but found: " + text.length());
         }

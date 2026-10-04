@@ -15,12 +15,16 @@ import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 @ApplicationScoped
 public class MarketplaceEntitlementService implements Resettable {
+    // The regions AWS publishes an Entitlement endpoint in, across partitions (botocore endpoints.json).
+    private static final Set<String> REGIONS = Set.of(
+            "us-east-1", "cn-northwest-1", "eusc-de-east-1"); // partition-literal: AWS's endpoint regions
     private static final Set<String> FILTER_KEYS = Set.of(
             "CUSTOMER_IDENTIFIER", "DIMENSION", "CUSTOMER_AWS_ACCOUNT_ID", "LICENSE_ARN");
 
@@ -39,9 +43,11 @@ public class MarketplaceEntitlementService implements Resettable {
     }
 
     ObjectNode getEntitlements(JsonNode request, String region) {
-        if (region != null && !region.isBlank() && !"us-east-1".equals(region)) { // partition-literal: AWS Marketplace is commercial-only and AWS pins its APIs to these regions
+        if (region != null && !region.isBlank() && !REGIONS.contains(region)) {
             throw new AwsException("InvalidParameterException",
-                    "AWS Marketplace Entitlement Service is available only in us-east-1.", 400); // partition-literal: AWS's message text
+                    "AWS Marketplace Entitlement Service is available only in "
+                            + "us-east-1, cn-northwest-1, " // partition-literal: the served regions
+                            + "and eusc-de-east-1.", 400); // partition-literal: the served regions
         }
         String productCode = requireText(request, "ProductCode", 1, 255);
         JsonNode filter = request == null ? null : request.get("Filter");
@@ -109,9 +115,9 @@ public class MarketplaceEntitlementService implements Resettable {
         if (filter == null || filter.isNull()) {
             return true;
         }
-        var fields = filter.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = filter.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
+            Map.Entry<String, JsonNode> entry = fields.next();
             String actual = switch (entry.getKey()) {
                 case "CUSTOMER_IDENTIFIER" -> entitlement.customerIdentifier();
                 case "CUSTOMER_AWS_ACCOUNT_ID" -> entitlement.customerAwsAccountId();

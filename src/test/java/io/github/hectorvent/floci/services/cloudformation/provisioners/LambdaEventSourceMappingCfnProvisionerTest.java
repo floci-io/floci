@@ -120,7 +120,7 @@ class LambdaEventSourceMappingCfnProvisionerTest {
             return resolved;
         }
         if (node.isArray()) {
-            var arr = mapper.createArrayNode();
+            ArrayNode arr = mapper.createArrayNode();
             for (JsonNode item : node) {
                 arr.add(resolveMockNode(item, engine));
             }

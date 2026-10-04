@@ -198,6 +198,17 @@ further divergences, both deliberate:
 | ForgotPassword | Starts the local forgot-password flow for a user. |
 | ConfirmForgotPassword | Completes the forgot-password flow by setting a replacement password. |
 
+As on AWS, every operation authorized by the user's access token (`GetUser`,
+`GetUserAuthFactors`, `UpdateUserAttributes`, `DeleteUserAttributes`, `ChangePassword`,
+`GetUserAttributeVerificationCode`, `VerifyUserAttribute`, `SetUserMFAPreference`,
+`GlobalSignOut`, and `AssociateSoftwareToken` and `VerifySoftwareToken` with an `AccessToken`)
+requires the token's `scope` to include `aws.cognito.signin.user.admin`. Tokens from
+`InitiateAuth` and the other API sign-in flows always carry it; a token from the OAuth token
+endpoint carries it only when the authorization request asked for it, or asked for no scope and
+the client allows it. Without it the call fails with `NotAuthorizedException:
+Access Token does not have required scopes`, as it does for a token with no `scope` claim at all,
+which a pre token generation trigger leaves when it suppresses every scope.
+
 ### Authentication
 
 | Action | Description |
@@ -236,8 +247,18 @@ preferences, SMS/email MFA challenges, and managed-login MFA are not emulated.
 `USER_AUTH` is the choice-based flow: with no `PREFERRED_CHALLENGE` it returns
 `ChallengeName=SELECT_CHALLENGE` and an `AvailableChallenges` list drawn from what the user has
 configured (`PASSWORD`, `PASSWORD_SRP`, `EMAIL_OTP`, `SMS_OTP`); with one, it goes straight to that
-challenge. It requires the user pool's tier to be Essentials or higher. `WEB_AUTHN` and the
-`ConfirmSignUp` session as a first-factor shortcut are not implemented yet.
+challenge. The list keeps only the first factors the pool's
+`Policies.SignInPolicy.AllowedFirstAuthFactors` allows: its `PASSWORD` covers both `PASSWORD` and
+`PASSWORD_SRP`, so a pool that allows only `EMAIL_OTP` offers `["EMAIL_OTP"]`, and a user with no
+password is never offered a password challenge. A pool created without a `SignInPolicy` gets
+`{"AllowedFirstAuthFactors": ["PASSWORD"]}`, on any tier, as `DescribeUserPool` reports on AWS, so it
+offers password challenges alone. `UpdateUserPool` keeps the policy when the request omits `Policies`,
+and puts the default back when its `Policies` has no `SignInPolicy`. A `PREFERRED_CHALLENGE` outside
+the list, because the policy leaves it out or the user has not set it up, gets `SELECT_CHALLENGE` and
+the list, as on AWS; one that names no challenge Cognito supports fails with
+`InvalidParameterException`. A `SELECT_CHALLENGE` answer outside the list fails with
+`InvalidParameterException`. It requires the user pool's tier to be Essentials or higher. `WEB_AUTHN` and the `ConfirmSignUp` session as a first-factor
+shortcut are not implemented yet.
 
 Any other `AuthFlow` value is rejected with `InvalidParameterException` and no tokens are issued.
 
@@ -366,10 +387,15 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 `/oauth2/authorize`, `/login` and `/logout`.
 
 1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
-   parameters. If the browser already has a managed login session in the pool, it skips the
-   form and redirects straight to the callback with a code, as AWS does.
-2. `GET /cognito-idp/login` renders a plain username and password form. The form carries the
-   request in hidden fields and a CSRF token that must match the `XSRF-TOKEN` cookie set with it.
+   parameters, `login_hint` included. If the browser already has a managed login session in the
+   pool, it skips the form and redirects straight to the callback with a code, as AWS does. A
+   `scope` the client's `AllowedOAuthScopes` does not include is refused first, as on AWS, with a
+   redirect to the callback carrying `error=invalid_request`, `error_description=invalid_scope`
+   and the `state`.
+2. `GET /cognito-idp/login` renders a plain username and password form, with the username filled
+   in from `login_hint` when the request has one. The form carries the request in hidden fields and
+   a CSRF token that must match the `XSRF-TOKEN` cookie set with it. With choice-based sign-in
+   (below), it asks for the username alone.
 3. `POST /cognito-idp/login` checks the password as `USER_PASSWORD_AUTH` does, including
    sign-in aliases and the pre and post authentication and user migration triggers, but
    without the client's `ExplicitAuthFlows`. On success it sets a `cognito` session cookie
@@ -378,13 +404,46 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 4. `POST /cognito-idp/oauth2/token` redeems the code. It invokes the pre token generation
    trigger with triggerSource `TokenGeneration_HostedAuth`, as AWS does for a hosted-UI
    sign-in, so a pool that customises its claims gets the same tokens here as from
-   `InitiateAuth`. The trigger is told the scopes the request asked for, narrowed to the
-   client's `AllowedOAuthScopes`, since the authorize endpoint does not check them itself. The
-   ID token carries the request's `nonce`, which the trigger cannot override.
+   `InitiateAuth`. The access token's `scope` is the scopes the request asked for, or every
+   scope in the client's `AllowedOAuthScopes` when it asked for none, as on AWS, and the
+   trigger is told the same scopes. The code keeps the scopes granted when it was issued: a
+   scope the client is allowed only afterwards is not added, and one it no longer allows is
+   dropped. A V2 trigger's `scopesToAdd` and `scopesToSuppress` apply on top of them. The ID token is issued only when the scopes include `openid`, and it carries
+   the request's `nonce`, which the trigger cannot override.
 5. `GET /cognito-idp/logout?client_id=...&logout_uri=...` ends the session and redirects to
    `logout_uri`, which must be one of the client's `LogoutURLs`. With `redirect_uri` and
    `response_type=code` instead of `logout_uri`, it ends the session and redirects to the
    sign-in form for that request.
+
+Choice-based sign-in applies when the pool's `SignInPolicy.AllowedFirstAuthFactors` includes
+`EMAIL_OTP` and the client's `ExplicitAuthFlows` includes `ALLOW_USER_AUTH` (on a pool above the
+Lite tier). The page then takes one step per `POST /cognito-idp/login`. Up to the password or the
+code, every username gets the same pages, so they do not tell who has an account, which factors
+they have, or whether they can sign in:
+
+1. The username.
+2. The factor, as buttons that post `challenge=PASSWORD` or `challenge=EMAIL_OTP`, when the policy
+   allows both. When it allows only `EMAIL_OTP`, every username goes straight to the code.
+3. For `PASSWORD`, the username and password form, where a user without a password fails as a
+   wrong password does. For `EMAIL_OTP`, the page sends a code through the `USER_AUTH` `EMAIL_OTP`
+   challenge, so it arrives in Floci's SES (readable at `/_aws/ses`), and shows a code field. The
+   username and the challenge's `Session` travel in hidden fields. A correct code signs the user
+   in as the password does: the session cookie, and a redirect to the callback with `code` and
+   `state`. A wrong code shows the code field again with
+   `Invalid verification code provided, please try again.` and the same session, so the user can
+   try again until the session (the client's `AuthSessionValidity`) or the code runs out.
+
+Only a user who can sign in and has a verified email is sent a code. Anyone else, an unknown user
+included, gets the same code field, but no message is sent and every code is wrong. Asking again
+within 30 seconds, before Floci sends another code, shows the code field for the code already
+sent. Why a user cannot sign in (disabled, unconfirmed, a password reset or a new password
+required) shows only after a correct code. A correct code uses up the session, so when the user
+cannot sign in or the post authentication trigger fails, the page goes back to the username with
+the reason. A code signs in once: of several requests that answer with it at once, from one session
+or several, one signs in and the others are told the code is wrong, or go back to the username if
+their session is already spent. A password posted to a pool whose policy leaves out `PASSWORD` is
+refused. Without choice-based sign-in, the page is the username and password form above, whatever
+the policy says.
 
 PKCE follows AWS: `code_challenge_method` must be `S256`, and discovery advertises
 `code_challenge_methods_supported: ["S256"]`. A code issued with a `code_challenge` is
@@ -397,9 +456,11 @@ Differences from AWS:
 
 - **No challenge pages.** A user who must change or reset their password, or who is not
   confirmed, sees an error on the form instead. Sign-up, forgot-password, MFA and passkey
-  pages are not served, and `prompt`, `login_hint`, `lang` and `idp_identifier` are ignored.
+  pages are not served, choice-based sign-in offers no `SMS_OTP` or `WEB_AUTHN` factor, and
+  `prompt`, `lang` and `idp_identifier` are ignored.
 - **Errors are JSON.** An authorization request error returns `400` with an OAuth error body,
-  even after `redirect_uri` is validated, where AWS redirects the error to the callback.
+  even after `redirect_uri` is validated, where AWS redirects the error to the callback. The
+  exception is an unallowed `scope`, which is redirected as on AWS.
 - **Relative redirect.** The redirect from `/oauth2/authorize` to the sign-in form has a
   relative `Location`, where AWS's is absolute.
 - **One session cookie per host.** Floci's own host serves every pool, so signing in to a
@@ -450,7 +511,8 @@ curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
 - It requires `AllowedOAuthFlowsUserPoolClient=true` and `AllowedOAuthFlows=["client_credentials"]`.
 - It doesn't require a Cognito domain.
 - Client-credentials returns only `access_token`, `token_type`, and `expires_in`; authorization-code
-  redemption returns the Cognito access, ID and refresh token set.
+  redemption returns the Cognito access and refresh tokens, and an ID token when the granted scopes
+  include `openid`.
 - It validates requested OAuth scopes against the app client's `AllowedOAuthScopes` and the pool's registered resource-server scopes.
 - It advertises the prefixed token endpoint in `/{userPoolId}/.well-known/openid-configuration`, or
   `https://<domain>/oauth2/token` when the pool has a custom domain (see Custom domains above).
@@ -486,8 +548,8 @@ literal `Username` you supply, unchanged.
 Floci mirrors AWS's access-token / ID-token split:
 
 - **Access token:** `sub`, `username` (the UUID), `scope` (`aws.cognito.signin.user.admin` for API
-  sign-in), `client_id`, `cognito:groups`, `jti`/`origin_jti`. It does **not** carry `cognito:username`
-  or user attributes like `email`.
+  sign-in, the granted OAuth scopes for an authorization code), `client_id`, `cognito:groups`,
+  `jti`/`origin_jti`. It does **not** carry `cognito:username` or user attributes like `email`.
 - **ID token:** `sub`, `cognito:username`, `aud`, and readable user attributes (`email`,
   `email_verified`, `phone_number`, `custom:*`, ...). Attribute claims are filtered by the app client's
   `ReadAttributes` (an unset/empty list means all attributes are readable).

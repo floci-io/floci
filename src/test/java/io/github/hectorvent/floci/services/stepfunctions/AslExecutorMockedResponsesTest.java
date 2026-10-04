@@ -74,10 +74,10 @@ class AslExecutorMockedResponsesTest {
 
     @Test
     void mockedReturnReplacesUnsupportedResource() throws Exception {
-        var mocks = testCase(Map.of("Call API", List.of(
+        MockedTestCase mocks = testCase(Map.of("Call API", List.of(
                 returnStep(0, 0, "{\"StatusCode\": 200, \"ResponseBody\": {\"id\": 1}}"))));
 
-        var execution = run("""
+        Execution execution = run("""
                 {
                   "StartAt": "Call API",
                   "States": {
@@ -91,7 +91,7 @@ class AslExecutorMockedResponsesTest {
                 """.formatted(UNSUPPORTED_RESOURCE), mocks);
 
         assertEquals("SUCCEEDED", execution.getStatus());
-        var output = objectMapper.readTree(execution.getOutput());
+        JsonNode output = objectMapper.readTree(execution.getOutput());
         assertEquals(200, output.path("StatusCode").asInt());
         assertEquals(1, output.path("ResponseBody").path("id").asInt());
         verifyNoInteractions(lambdaExecutor);
@@ -99,10 +99,10 @@ class AslExecutorMockedResponsesTest {
 
     @Test
     void mockedThrowKeepsErrorAndCauseThroughCatch() throws Exception {
-        var mocks = testCase(Map.of("Call API", List.of(
+        MockedTestCase mocks = testCase(Map.of("Call API", List.of(
                 throwStep(0, 0, "ApiGateway.422", "Unprocessable"))));
 
-        var execution = run("""
+        Execution execution = run("""
                 {
                   "StartAt": "Call API",
                   "States": {
@@ -124,18 +124,18 @@ class AslExecutorMockedResponsesTest {
                 """.formatted(UNSUPPORTED_RESOURCE), mocks);
 
         assertEquals("SUCCEEDED", execution.getStatus());
-        var output = objectMapper.readTree(execution.getOutput());
+        JsonNode output = objectMapper.readTree(execution.getOutput());
         assertEquals("ApiGateway.422", output.path("Error").asText());
         assertEquals("Unprocessable", output.path("Cause").asText());
     }
 
     @Test
     void attemptKeyedMocksDriveRetry() throws Exception {
-        var mocks = testCase(Map.of("Call API", List.of(
+        MockedTestCase mocks = testCase(Map.of("Call API", List.of(
                 throwStep(0, 0, "ApiGateway.429", "Too many requests"),
                 returnStep(1, 2, "{\"retried\": true}"))));
 
-        var execution = run("""
+        Execution execution = run("""
                 {
                   "StartAt": "Call API",
                   "States": {
@@ -160,11 +160,11 @@ class AslExecutorMockedResponsesTest {
 
     @Test
     void mockedResponseIndexContinuesAcrossMapIterations() throws Exception {
-        var mocks = testCase(Map.of("Call API", List.of(
+        MockedTestCase mocks = testCase(Map.of("Call API", List.of(
                 returnStep(0, 0, "{\"Payload\": \"first\"}"),
                 returnStep(1, 1, "{\"Payload\": \"second\"}"))));
 
-        var execution = run("""
+        Execution execution = run("""
                 {
                   "StartAt": "Each",
                   "States": {
@@ -196,10 +196,10 @@ class AslExecutorMockedResponsesTest {
 
     @Test
     void mockedResponseIndexRestartsForEachExecution() throws Exception {
-        var mocks = testCase(Map.of("Call API", List.of(
+        MockedTestCase mocks = testCase(Map.of("Call API", List.of(
                 returnStep(0, 0, "{\"value\": \"first\"}"),
                 returnStep(1, 1, "{\"value\": \"second\"}"))));
-        var definition = """
+        String definition = """
                 {
                   "StartAt": "Call API",
                   "States": {
@@ -212,8 +212,8 @@ class AslExecutorMockedResponsesTest {
                 }
                 """.formatted(UNSUPPORTED_RESOURCE);
 
-        var firstExecution = run(definition, mocks, "{}", "first-execution");
-        var secondExecution = run(definition, mocks, "{}", "second-execution");
+        Execution firstExecution = run(definition, mocks, "{}", "first-execution");
+        Execution secondExecution = run(definition, mocks, "{}", "second-execution");
 
         assertEquals("first", objectMapper.readTree(firstExecution.getOutput()).path("value").asText());
         assertEquals("first", objectMapper.readTree(secondExecution.getOutput()).path("value").asText());
@@ -221,10 +221,10 @@ class AslExecutorMockedResponsesTest {
 
     @Test
     void missingAttemptEntryFailsExecution() throws Exception {
-        var mocks = testCase(Map.of("Call API", List.of(
+        MockedTestCase mocks = testCase(Map.of("Call API", List.of(
                 throwStep(0, 0, "ApiGateway.429", "Too many requests"))));
 
-        var execution = run("""
+        Execution execution = run("""
                 {
                   "StartAt": "Call API",
                   "States": {
@@ -250,10 +250,10 @@ class AslExecutorMockedResponsesTest {
 
     @Test
     void statesRuntimeIsNotRetriedOrCaughtEvenWhenNamedExplicitly() throws Exception {
-        var mocks = testCase(Map.of("Call API", List.of(
+        MockedTestCase mocks = testCase(Map.of("Call API", List.of(
                 throwStep(0, 0, "ApiGateway.429", "Too many requests"))));
 
-        var execution = run("""
+        Execution execution = run("""
                 {
                   "StartAt": "Call API",
                   "States": {
@@ -309,20 +309,20 @@ class AslExecutorMockedResponsesTest {
     }
 
     private Execution run(String definition, MockedTestCase mocks, String input, String executionName) {
-        var stateMachine = new StateMachine();
+        StateMachine stateMachine = new StateMachine();
         stateMachine.setName("mock-test");
         stateMachine.setStateMachineArn("arn:aws:states:%s:%s:stateMachine:mock-test".formatted(REGION, ACCOUNT));
         stateMachine.setRoleArn("arn:aws:iam::%s:role/test-role".formatted(ACCOUNT));
         stateMachine.setDefinition(definition);
 
-        var execution = new Execution();
+        Execution execution = new Execution();
         execution.setName(executionName);
         execution.setExecutionArn(
                 "arn:aws:states:%s:%s:execution:mock-test:%s".formatted(REGION, ACCOUNT, executionName));
         execution.setStateMachineArn(stateMachine.getStateMachineArn());
         execution.setInput(input);
 
-        var history = new ArrayList<HistoryEvent>();
+        ArrayList<HistoryEvent> history = new ArrayList<>();
         executor.executeSync(stateMachine, execution, history, mocks, (updated, events) -> {
         });
         return execution;

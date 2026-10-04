@@ -232,4 +232,29 @@ class CloudWatchMetricStreamsServiceTest {
         service.untagResource(arn, List.of("team"), REGION);
         assertFalse(service.listTagsForResource(arn, REGION).containsKey("team"));
     }
+
+    /**
+     * An ARN naming no stream is an error on all three operations, not a silent no-op. The ARN
+     * used here differs from a working one only in the stream name, so the outcome cannot be
+     * explained by the ARN failing to parse as a metric stream ARN.
+     */
+    @Test
+    void tagOperationsRejectAnArnThatNamesNoStream() {
+        String arn = service.putMetricStream(stream("ops"), REGION).getArn();
+        String ghost = arn.replace("metric-stream/ops", "metric-stream/nosuch");
+        assertTrue(CloudWatchMetricStreamsService.isMetricStreamArn(ghost));
+
+        for (Runnable call : List.<Runnable>of(
+                () -> service.tagResource(ghost, Map.of("env", "prod"), REGION),
+                () -> service.untagResource(ghost, List.of("env"), REGION),
+                () -> service.listTagsForResource(ghost, REGION))) {
+            AwsException e = assertThrows(AwsException.class, call::run);
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+            assertEquals(404, e.getHttpStatus());
+        }
+
+        // The failures wrote nothing: the real stream still carries only what it was given.
+        service.tagResource(arn, Map.of("team", "platform"), REGION);
+        assertEquals(Map.of("team", "platform"), service.listTagsForResource(arn, REGION));
+    }
 }

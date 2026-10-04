@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.ssoportal;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.ssoportal.model.PortalAccountInfo;
 import io.github.hectorvent.floci.services.ssoportal.model.PortalRoleInfo;
 import io.github.hectorvent.floci.services.ssoportal.model.PortalRoleCredentials;
@@ -42,8 +45,8 @@ public class SsoPortalController {
             @QueryParam("account_id") String accountId,
             @QueryParam("role_name") String roleName) {
         PortalRoleCredentials credentials = service.getRoleCredentials(accessToken, accountId, roleName);
-        var response = objectMapper.createObjectNode();
-        var roleCredentials = response.putObject("roleCredentials");
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode roleCredentials = response.putObject("roleCredentials");
         roleCredentials.put("accessKeyId", credentials.accessKeyId());
         roleCredentials.put("expiration", credentials.expiration());
         roleCredentials.put("secretAccessKey", credentials.secretAccessKey());
@@ -58,11 +61,11 @@ public class SsoPortalController {
             @QueryParam("account_id") String accountId,
             @QueryParam("max_result") String maxResults,
             @QueryParam("next_token") String nextToken) {
-        var page = service.listAccountRoles(accessToken, accountId, maxResults, nextToken);
-        var response = objectMapper.createObjectNode();
-        var roles = response.putArray("roleList");
+        PaginatedResult<PortalRoleInfo> page = service.listAccountRoles(accessToken, accountId, maxResults, nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode roles = response.putArray("roleList");
         for (PortalRoleInfo role : page.items()) {
-            var item = roles.addObject();
+            ObjectNode item = roles.addObject();
             item.put("accountId", role.accountId());
             item.put("roleName", role.roleName());
         }
@@ -78,11 +81,11 @@ public class SsoPortalController {
             @HeaderParam("x-amz-sso_bearer_token") String accessToken,
             @QueryParam("max_result") String maxResults,
             @QueryParam("next_token") String nextToken) {
-        var page = service.listAccounts(accessToken, maxResults, nextToken);
-        var response = objectMapper.createObjectNode();
-        var accounts = response.putArray("accountList");
+        PaginatedResult<PortalAccountInfo> page = service.listAccounts(accessToken, maxResults, nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode accounts = response.putArray("accountList");
         for (PortalAccountInfo account : page.items()) {
-            var item = accounts.addObject();
+            ObjectNode item = accounts.addObject();
             item.put("accountId", account.accountId());
             if (account.accountName() != null) {
                 item.put("accountName", account.accountName());

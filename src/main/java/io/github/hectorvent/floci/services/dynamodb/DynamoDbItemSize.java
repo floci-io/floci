@@ -107,9 +107,9 @@ final class DynamoDbItemSize {
     static int calculateItemSize(JsonNode item) {
         if (item == null || !item.isObject()) return 0;
         int total = 0;
-        var fields = item.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = item.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
+            Map.Entry<String, JsonNode> entry = fields.next();
             total += utf8Length(entry.getKey());
             total += attributeValueSize(entry.getValue());
         }
@@ -149,9 +149,9 @@ final class DynamoDbItemSize {
         }
         if (attr.has("M")) {
             int size = 0;
-            var fields = attr.get("M").fields();
+            Iterator<Map.Entry<String, JsonNode>> fields = attr.get("M").fields();
             while (fields.hasNext()) {
-                var entry = fields.next();
+                Map.Entry<String, JsonNode> entry = fields.next();
                 size += utf8Length(entry.getKey()) + 1 + attributeValueSize(entry.getValue()) + 3;
             }
             return size;

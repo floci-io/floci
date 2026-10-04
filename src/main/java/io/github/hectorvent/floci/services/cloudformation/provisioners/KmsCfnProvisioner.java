@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.HashMap;
@@ -41,7 +42,7 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
     private void provisionKey(StackResource r, JsonNode props, ProvisionContext ctx) {
         String description = ctx.resolveOptional(props, "Description");
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, ctx);
-        var key = kmsService.createKey(description, null, tags, ctx.region());
+        KmsKey key = kmsService.createKey(description, null, tags, ctx.region());
         r.setPhysicalId(key.getKeyId());
         r.getAttributes().put("Arn", key.getArn());
         r.getAttributes().put("KeyId", key.getKeyId());

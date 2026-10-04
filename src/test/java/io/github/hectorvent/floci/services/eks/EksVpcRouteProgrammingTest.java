@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EksVpcRouteProgrammingTest {
@@ -224,11 +225,31 @@ class EksVpcRouteProgrammingTest {
         rt.setRoutes(List.of(r1, r2, rDefault, rPrefix, rIgw, rPcx));
 
         List<EksVpcRouteProgramming.VpcRouteEntry> entries =
-                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, List.of(rt), ec2);
+                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, "us-east-1", List.of(rt), ec2);
 
         assertEquals(2, entries.size());
         assertTrue(entries.stream().anyMatch(e -> "10.100.0.0/16".equals(e.destinationCidrBlock()) && "172.18.0.10".equals(e.gatewayIp())));
         assertTrue(entries.stream().anyMatch(e -> "10.200.0.0/16".equals(e.destinationCidrBlock()) && "172.18.0.20".equals(e.gatewayIp())));
+    }
+
+    @Test
+    void resolveProgrammableRoutesLooksEnisUpInTheRegionItIsGiven() {
+        Ec2Service ec2 = mock(Ec2Service.class);
+        Cluster cluster = new Cluster();
+        cluster.setName("test-cluster");
+        cluster.setAccountId("123456789012");
+        when(ec2.describeNetworkInterfaces(anyString(), anyString(), anyList(), any()))
+                .thenReturn(new NetworkInterfaceListResult(List.of(), null));
+
+        RouteTable rt = new RouteTable();
+        rt.setRouteTableId("rtb-1");
+        Route rEni = new Route("10.200.0.0/16", null, "CreateRoute");
+        rEni.setNetworkInterfaceId("eni-1");
+        rt.setRoutes(List.of(rEni));
+
+        EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, "cn-north-1", List.of(rt), ec2);
+
+        verify(ec2).describeNetworkInterfaces(eq("123456789012"), eq("cn-north-1"), eq(List.of("eni-1")), any());
     }
 
     @Test
@@ -254,7 +275,7 @@ class EksVpcRouteProgrammingTest {
         rt.setRoutes(List.of(rEni));
 
         List<EksVpcRouteProgramming.VpcRouteEntry> entries =
-                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, List.of(rt), ec2);
+                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, "us-east-1", List.of(rt), ec2);
 
         assertTrue(entries.isEmpty(), "Unattached ENI must not be resolved as a route gateway");
     }
@@ -284,7 +305,7 @@ class EksVpcRouteProgrammingTest {
         rt.setRoutes(List.of(rMissing, rValid));
 
         List<EksVpcRouteProgramming.VpcRouteEntry> entries =
-                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, List.of(rt), ec2);
+                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, "us-east-1", List.of(rt), ec2);
 
         assertEquals(1, entries.size(), "Valid instance route must still resolve despite missing ENI");
         assertEquals("10.201.0.0/16", entries.get(0).destinationCidrBlock());
@@ -324,7 +345,7 @@ class EksVpcRouteProgrammingTest {
         rt.setRoutes(List.of(rEni));
 
         List<EksVpcRouteProgramming.VpcRouteEntry> entries =
-                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, List.of(rt), ec2);
+                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, "us-east-1", List.of(rt), ec2);
 
         assertEquals(1, entries.size());
         assertEquals("10.0.1.20", entries.get(0).gatewayIp());
@@ -363,7 +384,7 @@ class EksVpcRouteProgrammingTest {
         rt.setRoutes(List.of(rEni));
 
         List<EksVpcRouteProgramming.VpcRouteEntry> entries =
-                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, List.of(rt), ec2);
+                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, "us-east-1", List.of(rt), ec2);
 
         assertEquals(1, entries.size());
         assertEquals("172.18.0.20", entries.get(0).gatewayIp(),
@@ -402,7 +423,7 @@ class EksVpcRouteProgrammingTest {
         rt.setRoutes(List.of(rEni));
 
         List<EksVpcRouteProgramming.VpcRouteEntry> entries =
-                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, List.of(rt), ec2);
+                EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, "us-east-1", List.of(rt), ec2);
 
         assertEquals(1, entries.size());
         assertEquals("172.17.0.5", entries.get(0).gatewayIp(),

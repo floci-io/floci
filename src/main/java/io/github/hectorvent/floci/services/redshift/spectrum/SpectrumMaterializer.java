@@ -21,6 +21,7 @@ public final class SpectrumMaterializer {
 
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String SQLSTATE_DATA = "22000";
+    private static final int DEFAULT_VARCHAR_MAX_BYTES = 256;
 
     public Materialization materialize(Socket backend, SpectrumExternalTable table,
                                        SpectrumExternalSchema schema, SpectrumS3Reader reader) {
@@ -44,7 +45,7 @@ public final class SpectrumMaterializer {
             try (Stream<SpectrumRow> rows = reader.read(schema, table)) {
                 Iterator<SpectrumRow> iterator = rows.iterator();
                 while (iterator.hasNext()) {
-                    writeCopyData(output, encodeRow(iterator.next()));
+                    writeCopyData(output, encodeRow(iterator.next(), table.columns()));
                 }
             }
             writeCopyDone(output);
@@ -96,13 +97,18 @@ public final class SpectrumMaterializer {
                 + ") FROM STDIN";
     }
 
-    private static byte[] encodeRow(SpectrumRow row) {
+    private static byte[] encodeRow(SpectrumRow row, List<SpectrumColumn> columns) {
         StringBuilder line = new StringBuilder();
         for (int i = 0; i < row.values().size(); i++) {
             if (i > 0) {
                 line.append('\t');
             }
             String value = row.values().get(i);
+            if (value != null
+                    && columns.get(i).type() == SpectrumColumn.Type.VARCHAR
+                    && value.getBytes(StandardCharsets.UTF_8).length > DEFAULT_VARCHAR_MAX_BYTES) {
+                value = null;
+            }
             if (value == null) {
                 line.append("\\N");
             } else {

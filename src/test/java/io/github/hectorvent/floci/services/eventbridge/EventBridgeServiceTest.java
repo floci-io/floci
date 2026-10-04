@@ -17,12 +17,14 @@ import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsT
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -36,13 +38,13 @@ class EventBridgeServiceTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private EventBridgeService service;
-    private EventBridgeInvoker invokerMock;
+    private TargetDispatcher dispatcherMock;
     private StorageBackend<String, Replay> replayStore;
     private ReplayDispatcher replayDispatcherMock;
 
     @BeforeEach
     void setUp() {
-        invokerMock = mock(EventBridgeInvoker.class);
+        dispatcherMock = mock(TargetDispatcher.class);
         replayStore = new InMemoryStorage<>();
         replayDispatcherMock = mock(ReplayDispatcher.class);
         service = new EventBridgeService(
@@ -56,7 +58,7 @@ class EventBridgeServiceTest {
                 new RegionResolver("us-east-1", "000000000000"),
                 new ObjectMapper(),
                 null,
-                invokerMock,
+                dispatcherMock,
                 replayDispatcherMock,
                 new ResourceGroupsTaggingService(null)
         );
@@ -362,6 +364,206 @@ class EventBridgeServiceTest {
         assertEquals(1, result.successfulCount());
         assertEquals(0, result.failedCount());
         assertEquals(1, service.listTargetsByRule("my-rule", null, REGION).size());
+        verify(dispatcherMock).dropPendingRetries(
+                service.describeRule("my-rule", null, REGION).getArn(), List.of("t1"));
+    }
+
+    @Test
+    void putTargetsStoresRetryPolicyAndDeadLetterConfig() {
+        service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue", null, null);
+        target.setRoleArn("arn:aws:iam::000000000000:role/eventbridge-target");
+        target.setRetryPolicy(new Target.RetryPolicy(4, 120));
+        target.setDeadLetterConfig(new Target.DeadLetterConfig("arn:aws:sqs:us-east-1:000000000000:dlq"));
+
+        service.putTargets("my-rule", null, List.of(target), REGION);
+
+        Target stored = service.listTargetsByRule("my-rule", null, REGION).getFirst();
+        assertEquals(target.getRoleArn(), stored.getRoleArn());
+        assertEquals(new Target.RetryPolicy(4, 120), stored.getRetryPolicy());
+        assertEquals(new Target.DeadLetterConfig("arn:aws:sqs:us-east-1:000000000000:dlq"),
+                stored.getDeadLetterConfig());
+    }
+
+    @Test
+    void crossAccountBusUpdateReplacesStoredTargetWithoutArn() {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        service.putTargets("role-rule", null, List.of(new Target("bus", null, null, null)), REGION);
+        String arn = "arn:aws:events:us-east-1:111111111111:event-bus/destination";
+
+        service.putTargets("role-rule", null, List.of(new Target("bus", arn, null, null)), REGION);
+
+        List<Target> stored = service.listTargetsByRule("role-rule", null, REGION);
+        assertEquals(1, stored.size());
+        assertEquals(arn, stored.getFirst().getArn());
+        assertNull(stored.getFirst().getRoleArn());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "aws, us-east-1",
+            "aws-us-gov, us-gov-west-1",
+            "aws-cn, cn-north-1"
+    })
+    void omittedRoleOnCrossAccountBusUpdateRetainsTheStoredRole(String partition, String region) {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, region);
+        String arn = "arn:" + partition + ":events:" + region + ":111111111111:event-bus/destination";
+        Target original = new Target("bus", arn, null, null);
+        original.setRoleArn("arn:" + partition + ":iam::000000000000:role/eventbridge-target");
+        service.putTargets("role-rule", null, List.of(original), region);
+
+        Target updated = new Target("bus", arn, "{\"updated\":true}", null);
+        service.putTargets("role-rule", null, List.of(updated), region);
+
+        Target stored = service.listTargetsByRule("role-rule", null, region).getFirst();
+        assertEquals(original.getRoleArn(), stored.getRoleArn());
+        assertEquals(updated.getInput(), stored.getInput());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws:events:us-east-1:000000000000:event-bus/local",
+            "arn:aws:states:us-east-1:111111111111:stateMachine:workflow",
+            "arn:aws:events:us-east-1:111111111111:rule/other"
+    })
+    void omittedRoleDoesNotRetainRolesForOtherTargetTypes(String arn) {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        Target original = new Target("target", arn, null, null);
+        original.setRoleArn("arn:aws:iam::000000000000:role/original");
+        service.putTargets("role-rule", null, List.of(original), REGION);
+
+        service.putTargets("role-rule", null, List.of(new Target("target", arn, null, null)), REGION);
+
+        assertNull(service.listTargetsByRule("role-rule", null, REGION).getFirst().getRoleArn());
+    }
+
+    @Test
+    void replacingCrossAccountBusArnOrIdDoesNotCopyTheOldRole() {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        String arn = "arn:aws:events:us-east-1:111111111111:event-bus/original";
+        Target original = new Target("bus", arn, null, null);
+        original.setRoleArn("arn:aws:iam::000000000000:role/original");
+        service.putTargets("role-rule", null, List.of(original), REGION);
+
+        service.putTargets("role-rule", null, List.of(new Target("other-id", arn, null, null)), REGION);
+        service.putTargets("role-rule", null, List.of(new Target("bus", arn + "-changed", null, null)), REGION);
+
+        assertTrue(service.listTargetsByRule("role-rule", null, REGION).stream()
+                .allMatch(target -> target.getRoleArn() == null));
+    }
+
+    @Test
+    void explicitRoleUpdateReplacesCrossAccountBusRole() {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        String arn = "arn:aws:events:us-east-1:111111111111:event-bus/destination";
+        Target original = new Target("bus", arn, null, null);
+        original.setRoleArn("arn:aws:iam::000000000000:role/original");
+        service.putTargets("role-rule", null, List.of(original), REGION);
+        Target updated = new Target("bus", arn, null, null);
+        updated.setRoleArn("arn:aws:iam::000000000000:role/replacement");
+
+        service.putTargets("role-rule", null, List.of(updated), REGION);
+
+        List<Target> stored = service.listTargetsByRule("role-rule", null, REGION);
+        assertEquals(1, stored.size());
+        assertEquals(updated.getRoleArn(), stored.getFirst().getRoleArn());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1601})
+    void putTargetsRejectsRoleArnOutsideModelLengthBounds(int length) {
+        Target valid = new Target("valid", "arn:aws:states:us-east-1:000000000000:stateMachine:valid", null, null);
+        Target invalid = new Target("invalid", valid.getArn(), null, null);
+        String role = "r".repeat(length);
+        invalid.setRoleArn(role);
+        String constraint = length == 0 ? "greater than or equal to 1" : "less than or equal to 1600";
+
+        assertPutTargetsValidation("1 validation error detected: Value '" + role + "' at "
+                + "'targets.2.member.roleArn' failed to satisfy constraint: Member must have length " + constraint,
+                valid, invalid);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 1600})
+    void putTargetsAcceptsRoleArnAtModelLengthBounds(int length) {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("workflow", "arn:aws:states:us-east-1:000000000000:stateMachine:example", null, null);
+        target.setRoleArn("r".repeat(length));
+
+        service.putTargets("role-rule", null, List.of(target), REGION);
+
+        assertEquals(target.getRoleArn(), service.listTargetsByRule("role-rule", null, REGION).getFirst().getRoleArn());
+    }
+
+    @Test
+    void putTargetsRejectsRetryAttemptsAboveMaximumBeforeLookingUpTheRule() {
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue", null, null);
+        target.setRetryPolicy(new Target.RetryPolicy(186, null));
+
+        assertPutTargetsValidation("1 validation error detected: Value '186' at "
+                + "'targets.1.member.retryPolicy.maximumRetryAttempts' failed to satisfy constraint: "
+                + "Member must have value less than or equal to 185", target);
+    }
+
+    @Test
+    void putTargetsRejectsEventAgeBelowMinimumOnTheSecondTarget() {
+        Target valid = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue", null, null);
+        valid.setRetryPolicy(new Target.RetryPolicy(0, 60));
+        Target invalid = new Target("t2", "arn:aws:sqs:us-east-1:000000000000:queue", null, null);
+        invalid.setRetryPolicy(new Target.RetryPolicy(null, 59));
+
+        assertPutTargetsValidation("1 validation error detected: Value '59' at "
+                + "'targets.2.member.retryPolicy.maximumEventAgeInSeconds' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 60", valid, invalid);
+    }
+
+    @Test
+    void putTargetsRejectsEmptyDeadLetterArn() {
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue", null, null);
+        target.setDeadLetterConfig(new Target.DeadLetterConfig(""));
+
+        assertPutTargetsValidation("1 validation error detected: Value '' at "
+                + "'targets.1.member.deadLetterConfig.arn' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", target);
+    }
+
+    @Test
+    void putTargetsRejectsDeadLetterArnAboveMaximumLength() {
+        String arn = "a".repeat(1601);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue", null, null);
+        target.setDeadLetterConfig(new Target.DeadLetterConfig(arn));
+
+        assertPutTargetsValidation("1 validation error detected: Value '" + arn + "' at "
+                + "'targets.1.member.deadLetterConfig.arn' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1600", target);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void putEventsHandsTheDispatcherTheRuleArnAndItsCurrentTargets() {
+        Rule rule = service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target first = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("my-rule", null, List.of(first), REGION);
+
+        service.putEvents(List.of(Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
+
+        ArgumentCaptor<Supplier<List<Target>>> currentTargets = ArgumentCaptor.forClass(Supplier.class);
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(first), anyString(), eq(REGION),
+                currentTargets.capture());
+        Target second = new Target("t2", "arn:aws:sqs:us-east-1:000000000000:queue-2", null, null);
+        service.putTargets("my-rule", null, List.of(second), REGION);
+        assertEquals(List.of("t1", "t2"),
+                currentTargets.getValue().get().stream().map(Target::getId).toList());
+    }
+
+    private void assertPutTargetsValidation(String expectedMessage, Target... targets) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putTargets("missing-rule", null, List.of(targets), REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(expectedMessage, error.getMessage());
     }
 
     // ──────────────────────────── Pattern Matching ────────────────────────────
@@ -467,7 +669,7 @@ class EventBridgeServiceTest {
         assertEquals(0, result.failedCount());
         assertEquals(1, result.entries().size());
         assertNotNull(result.entries().getFirst().get("EventId"));
-        verify(invokerMock).invokeTarget(eq(target), any(String.class), eq(REGION));
+        verify(dispatcherMock).dispatch(anyString(), eq(target), any(String.class), eq(REGION), any());
     }
 
     @Test
@@ -488,7 +690,7 @@ class EventBridgeServiceTest {
         assertEquals(0, result.failedCount());
         assertEquals(1, result.entries().size());
         assertNotNull(result.entries().getFirst().get("EventId"));
-        verify(invokerMock).invokeTarget(eq(target), any(String.class), eq(REGION));
+        verify(dispatcherMock).dispatch(anyString(), eq(target), any(String.class), eq(REGION), any());
     }
 
     @Test
@@ -509,7 +711,7 @@ class EventBridgeServiceTest {
         assertEquals(0, result.failedCount());
         assertEquals(1, result.entries().size());
         assertNotNull(result.entries().getFirst().get("EventId"));
-        verify(invokerMock).invokeTarget(eq(target), any(String.class), eq(REGION));
+        verify(dispatcherMock).dispatch(anyString(), eq(target), any(String.class), eq(REGION), any());
     }
 
     @Test
@@ -745,7 +947,7 @@ class EventBridgeServiceTest {
         assertEquals(0, result.failedCount());
 
         ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
-        verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("eu-west-1"));
+        verify(dispatcherMock).dispatch(anyString(), eq(target), json.capture(), eq("eu-west-1"), any());
         JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals("eu-west-1", envelope.path("region").asText(),
                 "envelope.region should reflect the PutEvents call's region, not the resolver default");
@@ -773,7 +975,7 @@ class EventBridgeServiceTest {
         service.putEvents(List.of(entry), "us-west-2");
 
         ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
-        verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("us-west-2"));
+        verify(dispatcherMock).dispatch(anyString(), eq(target), json.capture(), eq("us-west-2"), any());
         JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals("ap-northeast-1", envelope.path("region").asText(),
                 "entry.Region should win over the PutEvents call region");
@@ -800,7 +1002,7 @@ class EventBridgeServiceTest {
                 Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), "eu-west-1");
 
         ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
-        verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("eu-west-1"));
+        verify(dispatcherMock).dispatch(anyString(), eq(target), json.capture(), eq("eu-west-1"), any());
         JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals("eu-west-1", envelope.path("region").asText(),
                 "envelope and pattern matching must agree on the entry's effective region");
@@ -824,7 +1026,7 @@ class EventBridgeServiceTest {
         service.putEvents(List.of(
                 Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), "eu-west-1");
 
-        verify(invokerMock, Mockito.never()).invokeTarget(eq(target), any(), any());
+        verify(dispatcherMock, Mockito.never()).dispatch(any(), eq(target), any(), any(), any());
     }
 
     @Test
@@ -843,7 +1045,7 @@ class EventBridgeServiceTest {
                 Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
 
         ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
-        verify(invokerMock).invokeTarget(eq(target), json.capture(), eq(REGION));
+        verify(dispatcherMock).dispatch(anyString(), eq(target), json.capture(), eq(REGION), any());
         JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals(REGION, envelope.path("region").asText());
         assertEquals("000000000000", envelope.path("account").asText());

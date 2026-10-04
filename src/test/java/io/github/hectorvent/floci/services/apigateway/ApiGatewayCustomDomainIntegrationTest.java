@@ -246,6 +246,37 @@ class ApiGatewayCustomDomainIntegrationTest {
     }
 
     @Test @Order(16)
+    void invokeViaDottedDomainUnderLocalhost_isNotClaimedByS3() {
+        // api.mycorp.localhost also reads as S3 virtual-hosted bucket "api.mycorp"; the
+        // custom-domain route must win.
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"domainName\":\"api.mycorp.localhost\",\"certificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/loc\"}")
+                .when().post("/domainnames")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"basePath\":\"(none)\",\"restApiId\":\"" + apiId + "\",\"stage\":\"prod\"}")
+                .when().post("/domainnames/api.mycorp.localhost/basepathmappings")
+                .then()
+                .statusCode(201);
+
+        try {
+            given()
+                    .header("Host", "api.mycorp.localhost:4566")
+                    .when().get("/items")
+                    .then()
+                    .statusCode(200)
+                    .body("message", equalTo("custom-domain-works"));
+        } finally {
+            given().when().delete("/domainnames/api.mycorp.localhost/basepathmappings/(none)");
+            given().when().delete("/domainnames/api.mycorp.localhost");
+        }
+    }
+
+    @Test @Order(17)
     void cleanup() {
         given().when().delete("/domainnames/api.example.com/basepathmappings/v1").then().statusCode(anyOf(is(200), is(202), is(204)));
         given().when().delete("/domainnames/api.example.com/basepathmappings/(none)").then().statusCode(anyOf(is(200), is(202), is(204)));

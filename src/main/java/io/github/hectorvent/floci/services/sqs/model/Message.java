@@ -151,9 +151,12 @@ public class Message {
     }
 
     public void updateMd5OfMessageAttributes() {
+        this.md5OfMessageAttributes = computeMessageAttributesMd5(messageAttributes);
+    }
+
+    public static String computeMessageAttributesMd5(Map<String, MessageAttributeValue> messageAttributes) {
         if (messageAttributes == null || messageAttributes.isEmpty()) {
-            this.md5OfMessageAttributes = null;
-            return;
+            return null;
         }
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
@@ -190,10 +193,10 @@ public class Message {
             for (byte b : digest) {
                 sb.append(String.format("%02x", b));
             }
-            this.md5OfMessageAttributes = sb.toString();
+            return sb.toString();
         } catch (Exception ignored) {
             // Attribute serialization failure falls back to null MD5
-            this.md5OfMessageAttributes = null;
+            return null;
         }
     }
 

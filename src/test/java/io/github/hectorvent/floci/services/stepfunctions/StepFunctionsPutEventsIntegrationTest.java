@@ -53,7 +53,7 @@ class StepFunctionsPutEventsIntegrationTest {
     @Test
     @Order(1)
     void publishedEventReachesTheRuleTargetAndTheResultCarriesItsEventId() throws Exception {
-        var smArn = createStateMachine("put-events-delivers", """
+        String smArn = createStateMachine("put-events-delivers", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Publish",
@@ -74,12 +74,12 @@ class StepFunctionsPutEventsIntegrationTest {
                 }
                 """.replace("RESOURCE_ARN", RESOURCE).replace("SOURCE_NAME", SOURCE));
 
-        var result = mapper.readTree(succeedingOutputOf(smArn));
+        JsonNode result = mapper.readTree(succeedingOutputOf(smArn));
         assertEquals(0, result.path("FailedEntryCount").asInt());
-        var eventId = result.path("Entries").get(0).path("EventId").asText();
+        String eventId = result.path("Entries").get(0).path("EventId").asText();
         assertFalse(eventId.isBlank());
 
-        var delivered = mapper.readTree(receiveSingleMessage(sinkQueueUrl).path("Body").asText());
+        JsonNode delivered = mapper.readTree(receiveSingleMessage(sinkQueueUrl).path("Body").asText());
         assertEquals(eventId, delivered.path("id").asText());
         assertEquals("payout requested", delivered.path("detail-type").asText());
         assertEquals(1200, delivered.path("detail").path("amount").asInt());
@@ -155,7 +155,7 @@ class StepFunctionsPutEventsIntegrationTest {
     @Test
     @Order(4)
     void taskResultCarriesTheSameFieldsThePutEventsApiReturns() throws Exception {
-        var smArn = createStateMachine("put-events-same-envelope", """
+        String smArn = createStateMachine("put-events-same-envelope", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Publish",
@@ -172,8 +172,8 @@ class StepFunctionsPutEventsIntegrationTest {
                 }
                 """.replace("RESOURCE_ARN", RESOURCE));
 
-        var taskResult = mapper.readTree(succeedingOutputOf(smArn));
-        var apiResult = mapper.readTree(given()
+        JsonNode taskResult = mapper.readTree(succeedingOutputOf(smArn));
+        JsonNode apiResult = mapper.readTree(given()
                 .header("X-Amz-Target", "AWSEvents.PutEvents")
                 .contentType(EVENTS_CONTENT_TYPE)
                 .body("""
@@ -192,7 +192,7 @@ class StepFunctionsPutEventsIntegrationTest {
     @Test
     @Order(5)
     void oneRejectedEntryFailsTheTaskWithFailedEntryAndTheWholeResponseAsCause() throws Exception {
-        var smArn = createStateMachine("put-events-failed-entry", """
+        String smArn = createStateMachine("put-events-failed-entry", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Publish",
@@ -213,12 +213,12 @@ class StepFunctionsPutEventsIntegrationTest {
                 }
                 """.replace("RESOURCE_ARN", RESOURCE));
 
-        var describe = waitForTerminalState(startExecution(smArn));
+        Response describe = waitForTerminalState(startExecution(smArn));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("EventBridge.FailedEntry", describe.jsonPath().getString("error"));
 
         // The cause is the PutEvents response itself, so the caller can tell which entry failed.
-        var cause = mapper.readTree(describe.jsonPath().getString("cause"));
+        JsonNode cause = mapper.readTree(describe.jsonPath().getString("cause"));
         assertEquals(1, cause.path("FailedEntryCount").asInt());
         assertFalse(cause.path("Entries").get(0).path("EventId").asText().isBlank());
         assertEquals("InvalidArgument", cause.path("Entries").get(1).path("ErrorCode").asText());
@@ -227,7 +227,7 @@ class StepFunctionsPutEventsIntegrationTest {
     @Test
     @Order(6)
     void aFailedEntryIsCatchableByItsErrorName() throws Exception {
-        var smArn = createStateMachine("put-events-catch", """
+        String smArn = createStateMachine("put-events-catch", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Publish",
@@ -255,20 +255,20 @@ class StepFunctionsPutEventsIntegrationTest {
     }
 
     private static List<String> fieldNames(JsonNode node) {
-        var names = new ArrayList<String>();
+        ArrayList<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
         return names;
     }
 
     private String succeedingOutputOf(String smArn) {
-        var describe = waitForTerminalState(startExecution(smArn));
+        Response describe = waitForTerminalState(startExecution(smArn));
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),
                 "cause: " + describe.jsonPath().getString("cause"));
         return describe.jsonPath().getString("output");
     }
 
     private static String createQueue(String name) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AmazonSQS.CreateQueue")
                 .contentType(SQS_CONTENT_TYPE)
                 .body("{\"QueueName\":\"%s\"}".formatted(name))
@@ -278,7 +278,7 @@ class StepFunctionsPutEventsIntegrationTest {
     }
 
     private static String queueArn(String queueUrl) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
                 .contentType(SQS_CONTENT_TYPE)
                 .body("{\"QueueUrl\":\"%s\",\"AttributeNames\":[\"QueueArn\"]}".formatted(queueUrl))
@@ -310,15 +310,15 @@ class StepFunctionsPutEventsIntegrationTest {
     }
 
     private JsonNode receiveSingleMessage(String queueUrl) throws Exception {
-        for (var i = 0; i < 20; i++) {
-            var resp = given()
+        for (int i = 0; i < 20; i++) {
+            Response resp = given()
                     .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
                     .contentType(SQS_CONTENT_TYPE)
                     .body("{\"QueueUrl\":\"%s\",\"MaxNumberOfMessages\":1,\"WaitTimeSeconds\":1}"
                             .formatted(queueUrl))
                     .when().post("/");
             resp.then().statusCode(200);
-            var messages = mapper.readTree(resp.body().asString()).path("Messages");
+            JsonNode messages = mapper.readTree(resp.body().asString()).path("Messages");
             if (messages.size() == 1) {
                 return messages.get(0);
             }
@@ -329,7 +329,7 @@ class StepFunctionsPutEventsIntegrationTest {
     }
 
     private static String createStateMachine(String name, String definition) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -341,7 +341,7 @@ class StepFunctionsPutEventsIntegrationTest {
     }
 
     private static String startExecution(String smArn) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -353,8 +353,8 @@ class StepFunctionsPutEventsIntegrationTest {
     }
 
     private static Response waitForTerminalState(String execArn) {
-        for (var i = 0; i < 100; i++) {
-            var resp = given()
+        for (int i = 0; i < 100; i++) {
+            Response resp = given()
                     .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
                     .contentType(SFN_CONTENT_TYPE)
                     .body("""

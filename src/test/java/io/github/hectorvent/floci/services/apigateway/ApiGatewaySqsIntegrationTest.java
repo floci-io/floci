@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.BeforeEach;
@@ -196,17 +197,17 @@ class ApiGatewaySqsIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST")
                 .then().statusCode(201);
 
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", "arn:aws:apigateway:us-east-1:sqs:path/" + URI_ACCOUNT_ID + "/" + uriQueueName);
         integrationNode.put("passthroughBehavior", "NEVER");
 
-        var reqParams = mapper.createObjectNode();
+        ObjectNode reqParams = mapper.createObjectNode();
         reqParams.put("integration.request.header.Content-Type", "'application/x-www-form-urlencoded'");
         integrationNode.set("requestParameters", reqParams);
 
-        var reqTemplates = mapper.createObjectNode();
+        ObjectNode reqTemplates = mapper.createObjectNode();
         reqTemplates.put("application/json", vtl);
         integrationNode.set("requestTemplates", reqTemplates);
 

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -67,7 +68,7 @@ class OrganizationsCfnRollbackIntegrationTest {
     }
 
     private static Response cloudFormation(String action, String... formParams) {
-        var request = given()
+        RequestSpecification request = given()
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + MANAGEMENT_ACCOUNT
                         + "/20260823/us-east-1/cloudformation/aws4_request, SignedHeaders=host, Signature=abc")
                 .contentType("application/x-www-form-urlencoded")

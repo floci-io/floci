@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
@@ -41,6 +43,7 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
     private static final String LAUNCH_CONFIGURATION = "AWS::AutoScaling::LaunchConfiguration";
 
     private static final Logger LOG = Logger.getLogger(AutoScalingGroupCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final AutoScalingService autoScalingService;
 
@@ -71,6 +74,81 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
             default -> throw unsupported(resourceType);
         }
     }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (GROUP.equals(resource.getResourceType())) {
+            String rawSnapshot = resource.getAttributes().remove(CfnRollback.ASG_UPDATE_SNAPSHOT_ATTR);
+            if (rawSnapshot != null) {
+                try {
+                    AsgSnapshot snapshot = MAPPER.readValue(rawSnapshot, AsgSnapshot.class);
+                    // UpdateAutoScalingGroup treats null as "leave unchanged". Restore an unset
+                    // snapshot member with its API default instead; -1 removes DefaultInstanceWarmup.
+                    AsgOptionalFields optionalFields = new AsgOptionalFields(
+                            snapshot.desiredCapacityType() != null ? snapshot.desiredCapacityType() : "units",
+                            snapshot.capacityRebalance() != null ? snapshot.capacityRebalance() : false,
+                            snapshot.maxInstanceLifetime() != null ? snapshot.maxInstanceLifetime() : 0,
+                            snapshot.defaultInstanceWarmup() != null
+                                    ? snapshot.defaultInstanceWarmup()
+                                    : AsgOptionalFields.DEFAULT_INSTANCE_WARMUP_REMOVAL_SENTINEL
+                    );
+                    autoScalingService.updateAutoScalingGroup(
+                            snapshot.region(),
+                            snapshot.name(),
+                            snapshot.launchConfigName(),
+                            snapshot.launchTemplateId(),
+                            snapshot.launchTemplateName(),
+                            snapshot.launchTemplateVersion(),
+                            snapshot.mixedInstancesPolicy(),
+                            snapshot.minSize(),
+                            snapshot.maxSize(),
+                            snapshot.desiredCapacity(),
+                            snapshot.cooldown(),
+                            snapshot.availabilityZones(),
+                            snapshot.subnetIds(),
+                            snapshot.healthCheckType(),
+                            snapshot.healthCheckGracePeriod(),
+                            snapshot.terminationPolicies(),
+                            optionalFields
+                    );
+                    return true;
+                } catch (Exception e) {
+                    LOG.errorv("Could not restore Auto Scaling group update snapshot for {0}: {1}",
+                            resource.getLogicalId(), e.getMessage());
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.ASG_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    public record AsgSnapshot(
+            String region,
+            String name,
+            String launchConfigName,
+            String launchTemplateId,
+            String launchTemplateName,
+            String launchTemplateVersion,
+            MixedInstancesPolicy mixedInstancesPolicy,
+            Integer minSize,
+            Integer maxSize,
+            Integer desiredCapacity,
+            Integer cooldown,
+            List<String> availabilityZones,
+            List<String> subnetIds,
+            String healthCheckType,
+            Integer healthCheckGracePeriod,
+            List<String> terminationPolicies,
+            String desiredCapacityType,
+            Boolean capacityRebalance,
+            Integer maxInstanceLifetime,
+            Integer defaultInstanceWarmup
+    ) {}
 
     private static IllegalStateException unsupported(String resourceType) {
         return new IllegalStateException(
@@ -154,6 +232,35 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
         AutoScalingGroup existing = existingEntity(ctx, name, n -> requireAutoScalingGroup(region, n));
         AutoScalingGroup asg;
         if (existing != null) {
+            AsgSnapshot snapshot = new AsgSnapshot(
+                    region,
+                    name,
+                    existing.getLaunchConfigurationName(),
+                    existing.getLaunchTemplateId(),
+                    existing.getLaunchTemplateName(),
+                    existing.getLaunchTemplateVersion(),
+                    existing.getMixedInstancesPolicy(),
+                    existing.getMinSize(),
+                    existing.getMaxSize(),
+                    existing.getDesiredCapacity(),
+                    existing.getDefaultCooldown(),
+                    existing.getAvailabilityZones() != null ? List.copyOf(existing.getAvailabilityZones()) : List.of(),
+                    existing.getSubnetIds() != null ? List.copyOf(existing.getSubnetIds()) : List.of(),
+                    existing.getHealthCheckType(),
+                    existing.getHealthCheckGracePeriod(),
+                    existing.getTerminationPolicies() != null ? List.copyOf(existing.getTerminationPolicies()) : List.of(),
+                    existing.getDesiredCapacityType(),
+                    existing.getCapacityRebalance(),
+                    existing.getMaxInstanceLifetime(),
+                    existing.getDefaultInstanceWarmup()
+            );
+            try {
+                r.getAttributes().put(CfnRollback.ASG_UPDATE_SNAPSHOT_ATTR, MAPPER.writeValueAsString(snapshot));
+            } catch (JsonProcessingException e) {
+                LOG.warnv("Could not serialize Auto Scaling group update snapshot for {0}: {1}",
+                        r.getLogicalId(), e.getMessage());
+            }
+
             autoScalingService.updateAutoScalingGroup(region, name,
                     blankToNull(launchConfigName),
                     blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),

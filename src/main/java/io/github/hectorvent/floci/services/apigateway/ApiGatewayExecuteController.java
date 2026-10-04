@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.networknt.schema.ValidationMessage;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
@@ -21,6 +22,7 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
+// REST and v2 both define Authorizer; the less-used REST type is qualified below.
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
@@ -58,6 +60,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -112,6 +115,7 @@ public class ApiGatewayExecuteController {
     private final JwtSignatureVerifier jwtSignatureVerifier;
     private final RequestContext requestContext;
     private final ExecuteApiSigV4Authorizer sigV4Authorizer;
+    private final RestLambdaAuthorizer restLambdaAuthorizer;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -125,7 +129,7 @@ public class ApiGatewayExecuteController {
                                        ApiGatewayExecuteRouteContext routeContext,
                                        JwtSignatureVerifier jwtSignatureVerifier,
                                        RequestContext requestContext,
-                                       ExecuteApiSigV4Authorizer sigV4Authorizer) {
+                                       ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -141,6 +145,7 @@ public class ApiGatewayExecuteController {
         this.jwtSignatureVerifier = jwtSignatureVerifier;
         this.requestContext = requestContext;
         this.sigV4Authorizer = sigV4Authorizer;
+        this.restLambdaAuthorizer = restLambdaAuthorizer;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -465,8 +470,8 @@ public class ApiGatewayExecuteController {
                     iamIdentity);
             case "AWS" -> invokeAwsIntegration(scope, region, httpMethod, path, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
-            case "HTTP_PROXY" -> invokeHttpProxy(scope, apiId, httpMethod, path, proxy, stageName,
-                    matched, integration, headers, uriInfo, body, iamIdentity);
+            case "HTTP_PROXY" -> invokeHttpProxy(scope, apiId, httpMethod, path, stageName,
+                    matched, integration, headers, uriInfo, body, authorizerResult, iamIdentity);
             case "HTTP" -> invokeHttpIntegration(scope, region, apiId, httpMethod, path, proxy, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
             case "MOCK" -> invokeMock(scope, region, httpMethod, path, stageName,
@@ -540,15 +545,19 @@ public class ApiGatewayExecuteController {
      * {@code integration.request.*} parameter mapping applies on the way out.
      */
     private Response invokeHttpProxy(GatewayResponseScope scope, String apiId, String httpMethod, String path,
-                                     String proxy, String stageName, ApiGatewayResource resource,
+                                     String stageName, ApiGatewayResource resource,
                                      Integration integration, HttpHeaders headers,
                                      UriInfo uriInfo, byte[] body,
+                                     AuthorizerResult authorizerResult,
                                      ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
         String uri = integration.getUri();
         if (uri == null || uri.isBlank()) {
             return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
                     "No integration URI configured");
         }
+
+        String requestId = UUID.randomUUID().toString();
+        Map<String, Object> mappingContext = httpRequestMappingContext(scope, requestId, authorizerResult);
 
         // Two views of the same inbound data. The multi-value maps are what gets forwarded: a
         // proxy integration passes the request through, so "?tag=a&tag=b" has to arrive as two
@@ -568,29 +577,44 @@ public class ApiGatewayExecuteController {
             queryMap.put(e.getKey(), String.join(",", e.getValue()));
         }
         Map<String, String> pathMap = new LinkedHashMap<>();
-        if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
         pathMap.putAll(extractPathParams(resource.getPath(), path));
+        pathMap.putAll(greedyPathParam(resource.getPath(), path));
 
-        // integration.request.{header,querystring,path}.X ← method.request.*, applied here rather
+        // Mapping sources always read the original request, independent of destination order.
+        Map<String, String> outHeaders = new LinkedHashMap<>(headerMap);
+        Map<String, String> outQuery = new LinkedHashMap<>(queryMap);
+        Map<String, String> outPath = new LinkedHashMap<>(pathMap);
+
+        // REST integration.request.* mappings are applied here rather
         // than by the v2 RequestParameterMapper: that mapper reads the unrelated v2 syntax
         // ("append:header.x" → "$request.header.y") and would silently ignore these REST mappings.
         Map<String, String> requestParameters = integration.getRequestParameters();
         if (requestParameters != null) {
             for (Map.Entry<String, String> param : requestParameters.entrySet()) {
                 String dest = param.getKey();
-                String resolved = resolveRequestParameter(param.getValue(), queryMap, pathMap, headerMap);
-                if (resolved == null) continue;
+                String source = param.getValue();
+                String resolved = resolveRequestParameter(source, queryMap, pathMap, headerMap, mappingContext);
+                boolean isContextHeader = dest.startsWith("integration.request.header.")
+                        && source != null && source.startsWith("context.");
+                if (resolved == null && !isContextHeader) {
+                    continue;
+                }
                 // An explicit mapping overwrites, so it replaces any repeated inbound values too.
                 if (dest.startsWith("integration.request.header.")) {
                     String name = dest.substring("integration.request.header.".length());
-                    headerMap.put(name, resolved);
-                    multiValueHeaders.put(name, List.of(resolved));
+                    // A missing context value must not fall back to a client-supplied trusted header.
+                    outHeaders.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
+                    multiValueHeaders.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
+                    if (resolved != null) {
+                        outHeaders.put(name, resolved);
+                        multiValueHeaders.put(name, List.of(resolved));
+                    }
                 } else if (dest.startsWith("integration.request.querystring.")) {
                     String name = dest.substring("integration.request.querystring.".length());
-                    queryMap.put(name, resolved);
+                    outQuery.put(name, resolved);
                     multiValueQuery.put(name, List.of(resolved));
                 } else if (dest.startsWith("integration.request.path.")) {
-                    pathMap.put(dest.substring("integration.request.path.".length()), resolved);
+                    outPath.put(dest.substring("integration.request.path.".length()), resolved);
                 }
             }
         }
@@ -607,10 +631,10 @@ public class ApiGatewayExecuteController {
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
                 new io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext(
                         apiId, stageName, httpMethod, path,
-                        pathMap.getOrDefault("proxy", ""), resource.getPath(),
-                        UUID.randomUUID().toString(),
+                        outPath.getOrDefault("proxy", ""), resource.getPath(),
+                        requestId,
                         headerMap.getOrDefault("X-Forwarded-For", "127.0.0.1"),
-                        headerMap, queryMap, pathMap, body,
+                        outHeaders, outQuery, outPath, body,
                         Map.of(), Map.of(),
                         multiValueHeaders, multiValueQuery);
 
@@ -845,6 +869,7 @@ public class ApiGatewayExecuteController {
         }
 
         String requestId = UUID.randomUUID().toString();
+        Map<String, Object> mappingContext = httpRequestMappingContext(scope, requestId, authorizerResult);
         boolean binaryRequest = isBinaryMediaType(region, apiId,
                 headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
         String bodyStr = templateBody(integration, body, binaryRequest);
@@ -874,15 +899,17 @@ public class ApiGatewayExecuteController {
 
         // Only explicitly mapped parameters reach the backend — the defining difference from
         // HTTP_PROXY, which seeds the outgoing request with every inbound header and query param.
-        Map<String, String> outHeaders = new LinkedHashMap<>();
+        Map<String, String> outHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         Map<String, String> outQuery = new LinkedHashMap<>();
         Map<String, String> outPath = new LinkedHashMap<>(pathMap);
         Map<String, String> requestParameters = integration.getRequestParameters();
         if (requestParameters != null) {
             for (Map.Entry<String, String> param : requestParameters.entrySet()) {
                 String dest = param.getKey();
-                String resolved = resolveRequestParameter(param.getValue(), queryMap, pathMap, headerMap);
-                if (resolved == null) continue;
+                String resolved = resolveRequestParameter(param.getValue(), queryMap, pathMap, headerMap, mappingContext);
+                if (resolved == null) {
+                    continue;
+                }
                 if (dest.startsWith("integration.request.header.")) {
                     outHeaders.put(dest.substring("integration.request.header.".length()), resolved);
                 } else if (dest.startsWith("integration.request.querystring.")) {
@@ -990,47 +1017,120 @@ public class ApiGatewayExecuteController {
             return new AuthorizerResult(null, result.principalId(), result.context());
         }
         if ("CUSTOM".equals(authorizationType)) {
-            String authorizerId = method.getAuthorizerId();
-            if (authorizerId == null) {
-                return new AuthorizerResult(null, null, null);
-            }
-
-            io.github.hectorvent.floci.services.apigateway.model.Authorizer auth = apiGatewayService.getAuthorizer(region, apiId, authorizerId);
-            String authorizerType = auth.getType();
-            String lambdaName = functionNameFromUri(auth.getAuthorizerUri());
-            if ((!"TOKEN".equals(authorizerType) && !"REQUEST".equals(authorizerType))
-                    || lambdaName == null || lambdaName.isBlank()) {
-                return new AuthorizerResult(gatewayResponseOr(Response.status(500).build(), scope,
-                        GatewayResponseType.AUTHORIZER_CONFIGURATION_ERROR, null), null, null);
-            }
-
-            String event = toAuthorizerEvent(auth, headers, region, apiId, stageName, httpMethod, requestPath, resourcePath, resourceId, stage, uriInfo, resolvedApiKey);
-            try {
-                InvokeResult result = lambdaService.invoke(region, lambdaName, event.getBytes(), InvocationType.RequestResponse);
-                if (result.getFunctionError() != null) {
-                    return new AuthorizerResult(gatewayResponseOr(Response.status(403).build(), scope,
-                            GatewayResponseType.AUTHORIZER_FAILURE, null), null, null);
-                }
-
-                JsonNode policy = objectMapper.readTree(result.getPayload());
-                String effect = policy.path("policyDocument").path("Statement").get(0).path("Effect").asText("Deny");
-                if ("Deny".equalsIgnoreCase(effect)) {
-                    return new AuthorizerResult(
-                            gatewayResponse(scope, GatewayResponseType.ACCESS_DENIED, 403,
-                                    "User is not authorized to access this resource"),
-                            null,
-                            null);
-                }
-                String principalId = policy.path("principalId").asText(null);
-                Map<String, Object> context = extractAuthorizerContext(policy.path("context"));
-                return new AuthorizerResult(null, principalId, context);
-            } catch (Exception e) {
-                LOG.warnv("Authorizer failure: {0}", e.getMessage());
-                return new AuthorizerResult(gatewayResponseOr(Response.status(500).build(), scope,
-                        GatewayResponseType.AUTHORIZER_FAILURE, null), null, null);
-            }
+            return invokeLambdaAuthorizer(scope, region, apiId, stageName, httpMethod, requestPath,
+                    resourcePath, resourceId, stage, method, headers, uriInfo, resolvedApiKey);
         }
         return new AuthorizerResult(null, null, null);
+    }
+
+    private AuthorizerResult invokeLambdaAuthorizer(GatewayResponseScope scope, String region, String apiId,
+                                                     String stageName, String httpMethod, String requestPath,
+                                                     String resourcePath, String resourceId, Stage stage,
+                                                     MethodConfig method, HttpHeaders headers, UriInfo uriInfo,
+                                                     ResolvedApiKey resolvedApiKey) {
+        if (method.getAuthorizerId() == null) {
+            return authorizerError(scope, GatewayResponseType.AUTHORIZER_CONFIGURATION_ERROR, 500);
+        }
+        try {
+            io.github.hectorvent.floci.services.apigateway.model.Authorizer auth =
+                    apiGatewayService.getAuthorizer(region, apiId, method.getAuthorizerId());
+            String function = functionNameFromUri(auth.getAuthorizerUri());
+            if ((!"TOKEN".equals(auth.getType()) && !"REQUEST".equals(auth.getType()))
+                    || function == null || function.isBlank()) {
+                return authorizerError(scope, GatewayResponseType.AUTHORIZER_CONFIGURATION_ERROR, 500);
+            }
+            int ttl = Integer.parseInt(auth.getAuthorizerResultTtlInSeconds());
+            String event = toAuthorizerEvent(auth, headers, region, apiId, stageName, httpMethod,
+                    requestPath, resourcePath, resourceId, stage, uriInfo, resolvedApiKey);
+            List<String> identities = authorizerIdentityValues(scope, auth, event);
+            if (("TOKEN".equals(auth.getType()) || ttl > 0) && identities == null) {
+                return authorizerError(scope, GatewayResponseType.UNAUTHORIZED, 401);
+            }
+            RestLambdaAuthorizer.CacheKey key = new RestLambdaAuthorizer.CacheKey(
+                    new RestLambdaAuthorizer.Scope(regionResolver.getAccountId(), region, apiId, stageName),
+                    stage.getDeploymentId(), auth.getId(), auth.getAuthorizerUri(), auth.getType(),
+                    auth.getIdentitySource(), ttl, identities != null ? identities : List.of());
+            RestLambdaAuthorizer.Result verified = restLambdaAuthorizer.get(key);
+            if (verified == null) {
+                try (RestLambdaAuthorizer.Invocation pending = restLambdaAuthorizer.beginInvocation(key)) {
+                    InvokeResult invocation = lambdaService.invoke(region, function,
+                            event.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+                    if (invocation.getFunctionError() != null) {
+                        return lambdaAuthorizerFailure(scope, invocation);
+                    }
+                    verified = restLambdaAuthorizer.parse(invocation.getPayload());
+                    pending.cache(verified);
+                }
+            }
+            String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, requestPath);
+            Map<String, List<String>> conditions = Map.of("aws:SourceIp", List.of(routeContext.sourceIp()),
+                    "aws:SecureTransport", List.of(Boolean.toString("https".equals(uriInfo.getRequestUri().getScheme()))),
+                    "aws:CurrentTime", List.of(Instant.now().toString()));
+            if (!restLambdaAuthorizer.permits(verified, methodArn, conditions)) {
+                return authorizerError(scope, GatewayResponseType.ACCESS_DENIED, 403);
+            }
+            return new AuthorizerResult(null, verified.principalId(), verified.context());
+        } catch (Exception exception) {
+            LOG.warnv("Authorizer failure: {0}", exception.getMessage());
+            return authorizerError(scope, GatewayResponseType.AUTHORIZER_FAILURE, 500);
+        }
+    }
+
+    private AuthorizerResult lambdaAuthorizerFailure(GatewayResponseScope scope, InvokeResult invocation) throws IOException {
+        JsonNode error = objectMapper.readTree(invocation.getPayload());
+        boolean unauthorized = error != null && ("Unauthorized".equals(error.asText())
+                || "Unauthorized".equals(error.path("errorMessage").asText()));
+        return authorizerError(scope, unauthorized ? GatewayResponseType.UNAUTHORIZED
+                : GatewayResponseType.AUTHORIZER_FAILURE, unauthorized ? 401 : 500);
+    }
+
+    private AuthorizerResult authorizerError(GatewayResponseScope scope, GatewayResponseType type, int status) {
+        String message = switch (type) {
+            case UNAUTHORIZED -> "Unauthorized";
+            case ACCESS_DENIED -> "User is not authorized to access this resource";
+            default -> "Internal server error";
+        };
+        return new AuthorizerResult(gatewayResponse(scope, type, status, message), null, null);
+    }
+
+    private List<String> authorizerIdentityValues(GatewayResponseScope scope,
+            io.github.hectorvent.floci.services.apigateway.model.Authorizer auth, String event) throws IOException {
+        if (auth.getIdentitySource() == null || auth.getIdentitySource().isBlank()) {
+            return null;
+        }
+        List<String> identities = new ArrayList<>();
+        Map<String, Object> context = "REQUEST".equals(auth.getType())
+                ? objectMapper.convertValue(objectMapper.readTree(event).path("requestContext"), MAP_TYPE) : Map.of();
+        for (String source : auth.getIdentitySource().split(",", -1)) {
+            source = source.trim();
+            String value = authorizerIdentityValue(scope, auth.getType(), source, context);
+            if (value == null || value.isEmpty()) {
+                return null;
+            }
+            identities.add(value);
+        }
+        return identities;
+    }
+
+    private String authorizerIdentityValue(GatewayResponseScope scope, String type, String source,
+                                            Map<String, Object> context) {
+        if (source.startsWith("method.request.header.")) {
+            return scope.headers().getHeaderString(source.substring("method.request.header.".length()));
+        }
+        if (!"REQUEST".equals(type)) {
+            return null;
+        }
+        if (source.startsWith("method.request.querystring.")) {
+            return scope.uriInfo().getQueryParameters().getFirst(source.substring("method.request.querystring.".length()));
+        }
+        if (source.startsWith("stageVariables.")) {
+            return scope.stage().getVariables().get(source.substring("stageVariables.".length()));
+        }
+        if (source.startsWith("context.")) {
+            Object resolved = contextValue(context, source.substring("context.".length()));
+            return resolved != null ? resolved.toString() : null;
+        }
+        return null;
     }
 
     private Response validateRequest(GatewayResponseScope scope, String region, String apiId, MethodConfig method,
@@ -1099,7 +1199,7 @@ public class ApiGatewayExecuteController {
                                     com.networknt.schema.JsonSchemaFactory.getInstance(
                                             com.networknt.schema.SpecVersion.VersionFlag.V4);
                             com.networknt.schema.JsonSchema schema = factory.getSchema(schemaNode);
-                            var errors = schema.validate(bodyNode);
+                            Set<ValidationMessage> errors = schema.validate(bodyNode);
                             if (!errors.isEmpty()) {
                                 String errorMsg = errors.iterator().next().getMessage();
                                 return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_BODY, 400,
@@ -1117,13 +1217,6 @@ public class ApiGatewayExecuteController {
         }
 
         return null;
-    }
-
-    private Map<String, Object> extractAuthorizerContext(JsonNode contextNode) {
-        if (contextNode == null || contextNode.isMissingNode() || contextNode.isNull() || !contextNode.isObject()) {
-            return null;
-        }
-        return objectMapper.convertValue(contextNode, MAP_TYPE);
     }
 
     private String toAuthorizerEvent(io.github.hectorvent.floci.services.apigateway.model.Authorizer auth,
@@ -1182,7 +1275,7 @@ public class ApiGatewayExecuteController {
 
             // identity.apiKey / identity.apiKeyId: resolve from usage plans linked to this (apiId, stage)
             ObjectNode identity = ctx.putObject("identity");
-            identity.put("sourceIp", "127.0.0.1");
+            identity.put("sourceIp", routeContext.sourceIp());
             String userAgent = headers.getHeaderString("User-Agent");
             identity.put("userAgent", userAgent != null ? userAgent : "");
             if (resolvedApiKey != null) {
@@ -1298,9 +1391,9 @@ public class ApiGatewayExecuteController {
         String arnRegion = region != null ? region : regionResolver.getDefaultRegion();
         String domainName = AwsEndpoints.executeApiHost(apiId, arnRegion);
         long nowMillis = System.currentTimeMillis();
-        String requestTime = java.time.format.DateTimeFormatter
+        String requestTime = DateTimeFormatter
                 .ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
-                .format(java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC));
+                .format(ZonedDateTime.now(ZoneOffset.UTC));
 
         ObjectNode ctx = event.putObject("requestContext");
         ctx.put("accountId", regionResolver.getAccountId());
@@ -1337,7 +1430,7 @@ public class ApiGatewayExecuteController {
         identity.putNull("cognitoIdentityId");
         identity.putNull("cognitoIdentityPoolId");
         identity.putNull("principalOrgId");
-        identity.put("sourceIp", "127.0.0.1");
+        identity.put("sourceIp", routeContext.sourceIp());
         putOrNull(identity, "user", iamIdentity == null ? null : iamIdentity.userId());
         String userAgent = headers.getHeaderString("User-Agent");
         identity.put("userAgent", userAgent != null ? userAgent : "");
@@ -1527,9 +1620,9 @@ public class ApiGatewayExecuteController {
         if (headersNode == null || !headersNode.isObject()) {
             return Optional.empty();
         }
-        var it = headersNode.fields();
+        Iterator<Map.Entry<String, JsonNode>> it = headersNode.fields();
         while (it.hasNext()) {
-            var e = it.next();
+            Map.Entry<String, JsonNode> e = it.next();
             if (e.getKey().equalsIgnoreCase(name)) {
                 JsonNode value = e.getValue().isArray() ? e.getValue().get(0) : e.getValue();
                 return value == null || value.isNull() ? Optional.empty() : Optional.of(value.asText());
@@ -1624,7 +1717,7 @@ public class ApiGatewayExecuteController {
             for (Map.Entry<String, String> param : integrationReqParams.entrySet()) {
                 String dest = param.getKey();    // integration.request.header.X-Foo or integration.request.querystring.bar
                 String source = param.getValue(); // method.request.querystring.q or method.request.header.Auth or method.request.path.id
-                String resolvedValue = resolveRequestParameter(source, queryMap, pathMap, headerMap);
+                String resolvedValue = resolveRequestParameter(source, queryMap, pathMap, headerMap, Map.of());
                 if (resolvedValue != null) {
                     if (dest.startsWith("integration.request.header.")) {
                         headerMap.put(dest.substring("integration.request.header.".length()), resolvedValue);
@@ -1985,9 +2078,42 @@ public class ApiGatewayExecuteController {
         return null;
     }
 
+    private Map<String, Object> httpRequestMappingContext(GatewayResponseScope scope, String requestId,
+                                                         AuthorizerResult authorizerResult) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("accountId", regionResolver.getAccountId());
+        context.put("apiId", scope.apiId());
+        context.put("deploymentId", scope.stage().getDeploymentId());
+        context.put("httpMethod", scope.httpMethod());
+        context.put("path", "/" + scope.stageName() + scope.path());
+        context.put("protocol", "HTTP/1.1");
+        context.put("requestId", requestId);
+        context.put("resourceId", scope.resource().getId());
+        context.put("resourcePath", scope.resource().getPath());
+        context.put("stage", scope.stageName());
+
+        Map<String, Object> identity = new LinkedHashMap<>();
+        identity.put("sourceIp", "127.0.0.1");
+        identity.put("userAgent", scope.headers().getHeaderString("User-Agent"));
+        context.put("identity", identity);
+
+        Map<String, Object> authorizer = new LinkedHashMap<>();
+        if (authorizerResult.context() != null) {
+            authorizer.putAll(authorizerResult.context());
+        }
+        if (authorizerResult.principalId() != null) {
+            authorizer.put("principalId", authorizerResult.principalId());
+        }
+        context.put("authorizer", authorizer);
+        return context;
+    }
+
     private String resolveRequestParameter(String source, Map<String, String> queryParams,
-                                            Map<String, String> pathParams, Map<String, String> headers) {
-        if (source == null) return null;
+                                            Map<String, String> pathParams, Map<String, String> headers,
+                                            Map<String, Object> context) {
+        if (source == null) {
+            return null;
+        }
         if (source.startsWith("method.request.querystring.")) {
             return queryParams.get(source.substring("method.request.querystring.".length()));
         }
@@ -1996,6 +2122,11 @@ public class ApiGatewayExecuteController {
         }
         if (source.startsWith("method.request.header.")) {
             return headers.get(source.substring("method.request.header.".length()));
+        }
+        if (source.startsWith("context.")) {
+            Object value = contextValue(context, source.substring("context.".length()));
+            return value instanceof String || value instanceof Number || value instanceof Boolean
+                    ? value.toString() : null;
         }
         // Static value
         if (source.startsWith("'") && source.endsWith("'")) {
@@ -3564,7 +3695,7 @@ public class ApiGatewayExecuteController {
         context.put("status", status);
 
         Map<String, Object> identity = new LinkedHashMap<>();
-        identity.put("sourceIp", "127.0.0.1");
+        identity.put("sourceIp", routeContext.sourceIp());
         identity.put("userAgent", scope.headers() != null ? scope.headers().getHeaderString("User-Agent") : null);
         context.put("identity", identity);
 

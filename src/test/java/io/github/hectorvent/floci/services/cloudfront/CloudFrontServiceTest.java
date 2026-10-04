@@ -134,8 +134,8 @@ class CloudFrontServiceTest {
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         EmulatorConfig.DnsConfig dnsConfig = Mockito.mock(EmulatorConfig.DnsConfig.class);
-        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
-        var cloudFrontConfig = Mockito.mock(EmulatorConfig.CloudFrontServiceConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.CloudFrontServiceConfig cloudFrontConfig = Mockito.mock(EmulatorConfig.CloudFrontServiceConfig.class);
 
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
         when(config.hostname()).thenReturn(Optional.empty());

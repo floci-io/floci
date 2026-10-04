@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -389,7 +390,7 @@ class TlsCertificateHostnameTest {
 
         Path userCert = tempDir.resolve("user.crt");
         Path userKey = tempDir.resolve("user.key");
-        var user = new CertificateGenerator().generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
+        CertificateGenerator.GeneratedCertificate user = new CertificateGenerator().generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
         Files.writeString(userCert, user.certificatePem());
         Files.writeString(userKey, user.privateKeyPem());
         System.setProperty("floci.tls.enabled", "true");
@@ -410,7 +411,7 @@ class TlsCertificateHostnameTest {
         // The exact SAN list TlsConfigSource would compute for this configuration, so only the
         // issuer check can trigger regeneration here.
         List<String> sans = TlsConfigSource.DEFAULT_SAN_HOSTNAMES;
-        var legacy = gen.generateSelfSignedCertificate("localhost", sans, KeyAlgorithm.RSA_2048);
+        CertificateGenerator.GeneratedCertificate legacy = gen.generateSelfSignedCertificate("localhost", sans, KeyAlgorithm.RSA_2048);
         Files.writeString(tlsDir.resolve("floci-server.crt"), legacy.certificatePem());
         Files.writeString(tlsDir.resolve("floci-server.key"), legacy.privateKeyPem());
         Files.writeString(tlsDir.resolve("floci-server.metadata.json"),
@@ -484,7 +485,7 @@ class TlsCertificateHostnameTest {
         X509Certificate cert = parseCertificate(certFile);
         List<String> sans = extractSansFromCertificate(cert);
 
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             String expectedWildcard = "*.dkr.ecr." + region + ".localhost.floci.io";
             assertTrue(TlsConfigSource.DEFAULT_SAN_HOSTNAMES.contains(expectedWildcard),
                     "DEFAULT_SAN_HOSTNAMES missing ECR wildcard for region " + region);
@@ -496,9 +497,7 @@ class TlsCertificateHostnameTest {
     // ==================== Helper Methods ====================
 
     private X509Certificate parseCertificate(Path certFile) throws Exception {
-        String certPem = Files.readString(certFile);
-        CertificateGenerator gen = new CertificateGenerator();
-        return gen.parseCertificate(certPem);
+        return Pem.parseCertificate(Files.readString(certFile));
     }
 
     private List<String> extractSansFromCertificate(X509Certificate cert) throws Exception {

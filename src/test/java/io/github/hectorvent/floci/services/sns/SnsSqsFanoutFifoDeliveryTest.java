@@ -91,13 +91,13 @@ class SnsSqsFanoutFifoDeliveryTest {
         snsService.subscribe(topicArn, "sqs", queueArn, REGION, Map.of());
 
         // Act
-        var entries = List.<Map<String, Object>>of(
+        List<Map<String, Object>> entries = List.of(
                 Map.of("Id", "e1", "Message", "batch-msg-1",
                         "MessageGroupId", "group-a", "MessageDeduplicationId", "dedup-1"),
                 Map.of("Id", "e2", "Message", "batch-msg-2",
                         "MessageGroupId", "group-b", "MessageDeduplicationId", "dedup-2")
         );
-        var result = snsService.publishBatch(topicArn, entries, REGION);
+        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, entries, REGION);
 
         // Assert
         assertEquals(2, result.successful().size());
@@ -124,11 +124,11 @@ class SnsSqsFanoutFifoDeliveryTest {
         snsService.subscribe(topicArn, "sqs", queueArn, REGION, Map.of());
 
         // Act — no explicit dedup IDs; topic derives them from message content
-        var entries = List.<Map<String, Object>>of(
+        List<Map<String, Object>> entries = List.of(
                 Map.of("Id", "e1", "Message", "cbd-batch-msg-1", "MessageGroupId", "group-a"),
                 Map.of("Id", "e2", "Message", "cbd-batch-msg-2", "MessageGroupId", "group-b")
         );
-        var result = snsService.publishBatch(topicArn, entries, REGION);
+        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, entries, REGION);
 
         // Assert
         assertEquals(2, result.successful().size());
@@ -268,13 +268,13 @@ class SnsSqsFanoutFifoDeliveryTest {
                 "fifo-batch-group-scope-queue.fifo");
 
         // Act: one batch, same dedup ID under two different message groups
-        var entries = List.<Map<String, Object>>of(
+        List<Map<String, Object>> entries = List.of(
                 Map.of("Id", "e1", "Message", "batch-group-one",
                         "MessageGroupId", "group-1", "MessageDeduplicationId", "shared-dedup"),
                 Map.of("Id", "e2", "Message", "batch-group-two",
                         "MessageGroupId", "group-2", "MessageDeduplicationId", "shared-dedup")
         );
-        var result = snsService.publishBatch(topicArn, entries, REGION);
+        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, entries, REGION);
 
         // Assert
         assertEquals(2, result.successful().size());

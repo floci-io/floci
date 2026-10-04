@@ -43,10 +43,12 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1153,6 +1155,49 @@ class ContainerLauncherTest {
         }
     }
 
+    /**
+     * The sweep works from this process's own map of names, so a name it tracked can belong to
+     * another resource namespace sharing the daemon: that volume is left alone, not requeued.
+     */
+    @Test
+    void cleanupSupersededVolumes_leavesAVolumeOfAnotherResourceNamespaceAlone() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("cleanup-ns-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]);
+        LambdaFunction v1 = new LambdaFunction();
+        v1.setFunctionName("cleanup-ns-fn");
+        v1.setRuntime("nodejs20.x");
+        v1.setHandler("index.handler");
+        v1.setCodeLocalPath(codePath.toString());
+        v1.setCodeSha256("cleanup-ns-fn-sha-v1");
+        String volumeV1 = ContainerLauncher.codeVolumeName(v1);
+        LambdaFunction v2 = new LambdaFunction();
+        v2.setFunctionName("cleanup-ns-fn");
+        v2.setRuntime("nodejs20.x");
+        v2.setHandler("index.handler");
+        v2.setCodeLocalPath(codePath.toString());
+        v2.setCodeSha256("cleanup-ns-fn-sha-v2");
+        when(lifecycleManager.tryVolumeLabels(volumeV1))
+                .thenReturn(Optional.of(Map.of("floci_namespace", "someone-else")));
+
+        long originalBytes = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        long originalGrace = ContainerLauncher.VOLUME_CLEANUP_GRACE_MS;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = -1;
+            launcher.launch(v1);
+            launcher.launch(v2);
+
+            launcher.cleanupSupersededVolumes();
+            launcher.cleanupSupersededVolumes();
+
+            verify(lifecycleManager, never()).removeVolume(volumeV1);
+            verify(lifecycleManager, times(1)).tryVolumeLabels(volumeV1);
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = originalBytes;
+            ContainerLauncher.VOLUME_CLEANUP_GRACE_MS = originalGrace;
+        }
+    }
+
     @Test
     void cleanupSupersededVolumes_retriesOnALaterSweep_whenTheVolumeIsStillInUse() throws Exception {
         // Regression: removeVolume() silently no-ops when Docker refuses because the volume is
@@ -1484,7 +1529,7 @@ class ContainerLauncherTest {
      *  returns for a directory: the directory itself as a leading entry, then each name as a direct
      *  child, executable. */
     private static byte[] tarOf(String... binaryNames) throws IOException {
-        var entries = new java.util.LinkedHashMap<String, Boolean>();
+        LinkedHashMap<String, Boolean> entries = new LinkedHashMap<>();
         for (String name : binaryNames) {
             entries.put(name, true);
         }
@@ -1496,12 +1541,12 @@ class ContainerLauncherTest {
      *  exercised. Names containing "/" are written as-is (not prefixed), to model entries nested
      *  more than one level below the extensions directory. */
     private static byte[] tarOfRaw(java.util.Map<String, Boolean> nameToExecutable) throws IOException {
-        var bos = new java.io.ByteArrayOutputStream();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
         try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
             TarArchiveEntry dir = new TarArchiveEntry("extensions/");
             tar.putArchiveEntry(dir);
             tar.closeArchiveEntry();
-            for (var e : nameToExecutable.entrySet()) {
+            for (Map.Entry<String, Boolean> e : nameToExecutable.entrySet()) {
                 TarArchiveEntry entry = new TarArchiveEntry("extensions/" + e.getKey());
                 entry.setMode(e.getValue() ? 0100755 : 0100644); // executable vs. non-executable regular file
                 entry.setSize(0);
@@ -1782,7 +1827,7 @@ class ContainerLauncherTest {
 
     @Test
     void launchFunction_extensionDiscovery_filtersNonExecutableAndNestedEntries() throws Exception {
-        var entries = new java.util.LinkedHashMap<String, Boolean>();
+        LinkedHashMap<String, Boolean> entries = new LinkedHashMap<>();
         entries.put("lambda-adapter", true);           // direct child, executable: launched
         entries.put("README.md", false);                // direct child, not executable: skipped
         entries.put("nested/inner-binary", true);        // nested (not a direct child): skipped

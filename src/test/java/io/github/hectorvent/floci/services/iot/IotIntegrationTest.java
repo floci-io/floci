@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.iot;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
+import org.bouncycastle.pkcs.PKCS10CertificationRequest;
+import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -812,11 +815,11 @@ class IotIntegrationTest {
         java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("RSA");
         kpg.initialize(2048);
         java.security.KeyPair kp = kpg.generateKeyPair();
-        var csr = new org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder(
+        PKCS10CertificationRequest csr = new JcaPKCS10CertificationRequestBuilder(
                 new org.bouncycastle.asn1.x500.X500Name("CN=round-trip"), kp.getPublic())
                 .build(new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate()));
         java.io.StringWriter out = new java.io.StringWriter();
-        try (var w = new org.bouncycastle.openssl.jcajce.JcaPEMWriter(out)) {
+        try (JcaPEMWriter w = new JcaPEMWriter(out)) {
             w.writeObject(csr);
         }
         return out.toString();

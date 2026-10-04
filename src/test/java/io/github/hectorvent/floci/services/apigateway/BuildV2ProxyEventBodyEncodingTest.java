@@ -51,7 +51,7 @@ class BuildV2ProxyEventBodyEncodingTest {
                 null, null, null, null,
                 regionResolver, objectMapper, null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null
-        );
+        , null);
     }
 
     @ParameterizedTest(name = "{0}")

@@ -130,6 +130,15 @@ class PipesPollerTest {
     }
 
     @Test
+    void aSourceWithoutAnArnRegionPollsInTheDeploymentDefaultRegion() {
+        when(config.defaultRegion()).thenReturn("cn-north-1");
+        PipesPoller chinaPoller = pollerOver(streams);
+
+        assertEquals("cn-north-1", chinaPoller.extractRegionFromArn("smk://broker.internal:9092"));
+        assertEquals("eu-west-1", chinaPoller.extractRegionFromArn("arn:aws:sqs:eu-west-1:000000000000:orders"));
+    }
+
+    @Test
     void asEventArrayWrapsSingleObjectInBatchArray() throws Exception {
         // Pipes delivers events to a target as a batch array; a single-object enrichment response
         // must become a one-element array so a target like "InputPath": "$.[0]" can unwrap it.

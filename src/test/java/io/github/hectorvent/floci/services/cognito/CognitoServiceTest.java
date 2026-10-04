@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
+import io.github.hectorvent.floci.services.cognito.verification.SlowVerificationCodeStore;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
@@ -41,11 +42,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -57,6 +60,9 @@ import static org.mockito.Mockito.*;
 class CognitoServiceTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** What AWS's DescribeUserPool reports for a pool created without a SignInPolicy. */
+    private static final Map<String, Object> DEFAULT_SIGN_IN_POLICY =
+            Map.of("AllowedFirstAuthFactors", List.of("PASSWORD"));
 
     @Test
     void authSessionValiditySurvivesSerializationAndDefaultsForLegacyClients() throws Exception {
@@ -160,8 +166,46 @@ class CognitoServiceTest {
         Map<String, Object> expectedPasswordPolicy = new HashMap<>();
         expectedPasswordPolicy.put("MinimumLength", 12);
         expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
-        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy, "SignInPolicy", DEFAULT_SIGN_IN_POLICY),
+                pool.getPolicies());
         assertEquals(List.of("email"), pool.getUsernameAttributes());
+    }
+
+    @Test
+    void restoreUserPoolSettingsPutsBackWhatAnUpdateChangedAndKeepsTheSigningKeys() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "before"), "us-east-1");
+        String signingKeyId = service.describeUserPool(pool.getId()).getSigningKeyId();
+        UserPool settings = service.userPoolSettings(pool.getId());
+        assertNull(settings.getSigningPrivateKey(), "the settings copy carries no signing material");
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId(), "PoolName", "after",
+                "AutoVerifiedAttributes", List.of("email"), "MfaConfiguration", "OPTIONAL"), "us-east-1");
+        service.restoreUserPoolSettings(settings);
+
+        UserPool restored = service.describeUserPool(pool.getId());
+        assertEquals("before", restored.getName());
+        assertEquals(List.of(), restored.getAutoVerifiedAttributes(), "a setting the update added is cleared");
+        assertEquals("OFF", restored.getMfaConfiguration());
+        assertEquals(signingKeyId, restored.getSigningKeyId(), "the pool keeps the keys it signs with");
+    }
+
+    @Test
+    void restoreUserPoolClientSettingsPutsBackWhatAnUpdateChanged() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "pool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "web", false, false, List.of(), List.of());
+        UserPoolClient settings = service.userPoolClientSettings(pool.getId(), client.getClientId());
+        // The stored client is updated in place, so the expectation is copied before the update.
+        List<String> flowsBefore = List.copyOf(client.getExplicitAuthFlows());
+
+        service.updateUserPoolClient(pool.getId(), client.getClientId(), "web-v2", null, null, null, null,
+                null, null, List.of("ALLOW_USER_PASSWORD_AUTH"), null, null, null, null, null, null, null,
+                null, null, null, null);
+        service.restoreUserPoolClientSettings(settings);
+
+        UserPoolClient restored = service.describeUserPoolClient(pool.getId(), client.getClientId());
+        assertEquals("web", restored.getClientName());
+        assertEquals(flowsBefore, restored.getExplicitAuthFlows());
+        assertEquals(client.getClientId(), restored.getClientId());
     }
 
     @Test
@@ -657,7 +701,8 @@ class CognitoServiceTest {
         Map<String, Object> expectedPasswordPolicy = new HashMap<>();
         expectedPasswordPolicy.put("MinimumLength", 7);
         expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
-        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy, "SignInPolicy", DEFAULT_SIGN_IN_POLICY),
+                pool.getPolicies());
 
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "no-requirements-client", false, false, List.of(), List.of());
@@ -687,7 +732,8 @@ class CognitoServiceTest {
         expectedPasswordPolicy.put("RequireNumbers", false);
         expectedPasswordPolicy.put("RequireSymbols", false);
         expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
-        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy, "SignInPolicy", DEFAULT_SIGN_IN_POLICY),
+                pool.getPolicies());
     }
 
     @Test
@@ -2750,17 +2796,59 @@ class CognitoServiceTest {
         assertEquals("InvalidParameterException", ex.getErrorCode());
     }
 
+    /** A preferred challenge the user has not set up gets the choice of those they have, as AWS answers it. */
     @Test
-    void initiateAuthWithUserAuthRejectsAnUnavailablePreferredChallenge() {
-        // alice has neither a password nor an SRP verifier at this point: not confirmed yet.
+    void initiateAuthWithUserAuthOffersTheChoiceForAPreferredChallengeTheUserHasNotSetUp() {
+        // alice has a temporary password, and this service sends no codes, so EMAIL_OTP is not hers to take.
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
         service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
 
-        AwsException ex = assertThrows(AwsException.class, () -> service.initiateAuth(
-                client.getClientId(), "USER_AUTH",
-                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP")));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP"));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), result.get("AvailableChallenges"));
+    }
+
+    /** A PREFERRED_CHALLENGE naming no challenge Cognito supports is refused with AWS's message, for any username. */
+    @Test
+    void initiateAuthWithUserAuthRefusesAPreferredChallengeCognitoDoesNotSupport() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        service.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        for (String username : List.of("alice", "nobody")) {
+            AwsException ex = assertThrows(AwsException.class, () -> service.initiateAuth(client.getClientId(),
+                    "USER_AUTH", Map.of("USERNAME", username, "PREFERRED_CHALLENGE", "BOGUS")));
+            assertEquals("InvalidParameterException", ex.getErrorCode(), username);
+            assertEquals("The preferred challenge must be one of the supported challenges. "
+                    + "[PASSWORD, PASSWORD_SRP, SMS_OTP, EMAIL_OTP, WEB_AUTHN]", ex.getMessage(), username);
+        }
+    }
+
+    /**
+     * With user existence errors prevented, an unknown user's PREFERRED_CHALLENGE is answered as a known
+     * user's would be: with that challenge when the sign-in policy allows it, and with the choice of the
+     * policy's factors when it does not.
+     */
+    @Test
+    void initiateAuthWithUserAuthAnswersAnUnknownUsersPreferredChallengeAsAKnownUsers() {
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "TestPool",
+                "Policies", Map.of("SignInPolicy", Map.of(
+                        "AllowedFirstAuthFactors", List.of("PASSWORD", "SMS_OTP")))), "us-east-1");
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        service.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        Map<String, Object> allowed = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "nobody", "PREFERRED_CHALLENGE", "SMS_OTP"));
+        Map<String, Object> disallowed = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "nobody", "PREFERRED_CHALLENGE", "EMAIL_OTP"));
+
+        assertEquals("SMS_OTP", allowed.get("ChallengeName"));
+        assertEquals("SELECT_CHALLENGE", disallowed.get("ChallengeName"));
+        assertEquals(List.of("PASSWORD", "SMS_OTP"), disallowed.get("AvailableChallenges"));
     }
 
     @Test
@@ -3215,7 +3303,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
@@ -3271,7 +3359,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "SMS_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("phone_number", "+15551234567", "phone_number_verified", "true"), "TempPass1!");
@@ -3329,7 +3417,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
@@ -3343,6 +3431,393 @@ class CognitoServiceTest {
                 client.getClientId(), "EMAIL_OTP", session,
                 Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", "000000")));
         assertEquals("CodeMismatchException", ex.getErrorCode());
+    }
+
+    /** AWS, pool policy [PASSWORD]: a user with a password and a verified email gets SELECT_CHALLENGE with PASSWORD_SRP and PASSWORD. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void initiateAuthWithUserAuthOffersOnlyTheFirstFactorsTheSignInPolicyAllows() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        Map<String, Object> result = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertEquals(Set.of("PASSWORD", "PASSWORD_SRP"), Set.copyOf((List<String>) result.get("AvailableChallenges")));
+    }
+
+    @Test
+    void initiateAuthWithUserAuthOffersOnlyEmailOtpWhenThePolicyAllowsOnlyEmailOtp() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        Map<String, Object> result = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertEquals(List.of("EMAIL_OTP"), result.get("AvailableChallenges"));
+    }
+
+    @Test
+    void initiateAuthWithUserAuthOffersNoPasswordChallengeToAUserWithoutAPassword() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, null);
+
+        Map<String, Object> result = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals(List.of("EMAIL_OTP"), result.get("AvailableChallenges"));
+    }
+
+    /** Observed on AWS: a pool created without a SignInPolicy, on any tier, describes it as PASSWORD alone. */
+    @ParameterizedTest
+    @CsvSource({"LITE", "ESSENTIALS", "PLUS"})
+    void createUserPoolDefaultsTheSignInPolicyToPasswordAlone(String tier) {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool", "UserPoolTier", tier), "us-east-1");
+
+        assertEquals(Map.of("SignInPolicy", DEFAULT_SIGN_IN_POLICY),
+                service.describeUserPool(pool.getId()).getPolicies());
+    }
+
+    /**
+     * UpdateUserPool keeps a pool's policies when the request names none, as it keeps every member it omits,
+     * and a Policies without a SignInPolicy replaces them whole, so the sign-in policy is its default again.
+     */
+    @Test
+    void updateUserPoolKeepsTheSignInPolicyOrPutsTheDefaultBack() {
+        UserPool pool = poolWithFirstFactors(service, "PASSWORD", "EMAIL_OTP");
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId()), "us-east-1");
+        assertEquals(Map.of("AllowedFirstAuthFactors", List.of("PASSWORD", "EMAIL_OTP")),
+                service.describeUserPool(pool.getId()).getPolicies().get("SignInPolicy"));
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId(),
+                "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 8))), "us-east-1");
+        assertEquals(DEFAULT_SIGN_IN_POLICY, service.describeUserPool(pool.getId()).getPolicies().get("SignInPolicy"));
+    }
+
+    /**
+     * A pool without a SignInPolicy, created so or persisted by a Floci that did not store the default yet,
+     * allows PASSWORD alone, as AWS's default does: a user with a verified email is offered no EMAIL_OTP.
+     */
+    @Test
+    void initiateAuthWithUserAuthOffersOnlyPasswordChallengesWithoutASignInPolicy() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        Map<String, Object> created = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        serviceWithVerification.describeUserPool(pool.getId()).setPolicies(null);
+        Map<String, Object> persisted = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), created.get("AvailableChallenges"));
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), persisted.get("AvailableChallenges"));
+    }
+
+    /**
+     * AWS answers a PREFERRED_CHALLENGE the user cannot take, because the sign-in policy leaves it out or the
+     * user has not set it up, as it answers InitiateAuth without one: SELECT_CHALLENGE and the challenges
+     * they can take. Nothing is sent meanwhile.
+     */
+    @ParameterizedTest
+    @CsvSource({"PASSWORD", "SMS_OTP", "WEB_AUTHN"})
+    void initiateAuthWithUserAuthOffersTheChoiceForAPreferredChallengeTheUserCannotTake(String preferred) {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP", "SMS_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        Map<String, Object> result = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", preferred));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertEquals(List.of("EMAIL_OTP"), result.get("AvailableChallenges"));
+        assertNotNull(result.get("Session"));
+        verify(verificationCodeService, never()).issue(any(), any(), any(), any());
+    }
+
+    /** Only PREFERRED_CHALLENGE falls back: an answer to SELECT_CHALLENGE outside the choice offered is refused. */
+    @Test
+    void respondToSelectChallengeRefusesAnAnswerThePolicyDisallows() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+        String session = (String) serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+
+        AwsException answer = assertThrows(AwsException.class, () -> serviceWithVerification.respondToAuthChallenge(
+                client.getClientId(), "SELECT_CHALLENGE", session,
+                Map.of("USERNAME", "alice", "ANSWER", "PASSWORD_SRP", "SRP_A", "ABCDEF1234567890")));
+        assertEquals("InvalidParameterException", answer.getErrorCode());
+    }
+
+    /** Managed login asks again after a wrong code, so the USER_AUTH session must outlive one. */
+    @Test
+    void managedLoginEmailOtpKeepsTheSessionForAnotherTryAfterAWrongCode() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("654321");
+        doThrow(new VerificationCodeException(VerificationCodeException.Kind.MISMATCH, "nope"))
+                .when(verificationCodeService).consume(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP),
+                        eq("000000"));
+        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, null);
+
+        String session = serviceWithVerification.startManagedLoginEmailOtp(client, "alice");
+        AwsException wrong = assertThrows(AwsException.class,
+                () -> serviceWithVerification.completeManagedLoginEmailOtp(client, session, "000000"));
+        assertEquals("CodeMismatchException", wrong.getErrorCode());
+
+        assertEquals("alice", serviceWithVerification.completeManagedLoginEmailOtp(client, session, "654321")
+                .getUsername());
+        AwsException replayed = assertThrows(AwsException.class,
+                () -> serviceWithVerification.completeManagedLoginEmailOtp(client, session, "654321"));
+        assertEquals("NotAuthorizedException", replayed.getErrorCode(), "a session that signed in is spent");
+    }
+
+    /**
+     * Requests answering one session with its code at the same moment, from the sign-in page or from
+     * RespondToAuthChallenge, sign in once: the code store redeems the code once, and the others find it
+     * used or the session spent. The store reads the code a moment late, so they would all find it unused
+     * if redeeming it were not one step.
+     */
+    @Test
+    void managedLoginEmailOtpSignsInOnceWhenTheSameCodeArrivesConcurrently() throws Exception {
+        AtomicReference<String> sentCode = new AtomicReference<>();
+        CognitoService serviceWithVerification = serviceWithSlowCodeStore(Clock.systemUTC(), sentCode);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, null);
+        int callers = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(callers);
+        try {
+            for (int round = 0; round < 10; round++) {
+                String session = serviceWithVerification.startManagedLoginEmailOtp(client, "alice");
+                String code = sentCode.get();
+                CountDownLatch ready = new CountDownLatch(callers);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Boolean>> outcomes = new ArrayList<>();
+                for (int caller = 0; caller < callers; caller++) {
+                    boolean throughTheApi = caller % 2 == 1;
+                    outcomes.add(executor.submit(() -> {
+                        ready.countDown();
+                        start.await();
+                        try {
+                            if (throughTheApi) {
+                                serviceWithVerification.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP",
+                                        session, Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", code));
+                            } else {
+                                serviceWithVerification.completeManagedLoginEmailOtp(client, session, code);
+                            }
+                            return true;
+                        } catch (AwsException e) {
+                            assertTrue(Set.of("CodeMismatchException", "NotAuthorizedException")
+                                    .contains(e.getErrorCode()), e.getErrorCode() + ": " + e.getMessage());
+                            return false;
+                        }
+                    }));
+                }
+                assertTrue(ready.await(10, TimeUnit.SECONDS));
+                start.countDown();
+                int signedIn = 0;
+                for (Future<Boolean> outcome : outcomes) {
+                    if (outcome.get(10, TimeUnit.SECONDS)) {
+                        signedIn++;
+                    }
+                }
+                assertEquals(1, signedIn, "round " + round);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * Every live EMAIL_OTP or SMS_OTP session of a user takes the user's latest code, so two of them answered
+     * with it at once through RespondToAuthChallenge sign in once: the code store redeems it once. The store
+     * reads the code a moment late, so both would find it unused if redeeming it were not one step.
+     */
+    @ParameterizedTest
+    @CsvSource({"EMAIL_OTP, EMAIL_OTP_CODE, email, alice@example.com",
+            "SMS_OTP, SMS_OTP_CODE, phone_number, +15555550100"})
+    void respondToAuthChallengeRedeemsASignInCodeOnceAcrossSessions(String challenge, String codeParameter,
+                                                                    String attribute, String destination)
+            throws Exception {
+        MutableClock clock = new MutableClock();
+        AtomicReference<String> sentCode = new AtomicReference<>();
+        CognitoService serviceWithVerification = serviceWithSlowCodeStore(clock, sentCode);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, challenge);
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice",
+                Map.of(attribute, destination, attribute + "_verified", "true"), null);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 10; round++) {
+                List<String> sessions = new ArrayList<>();
+                while (sessions.size() < 2) {
+                    sessions.add((String) serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                            Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", challenge)).get("Session"));
+                    // Past the resend limit, the next session's code replaces this one's, and both take it.
+                    clock.advance(Duration.ofSeconds(31));
+                }
+                String code = sentCode.get();
+                CountDownLatch ready = new CountDownLatch(sessions.size());
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Boolean>> outcomes = new ArrayList<>();
+                for (String session : sessions) {
+                    outcomes.add(executor.submit(() -> {
+                        ready.countDown();
+                        start.await();
+                        try {
+                            serviceWithVerification.respondToAuthChallenge(client.getClientId(), challenge, session,
+                                    Map.of("USERNAME", "alice", codeParameter, code));
+                            return true;
+                        } catch (AwsException e) {
+                            assertEquals("CodeMismatchException", e.getErrorCode(), e.getMessage());
+                            return false;
+                        }
+                    }));
+                }
+                assertTrue(ready.await(10, TimeUnit.SECONDS));
+                start.countDown();
+                int signedIn = 0;
+                for (Future<Boolean> outcome : outcomes) {
+                    if (outcome.get(10, TimeUnit.SECONDS)) {
+                        signedIn++;
+                    }
+                }
+                assertEquals(1, signedIn, "round " + round);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * Redeeming a code holds up no other user: while one user's code is slow to redeem, from the sign-in page
+     * or from RespondToAuthChallenge, another user starts a USER_AUTH sign-in and answers it with their code.
+     */
+    @ParameterizedTest
+    @CsvSource({"page", "api"})
+    void slowCodeRedemptionForOneUserDoesNotHoldUpAnotherUsersSignIn(String aliceAnswersThrough) throws Exception {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("654321");
+        CountDownLatch aliceRedeeming = new CountDownLatch(1);
+        CountDownLatch releaseAlice = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            aliceRedeeming.countDown();
+            assertTrue(releaseAlice.await(10, TimeUnit.SECONDS));
+            return null;
+        }).when(verificationCodeService).consume(any(), eq("alice"), eq(VerificationCode.Purpose.EMAIL_OTP), any());
+        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        for (String username : List.of("alice", "bob")) {
+            serviceWithVerification.adminCreateUser(pool.getId(), username,
+                    Map.of("email", username + "@example.com", "email_verified", "true"), null);
+        }
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            String aliceSession = serviceWithVerification.startManagedLoginEmailOtp(client, "alice");
+            Future<Object> alice = executor.submit(() -> "page".equals(aliceAnswersThrough)
+                    ? serviceWithVerification.completeManagedLoginEmailOtp(client, aliceSession, "654321")
+                    : serviceWithVerification.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP",
+                            aliceSession, Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", "654321")));
+            assertTrue(aliceRedeeming.await(10, TimeUnit.SECONDS));
+
+            Future<Map<String, Object>> bob = executor.submit(() -> {
+                String bobSession = (String) serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                        Map.of("USERNAME", "bob", "PREFERRED_CHALLENGE", "EMAIL_OTP")).get("Session");
+                return serviceWithVerification.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP", bobSession,
+                        Map.of("USERNAME", "bob", "EMAIL_OTP_CODE", "654321"));
+            });
+
+            assertNotNull(bob.get(5, TimeUnit.SECONDS).get("AuthenticationResult"),
+                    "bob signs in while alice's code is still being redeemed");
+            releaseAlice.countDown();
+            assertNotNull(alice.get(10, TimeUnit.SECONDS));
+        } finally {
+            releaseAlice.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    /** A service whose EMAIL_OTP code is always {@code code}, with delivery mocked out. */
+    private CognitoService serviceWithEmailOtpCode(String code) {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn(code);
+        return serviceWithVerification(verificationCodeService);
+    }
+
+    private CognitoService serviceWithVerification(VerificationCodeService verificationCodeService) {
+        return serviceWithVerification(verificationCodeService, mock(CognitoMessageDispatcher.class));
+    }
+
+    private CognitoService serviceWithVerification(VerificationCodeService verificationCodeService,
+                                                   CognitoMessageDispatcher messageDispatcher) {
+        return new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                "cloudfront.net",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class)
+        );
+    }
+
+    /**
+     * A service with the real code store over a {@link SlowVerificationCodeStore}, keeping its codes' time by
+     * {@code clock}, that puts each code it sends in {@code sentCode}.
+     */
+    private CognitoService serviceWithSlowCodeStore(Clock clock, AtomicReference<String> sentCode) {
+        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        doAnswer(invocation -> {
+            sentCode.set(invocation.getArgument(3));
+            return null;
+        }).when(dispatcher).dispatch(any(), any(), any(), anyString(), any(), any());
+        return serviceWithVerification(new VerificationCodeService(SlowVerificationCodeStore.factory(), clock),
+                dispatcher);
+    }
+
+    private static UserPool poolWithFirstFactors(CognitoService service, String... factors) {
+        return service.createUserPool(Map.of(
+                "PoolName", "TestPool",
+                "Policies", Map.of("SignInPolicy", Map.of("AllowedFirstAuthFactors", List.of(factors)))), "us-east-1");
+    }
+
+    /** Creates alice with a verified email, and with {@code password} as her permanent password unless it is null. */
+    private static void createUserWithVerifiedEmail(CognitoService service, UserPool pool, String password) {
+        service.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "alice@example.com", "email_verified", "true"), null);
+        if (password != null) {
+            service.adminSetUserPassword(pool.getId(), "alice", password, true);
+        }
     }
 
     @Test
@@ -3382,7 +3857,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
@@ -3424,7 +3899,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");

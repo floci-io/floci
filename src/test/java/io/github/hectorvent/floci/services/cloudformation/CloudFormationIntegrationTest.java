@@ -1650,6 +1650,97 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void updateStack_httpApiWithOverrideTagKeepsPinnedId() {
+        String template = """
+            {
+              "Resources": {
+                "MyApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": {
+                    "Name": "cfn-override-api",
+                    "ProtocolType": "HTTP",
+                    "Description": "%s",
+                    "Tags": {
+                      "floci:override-id": "cfn-pinned-api",
+                      "env": "test"
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-http-api-override-stack")
+            .formParam("TemplateBody", template.formatted("before"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Infrastructure tools resend the full tag set, override included, on every update.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", "cfn-http-api-override-stack")
+            .formParam("TemplateBody", template.formatted("after"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-http-api-override-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+        given()
+        .when()
+            .get("/v2/apis/cfn-pinned-api")
+        .then()
+            .statusCode(200)
+            .body("description", equalTo("after"))
+            .body("tags.env", equalTo("test"))
+            .body("tags.'floci:override-id'", nullValue());
+
+        // A different override would rename the API, which is still refused after creation.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", "cfn-http-api-override-stack")
+            .formParam("TemplateBody", template.formatted("renamed").replace("cfn-pinned-api", "cfn-renamed-api"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-http-api-override-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
+
+        given()
+        .when()
+            .get("/v2/apis/cfn-pinned-api")
+        .then()
+            .statusCode(200)
+            .body("description", equalTo("after"))
+            .body("tags.env", equalTo("test"));
+    }
+
+    @Test
     void createStack_lambdaWithEnvironmentVariables() {
         String template = """
             {

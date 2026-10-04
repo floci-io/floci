@@ -114,6 +114,8 @@ class EcsContainerManagerFirelensTest {
         router.setName("log_router");
         router.setImage("amazon/aws-for-fluent-bit:stable");
         router.setFirelensConfiguration(new FirelensConfiguration("fluentbit", Map.of()));
+        router.setLogConfiguration(new LogConfiguration("awslogs",
+                Map.of("awslogs-group", "/ecs/firelens-family", "awslogs-stream-prefix", "firelens"), null));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
@@ -148,8 +150,11 @@ class EcsContainerManagerFirelensTest {
         assertTrue(logConfig.getValue().getConfig().get("fluentd-async-connect") == null,
                 "fluentd-async-connect was removed by Docker 28");
 
-        verify(logStreamer).attach(eq("router-id"), anyString(), anyString(), anyString(), anyString());
-        verify(logStreamer, never()).attach(eq("app-id"), anyString(), anyString(), anyString(), anyString());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("router-id"), anyString(), anyString(), anyString(),
+                anyString());
+        verify(logStreamer, never()).attachForAccount(anyString(), eq("app-id"), anyString(), anyString(), anyString(),
+                anyString());
+        verify(logStreamer, never()).attachConsoleOnly(eq("app-id"), anyString());
         assertTrue(handle.getFirelensVolumeName().contains("firelens"));
 
         verify(copyCmd).withRemotePath("/fluent-bit/etc");

@@ -337,10 +337,15 @@ class NativeDynamoDbTableServiceTest {
     void kinesisDestinationTransitionsPersistAndRepeatedTransitionsAreRejected() {
         TableDefinition created = tableService.createTable(createRequest(null, NO_SETTINGS), "ACTIVE", REGION);
 
-        String resolved = tableService.enableKinesisStreamingDestination(
+        NativeDynamoDbTableService.KinesisDestination resolved = tableService.enableKinesisStreamingDestination(
                 created.getTableArn(), STREAM_ARN, KinesisStreamingDestination.PRECISION_MICROSECOND, REGION);
 
-        assertEquals(TABLE, resolved, "an ARN input resolves to the canonical table name");
+        assertEquals(TABLE, resolved.tableName(), "an ARN input resolves to the canonical table name");
+        assertEquals(STREAM_ARN, resolved.streamArn());
+        assertEquals("ACTIVE", resolved.destinationStatus());
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
+                resolved.approximateCreationDateTimePrecision(),
+                "the snapshot carries the precision the response echoes");
         verify(kinesisService).describeStream(STREAM_NAME, REGION);
         KinesisStreamingDestination enabled = reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN)
                 .orElseThrow();
@@ -352,7 +357,13 @@ class NativeDynamoDbTableServiceTest {
                 TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MILLISECOND, REGION),
                 "Table already has an active Kinesis streaming destination with this stream ARN");
 
-        assertEquals(TABLE, tableService.disableKinesisStreamingDestination(TABLE, STREAM_ARN, REGION));
+        NativeDynamoDbTableService.KinesisDestination afterDisable =
+                tableService.disableKinesisStreamingDestination(TABLE, STREAM_ARN, REGION);
+        assertEquals(TABLE, afterDisable.tableName());
+        assertEquals("DISABLED", afterDisable.destinationStatus());
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
+                afterDisable.approximateCreationDateTimePrecision(),
+                "disabling keeps the stored precision so the response can report it");
         TableDefinition disabled = reloadFromDisk();
         assertEquals(1, disabled.getKinesisStreamingDestinations().size());
         assertEquals("DISABLED", disabled.findKinesisStreamingDestination(STREAM_ARN).orElseThrow()

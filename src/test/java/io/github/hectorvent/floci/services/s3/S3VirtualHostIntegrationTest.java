@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -302,7 +303,7 @@ class S3VirtualHostIntegrationTest {
     @Order(20)
     void createMultipartUploadViaVirtualHost() {
         String key = "virtual-multipart.zip";
-        var response = given()
+        Response response = given()
             .header("Host", HOST)
             .header("Authorization",
                     "AWS4-HMAC-SHA256 Credential=test/20260912/us-east-1/s3/aws4_request, Signature=fake")

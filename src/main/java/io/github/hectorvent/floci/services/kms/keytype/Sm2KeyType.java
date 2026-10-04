@@ -28,7 +28,7 @@ final class Sm2KeyType implements KmsKeyType {
             throw new AwsException("UnsupportedOperationException",
                     "KeySpec SM2 is not supported in this Region", 400);
         }
-        AsymmetricKeys.store(key, BcEcKeys.generateKeyPair(CURVE));
+        BcEcKeys.generateKeyPair(key, CURVE, random);
     }
 
     @Override

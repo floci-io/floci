@@ -257,6 +257,115 @@ class SqsCfnProvisionerTest {
     }
 
     @Test
+    void everyMutableQueuePropertyReachesCreateQueue() {
+        when(sqs.createQueue(eq("jobs"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("jobs", "http://localhost:4566/000000000000/jobs"));
+        ObjectNode props = mapper.createObjectNode()
+                .put("QueueName", "jobs")
+                .put("DelaySeconds", 5)
+                .put("MessageRetentionPeriod", 86400)
+                .put("MaximumMessageSize", 2048)
+                .put("ReceiveMessageWaitTimeSeconds", 20)
+                .put("KmsMasterKeyId", "alias/aws/sqs")
+                .put("KmsDataKeyReusePeriodSeconds", 600)
+                .put("SqsManagedSseEnabled", false);
+        props.putObject("RedriveAllowPolicy").put("redrivePermission", "denyAll");
+
+        provisioner.provision(resource("AWS::SQS::Queue", "Jobs"), props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).createQueue(eq("jobs"), captor.capture(), eq("us-east-1"));
+        assertEquals(Map.of(
+                "DelaySeconds", "5",
+                "MessageRetentionPeriod", "86400",
+                "MaximumMessageSize", "2048",
+                "ReceiveMessageWaitTimeSeconds", "20",
+                "KmsMasterKeyId", "alias/aws/sqs",
+                "KmsDataKeyReusePeriodSeconds", "600",
+                "SqsManagedSseEnabled", "false",
+                "RedriveAllowPolicy", "{\"redrivePermission\":\"denyAll\"}"), captor.getValue());
+    }
+
+    @Test
+    void aPropertyThatResolvesToNoValueIsAbsentOnCreate() {
+        // The engine resolves AWS::NoValue to blank; the mocked engine does the same for an object.
+        when(sqs.createQueue(eq("jobs"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("jobs", "http://localhost:4566/000000000000/jobs"));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "jobs").put("DelaySeconds", 5);
+        props.putObject("MessageRetentionPeriod").put("Ref", "AWS::NoValue");
+        props.putObject("VisibilityTimeout").put("Ref", "AWS::NoValue");
+
+        provisioner.provision(resource("AWS::SQS::Queue", "Jobs"), props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).createQueue(eq("jobs"), captor.capture(), eq("us-east-1"));
+        assertEquals(Map.of("DelaySeconds", "5"), captor.getValue());
+    }
+
+    @Test
+    void aPropertyThatResolvesToNoValueIsResetOnUpdate() {
+        StackResource r = resource("AWS::SQS::Queue", "Jobs");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "jobs")));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "jobs");
+        props.putObject("MessageRetentionPeriod").put("Ref", "AWS::NoValue");
+
+        provisioner.provision(r, props, updateCtx("http://localhost:4566/000000000000/jobs"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).setQueueAttributes(anyString(), captor.capture(), eq("us-east-1"));
+        assertEquals("345600", captor.getValue().get("MessageRetentionPeriod"));
+    }
+
+    @Test
+    void anUpdateResetsThePropertiesTheTemplateDropped() {
+        // CloudFormation applies the whole template as the desired state, so a property dropped from
+        // it goes back to its default. An empty value removes the stored attribute, which SqsService
+        // then reports at its default; MessageRetentionPeriod cannot be empty and is written out.
+        StackResource r = resource("AWS::SQS::Queue", "Jobs");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "jobs")));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "jobs").put("VisibilityTimeout", 45);
+
+        provisioner.provision(r, props, updateCtx("http://localhost:4566/000000000000/jobs"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).setQueueAttributes(eq("http://localhost:4566/000000000000/jobs"), captor.capture(),
+                eq("us-east-1"));
+        assertEquals(Map.of(
+                "VisibilityTimeout", "45",
+                "DelaySeconds", "",
+                "MessageRetentionPeriod", "345600",
+                "MaximumMessageSize", "",
+                "ReceiveMessageWaitTimeSeconds", "",
+                "KmsMasterKeyId", "",
+                "KmsDataKeyReusePeriodSeconds", "",
+                "RedrivePolicy", "",
+                "RedriveAllowPolicy", ""), captor.getValue(),
+                "a standard queue gets no FIFO-only attribute and SqsManagedSseEnabled is not reset");
+    }
+
+    @Test
+    void aFifoUpdateResetsContentBasedDeduplicationAndKeepsTheThroughputSettings() {
+        // As AWS records: ContentBasedDeduplication returns to false, while DeduplicationScope and
+        // FifoThroughputLimit keep their stored values when the template drops them.
+        StackResource r = resource("AWS::SQS::Queue", "Orders");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "orders.fifo")));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "orders.fifo").put("FifoQueue", true);
+
+        provisioner.provision(r, props, updateCtx("http://localhost:4566/000000000000/orders.fifo"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).setQueueAttributes(anyString(), captor.capture(), eq("us-east-1"));
+        assertEquals("false", captor.getValue().get("ContentBasedDeduplication"));
+        assertFalse(captor.getValue().containsKey("DeduplicationScope"));
+        assertFalse(captor.getValue().containsKey("FifoThroughputLimit"));
+    }
+
+    @Test
     void flippingFifoQueueIsAReplacingUpdate() {
         // FifoQueue is createOnly too: a prior plain name cannot serve a queue that is now FIFO, so
         // the update derives a fresh .fifo name and creates, as a replacing update should.

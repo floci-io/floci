@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.marketplace;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -17,7 +18,7 @@ class MarketplaceMeteringIntegrationTest {
     @Test
     void resolveCustomerIsStableForRegistrationToken() {
         String body = "{\"RegistrationToken\":\"local-registration-token\"}";
-        var first = rpc("ResolveCustomer", body).statusCode(200)
+        Response first = rpc("ResolveCustomer", body).statusCode(200)
                 .body("CustomerAWSAccountId", notNullValue()).body("LicenseArn", notNullValue())
                 .extract().response();
         rpc("ResolveCustomer", body).statusCode(200)

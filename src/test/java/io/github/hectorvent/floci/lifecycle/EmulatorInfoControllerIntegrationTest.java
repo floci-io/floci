@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.UUID;
 
@@ -118,7 +120,7 @@ class EmulatorInfoControllerIntegrationTest {
                 .contentType(startsWith("text/plain"))
                 .extract().body().asString();
 
-        var cert = (java.security.cert.X509Certificate) java.security.cert.CertificateFactory.getInstance("X.509")
+        X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509")
                 .generateCertificate(new java.io.ByteArrayInputStream(pem.getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
         assertTrue(cert.getBasicConstraints() >= 0, "must be a CA certificate");
         assertEquals(cert.getSubjectX500Principal(), cert.getIssuerX500Principal());

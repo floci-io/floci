@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.account.AccountClient;
 import software.amazon.awssdk.services.account.model.AlternateContactType;
+import software.amazon.awssdk.services.account.model.GetAlternateContactResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -23,7 +24,7 @@ class AccountAlternateContactTest {
                     .phoneNumber("+1 555 0100")
                     .title("Security"));
 
-            var response = account.getAlternateContact(request -> request
+            GetAlternateContactResponse response = account.getAlternateContact(request -> request
                     .alternateContactType(AlternateContactType.SECURITY));
             assertThat(response.alternateContact()).isNotNull();
             assertThat(response.alternateContact().emailAddress()).isEqualTo("security@example.com");

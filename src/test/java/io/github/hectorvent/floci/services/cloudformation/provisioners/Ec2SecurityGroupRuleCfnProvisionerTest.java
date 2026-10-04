@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
@@ -238,7 +239,7 @@ class Ec2SecurityGroupRuleCfnProvisionerTest {
 
         provisioner.provision(r, props, ctx());
 
-        var order = inOrder(ec2);
+        InOrder order = inOrder(ec2);
         order.verify(ec2).authorizeSecurityGroupIngress(eq("us-east-1"), eq("sg-123"), anyList());
         order.verify(ec2).deleteSecurityGroupRule("us-east-1", "sgr-old");
         assertEquals("sgr-new", r.getPhysicalId());

@@ -45,12 +45,12 @@ class HybridStorageTest {
     @Test
     void explicitFlushPersistsData() {
         Path filePath = tempDir.resolve("flush-test.json");
-        var store1 = new HybridStorage<>(filePath, new TypeReference<Map<String, String>>() {}, 60000);
+        HybridStorage<String, String> store1 = new HybridStorage<>(filePath, new TypeReference<Map<String, String>>() {}, 60000);
         store1.put("key1", "value1");
         store1.flush();
         store1.shutdown();
 
-        var store2 = new HybridStorage<>(filePath, new TypeReference<Map<String, String>>() {}, 60000);
+        HybridStorage<String, String> store2 = new HybridStorage<>(filePath, new TypeReference<Map<String, String>>() {}, 60000);
         store2.load();
         assertEquals("value1", store2.get("key1").orElseThrow());
         store2.shutdown();
@@ -63,7 +63,7 @@ class HybridStorageTest {
         Path quarantinePath = filePath.resolveSibling("corrupt-hybrid-store.json.corrupt");
         Files.writeString(filePath, unreadableContents);
         Files.writeString(quarantinePath, "previous unreadable contents");
-        var loadedStorage = new HybridStorage<>(filePath, new TypeReference<Map<String, String>>() {}, 60000);
+        HybridStorage<String, String> loadedStorage = new HybridStorage<>(filePath, new TypeReference<Map<String, String>>() {}, 60000);
 
         try {
             loadedStorage.load();
@@ -80,7 +80,7 @@ class HybridStorageTest {
     void dynamoTableWithLocalSecondaryIndexSurvivesRestart() {
         Path filePath = tempDir.resolve("dynamodb-tables.json");
         TypeReference<Map<String, TableDefinition>> type = new TypeReference<>() {};
-        var table = new TableDefinition(
+        TableDefinition table = new TableDefinition(
                 "ConfigTable",
                 List.of(new KeySchemaElement("pk", "HASH"), new KeySchemaElement("sk", "RANGE")),
                 List.of(new AttributeDefinition("pk", "S"), new AttributeDefinition("sk", "S"),
@@ -89,11 +89,11 @@ class HybridStorageTest {
                 "lsi", List.of(new KeySchemaElement("pk", "HASH"),
                         new KeySchemaElement("lsiSk", "RANGE")), null, "ALL")));
 
-        var store1 = new HybridStorage<String, TableDefinition>(filePath, type, 60000);
+        HybridStorage<String, TableDefinition> store1 = new HybridStorage<>(filePath, type, 60000);
         store1.put("000000000000/us-east-1::ConfigTable", table);
         store1.shutdown();
 
-        var store2 = new HybridStorage<String, TableDefinition>(filePath, type, 60000);
+        HybridStorage<String, TableDefinition> store2 = new HybridStorage<>(filePath, type, 60000);
         store2.load();
         TableDefinition restored = store2.get("000000000000/us-east-1::ConfigTable").orElseThrow();
         assertEquals("lsiSk", restored.getLocalSecondaryIndexes().getFirst().getSortKeyName());
@@ -113,7 +113,7 @@ class HybridStorageTest {
         storage.put("a.2", "v2");
         storage.put("b.1", "v3");
 
-        var results = storage.scan(key -> key.startsWith("a."));
+        List<String> results = storage.scan(key -> key.startsWith("a."));
         assertEquals(2, results.size());
     }
 
@@ -121,7 +121,7 @@ class HybridStorageTest {
     void scanReturnsMutableList() {
         storage.put("a", "1");
         storage.put("b", "2");
-        var result = storage.scan(key -> true);
+        List<String> result = storage.scan(key -> true);
         assertDoesNotThrow(() -> result.sort(String::compareTo));
         assertDoesNotThrow(() -> result.add("3"));
     }

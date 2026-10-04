@@ -30,12 +30,12 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
 
     @Test
     void unresolvableIntrinsicArgumentFailsTheExecution() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"Pick","States":{
                   "Pick":{"Type":"Pass","Parameters":{"v.$":"States.Format('{}', $.nope)"},"End":true}}}
                 """;
 
-        var describe = run("missing-intrinsic-arg", definition, "{\"other\":1}");
+        Response describe = run("missing-intrinsic-arg", definition, "{\"other\":1}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("States.Runtime", describe.jsonPath().getString("error"));
@@ -49,14 +49,14 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
     /** The cause names the whole expression, not the inner call that took the failing argument. */
     @Test
     void nestedIntrinsicNamesTheWholeExpression() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"Pick","States":{
                   "Pick":{"Type":"Pass",
                     "Parameters":{"v.$":"States.Format('{}', States.Format('{}', $.nope))"},
                     "End":true}}}
                 """;
 
-        var describe = run("nested-intrinsic", definition, "{\"other\":1}");
+        Response describe = run("nested-intrinsic", definition, "{\"other\":1}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("An error occurred while executing the state 'Pick' (entered at the event id #2). "
@@ -73,12 +73,12 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
      */
     @Test
     void intrinsicArgumentIndexingPastTheEndOfAnArrayFails() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"Pick","States":{
                   "Pick":{"Type":"Pass","Parameters":{"v.$":"States.Format('{}', $.items[5])"},"End":true}}}
                 """;
 
-        var describe = run("intrinsic-index-out-of-range", definition, "{\"items\":[1,2]}");
+        Response describe = run("intrinsic-index-out-of-range", definition, "{\"items\":[1,2]}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("An error occurred while executing the state 'Pick' (entered at the event id #2). "
@@ -91,7 +91,7 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
     /** States.Runtime is never caught. A Map carries the Catch because AWS refuses it on a Pass. */
     @Test
     void catchAllDoesNotSwallowTheFailure() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"M","States":{
                   "M":{"Type":"Map","ItemsPath":"$.items",
                     "Parameters":{"v.$":"States.Format('{}', $.nope)"},
@@ -100,7 +100,7 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
                   "Caught":{"Type":"Pass","End":true}}}
                 """;
 
-        var describe = run("intrinsic-catch-all", definition, "{\"items\":[1,2]}");
+        Response describe = run("intrinsic-catch-all", definition, "{\"items\":[1,2]}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("States.Runtime", describe.jsonPath().getString("error"));
@@ -114,23 +114,23 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
     /** Only absence fails. A present but explicitly null argument still formats as null. */
     @Test
     void explicitNullArgumentStillSucceeds() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"Pick","States":{
                   "Pick":{"Type":"Pass","Parameters":{"v.$":"States.Format('{}', $.nul)"},"End":true}}}
                 """;
 
-        var describe = run("explicit-null-arg", definition, "{\"nul\":null}");
+        Response describe = run("explicit-null-arg", definition, "{\"nul\":null}");
 
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("{\"v\":\"null\"}", describe.jsonPath().getString("output"));
     }
 
     private Response run(String label, String definition, String input) throws InterruptedException {
-        var smArn = create(label + "-" + System.currentTimeMillis(), definition);
-        var execArn = start(smArn, input);
-        for (var i = 0; i < 50; i++) {
-            var resp = describe(execArn);
-            var status = resp.jsonPath().getString("status");
+        String smArn = create(label + "-" + System.currentTimeMillis(), definition);
+        String execArn = start(smArn, input);
+        for (int i = 0; i < 50; i++) {
+            Response resp = describe(execArn);
+            String status = resp.jsonPath().getString("status");
             if (!"RUNNING".equals(status)) {
                 return resp;
             }
@@ -141,7 +141,7 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
     }
 
     private String create(String name, String definition) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("{\"name\":\"" + name + "\",\"definition\":" + quote(definition)
@@ -152,7 +152,7 @@ class StepFunctionsIntrinsicMissingArgumentIntegrationTest {
     }
 
     private String start(String smArn, String input) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("{\"stateMachineArn\":\"" + smArn + "\",\"input\":" + quote(input) + "}")

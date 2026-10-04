@@ -31,6 +31,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -310,8 +311,8 @@ public class SmtpRelay {
     private void doRelayRaw(RawRelayMessage relayMessage) {
         try {
             byte[] mimeBytes = tryBase64Decode(relayMessage.rawMessage());
-            var builder = new DefaultMessageBuilder();
-            var message = builder.parseMessage(new ByteArrayInputStream(mimeBytes));
+            DefaultMessageBuilder builder = new DefaultMessageBuilder();
+            Message message = builder.parseMessage(new ByteArrayInputStream(mimeBytes));
 
             MailMessage mail = new MailMessage();
 
@@ -573,7 +574,7 @@ public class SmtpRelay {
                             textBody.getMimeCharset());
                 }
             }
-            try (var is = textBody.getInputStream()) {
+            try (InputStream is = textBody.getInputStream()) {
                 return new String(is.readAllBytes(), charset);
             }
         } catch (Exception e) {

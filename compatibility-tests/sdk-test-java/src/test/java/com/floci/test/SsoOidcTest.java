@@ -5,6 +5,15 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.core.document.Document;
 import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
 import software.amazon.awssdk.services.ssooidc.SsoOidcClient;
+import software.amazon.awssdk.services.ssooidc.model.CreateTokenResponse;
+import software.amazon.awssdk.services.ssooidc.model.CreateTokenWithIamResponse;
+import software.amazon.awssdk.services.ssooidc.model.RegisterClientResponse;
+import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -18,7 +27,7 @@ class SsoOidcTest {
         assumeFalse(TestFixtures.isRealAws(), "Uses emulator-only client registration");
 
         try (SsoOidcClient oidc = TestFixtures.ssoOidcClient()) {
-            var response = oidc.registerClient(request -> request
+            RegisterClientResponse response = oidc.registerClient(request -> request
                     .clientName("Floci SDK CLI")
                     .clientType("public")
                     .grantTypes("authorization_code", "refresh_token")
@@ -40,11 +49,11 @@ class SsoOidcTest {
         assumeFalse(TestFixtures.isRealAws(), "Uses emulator-only device authorization");
 
         try (SsoOidcClient oidc = TestFixtures.ssoOidcClient()) {
-            var client = oidc.registerClient(request -> request
+            RegisterClientResponse client = oidc.registerClient(request -> request
                     .clientName("Floci Device SDK")
                     .clientType("public")
                     .grantTypes("urn:ietf:params:oauth:grant-type:device_code", "refresh_token"));
-            var response = oidc.startDeviceAuthorization(request -> request
+            StartDeviceAuthorizationResponse response = oidc.startDeviceAuthorization(request -> request
                     .clientId(client.clientId())
                     .clientSecret(client.clientSecret())
                     .startUrl("https://example.awsapps.com/start"));
@@ -57,11 +66,11 @@ class SsoOidcTest {
             assertThat(response.interval()).isEqualTo(5);
 
             try {
-                var advertisedUri = java.net.URI.create(response.verificationUriComplete());
-                var uri = TestFixtures.endpoint().resolve(
+                URI advertisedUri = URI.create(response.verificationUriComplete());
+                URI uri = TestFixtures.endpoint().resolve(
                         advertisedUri.getRawPath() + "?" + advertisedUri.getRawQuery());
-                var request = java.net.http.HttpRequest.newBuilder(uri).GET().build();
-                var browserResponse = TestFixtures.emulatorHttpClient().send(
+                HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
+                HttpResponse<String> browserResponse = TestFixtures.emulatorHttpClient().send(
                         request, java.net.http.HttpResponse.BodyHandlers.ofString());
                 assertThat(browserResponse.statusCode()).isEqualTo(200);
             } catch (java.io.IOException e) {
@@ -71,7 +80,7 @@ class SsoOidcTest {
                 throw new RuntimeException(e);
             }
 
-            var token = oidc.createToken(request -> request
+            CreateTokenResponse token = oidc.createToken(request -> request
                     .clientId(client.clientId())
                     .clientSecret(client.clientSecret())
                     .grantType("urn:ietf:params:oauth:grant-type:device_code")
@@ -80,7 +89,7 @@ class SsoOidcTest {
             assertThat(token.accessToken()).isNotBlank();
             assertThat(token.refreshToken()).isNotBlank();
 
-            var refreshed = oidc.createToken(request -> request
+            CreateTokenResponse refreshed = oidc.createToken(request -> request
                     .clientId(client.clientId())
                     .clientSecret(client.clientSecret())
                     .grantType("refresh_token")
@@ -99,7 +108,7 @@ class SsoOidcTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(TestFixtures.globalArn("sso", "aws", "applicationProvider/custom"))
                     .name("Floci IAM OIDC SDK"))
                     .applicationArn();
 
@@ -137,13 +146,13 @@ class SsoOidcTest {
                     + "&code_challenge_method=S256";
             String code;
             try {
-                var browserResponse = java.net.http.HttpClient.newBuilder()
+                HttpResponse<String> browserResponse = HttpClient.newBuilder()
                         .followRedirects(java.net.http.HttpClient.Redirect.NEVER)
                         .build()
                         .send(java.net.http.HttpRequest.newBuilder(java.net.URI.create(authorizeUrl)).GET().build(),
                                 java.net.http.HttpResponse.BodyHandlers.ofString());
                 assertThat(browserResponse.statusCode()).isEqualTo(303);
-                var params = java.net.URI.create(browserResponse.headers().firstValue("location").orElseThrow())
+                String[] params = URI.create(browserResponse.headers().firstValue("location").orElseThrow())
                         .getRawQuery().split("&");
                 code = java.util.Arrays.stream(params)
                         .filter(value -> value.startsWith("code="))
@@ -156,7 +165,7 @@ class SsoOidcTest {
                 throw new RuntimeException(e);
             }
 
-            var response = oidc.createTokenWithIAM(request -> request
+            CreateTokenWithIamResponse response = oidc.createTokenWithIAM(request -> request
                     .clientId(applicationArn)
                     .grantType("authorization_code")
                     .code(code)

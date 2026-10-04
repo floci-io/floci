@@ -169,14 +169,19 @@ the commercial value or Floci's own base host until sourced:
 - the console device-authorization client ids (`arn:aws:signin:::devtools/...`) outside the
   commercial partition;
 - the STS web-identity audience outside the commercial partition;
+- the EKS Pod Identity token audience (`pods.eks.amazonaws.com`) outside the commercial partition;
 - the Lambda function-URL host outside the commercial partition;
 - whether AWS managed policy documents differ in content in China or GovCloud;
 - the API Gateway regional hosted zone per region;
 - S3 `LocationConstraint` enum values and Route 53 hosted zones for the ISO and EUSC regions;
 - the SAML sign-on URL in `aws-iso-e`, `aws-iso-f` and `aws-eusc`, where assertions keep being
-  checked against the commercial `https://signin.aws.amazon.com/saml`.
+  checked against the commercial `https://signin.aws.amazon.com/saml`;
+- the exact error AWS WAF returns for the `CLOUDFRONT` scope in a partition without CloudFront
+  (GovCloud, the ISO partitions): Floci refuses it with `WAFInvalidParameterException` and its own
+  message.
 
 ## Related
 
-- [Environment Variables](environment-variables.md): `FLOCI_DEFAULT_REGION`, `FLOCI_PARTITIONS_ID`, `FLOCI_PARTITIONS_STRICT`
+- [Environment Variables](environment-variables.md): `FLOCI_DEFAULT_REGION`, `FLOCI_PARTITIONS_ID`,
+  `FLOCI_PARTITIONS_STRICT`, `FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS`
 - [Multi-Account Isolation](multi-account.md): the account half of the credential scope

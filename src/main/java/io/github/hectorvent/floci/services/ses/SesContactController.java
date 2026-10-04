@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
@@ -21,20 +22,27 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.structureMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.typedStringMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.unexpectedStartError;
 
 /**
@@ -90,15 +98,21 @@ public class SesContactController {
 
     @GET
     @Path("/contact-lists")
-    public Response listContactLists(@Context HttpHeaders headers) {
+    public Response listContactLists(@Context HttpHeaders headers,
+                                     @QueryParam("PageSize") String pageSize,
+                                     @Context UriInfo uriInfo) {
         String region = regionResolver.resolveRegion(headers);
+        String nextToken = SesListPaging.queryToken(uriInfo);
+        PaginatedResult<ContactList> page = contactService.listContactLists(region,
+                SesListPaging.V2_LIST_CONTACT_LISTS, SesListPaging.parseQueryPageSize(pageSize), nextToken);
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode lists = result.putArray("ContactLists");
-        for (ContactList cl : contactService.listContactLists(region)) {
+        for (ContactList cl : page.items()) {
             ObjectNode item = lists.addObject();
             item.put("ContactListName", cl.getContactListName());
             putTimestamp(item, "LastUpdatedTimestamp", cl.getLastUpdatedTimestamp());
         }
+        result.put("NextToken", page.nextToken());
         return Response.ok(result).build();
     }
 
@@ -226,27 +240,43 @@ public class SesContactController {
     @Path("/contact-lists/{contactListName}/contacts/list")
     public Response listContacts(@Context HttpHeaders headers,
                                  @PathParam("contactListName") String contactListName, String body) {
-        // AWS uses POST .../contacts/list with Filter/PageSize/NextToken in the body; Floci returns
-        // all contacts (filtering/pagination not yet implemented) but still rejects a malformed or
-        // non-object body like the other v2 endpoints.
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (body != null && !body.isBlank()) {
-                requireJsonObject(objectMapper.readTree(body));
-            }
-            SesContactService.ContactsWithList listed =
-                    contactService.listContacts(contactListName, region);
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            Integer pageSize = intMemberOrAbsent(request, "PageSize");
+            String nextToken = stringMemberOrAbsent(request, "NextToken");
+            SesContactService.ContactPage listed = contactService.listContacts(contactListName, region,
+                    SesListPaging.V2_LIST_CONTACTS, pageSize, nextToken, parseContactFilter(request));
             ObjectNode result = objectMapper.createObjectNode();
             ArrayNode arr = result.putArray("Contacts");
-            for (Contact c : listed.contacts()) {
+            for (Contact c : listed.contacts().items()) {
                 arr.add(contactJson(c, listed.list(), false));
             }
+            result.put("NextToken", listed.contacts().nextToken());
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
         } catch (JsonProcessingException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
+    }
+
+    private static SesContactService.ContactFilter parseContactFilter(JsonNode request) {
+        JsonNode filterNode = structureMemberOrAbsent(request, "Filter");
+        if (filterNode.isMissingNode() || filterNode.isNull()) {
+            return null;
+        }
+        JsonNode topicNode = structureMemberOrAbsent(filterNode, "TopicFilter");
+        SesContactService.TopicFilter topicFilter = null;
+        if (!topicNode.isMissingNode() && !topicNode.isNull()) {
+            topicFilter = new SesContactService.TopicFilter(typedStringMemberOrAbsent(topicNode, "TopicName"),
+                    coerceBooleanOrFalse(topicNode.path("UseDefaultIfPreferenceUnavailable")));
+        }
+        return new SesContactService.ContactFilter(typedStringMemberOrAbsent(filterNode, "FilteredStatus"),
+                topicFilter);
     }
 
     @GET
@@ -315,8 +345,7 @@ public class SesContactController {
     }
 
     // UnsubscribeAll is a Boolean; AWS coerces it the same way as any other SES v2 boolean
-    // (see parseSendingEnabled): a JSON string coerces to true, a number/null/array/object is a
-    // SerializationException. Absent leaves it unset.
+    // (see coerceBoolean). Absent leaves it unset.
     private static Boolean parseUnsubscribeAll(JsonNode request) {
         if (!request.has("UnsubscribeAll")) {
             return null;

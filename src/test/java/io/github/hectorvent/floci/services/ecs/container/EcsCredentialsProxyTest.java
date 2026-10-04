@@ -183,6 +183,47 @@ class EcsCredentialsProxyTest {
     }
 
     @Test
+    void removesAStaleContainerThisSameInstanceOwnsUnderTheNewLabels() {
+        stubSuccessfulLaunch("proxy-1");
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        when(config.port()).thenReturn(4566);
+        stubStaleContainerByName("stale-own", Map.of(
+                "io.floci.ecs.credentials-proxy", "true", "io.floci.owner", "4566"));
+
+        proxy.ensureProxyOn("floci-net");
+
+        verify(lifecycleManager).removeIfExists("stale-own");
+    }
+
+    @Test
+    void removesAStaleContainerWhoseNewAndLegacyLabelsAgree() {
+        stubSuccessfulLaunch("proxy-1");
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        when(config.port()).thenReturn(4566);
+        stubStaleContainerByName("stale-own", Map.of(
+                "io.floci.ecs.credentials-proxy", "true", "io.floci.owner", "4566",
+                "floci.ecs-task-role-credentials-proxy", "true", "floci_owner_port", "4566"));
+
+        proxy.ensureProxyOn("floci-net");
+
+        verify(lifecycleManager).removeIfExists("stale-own");
+    }
+
+    @Test
+    void leavesAStaleContainerWhoseNewAndLegacyOwnersDisagreeAlone() {
+        stubSuccessfulLaunch("proxy-1");
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        when(config.port()).thenReturn(4566);
+        stubStaleContainerByName("relabelled", Map.of(
+                "io.floci.ecs.credentials-proxy", "true", "io.floci.owner", "4566",
+                "floci.ecs-task-role-credentials-proxy", "true", "floci_owner_port", "4567"));
+
+        proxy.ensureProxyOn("floci-net");
+
+        verify(lifecycleManager, never()).removeIfExists("relabelled");
+    }
+
+    @Test
     void leavesAnUnrelatedSameNamedContainerAlone() {
         stubSuccessfulLaunch("proxy-1");
         // Same name, but not one of our proxies at all: no OWNS_NETWORK_LABEL.
@@ -243,6 +284,47 @@ class EcsCredentialsProxyTest {
 
         verify(lifecycleManager).removeIfExists("stale-proxy");
         verify(lifecycleManager, never()).removeIfExists("other-instance-proxy");
+    }
+
+    @Test
+    void reapSurvivingProxiesQueriesTheNewAndLegacyLabelsAndRemovesOnlyAgreeingOwnLeftovers() {
+        when(config.services().ecs().reconcileContainersOnStartup()).thenReturn(true);
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        when(config.port()).thenReturn(4566);
+        ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
+        ListContainersCmd newKeys = mock(ListContainersCmd.class);
+        ListContainersCmd legacyKeys = mock(ListContainersCmd.class);
+        when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        when(listCmd.withLabelFilter(Map.of("io.floci.ecs.credentials-proxy", "true"))).thenReturn(newKeys);
+        when(listCmd.withLabelFilter(Map.of("floci.ecs-task-role-credentials-proxy", "true")))
+                .thenReturn(legacyKeys);
+        Container newOnly = proxyContainer("new-only",
+                Map.of("io.floci.ecs.credentials-proxy", "true", "io.floci.owner", "4566"));
+        Container legacyOnly = proxyContainer("legacy-only",
+                Map.of("floci.ecs-task-role-credentials-proxy", "true", "floci_owner_port", "4566"));
+        Container both = proxyContainer("both", Map.of(
+                "io.floci.ecs.credentials-proxy", "true", "io.floci.owner", "4566",
+                "floci.ecs-task-role-credentials-proxy", "true", "floci_owner_port", "4566"));
+        // Relabelled outside Floci: the legacy owner names another instance, so it is left alone.
+        Container disagreeing = proxyContainer("disagreeing", Map.of(
+                "io.floci.ecs.credentials-proxy", "true", "io.floci.owner", "4566",
+                "floci.ecs-task-role-credentials-proxy", "true", "floci_owner_port", "4567"));
+        when(newKeys.exec()).thenReturn(List.of(newOnly, both, disagreeing));
+        when(legacyKeys.exec()).thenReturn(List.of(legacyOnly, both, disagreeing));
+
+        proxy.reapSurvivingProxies();
+
+        verify(lifecycleManager).removeIfExists("new-only");
+        verify(lifecycleManager).removeIfExists("legacy-only");
+        verify(lifecycleManager).removeIfExists("both");
+        verify(lifecycleManager, never()).removeIfExists("disagreeing");
+    }
+
+    private static Container proxyContainer(String id, Map<String, String> labels) {
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(id);
+        when(container.getLabels()).thenReturn(labels);
+        return container;
     }
 
     @Test

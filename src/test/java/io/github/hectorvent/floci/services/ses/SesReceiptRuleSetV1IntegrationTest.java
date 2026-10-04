@@ -68,6 +68,18 @@ class SesReceiptRuleSetV1IntegrationTest {
                 .body(containsString("<Name>" + RS + "</Name>"));
     }
 
+    // Unordered on purpose: it holds whether or not the rule set above still exists.
+    @Test
+    void listReceiptRuleSets_treatsAnEmptyTokenAsAbsentAndRefusesAnyOther() {
+        req("ListReceiptRuleSets").formParam("NextToken", "")
+        .when().post("/").then().statusCode(200)
+                .body(containsString("ListReceiptRuleSetsResponse"));
+        req("ListReceiptRuleSets").formParam("NextToken", "garbage")
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>Invalid page token: garbage</Message>"));
+    }
+
     @Test
     @Order(5)
     void describeNonExistent_returnsRuleSetDoesNotExist() {

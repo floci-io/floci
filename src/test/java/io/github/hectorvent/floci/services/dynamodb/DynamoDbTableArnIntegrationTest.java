@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -459,7 +460,7 @@ class DynamoDbTableArnIntegrationTest {
     }
 
     private static String createTable(String tableName, String authorization) {
-        var request = given()
+        RequestSpecification request = given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
             .contentType(DYNAMODB_CONTENT_TYPE);
         if (authorization != null) {

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -27,7 +28,7 @@ class IamListEntitiesForPolicyIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/iam/aws4_request";
 
     private String iam(String action, String... kv) {
-        var req = given()
+        RequestSpecification req = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", IAM_AUTH)
             .formParam("Action", action);

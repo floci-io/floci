@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,8 +35,8 @@ class LambdaPodSpecFactoryTest {
 
     @BeforeEach
     void setUp() {
-        var services = mock(EmulatorConfig.ServicesConfig.class);
-        var lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         kubernetes = mock(EmulatorConfig.LambdaServiceConfig.KubernetesExecutor.class);
         tls = mock(EmulatorConfig.TlsConfig.class);
         when(config.services()).thenReturn(services);
@@ -61,7 +62,7 @@ class LambdaPodSpecFactoryTest {
     }
 
     private static List<JsonNode> elements(JsonNode array) {
-        var list = new ArrayList<JsonNode>();
+        ArrayList<JsonNode> list = new ArrayList<>();
         array.forEach(list::add);
         return list;
     }
@@ -71,21 +72,21 @@ class LambdaPodSpecFactoryTest {
     }
 
     private static Map<String, String> stringMap(JsonNode object) {
-        var map = new LinkedHashMap<String, String>();
+        LinkedHashMap<String, String> map = new LinkedHashMap<>();
         object.fields().forEachRemaining(entry -> map.put(entry.getKey(), entry.getValue().asText()));
         return map;
     }
 
     @Test
     void zipFunctionPodHasInitContainerTaskVolumeAndEnv() {
-        var spec = spec(buildZipPod());
+        JsonNode spec = spec(buildZipPod());
 
         assertThat(spec.path("restartPolicy").asText()).isEqualTo("Never");
         assertThat(spec.path("terminationGracePeriodSeconds").asLong()).isEqualTo(5L);
-        var initContainers = elements(spec.path("initContainers"));
+        List<JsonNode> initContainers = elements(spec.path("initContainers"));
         assertThat(initContainers).hasSize(1);
 
-        var init = initContainers.getFirst();
+        JsonNode init = initContainers.getFirst();
         assertThat(init.path("image").asText()).isEqualTo("busybox:1.36");
         assertThat(texts(init.path("command")).get(2))
                 .contains("wget -q -O /tmp/code.zip")
@@ -95,7 +96,7 @@ class LambdaPodSpecFactoryTest {
                 .extracting(n -> n.path("name").asText(), n -> n.path("mountPath").asText())
                 .containsExactly(tuple("task", "/var/task"));
 
-        var runtime = elements(spec.path("containers")).getFirst();
+        JsonNode runtime = elements(spec.path("containers")).getFirst();
         assertThat(runtime.path("name").asText()).isEqualTo("runtime");
         assertThat(texts(runtime.path("args"))).containsExactly("index.handler");
         assertThat(runtime.path("resources").path("limits").path("memory").asText()).isEqualTo("256Mi");
@@ -113,7 +114,7 @@ class LambdaPodSpecFactoryTest {
 
     @Test
     void standardLabelsAreApplied() {
-        var labels = stringMap(buildZipPod().path("metadata").path("labels"));
+        Map<String, String> labels = stringMap(buildZipPod().path("metadata").path("labels"));
         assertThat(labels)
                 .containsEntry("app.kubernetes.io/managed-by", "floci")
                 .containsEntry("floci.io/service", "lambda")
@@ -124,7 +125,7 @@ class LambdaPodSpecFactoryTest {
     void userLabelsAreParsedAndApplied() {
         when(kubernetes.labels()).thenReturn(Optional.of(
                 List.of("team=platform", "floci.io/env=ci", "empty-ok=")));
-        var labels = stringMap(buildZipPod().path("metadata").path("labels"));
+        Map<String, String> labels = stringMap(buildZipPod().path("metadata").path("labels"));
         assertThat(labels)
                 .containsEntry("team", "platform")
                 .containsEntry("floci.io/env", "ci")
@@ -137,7 +138,7 @@ class LambdaPodSpecFactoryTest {
         // such entries must never reach the pod spec.
         when(kubernetes.labels()).thenReturn(Optional.of(
                 List.of("malformed", "a=b=c", "bad key=x", "team=platform")));
-        var labels = stringMap(buildZipPod().path("metadata").path("labels"));
+        Map<String, String> labels = stringMap(buildZipPod().path("metadata").path("labels"));
         assertThat(labels)
                 .containsEntry("team", "platform")
                 .doesNotContainKeys("malformed", "a", "bad key");
@@ -145,19 +146,19 @@ class LambdaPodSpecFactoryTest {
 
     @Test
     void layersAreDownloadedInOrderIntoOpt() {
-        var pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
+        ObjectNode pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
                 "public.ecr.aws/lambda/nodejs:20",
                 List.of(),
                 "http://10.0.0.5:4566/awslambda-us-east-1-tasks/snapshots/000000000000/my-fn",
                 List.of("http://10.0.0.5:4566/b/layers/1", "http://10.0.0.5:4566/b/layers/2"),
                 false, "index.handler", null, 128, Optional.empty());
 
-        var spec = spec(pod);
+        JsonNode spec = spec(pod);
         assertThat(elements(spec.path("volumes"))).extracting(n -> n.path("name").asText()).contains("opt");
         assertThat(elements(elements(spec.path("containers")).getFirst().path("volumeMounts")))
                 .extracting(n -> n.path("name").asText(), n -> n.path("mountPath").asText())
                 .contains(tuple("opt", "/opt"));
-        var init = elements(spec.path("initContainers")).getFirst();
+        JsonNode init = elements(spec.path("initContainers")).getFirst();
         assertThat(elements(init.path("volumeMounts")))
                 .extracting(n -> n.path("name").asText(), n -> n.path("mountPath").asText())
                 .contains(tuple("opt", "/opt"));
@@ -173,18 +174,18 @@ class LambdaPodSpecFactoryTest {
     void providedRuntimeCopiesBootstrapIntoVarRuntime() {
         // The provided.* entrypoint execs /var/runtime/bootstrap with no /var/task
         // fallback, so the init container must copy it there and restore the exec bit.
-        var pod = factory.buildPod("floci-lambda-custom-abc12345", "custom",
+        ObjectNode pod = factory.buildPod("floci-lambda-custom-abc12345", "custom",
                 "public.ecr.aws/lambda/provided:al2023",
                 List.of(),
                 "http://10.0.0.5:4566/awslambda-us-east-1-tasks/snapshots/000000000000/custom",
                 List.of(), true, "bootstrap", null, 128, Optional.empty());
 
-        var spec = spec(pod);
+        JsonNode spec = spec(pod);
         assertThat(elements(spec.path("volumes"))).extracting(n -> n.path("name").asText()).contains("runtime");
         assertThat(elements(elements(spec.path("containers")).getFirst().path("volumeMounts")))
                 .extracting(n -> n.path("name").asText(), n -> n.path("mountPath").asText())
                 .contains(tuple("runtime", "/var/runtime"));
-        var init = elements(spec.path("initContainers")).getFirst();
+        JsonNode init = elements(spec.path("initContainers")).getFirst();
         assertThat(elements(init.path("volumeMounts")))
                 .extracting(n -> n.path("name").asText())
                 .contains("runtime");
@@ -205,7 +206,7 @@ class LambdaPodSpecFactoryTest {
     void managedLabelsCannotBeOverriddenByUserLabels() {
         when(kubernetes.labels()).thenReturn(Optional.of(
                 List.of("app.kubernetes.io/managed-by=evil", "floci.io/service=other")));
-        var labels = stringMap(buildZipPod().path("metadata").path("labels"));
+        Map<String, String> labels = stringMap(buildZipPod().path("metadata").path("labels"));
         assertThat(labels)
                 .containsEntry("app.kubernetes.io/managed-by", "floci")
                 .containsEntry("floci.io/service", "lambda");
@@ -213,7 +214,7 @@ class LambdaPodSpecFactoryTest {
 
     @Test
     void dollarSignsInEnvValuesAreEscapedForKubernetesExpansion() {
-        var pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
+        ObjectNode pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
                 "public.ecr.aws/lambda/python:3.12",
                 List.of("SECRET=pa$$word", "TEMPLATE=$(HOME)/x"),
                 "http://10.0.0.5:4566/b/k", List.of(), false, "h", null, 128, Optional.empty());
@@ -229,14 +230,14 @@ class LambdaPodSpecFactoryTest {
         // Downloads stay plain HTTP even in TLS mode (busybox wget cannot TLS-handshake
         // with Floci); the CA bundle mount is for HTTPS calls made from inside the function.
         when(tls.enabled()).thenReturn(true);
-        var pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
+        ObjectNode pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
                 "public.ecr.aws/lambda/python:3.12",
                 List.of(),
                 "http://10.0.0.5:4566/awslambda-us-east-1-tasks/snapshots/000000000000/my-fn",
                 List.of(), false, "index.handler", null, 128,
                 Optional.of(KubernetesPodLauncher.CA_CONFIG_MAP_NAME));
 
-        var spec = spec(pod);
+        JsonNode spec = spec(pod);
         assertThat(elements(spec.path("volumes"))).anySatisfy(volume -> {
             assertThat(volume.path("name").asText()).isEqualTo("floci-ca");
             assertThat(volume.path("configMap").path("name").asText())
@@ -256,7 +257,7 @@ class LambdaPodSpecFactoryTest {
 
     @Test
     void dollarSignsInCommandAndArgsAreEscapedForKubernetesExpansion() {
-        var pod = factory.buildPod("floci-lambda-img-abc12345", "img",
+        ObjectNode pod = factory.buildPod("floci-lambda-img-abc12345", "img",
                 "123456789012.dkr.ecr.us-east-1.amazonaws.com/my-image:latest",
                 List.of(), null, List.of(), false, null,
                 new LambdaPodSpecFactory.ImageConfig(
@@ -268,18 +269,18 @@ class LambdaPodSpecFactoryTest {
 
     @Test
     void imagePackageTypeHasNoInitContainerAndMapsImageConfig() {
-        var pod = factory.buildPod("floci-lambda-img-abc12345", "img",
+        ObjectNode pod = factory.buildPod("floci-lambda-img-abc12345", "img",
                 "123456789012.dkr.ecr.us-east-1.amazonaws.com/my-image:latest",
                 List.of(), null, List.of(), false, null,
                 new LambdaPodSpecFactory.ImageConfig(
                         List.of("/entry.sh"), List.of("arg1", "arg2"), "/work"),
                 512, Optional.empty());
 
-        var spec = spec(pod);
+        JsonNode spec = spec(pod);
         assertThat(elements(spec.path("initContainers"))).isEmpty();
         assertThat(elements(spec.path("volumes"))).isEmpty();
 
-        var runtime = elements(spec.path("containers")).getFirst();
+        JsonNode runtime = elements(spec.path("containers")).getFirst();
         assertThat(texts(runtime.path("command"))).containsExactly("/entry.sh");
         assertThat(texts(runtime.path("args"))).containsExactly("arg1", "arg2");
         assertThat(runtime.path("workingDir").asText()).isEqualTo("/work");
@@ -287,7 +288,7 @@ class LambdaPodSpecFactoryTest {
 
     @Test
     void envEntriesSplitOnFirstEquals() {
-        var pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
+        ObjectNode pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
                 "public.ecr.aws/lambda/python:3.12",
                 List.of("KEY=a=b", "EMPTY="),
                 "http://10.0.0.5:4566/b/k", List.of(), false, "h", null, 128, Optional.empty());
@@ -301,7 +302,7 @@ class LambdaPodSpecFactoryTest {
     @Test
     void envEntriesWithEmptyNamesAreDropped() {
         // The API server rejects a pod whose env var has an empty name.
-        var pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
+        ObjectNode pod = factory.buildPod("floci-lambda-my-fn-abc12345", "my-fn",
                 "public.ecr.aws/lambda/python:3.12",
                 List.of("=oops", "KEY=1"),
                 "http://10.0.0.5:4566/b/k", List.of(), false, "h", null, 128, Optional.empty());
@@ -312,11 +313,11 @@ class LambdaPodSpecFactoryTest {
 
     @Test
     void podNameIsDnsSafeAndClamped() {
-        var name = LambdaPodSpecFactory.podName("My_Function.With.Dots", "abc12345");
+        String name = LambdaPodSpecFactory.podName("My_Function.With.Dots", "abc12345");
         assertThat(name).isEqualTo("floci-lambda-my-function-with-dots-abc12345");
         assertThat(name).hasSizeLessThanOrEqualTo(63);
 
-        var longName = LambdaPodSpecFactory.podName("a".repeat(100), "abc12345");
+        String longName = LambdaPodSpecFactory.podName("a".repeat(100), "abc12345");
         assertThat(longName)
                 .hasSizeLessThanOrEqualTo(63)
                 .endsWith("-abc12345")

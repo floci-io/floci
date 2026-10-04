@@ -39,9 +39,16 @@ The data plane is used by applications to retrieve the active configuration for 
 - `StartConfigurationSession`
 - `GetLatestConfiguration`
 
-Basic `AWS.AppConfig.FeatureFlags` profiles are returned in AWS retrieval-time JSON format. Multi-variant
-feature flags require context evaluation and Amazon Ion output, which Floci does not yet emulate. Floci
-returns those configurations unchanged.
+Basic `AWS.AppConfig.FeatureFlags` profiles are returned in AWS retrieval-time JSON format.
+
+Feature flags with variants are returned, as AWS does, in Amazon Ion (`application/ion; type=AWS.AppConfig.FeatureFlags`)
+to a caller whose `Accept` header asks for it, as the AWS AppConfig Agent's does: the caller evaluates the variants'
+rules against its own context (`?flag=name&context=key=value`). The layout is the one AWS documents for the agent's
+[local development mode](https://docs.aws.amazon.com/appconfig/latest/userguide/appconfig-agent-how-to-use-local-development-samples.html#appconfig-agent-how-to-use-local-development-samples-multi-variant):
+each flag with variants is a list of its variants, and each basic flag in the same profile is its retrieval-time JSON
+as a string. Rules of the form `(eq $attribute "value")` are
+encoded; a profile with any other rule is returned unchanged, as JSON, and Floci logs a warning, as it does for a
+caller that does not accept Ion.
 
 ## Configuration
 

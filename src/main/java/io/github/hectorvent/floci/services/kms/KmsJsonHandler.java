@@ -771,7 +771,7 @@ public class KmsJsonHandler {
         if (k.getValidTo() > 0) {
             keyMetadata.put("ValidTo", k.getValidTo());
         }
-        keyMetadata.put("KeyManager", "CUSTOMER");
+        keyMetadata.put("KeyManager", k.getKeyManager());
         keyMetadata.put("CustomerMasterKeySpec", k.getKeySpec().name());
         keyMetadata.put("KeySpec", k.getKeySpec().name());
         keyMetadata.put("MultiRegion", k.isMultiRegion());

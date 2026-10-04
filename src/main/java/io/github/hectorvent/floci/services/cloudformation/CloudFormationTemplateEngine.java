@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -98,6 +100,11 @@ public class CloudFormationTemplateEngine {
         this.objectMapper = objectMapper;
         this.importValueResolver = importValueResolver;
         this.dynamicReferenceResolver = dynamicReferenceResolver;
+    }
+
+    /** The id of the stack this engine resolves for, as {@code AWS::StackId} returns it. */
+    public String stackId() {
+        return stackId;
     }
 
     /**
@@ -206,16 +213,16 @@ public class CloudFormationTemplateEngine {
                 return TextNode.valueOf(resolve(node));
             }
             // Plain object — resolve each field
-            var resolved = objectMapper.createObjectNode();
+            ObjectNode resolved = objectMapper.createObjectNode();
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
-                var entry = fields.next();
+                Map.Entry<String, JsonNode> entry = fields.next();
                 resolved.set(entry.getKey(), resolveNode(entry.getValue()));
             }
             return resolved;
         }
         if (node.isArray()) {
-            var arr = objectMapper.createArrayNode();
+            ArrayNode arr = objectMapper.createArrayNode();
             for (JsonNode item : node) {
                 arr.add(resolveNode(item));
             }

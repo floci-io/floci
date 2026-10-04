@@ -15,6 +15,8 @@ import software.amazon.awssdk.services.ecs.model.CreateClusterRequest;
 import software.amazon.awssdk.services.ecs.model.DeleteClusterRequest;
 import software.amazon.awssdk.services.ecs.model.ExecuteCommandRequest;
 import software.amazon.awssdk.services.ecs.model.LaunchType;
+import software.amazon.awssdk.services.ecs.model.LogConfiguration;
+import software.amazon.awssdk.services.ecs.model.LogDriver;
 import software.amazon.awssdk.services.ecs.model.NetworkMode;
 import software.amazon.awssdk.services.ecs.model.RegisterTaskDefinitionRequest;
 import software.amazon.awssdk.services.ecs.model.RunTaskRequest;
@@ -29,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletionStage;
@@ -69,6 +72,13 @@ class EcsRunningTaskTest {
                                 + "$(wget -qO- $ECS_CONTAINER_METADATA_URI_V4/stats); sleep 120")
                         .essential(true)
                         .memory(64)
+                        .logConfiguration(LogConfiguration.builder()
+                                .logDriver(LogDriver.AWSLOGS)
+                                .options(Map.of(
+                                        "awslogs-group", "/ecs/" + family,
+                                        "awslogs-region", logs.serviceClientConfiguration().region().id(),
+                                        "awslogs-stream-prefix", "ecs"))
+                                .build())
                         .build())
                 .build());
         taskArn = ecs.runTask(RunTaskRequest.builder()

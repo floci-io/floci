@@ -11,6 +11,8 @@ import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.DescribeSubnetsResponse;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo;
+import software.amazon.awssdk.services.rds.model.CreateDbClusterResponse;
+import software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
@@ -22,18 +24,28 @@ import software.amazon.awssdk.services.rds.model.DBSnapshot;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
+import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetGroupsResponse;
+import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetsResponse;
 import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
+import software.amazon.awssdk.services.rds.model.InvalidRestoreException;
+import software.amazon.awssdk.services.rds.model.ListTagsForResourceResponse;
+import software.amazon.awssdk.services.rds.model.ModifyDbClusterResponse;
+import software.amazon.awssdk.services.rds.model.ModifyDbProxyResponse;
+import software.amazon.awssdk.services.rds.model.ModifyDbProxyTargetGroupResponse;
 import software.amazon.awssdk.services.rds.model.ModifyOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.OptionConfiguration;
 import software.amazon.awssdk.services.rds.model.OptionGroupNotFoundException;
 import software.amazon.awssdk.services.rds.model.OptionSetting;
 import software.amazon.awssdk.services.rds.model.RdsException;
+import software.amazon.awssdk.services.rds.model.RegisterDbProxyTargetsResponse;
 import software.amazon.awssdk.services.rds.model.Tag;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -96,7 +108,7 @@ class RdsControlPlaneTest {
 
     @Test
     void sdkRoundTripsAuroraServerlessV2ScalingConfiguration() {
-        var created = rds.createDBCluster(b -> b
+        CreateDbClusterResponse created = rds.createDBCluster(b -> b
                 .dbClusterIdentifier(serverlessClusterName)
                 .engine("aurora-postgresql")
                 .masterUsername("admin")
@@ -113,7 +125,7 @@ class RdsControlPlaneTest {
         assertThat(created.dbCluster().serverlessV2ScalingConfiguration().secondsUntilAutoPause())
                 .isEqualTo(300);
 
-        var modified = rds.modifyDBCluster(b -> b
+        ModifyDbClusterResponse modified = rds.modifyDBCluster(b -> b
                 .dbClusterIdentifier(serverlessClusterName)
                 .serverlessV2ScalingConfiguration(c -> c
                         .secondsUntilAutoPause(600)));
@@ -124,7 +136,7 @@ class RdsControlPlaneTest {
         assertThat(modified.dbCluster().serverlessV2ScalingConfiguration().secondsUntilAutoPause())
                 .isEqualTo(600);
 
-        var described = rds.describeDBClusters(b -> b
+        DBCluster described = rds.describeDBClusters(b -> b
                 .dbClusterIdentifier(serverlessClusterName)).dbClusters().get(0);
         assertThat(described.serverlessV2ScalingConfiguration().minCapacity()).isEqualTo(0.0);
         assertThat(described.serverlessV2ScalingConfiguration().maxCapacity()).isEqualTo(16.0);
@@ -167,7 +179,7 @@ class RdsControlPlaneTest {
 
     @Test
     void sdkRoundTripsDbProxyAndItsDefaultTargetGroup() {
-        var created = rds.createDBProxy(b -> b
+        CreateDbProxyResponse created = rds.createDBProxy(b -> b
                 .dbProxyName(proxyName)
                 .engineFamily("POSTGRESQL")
                 .roleArn("arn:aws:iam::000000000000:role/rds-proxy-test")
@@ -199,14 +211,14 @@ class RdsControlPlaneTest {
             assertThat(auth.description()).isEqualTo("compatibility credentials");
         });
 
-        var targetGroups = rds.describeDBProxyTargetGroups(b -> b.dbProxyName(proxyName));
+        DescribeDbProxyTargetGroupsResponse targetGroups = rds.describeDBProxyTargetGroups(b -> b.dbProxyName(proxyName));
         assertThat(targetGroups.targetGroups()).singleElement().satisfies(targetGroup -> {
             assertThat(targetGroup.targetGroupName()).isEqualTo("default");
             assertThat(targetGroup.isDefault()).isTrue();
             assertThat(targetGroup.targetGroupArn()).contains(":target-group:prx-tg-");
         });
 
-        var tags = rds.listTagsForResource(b -> b.resourceName(created.dbProxy().dbProxyArn()));
+        ListTagsForResourceResponse tags = rds.listTagsForResource(b -> b.resourceName(created.dbProxy().dbProxyArn()));
         assertThat(tags.tagList()).singleElement().satisfies(tag -> {
             assertThat(tag.key()).isEqualTo("owner");
             assertThat(tag.value()).isEqualTo("compatibility");
@@ -217,7 +229,7 @@ class RdsControlPlaneTest {
     void sdkRoundTripsIamDefaultAuthAndProxyUpdates() {
         String mutableProxyName = TestFixtures.uniqueName("rds-proxy-mutable");
         try {
-            var created = rds.createDBProxy(b -> b
+            CreateDbProxyResponse created = rds.createDBProxy(b -> b
                     .dbProxyName(mutableProxyName)
                     .engineFamily("MYSQL")
                     .roleArn("arn:aws:iam::000000000000:role/rds-proxy-initial")
@@ -231,7 +243,7 @@ class RdsControlPlaneTest {
             assertThat(created.dbProxy().defaultAuthScheme()).isEqualTo("IAM_AUTH");
             assertThat(created.dbProxy().auth()).isEmpty();
 
-            var modified = rds.modifyDBProxy(b -> b
+            ModifyDbProxyResponse modified = rds.modifyDBProxy(b -> b
                     .dbProxyName(mutableProxyName)
                     .roleArn("arn:aws:iam::000000000000:role/rds-proxy-updated")
                     .securityGroups("sg-proxy-updated-a", "sg-proxy-updated-b")
@@ -250,7 +262,7 @@ class RdsControlPlaneTest {
             assertThat(modified.dbProxy().idleClientTimeout()).isEqualTo(600);
             assertThat(modified.dbProxy().updatedDate()).isAfterOrEqualTo(created.dbProxy().updatedDate());
 
-            var described = rds.describeDBProxies(b -> b.dbProxyName(mutableProxyName));
+            DescribeDbProxiesResponse described = rds.describeDBProxies(b -> b.dbProxyName(mutableProxyName));
             assertThat(described.dbProxies()).singleElement().satisfies(proxy -> {
                 assertThat(proxy.defaultAuthScheme()).isEqualTo("IAM_AUTH");
                 assertThat(proxy.auth()).isEmpty();
@@ -263,7 +275,7 @@ class RdsControlPlaneTest {
                 assertThat(proxy.idleClientTimeout()).isEqualTo(600);
             });
 
-            var modifiedTargetGroup = rds.modifyDBProxyTargetGroup(b -> b
+            ModifyDbProxyTargetGroupResponse modifiedTargetGroup = rds.modifyDBProxyTargetGroup(b -> b
                     .dbProxyName(mutableProxyName)
                     .targetGroupName("default")
                     .connectionPoolConfig(pool -> pool
@@ -275,7 +287,7 @@ class RdsControlPlaneTest {
 
             assertPoolConfiguration(modifiedTargetGroup.dbProxyTargetGroup().connectionPoolConfig());
 
-            var describedTargetGroups = rds.describeDBProxyTargetGroups(b -> b
+            DescribeDbProxyTargetGroupsResponse describedTargetGroups = rds.describeDBProxyTargetGroups(b -> b
                     .dbProxyName(mutableProxyName)
                     .targetGroupName("default"));
             assertThat(describedTargetGroups.targetGroups()).singleElement().satisfies(targetGroup ->
@@ -292,8 +304,8 @@ class RdsControlPlaneTest {
              RdsClient west = rdsClient(Region.US_WEST_2)) {
             // Subnet ids are region-scoped on real AWS (and on floci, since #21), so each proxy
             // needs subnets from its own signed region rather than the shared us-east-1 subnetIds.
-            var eastProxy = createIamProxy(east, regionalProxyName, subnetIdsFor(Region.US_EAST_1));
-            var westProxy = createIamProxy(west, regionalProxyName, subnetIdsFor(Region.US_WEST_2));
+            CreateDbProxyResponse eastProxy = createIamProxy(east, regionalProxyName, subnetIdsFor(Region.US_EAST_1));
+            CreateDbProxyResponse westProxy = createIamProxy(west, regionalProxyName, subnetIdsFor(Region.US_WEST_2));
 
             assertThat(eastProxy.dbProxy().dbProxyArn()).contains(":rds:us-east-1:");
             assertThat(westProxy.dbProxy().dbProxyArn()).contains(":rds:us-west-2:");
@@ -319,8 +331,8 @@ class RdsControlPlaneTest {
         String regionalInstanceName = TestFixtures.uniqueName("rds-db-regional");
         try (RdsClient east = rdsClient(Region.US_EAST_1);
              RdsClient west = rdsClient(Region.US_WEST_2)) {
-            var eastInstance = createDbInstance(east, regionalInstanceName, "east-secret");
-            var westInstance = createDbInstance(west, regionalInstanceName, "west-secret");
+            CreateDbInstanceResponse eastInstance = createDbInstance(east, regionalInstanceName, "east-secret");
+            CreateDbInstanceResponse westInstance = createDbInstance(west, regionalInstanceName, "west-secret");
 
             assertThat(eastInstance.dbInstance().dbInstanceArn()).contains(":rds:us-east-1:");
             assertThat(westInstance.dbInstance().dbInstanceArn()).contains(":rds:us-west-2:");
@@ -365,7 +377,7 @@ class RdsControlPlaneTest {
         String targetInstanceName = TestFixtures.uniqueName("rds-db-target");
         boolean registered = false;
         try {
-            var instance = createDbInstance(rds, targetInstanceName, "target-secret");
+            CreateDbInstanceResponse instance = createDbInstance(rds, targetInstanceName, "target-secret");
             rds.createDBProxy(b -> b
                     .dbProxyName(targetProxyName)
                     .engineFamily("POSTGRESQL")
@@ -375,7 +387,7 @@ class RdsControlPlaneTest {
                             .secretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds-proxy-target")
                             .iamAuth("DISABLED")));
 
-            var registerResponse = rds.registerDBProxyTargets(b -> b
+            RegisterDbProxyTargetsResponse registerResponse = rds.registerDBProxyTargets(b -> b
                     .dbProxyName(targetProxyName)
                     .dbInstanceIdentifiers(targetInstanceName));
             registered = true;
@@ -383,7 +395,7 @@ class RdsControlPlaneTest {
                     assertInstanceProxyTarget(target, targetInstanceName,
                             instance.dbInstance().dbInstanceArn()));
 
-            var described = rds.describeDBProxyTargets(b -> b
+            DescribeDbProxyTargetsResponse described = rds.describeDBProxyTargets(b -> b
                     .dbProxyName(targetProxyName));
             assertThat(described.targets()).singleElement().satisfies(target ->
                     assertInstanceProxyTarget(target, targetInstanceName,
@@ -601,6 +613,69 @@ class RdsControlPlaneTest {
         }
     }
 
+    @Test
+    @DisplayName("Point in time restore of an instance and a cluster, and the restorable times")
+    void sdkRestoresAnInstanceAndAClusterToAPointInTime() {
+        String instanceName = TestFixtures.uniqueName("rds-pitr-db");
+        String restoredInstance = instanceName + "-restored";
+        String clusterName = TestFixtures.uniqueName("rds-pitr-cluster");
+        String restoredCluster = clusterName + "-restored";
+        try {
+            createDbInstance(rds, instanceName, "pitr-secret");
+            DBInstance source = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertThat(source.latestRestorableTime()).isNotNull();
+
+            DBInstance restored = rds.restoreDBInstanceToPointInTime(b -> b
+                    .sourceDBInstanceIdentifier(instanceName)
+                    .targetDBInstanceIdentifier(restoredInstance)
+                    .useLatestRestorableTime(true)
+                    .dbInstanceClass("db.t3.small"))
+                    .dbInstance();
+            assertThat(restored.dbInstanceIdentifier()).isEqualTo(restoredInstance);
+            assertThat(restored.dbInstanceClass()).isEqualTo("db.t3.small");
+            assertThat(restored.dbName()).isEqualTo("app");
+
+            assertThatThrownBy(() -> rds.restoreDBInstanceToPointInTime(b -> b
+                    .sourceDBInstanceIdentifier(instanceName)
+                    .targetDBInstanceIdentifier(instanceName + "-early")
+                    // Before the source existed, so outside its restorable window.
+                    .restoreTime(Instant.now().minusSeconds(3 * 86400))))
+                    .isInstanceOf(InvalidRestoreException.class);
+
+            rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("pitr-secret")
+                    .databaseName("app"));
+            DBCluster sourceCluster = rds.describeDBClusters(b -> b.dbClusterIdentifier(clusterName))
+                    .dbClusters().get(0);
+            assertThat(sourceCluster.earliestRestorableTime()).isNotNull();
+            assertThat(sourceCluster.latestRestorableTime()).isAfterOrEqualTo(sourceCluster.earliestRestorableTime());
+
+            DBCluster restoredFromTime = rds.restoreDBClusterToPointInTime(b -> b
+                    .dbClusterIdentifier(restoredCluster)
+                    .sourceDBClusterIdentifier(sourceCluster.dbClusterArn())
+                    .restoreToTime(sourceCluster.earliestRestorableTime())
+                    .restoreType("copy-on-write"))
+                    .dbCluster();
+            assertThat(restoredFromTime.dbClusterIdentifier()).isEqualTo(restoredCluster);
+            assertThat(restoredFromTime.databaseName()).isEqualTo("app");
+        } finally {
+            deleteDbInstance(rds, restoredInstance);
+            deleteDbInstance(rds, instanceName);
+            for (String name : List.of(restoredCluster, clusterName)) {
+                try {
+                    rds.deleteDBCluster(b -> b.dbClusterIdentifier(name).skipFinalSnapshot(true));
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + name, e);
+                }
+            }
+        }
+    }
+
     private static CreateDbProxyResponse createIamProxy(RdsClient client, String name, List<String> vpcSubnetIds) {
         return client.createDBProxy(b -> b
                 .dbProxyName(name)
@@ -744,7 +819,7 @@ class RdsControlPlaneTest {
                     .majorEngineVersion("16")
                     .optionGroupDescription("attached to an instance"));
 
-            var instance = rds.createDBInstance(b -> b
+            CreateDbInstanceResponse instance = rds.createDBInstance(b -> b
                     .dbInstanceIdentifier(instanceName)
                     .engine("postgres")
                     .engineVersion("16.3")
@@ -778,7 +853,7 @@ class RdsControlPlaneTest {
     void sdkReportsTheDefaultOptionGroupForAnUnattachedInstance() {
         String instanceName = TestFixtures.uniqueName("rds-db-default-og");
         try {
-            var instance = createDbInstance(rds, instanceName, "default-og-secret");
+            CreateDbInstanceResponse instance = createDbInstance(rds, instanceName, "default-og-secret");
 
             assertThat(instance.dbInstance().optionGroupMemberships())
                     .singleElement()

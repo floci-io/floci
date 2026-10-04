@@ -436,6 +436,28 @@ class S3VersioningIntegrationTest {
             .then()
                 .statusCode(200);
 
+            String validationReceipt = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
+                    containsString("\"Event\":\"s3:TestEvent\""))
+                .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.ReceiptHandle");
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("ReceiptHandle", validationReceipt)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
             String olderVersionId = given()
                 .body("v1")
                 .contentType("text/plain")

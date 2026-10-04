@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
+import io.github.hectorvent.floci.core.common.MultipartFormParser;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -28,6 +29,7 @@ import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.CopyObjectOptions;
+import io.github.hectorvent.floci.services.s3.model.CopySourceConditions;
 import io.github.hectorvent.floci.services.s3.model.QueueNotification;
 import io.github.hectorvent.floci.services.s3.model.ObjectLockRetention;
 import io.github.hectorvent.floci.services.s3.model.Part;
@@ -71,6 +73,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Stream;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
@@ -231,8 +234,8 @@ public class S3Controller {
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListAllMyBucketsResult", AwsNamespaces.S3)
                     .start("Owner")
-                    .elem("ID", "owner")
-                    .elem("DisplayName", "owner")
+                    .elem("ID", regionResolver.getAccountId())
+                    .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
                     .end("Owner")
                     .start("Buckets");
             for (Bucket b : buckets) {
@@ -288,7 +291,8 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (hasQueryParam(uriInfo, "notification")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutBucketNotification", authorization);
-                return handlePutBucketNotification(bucket, body);
+                return handlePutBucketNotification(bucket, body,
+                        Boolean.parseBoolean(httpHeaders.getHeaderString("x-amz-skip-destination-validation")));
             }
             if (hasQueryParam(uriInfo, "versioning")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutBucketVersioning", authorization);
@@ -884,7 +888,7 @@ public class S3Controller {
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
             s3Service.authorizePutObject(bucket, key, authorization);
-            S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders),
+            S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders, uriInfo),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                             .withContentEncoding(persistedEncoding)
@@ -1484,7 +1488,7 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "uploads")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
-                        extractUserMetadata(httpHeaders),
+                        extractUserMetadata(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-storage-class"),
                         httpHeaders.getHeaderString("Content-Disposition"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption"),
@@ -1707,13 +1711,17 @@ public class S3Controller {
                .elem("Size", part.getSize())
                .end("Part");
         }
+        String ownerAccountId = upload.getOwnerAccountId() != null
+                ? upload.getOwnerAccountId() : s3Service.getBucketOwnerAccountId(bucket);
+        String initiatorAccountId = upload.getInitiatorAccountId() != null
+                ? upload.getInitiatorAccountId() : ownerAccountId;
         xml.start("Initiator")
-           .elem("ID", "owner")
-           .elem("DisplayName", "owner")
+           .elem("ID", initiatorAccountId)
+           .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
            .end("Initiator")
            .start("Owner")
-           .elem("ID", "owner")
-           .elem("DisplayName", "owner")
+           .elem("ID", ownerAccountId)
+           .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
            .end("Owner")
            .elem("StorageClass", upload.getStorageClass());
         xml.end("ListPartsResult");
@@ -1915,31 +1923,31 @@ public class S3Controller {
         }
     }
 
-    private Response handlePutBucketNotification(String bucket, byte[] body) {
+    private Response handlePutBucketNotification(String bucket, byte[] body, boolean skipDestinationValidation) {
         try {
             String xml = new String(body, StandardCharsets.UTF_8);
             NotificationConfiguration config = new NotificationConfiguration();
 
-            for (var parsed : parseNotificationGroups(xml, "QueueConfiguration", "Queue")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "QueueConfiguration", "Queue")) {
                 config.getQueueConfigurations().add(
                         new QueueNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "TopicConfiguration", "Topic")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "TopicConfiguration", "Topic")) {
                 config.getTopicConfigurations().add(
                         new TopicNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "LambdaFunctionConfiguration", "LambdaFunctionArn")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "LambdaFunctionConfiguration", "LambdaFunctionArn")) {
                 config.getLambdaFunctionConfigurations().add(
                         new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "CloudFunctionConfiguration", "CloudFunction")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "CloudFunctionConfiguration", "CloudFunction")) {
                 config.getLambdaFunctionConfigurations().add(
                         new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
 
             config.setEventBridgeEnabled(parseEventBridgeConfiguration(xml));
 
-            s3Service.putBucketNotificationConfiguration(bucket, config);
+            s3Service.putBucketNotificationConfiguration(bucket, config, skipDestinationValidation);
             return Response.ok().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e, bucket);
@@ -2768,7 +2776,7 @@ public class S3Controller {
                 sourceObject.versionId(),
                 new CopyObjectOptions()
                         .withMetadataDirective(httpHeaders.getHeaderString("x-amz-metadata-directive"))
-                        .withReplacementMetadata(extractUserMetadata(httpHeaders))
+                        .withReplacementMetadata(extractUserMetadata(httpHeaders, uriInfo))
                         .withTaggingDirective(taggingDirective)
                         .withReplacementTagging(replacementTagging)
                         .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
@@ -2791,7 +2799,10 @@ public class S3Controller {
                         .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
                         .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
                         .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
-                        .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp")));
+                        .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
+                        .withIfMatch(httpHeaders.getHeaderString("If-Match"))
+                        .withIfNoneMatch(httpHeaders.getHeaderString("If-None-Match"))
+                        .withCopySourceConditions(copySourceConditions(httpHeaders)));
         XmlBuilder xmlBuilder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyObjectResult", AwsNamespaces.S3)
@@ -2828,7 +2839,8 @@ public class S3Controller {
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
                 copySourceSseCustomerHeaders(httpHeaders),
-                sseCustomerHeaders(httpHeaders));
+                sseCustomerHeaders(httpHeaders),
+                copySourceConditions(httpHeaders));
         // The destination multipart upload's own SSE settings (captured at
         // CreateMultipartUpload), not anything from this request's headers.
         // UploadPartCopy doesn't take server-side-encryption headers itself,
@@ -2852,6 +2864,16 @@ public class S3Controller {
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
         return response.build();
+    }
+
+    private CopySourceConditions copySourceConditions(HttpHeaders httpHeaders) {
+        String ifModifiedSince = httpHeaders.getHeaderString("x-amz-copy-source-if-modified-since");
+        String ifUnmodifiedSince = httpHeaders.getHeaderString("x-amz-copy-source-if-unmodified-since");
+        return new CopySourceConditions(
+                httpHeaders.getHeaderString("x-amz-copy-source-if-match"),
+                httpHeaders.getHeaderString("x-amz-copy-source-if-none-match"),
+                ifModifiedSince != null ? parseHttpDate(ifModifiedSince) : null,
+                ifUnmodifiedSince != null ? parseHttpDate(ifUnmodifiedSince) : null);
     }
 
     private S3Service.SseCustomerHeaders copySourceSseCustomerHeaders(HttpHeaders httpHeaders) {
@@ -2972,19 +2994,31 @@ public class S3Controller {
         }
     }
 
-    private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders) {
+    /**
+     * Reads {@code x-amz-meta-*} user metadata from the request headers and, for presigned URLs
+     * whose SDK hoisted them there, from the query string. A query parameter wins over a header
+     * with the same key, because the presigned URL signature covers the query value.
+     */
+    private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, UriInfo uriInfo) {
         Map<String, String> metadata = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> entry : httpHeaders.getRequestHeaders().entrySet()) {
-            String headerName = entry.getKey().toLowerCase(Locale.ROOT);
-            if (!headerName.startsWith("x-amz-meta-")) {
+        if (uriInfo != null) {
+            addUserMetadata(metadata, uriInfo.getQueryParameters());
+        }
+        addUserMetadata(metadata, httpHeaders.getRequestHeaders());
+        return metadata;
+    }
+
+    private static void addUserMetadata(Map<String, String> metadata, Map<String, List<String>> source) {
+        for (Map.Entry<String, List<String>> entry : source.entrySet()) {
+            String name = entry.getKey().toLowerCase(Locale.ROOT);
+            if (!name.startsWith("x-amz-meta-")) {
                 continue;
             }
-            String key = headerName.substring("x-amz-meta-".length());
+            String key = name.substring("x-amz-meta-".length());
             if (!key.isBlank() && !entry.getValue().isEmpty()) {
-                metadata.put(key, entry.getValue().get(0));
+                metadata.putIfAbsent(key, entry.getValue().get(0));
             }
         }
-        return metadata;
     }
 
     static String resolveHeaderOrQueryParam(HttpHeaders httpHeaders, UriInfo uriInfo, String name) {
@@ -3272,6 +3306,19 @@ public class S3Controller {
             if (argumentValue != null) {
                 xmlBuilder.elem("ArgumentValue", argumentValue.toString());
             }
+            for (int index = 1; ; index++) {
+                Object numberedName = e.getExtendedData().get("ArgumentName" + index);
+                Object numberedValue = e.getExtendedData().get("ArgumentValue" + index);
+                if (numberedName == null && numberedValue == null) {
+                    break;
+                }
+                if (numberedName != null) {
+                    xmlBuilder.elem("ArgumentName" + index, numberedName.toString());
+                }
+                if (numberedValue != null) {
+                    xmlBuilder.elem("ArgumentValue" + index, numberedValue.toString());
+                }
+            }
         }
         String xml = xmlBuilder
                 .elem("RequestId", java.util.UUID.randomUUID().toString())
@@ -3402,55 +3449,14 @@ public class S3Controller {
     }
 
     private Response doHandlePresignedPost(String bucket, String contentType, byte[] body) {
-        String boundary = extractBoundary(contentType);
-        if (boundary == null) {
-            throw new AwsException("InvalidArgument",
-                    "Could not determine multipart boundary from Content-Type.", 400);
-        }
+        String boundary = MultipartFormParser.extractBoundary(contentType).orElseThrow(() ->
+                new AwsException("InvalidArgument",
+                        "Could not determine multipart boundary from Content-Type.", 400));
 
-        Map<String, String> fields = new LinkedHashMap<>();
-        byte[] fileData = null;
-        String fileContentType = null;
-
-        byte[] boundaryBytes = ("--" + boundary).getBytes(StandardCharsets.UTF_8);
-        List<byte[]> parts = splitMultipartParts(body, boundaryBytes);
-
-        for (byte[] part : parts) {
-            int headerEnd = indexOfDoubleNewline(part);
-            if (headerEnd < 0) {
-                continue;
-            }
-            String headers = new String(part, 0, headerEnd, StandardCharsets.UTF_8);
-            int bodyStart = headerEnd + 4; // skip \r\n\r\n
-            byte[] partBody = Arrays.copyOfRange(part, bodyStart, part.length);
-
-            // Trim trailing \r\n from part body
-            if (partBody.length >= 2
-                    && partBody[partBody.length - 2] == '\r'
-                    && partBody[partBody.length - 1] == '\n') {
-                partBody = Arrays.copyOf(partBody, partBody.length - 2);
-            }
-
-            String disposition = extractHeaderValue(headers, "Content-Disposition");
-            if (disposition == null) {
-                continue;
-            }
-            String fieldName = extractDispositionParam(disposition, "name");
-            if (fieldName == null) {
-                continue;
-            }
-
-            String filename = extractDispositionParam(disposition, "filename");
-            if (filename != null) {
-                fileData = partBody;
-                String partContentType = extractHeaderValue(headers, "Content-Type");
-                if (partContentType != null) {
-                    fileContentType = partContentType.trim();
-                }
-            } else {
-                fields.put(fieldName, new String(partBody, StandardCharsets.UTF_8));
-            }
-        }
+        MultipartFormParser.ParsedForm form = MultipartFormParser.parse(body, boundary);
+        Map<String, String> fields = form.fields();
+        byte[] fileData = form.file().map(MultipartFormParser.FilePart::content).orElse(null);
+        String fileContentType = form.file().map(MultipartFormParser.FilePart::contentType).orElse(null);
 
         String key = fields.get("key");
         if (key == null || key.isEmpty()) {
@@ -3490,7 +3496,7 @@ public class S3Controller {
                     S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
         }
 
-        if (s3Service.isAuthEnforced()) {
+        if (s3Service.isAuthEnforced() || (config.auth().validateSignatures() && isSignedPost(lcFields))) {
             validatePresignedPostAuth(lcFields, bucket, key, fileData.length);
         } else {
             // Validate policy conditions if present
@@ -3557,6 +3563,17 @@ public class S3Controller {
             throw new AwsException("AuthorizationHeaderMalformed", "The authorization header is malformed; "
                     + "the region '" + region + "' is wrong; expecting a region AWS publishes.", 400);
         }
+    }
+
+    /**
+     * Whether a browser POST carries any SigV4 form field. Under {@code floci.auth.validate-signatures}
+     * such a POST must verify, while one with none of them is anonymous and is left to
+     * {@code enforce-auth}, which decides anonymous access from the bucket policy and ACL.
+     */
+    private static boolean isSignedPost(Map<String, String> fields) {
+        return Stream.of("x-amz-algorithm", "x-amz-credential", "x-amz-signature")
+                .map(fields::get)
+                .anyMatch(value -> value != null && !value.isEmpty());
     }
 
     /**
@@ -3715,123 +3732,6 @@ public class S3Controller {
         return fields.get(fieldName);
     }
 
-    private static String extractBoundary(String contentType) {
-        if (contentType == null) {
-            return null;
-        }
-        for (String part : contentType.split(";")) {
-            String trimmed = part.trim();
-            if (trimmed.toLowerCase(Locale.ROOT).startsWith("boundary=")) {
-                String boundary = trimmed.substring("boundary=".length()).trim();
-                if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
-                    boundary = boundary.substring(1, boundary.length() - 1);
-                }
-                return boundary;
-            }
-        }
-        return null;
-    }
-
-    private static List<byte[]> splitMultipartParts(byte[] body, byte[] boundary) {
-        java.util.ArrayList<byte[]> parts = new java.util.ArrayList<>();
-        int pos = indexOf(body, boundary, 0);
-        if (pos < 0) {
-            return parts;
-        }
-        // Skip past the first boundary line
-        pos += boundary.length;
-        // Skip the CRLF or -- after boundary
-        if (pos < body.length - 1 && body[pos] == '-' && body[pos + 1] == '-') {
-            return parts; // closing boundary immediately
-        }
-        if (pos < body.length - 1 && body[pos] == '\r' && body[pos + 1] == '\n') {
-            pos += 2;
-        }
-
-        while (pos < body.length) {
-            int nextBoundary = indexOf(body, boundary, pos);
-            if (nextBoundary < 0) {
-                break;
-            }
-            parts.add(Arrays.copyOfRange(body, pos, nextBoundary));
-            pos = nextBoundary + boundary.length;
-            // Check for closing boundary --
-            if (pos < body.length - 1 && body[pos] == '-' && body[pos + 1] == '-') {
-                break;
-            }
-            // Skip CRLF after boundary
-            if (pos < body.length - 1 && body[pos] == '\r' && body[pos + 1] == '\n') {
-                pos += 2;
-            }
-        }
-        return parts;
-    }
-
-    private static int indexOf(byte[] data, byte[] pattern, int fromIndex) {
-        outer:
-        for (int i = fromIndex; i <= data.length - pattern.length; i++) {
-            for (int j = 0; j < pattern.length; j++) {
-                if (data[i + j] != pattern[j]) {
-                    continue outer;
-                }
-            }
-            return i;
-        }
-        return -1;
-    }
-
-    private static int indexOfDoubleNewline(byte[] data) {
-        for (int i = 0; i < data.length - 3; i++) {
-            if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n') {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private static String extractHeaderValue(String headers, String headerName) {
-        String lowerHeaders = headers.toLowerCase(Locale.ROOT);
-        String lowerName = headerName.toLowerCase(Locale.ROOT) + ":";
-        int idx = lowerHeaders.indexOf(lowerName);
-        if (idx < 0) {
-            return null;
-        }
-        int valueStart = idx + lowerName.length();
-        int lineEnd = headers.indexOf('\r', valueStart);
-        if (lineEnd < 0) {
-            lineEnd = headers.indexOf('\n', valueStart);
-        }
-        if (lineEnd < 0) {
-            lineEnd = headers.length();
-        }
-        return headers.substring(valueStart, lineEnd).trim();
-    }
-
-    private static String extractDispositionParam(String disposition, String paramName) {
-        String search = paramName + "=";
-        int idx = disposition.indexOf(search);
-        if (idx < 0) {
-            return null;
-        }
-        int valueStart = idx + search.length();
-        if (valueStart >= disposition.length()) {
-            return null;
-        }
-        if (disposition.charAt(valueStart) == '"') {
-            valueStart++;
-            int valueEnd = disposition.indexOf('"', valueStart);
-            if (valueEnd < 0) {
-                return disposition.substring(valueStart);
-            }
-            return disposition.substring(valueStart, valueEnd);
-        } else {
-            int valueEnd = disposition.indexOf(';', valueStart);
-            if (valueEnd < 0) {
-                valueEnd = disposition.length();
-            }
-            return disposition.substring(valueStart, valueEnd).trim();
-        }
-    }
 
     private static final int MAX_INLINE_TAGS = 10;
     private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;

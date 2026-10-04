@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -23,15 +24,15 @@ class DbClusterPersistenceTest {
         cluster.setServerlessV2MaxCapacity(16.0);
         cluster.setServerlessV2SecondsUntilAutoPause(600);
 
-        var writer = new PersistentStorage<String, DbCluster>(
+        PersistentStorage<String, DbCluster> writer = new PersistentStorage<>(
                 file, new TypeReference<Map<String, DbCluster>>() {});
         writer.put(cluster.getDbClusterIdentifier(), cluster);
 
-        var reader = new PersistentStorage<String, DbCluster>(
+        PersistentStorage<String, DbCluster> reader = new PersistentStorage<>(
                 file, new TypeReference<Map<String, DbCluster>>() {});
         reader.load();
 
-        var restored = reader.get(cluster.getDbClusterIdentifier());
+        Optional<DbCluster> restored = reader.get(cluster.getDbClusterIdentifier());
         assertTrue(restored.isPresent());
         assertEquals("aurora-postgresql", restored.get().getEngineIdentifier());
         assertEquals(0.0, restored.get().getServerlessV2MinCapacity());

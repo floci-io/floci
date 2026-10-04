@@ -22,6 +22,7 @@ import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Pins which {@code Fn::GetAtt} attributes declared by the CloudFormation registry schemas Floci
@@ -183,7 +184,7 @@ class CfnSchemaCoverageTest {
 
     private static Map<String, ProvisionerScan> scanProvisioners() {
         Map<String, ProvisionerScan> scans = new TreeMap<>();
-        try (var files = Files.list(PROVISIONERS)) {
+        try (Stream<Path> files = Files.list(PROVISIONERS)) {
             for (Path file : files.filter(f -> f.getFileName().toString().endsWith("CfnProvisioner.java"))
                     .sorted()
                     .toList()) {

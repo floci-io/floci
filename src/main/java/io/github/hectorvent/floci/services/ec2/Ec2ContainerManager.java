@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -32,11 +33,8 @@ import com.github.dockerjava.api.model.MountType;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
@@ -107,16 +105,18 @@ public class Ec2ContainerManager {
     };
 
     /**
-     * Label identifying the Floci process that created an EC2 instance container, by its API
-     * port. {@link #reconcileOrphanedContainers} lists on the existing {@code io.floci.service=ec2}
-     * identity label (see {@link ContainerStorageHelper#resourceIdentityLabels}) and then keeps
-     * only containers carrying <em>this</em> process's owner port: several emulators can share one
+     * Label identifying the Floci deployment that created an EC2 instance container, by its
+     * resource namespace and API port. {@link #reconcileOrphanedContainers} lists on the existing
+     * {@code io.floci.service=ec2} identity label (see
+     * {@link ContainerStorageHelper#resourceIdentityLabels}) and then keeps
+     * only containers carrying <em>this</em> deployment's owner: several emulators can share one
      * Docker daemon, and an unscoped sweep would reap a sibling's live instances.
      * {@code floci_namespace} is the documented scoping mechanism for that, but it is absent
      * unless a resource namespace is configured, so it cannot scope the default configuration.
      * Containers created before this label existed carry no owner and are therefore never swept.
      */
-    static final String LABEL_OWNER_PORT = ContainerStorageHelper.OWNER_LABEL;
+    static final String LABEL_OWNER = ContainerStorageHelper.OWNER_LABEL;
+    private static final ContainerStorageHelper.LabelAliases ALIASES = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
 
     /**
      * Identity of the Floci deployment that owns a container, for scoping the startup sweep.
@@ -128,10 +128,10 @@ public class Ec2ContainerManager {
     private String ownerIdentity() {
         return ContainerStorageHelper.ownerIdentity(config);
     }
-    static final String LABEL_SERVICE = "io.floci.service";
+    static final String LABEL_SERVICE = ContainerStorageHelper.SERVICE_LABEL;
     static final String SERVICE_VALUE = "ec2";
-    static final String LABEL_RESOURCE_ID = "io.floci.resource-id";
-    static final String LABEL_REGION = "io.floci.region";
+    static final String LABEL_RESOURCE_ID = ContainerStorageHelper.RESOURCE_ID_LABEL;
+    static final String LABEL_REGION = ContainerStorageHelper.REGION_LABEL;
 
     static int containerBridgeIpAttempts = 30;
     static long containerBridgeIpPollMillis = 500;
@@ -187,10 +187,11 @@ public class Ec2ContainerManager {
         String helperId = mode.substring("container:".length());
         InspectContainerResponse helper = dockerClient.inspectContainerCmd(helperId).exec();
         Map<String, String> labels = helper.getConfig().getLabels();
-        if (!"true".equals(labels.get("floci.security-group-helper"))
+        if (!ALIASES.consistent(helperId, labels)
+                || !ALIASES.matches(labels, ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true")
                 || !"ec2".equals(labels.get(LABEL_SERVICE))
                 || !instance.getInstanceId().equals(labels.get(LABEL_RESOURCE_ID))
-                || !ownerIdentity().equals(labels.get(LABEL_OWNER_PORT))) {
+                || !ALIASES.matches(labels, LABEL_OWNER, ownerIdentity())) {
             throw new IllegalStateException("EC2 workload network namespace is not Floci protected");
         }
         String address = helper.getNetworkSettings().getNetworks().values().stream()
@@ -694,8 +695,8 @@ public class Ec2ContainerManager {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "ec2", instanceId, regionResolver.getAccountId(), region))
                 // Which Floci owns this container, so the startup reconciler cannot reap a
-                // sibling emulator's live instances off a shared daemon. See LABEL_OWNER_PORT.
-                .withLabels(Map.of(LABEL_OWNER_PORT, ownerIdentity()))
+                // sibling emulator's live instances off a shared daemon. See LABEL_OWNER.
+                .withLabels(Map.of(LABEL_OWNER, ownerIdentity()))
                 // EC2 instances expose IMDS on 169.254.169.254. Floci needs network administration
                 // privileges in the local container to attach that link-local address.
                 .withPrivileged(namespace == null)
@@ -715,7 +716,7 @@ public class Ec2ContainerManager {
             specBuilder.withPortBinding(22, sshHostPort);
         } else {
             specBuilder.withNetworkMode("container:" + namespace.helperId());
-            specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+            specBuilder.withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true"));
         }
         if (image.systemd()) {
             specBuilder
@@ -1071,7 +1072,7 @@ public class Ec2ContainerManager {
                     .exec();
             for (Container container : containers) {
                 Map<String, String> labels = container.getLabels() == null ? Map.of() : container.getLabels();
-                if (!owner.equals(labels.get(LABEL_OWNER_PORT))) {
+                if (!ALIASES.consistent(container.getId(), labels) || !ALIASES.matches(labels, LABEL_OWNER, owner)) {
                     continue;
                 }
                 String instanceId = labels.get(LABEL_RESOURCE_ID);
@@ -1491,11 +1492,8 @@ public class Ec2ContainerManager {
 
             // Copy authorized_keys via docker cp
             String keyContent = publicKey.trim() + "\n";
-            byte[] tar = buildSingleFileTar("authorized_keys", keyContent.getBytes(StandardCharsets.UTF_8), 0600);
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath("/root/.ssh")
-                    .withTarInputStream(new ByteArrayInputStream(tar))
-                    .exec();
+            RetryingTarCopier.copyBytes(dockerClient, containerId, "/root/.ssh",
+                    "authorized_keys", keyContent.getBytes(StandardCharsets.UTF_8), 0600);
 
             execInContainer(containerId, new String[]{"chmod", "600", "/root/.ssh/authorized_keys"}, 5);
             LOG.infov("Injected SSH public key into container {0}", containerId);
@@ -1760,9 +1758,5 @@ public class Ec2ContainerManager {
 
     static Optional<String> preferredMetadataSourceIp(Map<String, ContainerNetwork> networks) {
         return Ec2MetadataProxy.preferredMetadataSourceIp(networks);
-    }
-
-    private byte[] buildSingleFileTar(String filename, byte[] content, int mode) throws IOException {
-        return UserDataPipeline.buildSingleFileTar(filename, content, mode);
     }
 }

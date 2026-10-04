@@ -224,6 +224,7 @@ public class EventBridgeHandler {
                         input.isEmpty() ? null : input,
                         inputPath.isEmpty() ? null : inputPath
                 );
+                target.setRoleArn(t.path("RoleArn").asText(null));
                 target.setInputTransformer(InputTransformer.fromJson(t.path("InputTransformer")));
                 JsonNode sqsParamsNode = t.path("SqsParameters");
                 if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
@@ -241,6 +242,15 @@ public class EventBridgeHandler {
                 JsonNode ecsParamsNode = t.path("EcsParameters");
                 if (!ecsParamsNode.isMissingNode() && ecsParamsNode.isObject()) {
                     target.setEcsParameters(objectMapper.convertValue(ecsParamsNode, EcsParameters.class));
+                }
+                JsonNode retryPolicyNode = t.path("RetryPolicy");
+                if (retryPolicyNode.isObject()) {
+                    target.setRetryPolicy(objectMapper.convertValue(retryPolicyNode, Target.RetryPolicy.class));
+                }
+                JsonNode deadLetterConfigNode = t.path("DeadLetterConfig");
+                if (deadLetterConfigNode.isObject()) {
+                    target.setDeadLetterConfig(
+                            objectMapper.convertValue(deadLetterConfigNode, Target.DeadLetterConfig.class));
                 }
                 targets.add(target);
             }
@@ -304,6 +314,15 @@ public class EventBridgeHandler {
             }
             if (t.getEcsParameters() != null) {
                 node.set("EcsParameters", objectMapper.valueToTree(t.getEcsParameters()));
+            }
+            if (t.getRetryPolicy() != null) {
+                node.set("RetryPolicy", objectMapper.valueToTree(t.getRetryPolicy()));
+            }
+            if (t.getRoleArn() != null) {
+                node.put("RoleArn", t.getRoleArn());
+            }
+            if (t.getDeadLetterConfig() != null) {
+                node.set("DeadLetterConfig", objectMapper.valueToTree(t.getDeadLetterConfig()));
             }
             targetsArray.add(node);
         }

@@ -67,7 +67,7 @@ public class CloudHsmV2Test {
         // 3. Create HSM
         CreateHsmResponse hsmResp = client.createHsm(r -> r
                 .clusterId(clusterId)
-                .availabilityZone("us-east-1a")
+                .availabilityZone(TestFixtures.region().id() + "a")
                 .ipAddress("10.0.1.5")
         );
 
@@ -128,7 +128,8 @@ public class CloudHsmV2Test {
 
         client.initializeCluster(r -> r.clusterId(clusterId).signedCert(signedCert).trustAnchor(trustAnchor));
 
-        Hsm hsm = client.createHsm(r -> r.clusterId(clusterId).availabilityZone("us-east-1b")).hsm();
+        Hsm hsm = client.createHsm(r -> r.clusterId(clusterId)
+                .availabilityZone(TestFixtures.region().id() + "b")).hsm();
 
         // Test exactly one selector rule
         assertThatThrownBy(() -> client.deleteHsm(r -> r
