@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -79,6 +80,38 @@ class DynamoDbAccountIsolationIntegrationTest {
             .body("Count", equalTo(0));
     }
 
+    @Test
+    void streamsInSameNamedTableAreIsolatedBetweenAccounts() {
+        String tableName = "account-isolation-stream-table";
+
+        createTable(AUTH_ACCOUNT_1, tableName);
+        createTable(AUTH_ACCOUNT_2, tableName);
+        enableStream(AUTH_ACCOUNT_1, tableName);
+        enableStream(AUTH_ACCOUNT_2, tableName);
+
+        given()
+            .header("X-Amz-Target", "DynamoDBStreams_20120810.ListStreams")
+            .header("Authorization", AUTH_ACCOUNT_1)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\":\"%s\"}".formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("Streams.size()", equalTo(1))
+            .body("Streams[0].StreamArn", containsString(":000000000001:"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDBStreams_20120810.ListStreams")
+            .header("Authorization", AUTH_ACCOUNT_2)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\":\"%s\"}".formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("Streams.size()", equalTo(1))
+            .body("Streams[0].StreamArn", containsString(":000000000002:"));
+    }
+
     private static void createTable(String auth, String tableName) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -90,6 +123,21 @@ class DynamoDbAccountIsolationIntegrationTest {
                     "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
                     "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
                     "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    private static void enableStream(String auth, String tableName) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .header("Authorization", auth)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "StreamSpecification": {"StreamEnabled": true, "StreamViewType": "NEW_IMAGE"}
                 }
                 """.formatted(tableName))
         .when().post("/")

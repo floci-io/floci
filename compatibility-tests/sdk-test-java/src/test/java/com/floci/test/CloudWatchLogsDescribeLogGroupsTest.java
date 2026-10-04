@@ -22,9 +22,9 @@ class CloudWatchLogsDescribeLogGroupsTest {
                 LogGroup group = findGroup(logs, groupName);
 
                 assertThat(group.arn())
-                        .isEqualTo("arn:aws:logs:us-east-1:000000000000:log-group:" + groupName + ":*");
+                        .isEqualTo(TestFixtures.arn("logs", "000000000000", "log-group:" + groupName + ":*"));
                 assertThat(group.logGroupArn())
-                        .isEqualTo("arn:aws:logs:us-east-1:000000000000:log-group:" + groupName);
+                        .isEqualTo(TestFixtures.arn("logs", "000000000000", "log-group:" + groupName));
                 assertThat(group.logGroupArn()).doesNotEndWith(":*");
             } finally {
                 deleteIfPresent(logs, groupName);

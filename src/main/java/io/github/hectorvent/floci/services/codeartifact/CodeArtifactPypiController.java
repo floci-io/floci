@@ -29,6 +29,7 @@ import java.util.Arrays;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Serves the real PyPI simple-repository wire protocol behind the URL
@@ -63,6 +64,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public class CodeArtifactPypiController {
 
     private static final String SIMPLE_PATH = "/simple/";
+
+    /** Matches an {@code href="..."} attribute in pypiserver's own simple-index HTML. */
+    private static final Pattern SIMPLE_INDEX_HREF = Pattern.compile("href=\"([^\"]*)\"");
 
     private final CodeArtifactService service;
     private final PypiserverSidecarManager pypiserver;
@@ -103,7 +107,8 @@ public class CodeArtifactPypiController {
                                   @PathParam("repository") String repository,
                                   @PathParam("package") String packageName) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
-        Response response = proxyGet(handle.baseUrl(), SIMPLE_PATH + packageName + "/");
+        Response response = proxyGet(handle.baseUrl(), SIMPLE_PATH + SidecarUriUtils.encodeSegment(packageName)
+                + "/");
         if (response.getStatus() != 200) {
             return response;
         }
@@ -120,7 +125,7 @@ public class CodeArtifactPypiController {
                                   @PathParam("repository") String repository,
                                   @PathParam("filename") String filename) {
         String baseUrl = requireRepository(headers, domain, repository).baseUrl();
-        return proxyGet(baseUrl, "/packages/" + filename);
+        return proxyGet(baseUrl, "/packages/" + SidecarUriUtils.encodeSegment(filename));
     }
 
     /**
@@ -191,11 +196,18 @@ public class CodeArtifactPypiController {
      * check couldn't complete" the same as "nothing published yet" would let an upload with
      * different content through to pypiserver (which has no conflict check of its own) during
      * exactly the moment this proxy's own protection is unavailable, the opposite of fail-safe.
+     *
+     * <p>{@code packageName} and {@code filename} are percent-encoded via {@link SidecarUriUtils#
+     * encodeSegment} before being placed in either request path: without that, a {@code /} in
+     * either one would be indistinguishable from a real path separator, and a {@code #} or
+     * {@code ?} would be reinterpreted by {@link URI#create} as a fragment or query string,
+     * silently fetching a different path than the one actually requested.
      */
     private Optional<byte[]> existingFileContent(String baseUrl, String packageName, String filename) {
         String normalized = normalizePackageName(packageName);
-        HttpRequest indexRequest = HttpRequest.newBuilder(URI.create(baseUrl + SIMPLE_PATH + normalized + "/"))
-                .timeout(Duration.ofSeconds(5)).GET().build();
+        URI indexUri = SidecarUriUtils.combine(URI.create(baseUrl),
+                SIMPLE_PATH + SidecarUriUtils.encodeSegment(normalized) + "/");
+        HttpRequest indexRequest = HttpRequest.newBuilder(indexUri).timeout(Duration.ofSeconds(5)).GET().build();
         HttpResponse<String> indexResponse;
         try {
             indexResponse = httpClient.send(indexRequest, BodyHandlers.ofString());
@@ -212,12 +224,13 @@ public class CodeArtifactPypiController {
                     "Could not check pypi package " + packageName + " for an existing " + filename
                             + ": upstream returned " + indexResponse.statusCode());
         }
-        if (!indexResponse.body().contains(filename)) {
+        if (!indexListsFilename(indexResponse.body(), filename)) {
             return Optional.empty();
         }
 
-        HttpRequest fileRequest = HttpRequest.newBuilder(URI.create(baseUrl + "/packages/" + filename))
-                .timeout(Duration.ofSeconds(10)).GET().build();
+        URI fileUri = SidecarUriUtils.combine(URI.create(baseUrl), "/packages/"
+                + SidecarUriUtils.encodeSegment(filename));
+        HttpRequest fileRequest = HttpRequest.newBuilder(fileUri).timeout(Duration.ofSeconds(10)).GET().build();
         HttpResponse<byte[]> fileResponse;
         try {
             fileResponse = httpClient.send(fileRequest, BodyHandlers.ofByteArray());
@@ -237,6 +250,22 @@ public class CodeArtifactPypiController {
         return name.toLowerCase(Locale.ROOT).replaceAll("[-_.]+", "-");
     }
 
+    /**
+     * An exact entry match, not a substring search: a shorter real filename that happens to be a
+     * substring of a different, longer real filename (or of surrounding markup) must not pass
+     * this check.
+     */
+    private static boolean indexListsFilename(String indexBody, String filename) {
+        return SIMPLE_INDEX_HREF.matcher(indexBody).results()
+                .map(match -> {
+                    String href = match.group(1);
+                    String name = href.substring(href.lastIndexOf('/') + 1);
+                    int fragment = name.indexOf('#');
+                    return fragment < 0 ? name : name.substring(0, fragment);
+                })
+                .anyMatch(filename::equals);
+    }
+
     private Response forwardUpload(String baseUrl, String contentType, byte[] content) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/"))
                 .timeout(Duration.ofSeconds(30))
@@ -252,14 +281,20 @@ public class CodeArtifactPypiController {
         return Response.status(response.statusCode()).build();
     }
 
-    private Response proxyGet(String baseUrl, String path) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
+    /**
+     * {@code encodedPath} must already be fully percent-encoded, built from {@link
+     * SidecarUriUtils#encodeSegment}-encoded, caller-supplied segments: see {@link
+     * SidecarUriUtils#combine} for why a raw {@code URI.create(baseUrl + path)} concatenation
+     * isn't safe here.
+     */
+    private Response proxyGet(String baseUrl, String encodedPath) {
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), encodedPath))
                 .timeout(Duration.ofSeconds(10)).GET().build();
         HttpResponse<byte[]> response;
         try {
             response = httpClient.send(request, BodyHandlers.ofByteArray());
         } catch (Exception e) {
-            throw new IllegalStateException("Could not reach the pypi sidecar at " + path, e);
+            throw new IllegalStateException("Could not reach the pypi sidecar at " + encodedPath, e);
         }
         if (response.statusCode() == 404) {
             return Response.status(404).build();

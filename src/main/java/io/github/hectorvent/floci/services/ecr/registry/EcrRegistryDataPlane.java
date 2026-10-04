@@ -171,7 +171,7 @@ public class EcrRegistryDataPlane {
         context.request().headers().forEach(header -> {
             if (!HOP_BY_HOP_HEADERS.contains(header.getKey().toLowerCase())
                     && !"host".equalsIgnoreCase(header.getKey())) {
-                upstream.putHeader(header.getKey(), header.getValue());
+                upstream.headers().add(header.getKey(), header.getValue());
             }
         });
         if (context.request().getHeader("Content-Length") == null

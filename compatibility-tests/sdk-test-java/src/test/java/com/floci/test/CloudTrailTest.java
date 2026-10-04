@@ -63,7 +63,7 @@ class CloudTrailTest {
         assertThat(response.trailList()).hasSize(1);
         Trail trail = response.trailList().get(0);
         assertThat(trail.name()).isEqualTo(trailName);
-        assertThat(trail.homeRegion()).isEqualTo("us-east-1");
+        assertThat(trail.homeRegion()).isEqualTo(TestFixtures.region().id());
         assertThat(trail.s3BucketName()).isEqualTo(bucketName);
     }
 

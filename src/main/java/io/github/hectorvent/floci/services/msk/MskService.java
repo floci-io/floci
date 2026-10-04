@@ -440,7 +440,7 @@ public class MskService implements ResourceProvider {
         }
 
         String accountId = regionResolver.getAccountId();
-        String arn = AwsArnUtils.Arn.of("kafka", config.defaultRegion(), accountId,
+        String arn = AwsArnUtils.Arn.of("kafka", regionResolver.getRegion(), accountId,
                 "configuration/" + name + "/" + UUID.randomUUID()).toString();
 
         MskConfiguration configuration = new MskConfiguration(arn, name, description, kafkaVersions, serverProperties);

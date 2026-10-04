@@ -559,7 +559,7 @@ class GlueCatalogTest {
                 .tags(Map.of("Environment", "dev", "Project", "project1"))
                 .build());
 
-        String databaseArn = "arn:aws:glue:us-east-1:000000000000:database/" + DATABASE_TAGGED_NAME;
+        String databaseArn = TestFixtures.arn("glue", "000000000000", "database/" + DATABASE_TAGGED_NAME);
         GetResourcesResponse response = tagging.getResources(b -> b.resourceARNList(databaseArn));
 
         assertThat(response.resourceTagMappingList()).singleElement().satisfies(mapping -> {
@@ -586,7 +586,7 @@ class GlueCatalogTest {
                         .physicalConnectionRequirements(PhysicalConnectionRequirements.builder()
                                 .subnetId("subnet-0123456789abcdef0")
                                 .securityGroupIdList("sg-0123456789abcdef0")
-                                .availabilityZone("us-east-1a")
+                                .availabilityZone(TestFixtures.region().id() + "a")
                                 .build())
                         .build())
                 .tags(Map.of("env", "dev"))
@@ -660,7 +660,8 @@ class GlueCatalogTest {
     @DisplayName("The catalog resource policy follows the create, update and delete conditions Terraform sends")
     void catalogResourcePolicyLifecycle() {
         String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:root\"},\"Action\":\"glue:GetTable\",\"Resource\":\"*\"}]}";
+                + "\"Principal\":{\"AWS\":\"" + TestFixtures.globalArn("iam", "111122223333", "root") + "\"},"
+                + "\"Action\":\"glue:GetTable\",\"Resource\":\"*\"}]}";
         String policyV2 = policy.replace("glue:GetTable", "glue:GetTables");
         // Start from no policy; the catalog is shared with other tests.
         try {

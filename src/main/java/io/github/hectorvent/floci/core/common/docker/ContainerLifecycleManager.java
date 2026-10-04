@@ -950,27 +950,36 @@ public class ContainerLifecycleManager {
     /**
      * Returns whether the container is currently running. A missing container is treated as
      * not-running; any other Docker error (e.g. an inspect timeout under daemon overload) is also
-     * treated as not-running, so a hung/dead container is not reused from the warm pool — a false
+     * treated as not-running, so a hung/dead container is not reused from the warm pool. A false
      * negative merely triggers a clean cold-start, which is far cheaper than blocking until the
-     * function timeout.
+     * function timeout. Callers that must not act on a failed probe use {@link #probeContainer}.
      *
      * @param containerId the container ID to inspect
      * @return true only if the container exists and is reported as running; false on any error
      */
     public boolean isContainerRunning(String containerId) {
+        return probeContainer(containerId) == ContainerLiveness.RUNNING;
+    }
+
+    /**
+     * Probes the container and tells a definite answer from a failed probe.
+     *
+     * @param containerId the container ID to inspect
+     * @return RUNNING or NOT_RUNNING when Docker answered (a missing container is NOT_RUNNING),
+     *         UNKNOWN when the inspect call itself failed
+     */
+    public ContainerLiveness probeContainer(String containerId) {
         try {
             InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
-            return Boolean.TRUE.equals(inspect.getState().getRunning());
+            return Boolean.TRUE.equals(inspect.getState().getRunning())
+                    ? ContainerLiveness.RUNNING
+                    : ContainerLiveness.NOT_RUNNING;
         } catch (NotFoundException e) {
-            return false;
+            return ContainerLiveness.NOT_RUNNING;
         } catch (Exception e) {
-            // Treat an inspect failure/timeout as NOT running. Under Docker-daemon overload,
-            // returning true here caused the warm pool to "reuse" dead/hung containers, so the
-            // invocation blocked until the function timeout (~20-30s) every time. A false
-            // negative merely triggers a clean cold-start, which is far cheaper than a hang.
-            LOG.warnv("Liveness check failed for container {0}; treating as not running: {1}",
+            LOG.warnv("Liveness check failed for container {0}; state unknown: {1}",
                     containerId, e.getMessage());
-            return false;
+            return ContainerLiveness.UNKNOWN;
         }
     }
 

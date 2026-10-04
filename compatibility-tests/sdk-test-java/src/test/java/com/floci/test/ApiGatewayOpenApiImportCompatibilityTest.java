@@ -29,6 +29,7 @@ class ApiGatewayOpenApiImportCompatibilityTest {
     @DisplayName("ImportRestApi and PutRestApi resolve AWS variables through the SDK")
     void sdkImportAndPutResolveAwsVariables() {
         String title = TestFixtures.uniqueName("apigw-variable-import");
+        String region = TestFixtures.region().id();
         try (ApiGatewayClient apiGateway = TestFixtures.apiGatewayClient()) {
             ImportRestApiResponse imported = apiGateway.importRestApi(request -> request
                     .body(SdkBytes.fromUtf8String(variableSpec(title, "${AWS::Region}"))));
@@ -37,11 +38,11 @@ class ApiGatewayOpenApiImportCompatibilityTest {
                 GetIntegrationResponse integration = apiGateway.getIntegration(request -> request
                         .restApiId(imported.id()).resourceId(initialId).httpMethod("POST"));
                 assertThat(integration.uri())
-                        .isEqualTo("arn:aws:apigateway:us-east-1:states:action/StartExecution");
+                        .isEqualTo(TestFixtures.arn("apigateway", "states", "action/StartExecution"));
                 assertThat(integration.requestTemplates())
-                        .containsEntry("application/json", "{\"value\":\"us-east-1\"}");
+                        .containsEntry("application/json", "{\"value\":\"" + region + "\"}");
                 assertThat(integration.requestParameters())
-                        .containsEntry("integration.request.header.X-Region", "'us-east-1'");
+                        .containsEntry("integration.request.header.X-Region", "'" + region + "'");
                 assertThat(apiGateway.getGatewayResponse(request -> request
                         .restApiId(imported.id()).responseType(GatewayResponseType.UNAUTHORIZED))
                         .responseTemplates())

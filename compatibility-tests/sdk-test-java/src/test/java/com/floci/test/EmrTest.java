@@ -249,6 +249,65 @@ class EmrTest {
     }
 
     @Test
+    @Order(15)
+    void modifyInstanceGroupsResizesCore() {
+        String coreGroupId = emr.listInstanceGroups(r -> r.clusterId(clusterId)).instanceGroups().stream()
+                .filter(g -> g.instanceGroupType() == InstanceGroupType.CORE)
+                .findFirst().orElseThrow().id();
+        emr.modifyInstanceGroups(r -> r.clusterId(clusterId)
+                .instanceGroups(InstanceGroupModifyConfig.builder().instanceGroupId(coreGroupId).instanceCount(4).build()));
+        InstanceGroup core = emr.listInstanceGroups(r -> r.clusterId(clusterId)).instanceGroups().stream()
+                .filter(g -> g.id().equals(coreGroupId)).findFirst().orElseThrow();
+        assertThat(core.requestedInstanceCount()).isEqualTo(4);
+        assertThat(core.runningInstanceCount()).isEqualTo(4);
+        assertThat(emr.listInstances(r -> r.clusterId(clusterId)).instances()).hasSize(5);  // 1 master + 4 core
+    }
+
+    @Test
+    @Order(16)
+    void bootstrapActionsAndFleetResize() {
+        String fleetClusterId = emr.runJobFlow(r -> r
+                .name("floci-emr-sdk-fleet")
+                .releaseLabel("emr-7.5.0")
+                .bootstrapActions(BootstrapActionConfig.builder()
+                        .name("install")
+                        .scriptBootstrapAction(ScriptBootstrapActionConfig.builder()
+                                .path("s3://bucket/install.sh").args("--fast").build())
+                        .build())
+                .instances(JobFlowInstancesConfig.builder()
+                        .keepJobFlowAliveWhenNoSteps(true)
+                        .instanceFleets(
+                                InstanceFleetConfig.builder().instanceFleetType(InstanceFleetType.MASTER)
+                                        .targetOnDemandCapacity(1)
+                                        .instanceTypeConfigs(InstanceTypeConfig.builder().instanceType("m5.xlarge").build())
+                                        .build(),
+                                InstanceFleetConfig.builder().instanceFleetType(InstanceFleetType.CORE)
+                                        .targetOnDemandCapacity(2)
+                                        .instanceTypeConfigs(InstanceTypeConfig.builder().instanceType("m5.xlarge").build())
+                                        .build())
+                        .build()))
+                .jobFlowId();
+        try {
+            List<Command> actions = emr.listBootstrapActions(r -> r.clusterId(fleetClusterId)).bootstrapActions();
+            assertThat(actions).hasSize(1);
+            assertThat(actions.get(0).scriptPath()).isEqualTo("s3://bucket/install.sh");
+            assertThat(actions.get(0).args()).containsExactly("--fast");
+
+            String coreFleetId = emr.listInstanceFleets(r -> r.clusterId(fleetClusterId)).instanceFleets().stream()
+                    .filter(f -> f.instanceFleetType() == InstanceFleetType.CORE)
+                    .findFirst().orElseThrow().id();
+            emr.modifyInstanceFleet(r -> r.clusterId(fleetClusterId).instanceFleet(InstanceFleetModifyConfig.builder()
+                    .instanceFleetId(coreFleetId).targetOnDemandCapacity(5).build()));
+            InstanceFleet core = emr.listInstanceFleets(r -> r.clusterId(fleetClusterId)).instanceFleets().stream()
+                    .filter(f -> f.id().equals(coreFleetId)).findFirst().orElseThrow();
+            assertThat(core.targetOnDemandCapacity()).isEqualTo(5);
+            assertThat(core.provisionedOnDemandCapacity()).isEqualTo(5);
+        } finally {
+            emr.terminateJobFlows(r -> r.jobFlowIds(fleetClusterId));
+        }
+    }
+
+    @Test
     @Order(20)
     void terminate() {
         emr.terminateJobFlows(r -> r.jobFlowIds(clusterId));

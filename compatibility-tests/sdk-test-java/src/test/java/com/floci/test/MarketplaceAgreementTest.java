@@ -11,12 +11,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class MarketplaceAgreementTest {
 
-    private static final List<String> REGIONS = List.of("us-east-1");
+    private static final List<String> REGIONS = List.of(
+            "us-east-1", "us-iso-east-1", "us-isob-east-1", "us-isof-south-1", "eusc-de-east-1");
 
     @Test
     void usesAwsSdkWireContract() {
         assumeTrue(REGIONS.contains(TestFixtures.region().id()),
-                "Floci serves AWS Marketplace Agreement only in us-east-1");
+                "AWS Marketplace Agreement has no endpoint in this region");
         try (MarketplaceAgreementClient client = TestFixtures.marketplaceAgreementClient()) {
             SearchAgreementsResponse response = client.searchAgreements(r -> r.filters(
                     f -> f.name("AgreementType").values("PurchaseAgreement")));
