@@ -113,18 +113,26 @@ class EksStorageClassDockerIntegrationTest {
         assertNotEquals(0, localPathResult.exitCode(), "local-path StorageClass must not exist");
 
         // 3. Verify CoreDNS deployment is present and healthy in kube-system
-        long corednsDeadline = System.currentTimeMillis() + 30000;
-        boolean corednsFound = false;
+        long corednsDeadline = System.currentTimeMillis() + 60000;
+        boolean corednsRolledOut = false;
         while (System.currentTimeMillis() < corednsDeadline) {
-            ContainerExec.Result corednsResult = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "get", "deployment", "coredns", "-n", "kube-system", "-o", "jsonpath={.metadata.name}"});
-            if (corednsResult.exitCode() == 0 && "coredns".equals(corednsResult.stdout().trim())) {
-                corednsFound = true;
+            ContainerExec.Result rolloutResult = execInContainerWithExitCode(containerId,
+                    new String[]{"kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=10s"});
+            if (rolloutResult.exitCode() == 0) {
+                corednsRolledOut = true;
                 break;
             }
-            Thread.sleep(1000);
+            Thread.sleep(2000);
         }
-        assertTrue(corednsFound, "CoreDNS deployment must exist in kube-system");
+        assertTrue(corednsRolledOut, "CoreDNS deployment must be successfully rolled out");
+
+        // 4. Verify CoreDNS pods are running and ready
+        ContainerExec.Result podsResult = execInContainerWithExitCode(containerId,
+                new String[]{"kubectl", "get", "pods", "-n", "kube-system", "-l", "k8s-app=kube-dns",
+                        "-o", "jsonpath={.items[*].status.phase}"});
+        assertEquals(0, podsResult.exitCode(), "kubectl get pods failed: " + podsResult.stderr());
+        assertTrue(podsResult.stdout().contains("Running"),
+                "CoreDNS pod must be in Running phase, but got: " + podsResult.stdout());
     }
 
     private boolean isDockerAvailable() {

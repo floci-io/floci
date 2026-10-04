@@ -99,6 +99,7 @@ public class EksClusterManager
     private static final int K3S_API_SERVER_PORT = 6443;
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
     private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
+    private static final String DEFAULT_STORAGE_CLASS_LABEL = "io.floci.eks.default-storage-class";
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
@@ -490,9 +491,16 @@ public class EksClusterManager
                 ? cluster.getPodCidr()
                 : DEFAULT_POD_CIDR;
 
+        boolean defaultStorageClass = cluster != null && cluster.getDefaultStorageClass() != null
+                ? cluster.getDefaultStorageClass()
+                : config.services().eks().defaultStorageClass();
+        if (cluster != null) {
+            cluster.setDefaultStorageClass(defaultStorageClass);
+        }
+
         List<String> serverArgs = buildServerArgs(
                 config.services().eks().disableCni(),
-                config.services().eks().defaultStorageClass(),
+                defaultStorageClass,
                 serviceCidr,
                 clusterCidr);
 
@@ -536,6 +544,7 @@ public class EksClusterManager
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
                 "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
         labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
+        labels.put(DEFAULT_STORAGE_CLASS_LABEL, String.valueOf(defaultStorageClass));
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -682,6 +691,13 @@ public class EksClusterManager
         if (existing.isEmpty()) {
             LOG.infov("No surviving k3s container for EKS cluster {0}; recreating it "
                     + "(a surviving data volume is reused)", cluster.getName());
+            if (cluster.getDefaultStorageClass() == null) {
+                boolean targetSetting = config.services().eks().defaultStorageClass();
+                LOG.infov("Recreating EKS cluster {0} with defaultStorageClass={1} "
+                        + "(set floci.services.eks.default-storage-class: true to retain bundled local-path)",
+                        cluster.getName(), String.valueOf(targetSetting));
+                cluster.setDefaultStorageClass(targetSetting);
+            }
             startCluster(cluster);
             return;
         }
@@ -690,6 +706,14 @@ public class EksClusterManager
         Map<String, String> existingLabels = existing.get().getLabels();
         boolean capacityChanged = existingLabels == null
                 || !desiredCapacity.equals(existingLabels.get(NODE_CAPACITY_LABEL));
+        if (existingLabels != null && existingLabels.containsKey(DEFAULT_STORAGE_CLASS_LABEL)) {
+            cluster.setDefaultStorageClass(Boolean.parseBoolean(existingLabels.get(DEFAULT_STORAGE_CLASS_LABEL)));
+        } else if (cluster.getDefaultStorageClass() == null) {
+            // Surviving container was created before defaultStorageClass was configurable:
+            // preserve prior behavior with local-storage enabled.
+            cluster.setDefaultStorageClass(true);
+            LOG.infov("Adopting pre-upgrade EKS cluster {0} with local-storage enabled", cluster.getName());
+        }
         if (!adoptSurvivingCluster(cluster, existing.get().getId())) {
             startCluster(cluster);
             return;

@@ -349,7 +349,8 @@ class EksClusterManagerTest {
                 "io.floci.resource-id", "my-cluster",
                 "io.floci.account", "000000000000",
                 "io.floci.region", "us-east-1",
-                "io.floci.eks.node-capacity", "m5.large:unbounded"));
+                "io.floci.eks.node-capacity", "m5.large:unbounded",
+                "io.floci.eks.default-storage-class", "false"));
     }
 
     @ParameterizedTest
@@ -516,6 +517,35 @@ class EksClusterManagerTest {
             // The port Docker already holds must not be handed out to another cluster.
             verify(portAllocator).markReserved(6512);
             verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void restoreClusterPreservesPreUpgradeLocalStorageWhenContainerSurvives() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-pre-upgrade")));
+            when(lifecycleManager.adopt("cid-pre-upgrade", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-pre-upgrade", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals(Boolean.TRUE, cluster.getDefaultStorageClass());
+        }
+
+        @Test
+        void restoreClusterPreservesDefaultStorageClassLabelFromSurvivingContainer() {
+            Container container = containerFromJson("{\"Id\":\"cid-new\","
+                    + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                    + "\"io.floci.eks.default-storage-class\":\"false\"}}");
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(container));
+            when(lifecycleManager.adopt("cid-new", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-new", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals(Boolean.FALSE, cluster.getDefaultStorageClass());
         }
 
         @Test
