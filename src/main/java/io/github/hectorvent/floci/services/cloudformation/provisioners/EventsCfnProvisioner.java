@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
+import io.github.hectorvent.floci.services.eventbridge.model.HttpParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
@@ -165,6 +166,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 if (targetId != null && targetArn != null) {
                     Target target = new Target(targetId, targetArn, input, inputPath);
                     target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
+                    JsonNode httpParamsNode = resolved.path("HttpParameters");
+                    if (httpParamsNode.isObject()) {
+                        target.setHttpParameters(MAPPER.convertValue(httpParamsNode, HttpParameters.class));
+                    }
                     JsonNode sqsParamsNode = resolved.path("SqsParameters");
                     if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
                         String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);
@@ -273,6 +278,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        if ("AWS::Events::ApiDestination".equals(resource.getResourceType())) {
+            return rollbackApiDestinationUpdate(resource);
+        }
         String rawSnapshot = resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
             return false;
@@ -752,8 +760,12 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             rateLimit = props.get("InvocationRateLimitPerSecond").asInt();
         }
 
+        // A snapshot describes the update in flight; one an earlier update left behind is stale
+        r.getAttributes().remove(CfnRollback.API_DESTINATION_UPDATE_SNAPSHOT_ATTR);
         ApiDestination destination;
         if (ctx.reusesPriorEntity(name)) {
+            snapshotApiDestinationBeforeUpdate(r, eventBridgeService.describeApiDestination(name, ctx.region()),
+                    ctx.region());
             destination = eventBridgeService.updateApiDestination(
                     name, description, connectionArn, invocationEndpoint, httpMethod, rateLimit, ctx.region());
         } else {
@@ -772,6 +784,45 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
         r.getAttributes().put("ArnForPolicy", arnForPolicy);
         r.getAttributes().put("Name", name);
+    }
+
+    private void snapshotApiDestinationBeforeUpdate(StackResource r, ApiDestination current, String region) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("name", current.getName());
+        snapshot.put("description", current.getDescription());
+        snapshot.put("connectionArn", current.getConnectionArn());
+        snapshot.put("invocationEndpoint", current.getInvocationEndpoint());
+        snapshot.put("httpMethod", current.getHttpMethod());
+        if (current.getInvocationRateLimitPerSecond() != null) {
+            snapshot.put("invocationRateLimitPerSecond", current.getInvocationRateLimitPerSecond());
+        }
+        r.getAttributes().put(CfnRollback.API_DESTINATION_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    // The snapshot is spent only once the restore succeeded: a restore that throws leaves it for the next attempt
+    private boolean rollbackApiDestinationUpdate(StackResource resource) {
+        String raw = resource.getAttributes().get(CfnRollback.API_DESTINATION_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the API destination update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        eventBridgeService.restoreApiDestination(snapshot.path("name").asText(),
+                snapshotText(snapshot, "description"),
+                snapshotText(snapshot, "connectionArn"),
+                snapshotText(snapshot, "invocationEndpoint"),
+                snapshotText(snapshot, "httpMethod"),
+                snapshot.hasNonNull("invocationRateLimitPerSecond")
+                        ? snapshot.get("invocationRateLimitPerSecond").asInt() : null,
+                snapshot.path("region").asText());
+        resource.getAttributes().remove(CfnRollback.API_DESTINATION_UPDATE_SNAPSHOT_ATTR);
+        return true;
     }
 
     private void deleteApiDestinationSafe(String name, String region) {

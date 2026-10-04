@@ -586,7 +586,10 @@ public class EventBridgeHandler {
         ApiDestination destination = eventBridgeService.createApiDestination(
                 name, description, connectionArn, invocationEndpoint,
                 httpMethod, invocationRateLimitPerSecond, region);
+        return buildApiDestinationMutationResponse(destination);
+    }
 
+    private Response buildApiDestinationMutationResponse(ApiDestination destination) {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ApiDestinationArn", destination.getArn());
         response.put("ApiDestinationState", destination.getApiDestinationState().name());
@@ -613,13 +616,7 @@ public class EventBridgeHandler {
         ApiDestination destination = eventBridgeService.updateApiDestination(
                 name, description, connectionArn, invocationEndpoint,
                 httpMethod, invocationRateLimitPerSecond, region);
-
-        ObjectNode response = objectMapper.createObjectNode();
-        response.put("ApiDestinationArn", destination.getArn());
-        response.put("ApiDestinationState", destination.getApiDestinationState().name());
-        response.put("CreationTime", destination.getCreationTime().getEpochSecond());
-        response.put("LastModifiedTime", destination.getLastModifiedTime().getEpochSecond());
-        return Response.ok(response).build();
+        return buildApiDestinationMutationResponse(destination);
     }
 
     private Response handleDeleteApiDestination(JsonNode request, String region) {
@@ -631,11 +628,23 @@ public class EventBridgeHandler {
     private Response handleListApiDestinations(JsonNode request, String region) {
         String namePrefix = request.path("NamePrefix").asText(null);
         String connectionArn = request.path("ConnectionArn").asText(null);
-        List<ApiDestination> destinations = eventBridgeService.listApiDestinations(namePrefix, connectionArn, region);
+        String nextToken = request.path("NextToken").asText(null);
+        int limit = request.hasNonNull("Limit") ? request.path("Limit").asInt() : 100;
+        if (limit < 1 || limit > 100) {
+            throw new AwsException("ValidationException", "Limit must be between 1 and 100.", 400);
+        }
+        // The list is sorted by name, so NextToken is simply the name of the last item on the previous page
+        List<ApiDestination> destinations = eventBridgeService.listApiDestinations(namePrefix, connectionArn, region)
+                .stream()
+                .filter(dest -> nextToken == null || dest.getName().compareTo(nextToken) > 0)
+                .toList();
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("ApiDestinations");
-        for (ApiDestination dest : destinations) {
+        for (ApiDestination dest : destinations.subList(0, Math.min(limit, destinations.size()))) {
             array.add(buildApiDestinationNode(dest, false));
+        }
+        if (destinations.size() > limit) {
+            response.put("NextToken", destinations.get(limit - 1).getName());
         }
         return Response.ok(response).build();
     }

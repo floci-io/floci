@@ -1225,6 +1225,104 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void createApiDestination_rejectsNonHttpEndpoint() {
+        Connection conn = service.createConnection("conn-endpoint", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"x-key\",\"ApiKeyValue\":\"val\"}}",
+                null, null, REGION);
+
+        for (String endpoint : List.of("ftp://example.com/x", "file:///etc/passwd", "https:///no-host",
+                "https://*.example.com/hook", "not a url")) {
+            AwsException ex = assertThrows(AwsException.class, () -> service.createApiDestination(
+                    "bad-endpoint", null, conn.getConnectionArn(), endpoint, "POST", null, REGION));
+            assertEquals("ValidationException", ex.getErrorCode());
+        }
+        assertThrows(AwsException.class, () -> service.describeApiDestination("bad-endpoint", REGION));
+
+        ApiDestination wildcardPath = service.createApiDestination("wildcard-path", null, conn.getConnectionArn(),
+                "https://api.example.com/hook/*", "POST", null, REGION);
+        assertEquals("https://api.example.com/hook/*", wildcardPath.getInvocationEndpoint());
+    }
+
+    @Test
+    void updateApiDestination_leavesDestinationUntouchedWhenAnyFieldIsInvalid() {
+        Connection conn = service.createConnection("conn-atomic", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"x-key\",\"ApiKeyValue\":\"val\"}}",
+                null, null, REGION);
+        service.createApiDestination("atomic-upd", "original", conn.getConnectionArn(),
+                "https://api.com/v1", "POST", null, REGION);
+
+        assertThrows(AwsException.class, () -> service.updateApiDestination(
+                "atomic-upd", "changed", null, null, "INVALID_METHOD", null, REGION));
+
+        ApiDestination described = service.describeApiDestination("atomic-upd", REGION);
+        assertEquals("original", described.getDescription());
+        assertEquals("POST", described.getHttpMethod());
+    }
+
+    @Test
+    void updateApiDestination_rejectsNonHttpEndpoint() {
+        Connection conn = service.createConnection("conn-endpoint-upd", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"x-key\",\"ApiKeyValue\":\"val\"}}",
+                null, null, REGION);
+        service.createApiDestination("endpoint-upd", null, conn.getConnectionArn(),
+                "https://api.com/v1", "POST", null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateApiDestination(
+                "endpoint-upd", null, null, "file:///etc/passwd", null, null, REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("https://api.com/v1",
+                service.describeApiDestination("endpoint-upd", REGION).getInvocationEndpoint());
+    }
+
+    @Test
+    void findApiDestinationByArn_ignoresAnArnFromBeforeTheDestinationWasRecreated() {
+        Connection conn = service.createConnection("conn-recreate", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"x-key\",\"ApiKeyValue\":\"val\"}}",
+                null, null, REGION);
+        ApiDestination first = service.createApiDestination("recreated", null, conn.getConnectionArn(),
+                "https://api.com/v1", "POST", null, REGION);
+        service.deleteApiDestination("recreated", REGION);
+        ApiDestination second = service.createApiDestination("recreated", null, conn.getConnectionArn(),
+                "https://api.com/v2", "POST", null, REGION);
+
+        assertNull(service.findApiDestinationByArn(first.getArn(), REGION));
+        assertEquals("https://api.com/v2",
+                service.findApiDestinationByArn(second.getArn(), REGION).getInvocationEndpoint());
+    }
+
+    @Test
+    void restoreApiDestination_putsBackUnsetFieldsToo() {
+        Connection conn = service.createConnection("conn-restore", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"x-key\",\"ApiKeyValue\":\"val\"}}",
+                null, null, REGION);
+        service.createApiDestination("restored", "changed", conn.getConnectionArn(),
+                "https://api.com/v2", "PUT", 5, REGION);
+
+        service.restoreApiDestination("restored", null, conn.getConnectionArn(),
+                "https://api.com/v1", "POST", null, REGION);
+
+        ApiDestination restored = service.describeApiDestination("restored", REGION);
+        assertNull(restored.getDescription());
+        assertNull(restored.getInvocationRateLimitPerSecond());
+        assertEquals("https://api.com/v1", restored.getInvocationEndpoint());
+        assertEquals("POST", restored.getHttpMethod());
+    }
+
+    @Test
+    void listApiDestinations_isSortedByName() {
+        Connection conn = service.createConnection("conn-sorted", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"x-key\",\"ApiKeyValue\":\"val\"}}",
+                null, null, REGION);
+        for (String name : List.of("sorted-c", "sorted-a", "sorted-b")) {
+            service.createApiDestination(name, null, conn.getConnectionArn(), "https://api.com", "GET", null, REGION);
+        }
+
+        List<String> names = service.listApiDestinations("sorted-", null, REGION).stream()
+                .map(ApiDestination::getName).toList();
+        assertEquals(List.of("sorted-a", "sorted-b", "sorted-c"), names);
+    }
+
+    @Test
     void updateAndDeleteApiDestination() {
         Connection conn1 = service.createConnection("conn-upd1", null, "API_KEY",
                 "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"k\",\"ApiKeyValue\":\"v\"}}", null, null, REGION);

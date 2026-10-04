@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
+import io.github.hectorvent.floci.services.eventbridge.model.HttpParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import org.junit.jupiter.api.Test;
@@ -408,6 +409,7 @@ class EventsCfnProvisionerTest {
                 eq("arn:aws:events:us-east-1:000000000000:connection/conn/222"),
                 eq("https://api.example.com/v2/orders"), eq("PUT"), eq(20), eq(REGION)))
                 .thenReturn(destination);
+        when(events.describeApiDestination("orders-dest", REGION)).thenReturn(priorApiDestination());
 
         StackResource r = resource("AWS::Events::ApiDestination", "MyDestination");
         ObjectNode props = mapper.createObjectNode()
@@ -422,6 +424,83 @@ class EventsCfnProvisionerTest {
 
         verify(events).updateApiDestination(eq("orders-dest"), any(), any(), any(), any(), any(), eq(REGION));
         assertEquals("orders-dest", r.getPhysicalId());
+    }
+
+    private static ApiDestination priorApiDestination() {
+        return new ApiDestination(
+                "orders-dest",
+                "arn:aws:events:us-east-1:000000000000:api-destination/orders-dest/12345678",
+                "arn:aws:events:us-east-1:000000000000:connection/conn/111",
+                "https://api.example.com/v1/orders",
+                "POST",
+                null,
+                "Original destination");
+    }
+
+    private StackResource updatedApiDestination() {
+        when(events.describeApiDestination("orders-dest", REGION)).thenReturn(priorApiDestination());
+        when(events.updateApiDestination(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(priorApiDestination());
+        StackResource r = resource("AWS::Events::ApiDestination", "MyDestination");
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "orders-dest")
+                .put("ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/conn/222")
+                .put("InvocationEndpoint", "https://api.example.com/v2/orders")
+                .put("HttpMethod", "PUT")
+                .put("InvocationRateLimitPerSecond", 20);
+        provisioner.provision(r, props, ctx("orders-dest"));
+        return r;
+    }
+
+    @Test
+    void aRollbackPutsBackTheApiDestinationTheUpdateChanged() {
+        StackResource r = updatedApiDestination();
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(events).restoreApiDestination("orders-dest", "Original destination",
+                "arn:aws:events:us-east-1:000000000000:connection/conn/111",
+                "https://api.example.com/v1/orders", "POST", null, REGION);
+        assertFalse(provisioner.rollbackUpdate(r), "the snapshot is spent once restored");
+    }
+
+    @Test
+    void anApiDestinationCreateTakesNoSnapshotToRollBack() {
+        StackResource r = resource("AWS::Events::ApiDestination", "MyDestination");
+        when(events.createApiDestination(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(priorApiDestination());
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "orders-dest")
+                .put("ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/conn/111")
+                .put("InvocationEndpoint", "https://api.example.com/v1/orders")
+                .put("HttpMethod", "POST");
+        provisioner.provision(r, props, ctx(null));
+
+        assertFalse(provisioner.rollbackUpdate(r));
+        verify(events, never()).restoreApiDestination(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aRuleTargetKeepsItsHttpParameters() {
+        stubPutRule();
+        when(events.listTargetsByRule(anyString(), any(), anyString())).thenReturn(List.of());
+        ObjectNode destinationTarget = target("dest",
+                "arn:aws:events:us-east-1:000000000000:api-destination/orders-dest/12345678");
+        ObjectNode httpParameters = destinationTarget.putObject("HttpParameters");
+        httpParameters.putArray("PathParameterValues").add("orders");
+        httpParameters.putObject("HeaderParameters").put("x-tenant", "alpha");
+        httpParameters.putObject("QueryStringParameters").put("version", "v1");
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        props.putArray("Targets").add(destinationTarget);
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx("orders"));
+
+        ArgumentCaptor<List<Target>> put = ArgumentCaptor.forClass(List.class);
+        verify(events).putTargets(eq("orders"), any(), put.capture(), anyString());
+        HttpParameters stored = put.getValue().get(0).getHttpParameters();
+        assertEquals(List.of("orders"), stored.getPathParameterValues());
+        assertEquals("alpha", stored.getHeaderParameters().get("x-tenant"));
+        assertEquals("v1", stored.getQueryStringParameters().get("version"));
     }
 
     @Test

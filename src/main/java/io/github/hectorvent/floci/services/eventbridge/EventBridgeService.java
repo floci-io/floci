@@ -35,8 +35,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1511,9 +1514,9 @@ public class EventBridgeService implements ResourceProvider {
     private static final Set<String> ALLOWED_HTTP_METHODS =
             Set.of("GET", "HEAD", "POST", "OPTIONS", "PUT", "DELETE", "PATCH");
 
-    public ApiDestination createApiDestination(String name, String description, String connectionArn,
-                                               String invocationEndpoint, String httpMethod,
-                                               Integer invocationRateLimitPerSecond, String region) {
+    public synchronized ApiDestination createApiDestination(String name, String description, String connectionArn,
+                                                            String invocationEndpoint, String httpMethod,
+                                                            Integer invocationRateLimitPerSecond, String region) {
         validateApiDestinationName(name);
         if (connectionArn == null || connectionArn.isBlank()) {
             throw new AwsException("ValidationException", "ConnectionArn is required.", 400);
@@ -1522,6 +1525,7 @@ public class EventBridgeService implements ResourceProvider {
         if (invocationEndpoint == null || invocationEndpoint.isBlank()) {
             throw new AwsException("ValidationException", "InvocationEndpoint is required.", 400);
         }
+        validateInvocationEndpoint(invocationEndpoint);
         validateHttpMethod(httpMethod);
         if (invocationRateLimitPerSecond != null && invocationRateLimitPerSecond < 1) {
             throw new AwsException("ValidationException",
@@ -1560,16 +1564,30 @@ public class EventBridgeService implements ResourceProvider {
                         "ApiDestination " + name + " does not exist.", 400));
     }
 
-    public ApiDestination updateApiDestination(String name, String description, String connectionArn,
-                                               String invocationEndpoint, String httpMethod,
-                                               Integer invocationRateLimitPerSecond, String region) {
+    public synchronized ApiDestination updateApiDestination(String name, String description, String connectionArn,
+                                                            String invocationEndpoint, String httpMethod,
+                                                            Integer invocationRateLimitPerSecond, String region) {
         String key = apiDestinationKey(region, name);
         ApiDestination destination = apiDestinationStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "ApiDestination " + name + " does not exist.", 400));
 
+        // Validate everything before assigning: the in-memory store returns the same instance, so a rejected update must not leave partial changes
         if (connectionArn != null) {
             findConnectionByArn(connectionArn, region);
+        }
+        if (invocationEndpoint != null) {
+            validateInvocationEndpoint(invocationEndpoint);
+        }
+        if (httpMethod != null) {
+            validateHttpMethod(httpMethod);
+        }
+        if (invocationRateLimitPerSecond != null && invocationRateLimitPerSecond < 1) {
+            throw new AwsException("ValidationException",
+                    "InvocationRateLimitPerSecond must be at least 1.", 400);
+        }
+
+        if (connectionArn != null) {
             destination.setConnectionArn(connectionArn);
         }
         if (description != null) {
@@ -1579,14 +1597,9 @@ public class EventBridgeService implements ResourceProvider {
             destination.setInvocationEndpoint(invocationEndpoint);
         }
         if (httpMethod != null) {
-            validateHttpMethod(httpMethod);
             destination.setHttpMethod(httpMethod);
         }
         if (invocationRateLimitPerSecond != null) {
-            if (invocationRateLimitPerSecond < 1) {
-                throw new AwsException("ValidationException",
-                        "InvocationRateLimitPerSecond must be at least 1.", 400);
-            }
             destination.setInvocationRateLimitPerSecond(invocationRateLimitPerSecond);
         }
         Instant now = Instant.now();
@@ -1596,7 +1609,26 @@ public class EventBridgeService implements ResourceProvider {
         return destination;
     }
 
-    public ApiDestination deleteApiDestination(String name, String region) {
+    // Puts back a prior configuration verbatim, including unset fields that updateApiDestination cannot clear
+    public synchronized ApiDestination restoreApiDestination(String name, String description, String connectionArn,
+                                                             String invocationEndpoint, String httpMethod,
+                                                             Integer invocationRateLimitPerSecond, String region) {
+        String key = apiDestinationKey(region, name);
+        ApiDestination destination = apiDestinationStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "ApiDestination " + name + " does not exist.", 400));
+        destination.setDescription(description);
+        destination.setConnectionArn(connectionArn);
+        destination.setInvocationEndpoint(invocationEndpoint);
+        destination.setHttpMethod(httpMethod);
+        destination.setInvocationRateLimitPerSecond(invocationRateLimitPerSecond);
+        destination.setLastModifiedTime(Instant.now());
+        apiDestinationStore.put(key, destination);
+        LOG.infov("Restored API Destination: {0}", name);
+        return destination;
+    }
+
+    public synchronized ApiDestination deleteApiDestination(String name, String region) {
         String key = apiDestinationKey(region, name);
         ApiDestination destination = apiDestinationStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -1608,7 +1640,7 @@ public class EventBridgeService implements ResourceProvider {
 
     public List<ApiDestination> listApiDestinations(String namePrefix, String connectionArn, String region) {
         String prefix = "api-destination:" + region + ":";
-        return apiDestinationStore.scan(k -> {
+        List<ApiDestination> destinations = new ArrayList<>(apiDestinationStore.scan(k -> {
             if (!k.startsWith(prefix)) {
                 return false;
             }
@@ -1625,7 +1657,9 @@ public class EventBridgeService implements ResourceProvider {
                 return false;
             }
             return true;
-        });
+        }));
+        destinations.sort(Comparator.comparing(ApiDestination::getName));
+        return destinations;
     }
 
     public Connection findConnectionByArn(String connectionArn, String region) {
@@ -1641,7 +1675,8 @@ public class EventBridgeService implements ResourceProvider {
                 String name = slash > 0 ? remainder.substring(0, slash) : remainder;
                 String connRegion = parsed.region().isEmpty() ? region : parsed.region();
                 Optional<Connection> opt = connectionStore.get(connectionKey(connRegion, name));
-                if (opt.isPresent()) {
+                // The ARN carries a generated id: one for a connection deleted and recreated under the same name must not match
+                if (opt.isPresent() && connectionArn.equals(opt.get().getConnectionArn())) {
                     return opt.get();
                 }
             }
@@ -1666,7 +1701,8 @@ public class EventBridgeService implements ResourceProvider {
                 String name = slash > 0 ? remainder.substring(0, slash) : remainder;
                 String destRegion = parsed.region().isEmpty() ? region : parsed.region();
                 Optional<ApiDestination> opt = apiDestinationStore.get(apiDestinationKey(destRegion, name));
-                if (opt.isPresent()) {
+                // Same as connections: an ARN for a destination deleted and recreated under the same name is stale
+                if (opt.isPresent() && arn.equals(opt.get().getArn())) {
                     return opt.get();
                 }
             }
@@ -1688,6 +1724,25 @@ public class EventBridgeService implements ResourceProvider {
         if (name.length() > 64 || !API_DESTINATION_NAME_PATTERN.matcher(name).matches()) {
             throw new AwsException("ValidationException",
                     "Name must match [\\.\\-_A-Za-z0-9]+ and be at most 64 characters.", 400);
+        }
+    }
+
+    private static void validateInvocationEndpoint(String invocationEndpoint) {
+        URI uri;
+        try {
+            uri = new URI(invocationEndpoint);
+        } catch (URISyntaxException e) {
+            throw new AwsException("ValidationException", "InvocationEndpoint is not a valid URL.", 400);
+        }
+        String scheme = uri.getScheme();
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+            throw new AwsException("ValidationException",
+                    "InvocationEndpoint must be an HTTP or HTTPS URL.", 400);
+        }
+        // A '*' in the host makes getHost() return null, so such a URL could never be delivered; AWS only allows the wildcard in the path
+        if (uri.getRawAuthority() == null || uri.getRawAuthority().isBlank() || uri.getRawAuthority().contains("*")) {
+            throw new AwsException("ValidationException",
+                    "InvocationEndpoint must include a host, and a '*' wildcard is only allowed in the path.", 400);
         }
     }
 

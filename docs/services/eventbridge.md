@@ -181,9 +181,16 @@ aws events put-targets \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-- Path parameter wildcards (`*`) in `InvocationEndpoint` are substituted in order by `PathParameterValues`.
-- Query string and header parameters from both the Connection and the Target are merged and forwarded on the outgoing HTTP request.
-- Requests to link-local and AWS metadata endpoints (such as `169.254.0.0/16`) are blocked for SSRF protection.
+- `InvocationEndpoint` must be an `http` or `https` URL.
+- Path parameter wildcards (`*`) in the path of `InvocationEndpoint` are substituted in order by `PathParameterValues`. Each value is percent-encoded as a single path segment, and a `*` in the host or query is never substituted.
+- Query string and header parameters from both the Connection and the Target are merged and forwarded on the outgoing HTTP request. Connection `BodyParameters` are merged into the event body when it is a JSON object.
+- `OAUTH_CLIENT_CREDENTIALS` connections run the RFC 6749 client-credentials exchange against `AuthorizationEndpoint` for each delivery: the client ID and secret go in a `Basic` `Authorization` header, the body is form-encoded `grant_type=client_credentials` plus any `BodyParameters`, and the returned `access_token` is sent as `Authorization: <token_type> <access_token>`. Tokens are not cached.
+- If the connection is missing, or its authorization cannot be obtained, the delivery is dropped instead of being sent unauthenticated.
+- Requests to link-local and AWS metadata endpoints (such as `169.254.0.0/16`) are blocked for SSRF protection, including for the OAuth endpoint. The host is resolved once for the check and again when the request is sent, so DNS rebinding is not fully prevented.
+- A delivery that fails with a connection error, HTTP 429 or HTTP 5xx is retried and dead-lettered like any other target (see Target Retry and Dead-Letter Queues). Any other failure is permanent and goes straight to the dead-letter queue: another non-2xx response, an invalid or blocked URL, a missing connection, or an OAuth token request that fails.
+- `InvocationRateLimitPerSecond` is enforced per destination with a one-second window. An event over the limit is treated as throttled and retried with backoff.
+- A destination or connection ARN taken before the resource was deleted and recreated under the same name no longer resolves.
+- `ListApiDestinations` supports `Limit` (1 to 100) and `NextToken`.
 
 ## Target Retry and Dead-Letter Queues
 

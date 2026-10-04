@@ -87,6 +87,14 @@ public final class CfnRollback {
     public static final String ARCHIVE_UPDATE_SNAPSHOT_ATTR = "__FlociArchiveUpdateSnapshot";
 
     /**
+     * Holds the connection, endpoint, method, description and rate limit an EventBridge API
+     * destination carried before an in-place update changed them, so a failed stack update can put
+     * them back. Written by {@code EventsCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String API_DESTINATION_UPDATE_SNAPSHOT_ATTR = "__FlociApiDestinationUpdateSnapshot";
+
+    /**
      * Holds the name, description and endpoint configuration a REST API had before an in-place
      * update patched them, and whether the update also re-applied an OpenAPI document, so a failed
      * stack update can put them back. Written by {@code ApiGatewayRestApiCfnProvisioner} before its
