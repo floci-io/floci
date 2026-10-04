@@ -9,6 +9,8 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
+import jakarta.ws.rs.container.ResourceInfo;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -35,13 +37,10 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(PreSignedUrlFilter.class);
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String LEGACY_SECRET_KEY = "test";
-    private static final Set<String> PRESIGNED_QUERY_PARAMS = Set.of(
+    private static final Set<String> PRESIGNED_AUTH_SIGNALS = Set.of(
             "X-Amz-Algorithm",
             "X-Amz-Credential",
-            "X-Amz-Signature",
-            "X-Amz-Date",
-            "X-Amz-SignedHeaders",
-            "X-Amz-Expires");
+            "X-Amz-Signature");
     private static final Set<String> CHECKSUM_HEADERS_REQUIRING_SIGNATURE =
             Set.of(
                     "x-amz-checksum-algorithm",
@@ -57,6 +56,9 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private final IamService iamService;
     private final CurrentVertxRequest currentVertxRequest;
 
+    @Context
+    ResourceInfo resourceInfo;
+
     @Inject
     public PreSignedUrlFilter(PreSignedUrlGenerator presignGenerator,
                               S3Service s3Service,
@@ -68,8 +70,16 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         this.currentVertxRequest = currentVertxRequest;
     }
 
+    boolean routedToS3() {
+        return resourceInfo != null && S3Controller.class.equals(resourceInfo.getResourceClass());
+    }
+
     @Override
     public void filter(ContainerRequestContext requestContext) {
+        if (!routedToS3()) {
+            return;
+        }
+
         // A browser preflight reuses the target request's presigned URL, so its OPTIONS method
         // must not be verified against a signature created for the follow-up PUT/GET request.
         // The dedicated S3 OPTIONS resource performs the bucket CORS evaluation instead.
@@ -79,14 +89,14 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
         MultivaluedMap<String, String> queryParams = requestContext.getUriInfo().getQueryParameters();
 
-        boolean hasPresignedParam = false;
-        for (String param : PRESIGNED_QUERY_PARAMS) {
+        boolean hasPresignedAuthSignal = false;
+        for (String param : PRESIGNED_AUTH_SIGNALS) {
             if (queryParams.containsKey(param)) {
-                hasPresignedParam = true;
+                hasPresignedAuthSignal = true;
                 break;
             }
         }
-        if (!hasPresignedParam) {
+        if (!hasPresignedAuthSignal) {
             return;
         }
 

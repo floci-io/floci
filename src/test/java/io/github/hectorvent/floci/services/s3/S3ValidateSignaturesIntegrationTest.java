@@ -236,6 +236,37 @@ class S3ValidateSignaturesIntegrationTest {
         given().filter(LOCAL_SIGNER).when().get("/routing-check-missing-algo").then().statusCode(404);
     }
 
+    @Test
+    @Order(32)
+    void headerSignedRequestWithDateOrExpiresQueryParamIsAccepted() {
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .put("/" + BUCKET + "/query-date-test.txt?X-Amz-Date=" + AMZ_DATE + "&X-Amz-Expires=3600")
+        .then()
+            .statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + BUCKET + "/query-date-test.txt")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(33)
+    void sigV4AHeaderIsNotRejectedAsMalformed() {
+        String authSigV4A = "AWS4-ECDSA-P256-SHA256 Credential=test/" + CREDENTIAL_DATE
+                + "/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=30450220abc";
+        given()
+            .header("Authorization", authSigV4A)
+        .when()
+            .get("/" + BUCKET + "/" + KEY)
+        .then()
+            .statusCode(200);
+    }
+
     private static void createIamUser(String userName) {
         String authorization = "AWS4-HMAC-SHA256 Credential=test/" + CREDENTIAL_DATE
                 + "/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=unused";

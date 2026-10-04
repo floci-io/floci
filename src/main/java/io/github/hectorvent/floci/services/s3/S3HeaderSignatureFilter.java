@@ -75,6 +75,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(S3HeaderSignatureFilter.class);
 
     private static final String ALGORITHM = "AWS4-HMAC-SHA256";
+    private static final String SIGV4A_ALGORITHM = "AWS4-ECDSA-P256-SHA256";
     private static final String SIGNING_SERVICE = "s3";
     private static final String TERMINATOR = "aws4_request";
     private static final Duration MAX_CLOCK_SKEW = Duration.ofMinutes(15);
@@ -107,9 +108,12 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         if (authorization == null || authorization.isBlank()) {
             return;
         }
-        if (!authorization.startsWith(ALGORITHM + " ")) {
+        if (!authorization.startsWith(ALGORITHM + " ") && !authorization.startsWith(SIGV4A_ALGORITHM + " ")) {
             abort(ctx, 400, "AuthorizationHeaderMalformed",
                     "The authorization header you provided is invalid.");
+            return;
+        }
+        if (authorization.startsWith(SIGV4A_ALGORITHM + " ")) {
             return;
         }
         if (!verifiesSignatures()) {
@@ -197,7 +201,8 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     }
 
     private boolean verifiesSignatures() {
-        return s3Service.isAuthEnforced() || presignGenerator.shouldValidateSignatures();
+        return (s3Service != null && s3Service.isAuthEnforced())
+                || (presignGenerator != null && presignGenerator.shouldValidateSignatures());
     }
 
     private boolean routedToS3() {

@@ -76,4 +76,14 @@ class S3HeaderSignatureFilterTest {
 
         verify(ctx, never()).abortWith(any());
     }
+
+    @Test
+    void allowsSigV4AAuthorizationHeader() throws IOException {
+        when(ctx.getHeaderString("Authorization"))
+                .thenReturn("AWS4-ECDSA-P256-SHA256 Credential=111122223333/20261001/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc");
+
+        filter.filter(ctx);
+
+        verify(ctx, never()).abortWith(any());
+    }
 }

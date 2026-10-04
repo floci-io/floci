@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -18,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -212,6 +214,7 @@ class PreSignedUrlFilterTest {
     @Test
     void abortsWhenPresignedParamPresentWithoutAlgorithm() {
         PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null);
+        filter.resourceInfo = s3ResourceInfo();
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
@@ -235,6 +238,7 @@ class PreSignedUrlFilterTest {
     @Test
     void allowsRequestWithoutAnyPresignedParams() {
         PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null);
+        filter.resourceInfo = s3ResourceInfo();
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
@@ -245,5 +249,47 @@ class PreSignedUrlFilterTest {
         filter.filter(ctx);
 
         verify(ctx, never()).abortWith(any());
+    }
+
+    @Test
+    void allowsHeaderSignedRequestWithDateOrExpiresQueryParam() {
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null);
+        filter.resourceInfo = s3ResourceInfo();
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.add("X-Amz-Date", "20261001T000000Z");
+        queryParams.add("X-Amz-Expires", "3600");
+        when(uriInfo.getQueryParameters()).thenReturn(queryParams);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+
+        filter.filter(ctx);
+
+        verify(ctx, never()).abortWith(any());
+    }
+
+    @Test
+    void allowsNonS3Routes() {
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null);
+        ResourceInfo nonS3Info = mock(ResourceInfo.class);
+        doReturn(Object.class).when(nonS3Info).getResourceClass();
+        filter.resourceInfo = nonS3Info;
+
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.add("X-Amz-Credential", "111122223333/20261001/us-east-1/s3/aws4_request");
+        when(uriInfo.getQueryParameters()).thenReturn(queryParams);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+
+        filter.filter(ctx);
+
+        verify(ctx, never()).abortWith(any());
+    }
+
+    private static ResourceInfo s3ResourceInfo() {
+        ResourceInfo info = mock(ResourceInfo.class);
+        doReturn(S3Controller.class).when(info).getResourceClass();
+        return info;
     }
 }
