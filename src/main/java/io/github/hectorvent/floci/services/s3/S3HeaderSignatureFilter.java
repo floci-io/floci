@@ -100,11 +100,19 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext ctx) throws IOException {
-        if (!verifiesSignatures() || !routedToS3()) {
+        if (!routedToS3()) {
             return;
         }
         String authorization = ctx.getHeaderString("Authorization");
-        if (authorization == null || !authorization.startsWith(ALGORITHM + " ")) {
+        if (authorization == null || authorization.isBlank()) {
+            return;
+        }
+        if (!authorization.startsWith(ALGORITHM + " ")) {
+            abort(ctx, 400, "AuthorizationHeaderMalformed",
+                    "The authorization header you provided is invalid.");
+            return;
+        }
+        if (!verifiesSignatures()) {
             return;
         }
 
