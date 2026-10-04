@@ -298,6 +298,30 @@ class IotAuthorizerTest {
     }
 
     @Test
+    @DisplayName("Describe, update and delete validate the authorizer name before looking it up")
+    void pathOperationsValidateTheName() {
+        String constraint = "Value at 'authorizerName' failed to satisfy constraint: ";
+        String pattern = constraint + "Member must satisfy regular expression pattern: [\\w=,@-]+";
+        String badName = "1 validation error detected: " + pattern;
+        String overlong = "!".repeat(129);
+        String bothViolated = "2 validation errors detected: " + pattern + "; " + constraint
+                + "Member must have length less than or equal to 128";
+
+        assertAwsError(() -> iot.describeAuthorizer(r -> r.authorizerName("bad name!")),
+                InvalidRequestException.class, 400, badName);
+        assertAwsError(() -> iot.describeAuthorizer(r -> r.authorizerName(overlong)),
+                InvalidRequestException.class, 400, bothViolated);
+        assertAwsError(() -> iot.updateAuthorizer(r -> r.authorizerName("bad name!").status(AuthorizerStatus.INACTIVE)),
+                InvalidRequestException.class, 400, badName);
+        assertAwsError(() -> iot.updateAuthorizer(r -> r.authorizerName(overlong).status(AuthorizerStatus.INACTIVE)),
+                InvalidRequestException.class, 400, bothViolated);
+        assertAwsError(() -> iot.deleteAuthorizer(r -> r.authorizerName("bad name!")),
+                InvalidRequestException.class, 400, badName);
+        assertAwsError(() -> iot.deleteAuthorizer(r -> r.authorizerName(overlong)),
+                InvalidRequestException.class, 400, bothViolated);
+    }
+
+    @Test
     @DisplayName("Update changes only the fields sent and bumps lastModifiedDate on a status change")
     void updateAppliesOnlyTheFieldsSent() throws InterruptedException {
         String name = name("upd");

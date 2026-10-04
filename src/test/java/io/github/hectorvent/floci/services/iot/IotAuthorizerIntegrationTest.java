@@ -110,6 +110,13 @@ class IotAuthorizerIntegrationTest {
             .header("X-Amzn-ErrorType", "ResourceNotFoundException")
             .body("message", equalTo("Authorizer it-auth-missing not found"));
 
+        given().when().get("/authorizer/{name}", "bad name!")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-ErrorType", "InvalidRequestException")
+            .body("message", equalTo("1 validation error detected: Value at 'authorizerName' failed to satisfy constraint: "
+                    + "Member must satisfy regular expression pattern: [\\w=,@-]+"));
+
         given().contentType("application/json")
             .body("{\"authorizerFunctionArn\": \"not-an-arn\", \"signingDisabled\": true}")
         .when().post("/authorizer/it-auth-badarn")

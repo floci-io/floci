@@ -106,12 +106,14 @@ public class IotAuthorizerService {
     }
 
     public IotAuthorizer describeAuthorizer(String name, String region) {
+        requireNameLike("authorizerName", name, NAME_PATTERN);
         return store.get(key(region, name))
                 .orElseThrow(() -> notFound("Authorizer " + name + " not found"));
     }
 
     /** A partial update: absent members stay, signing keys merge per key name. */
     public IotAuthorizer updateAuthorizer(String name, JsonNode body, String region) {
+        requireNameLike("authorizerName", name, NAME_PATTERN);
         String functionArn = body.path("authorizerFunctionArn").asText(null);
         String status = status(body.path("status").asText(null));
         String tokenKeyName = tokenKeyName(body);
@@ -198,7 +200,6 @@ public class IotAuthorizerService {
     }
 
     public IotAuthorizer setDefaultAuthorizer(String name, String region) {
-        requireNameLike("authorizerName", name, NAME_PATTERN);
         synchronized (lock) {
             IotAuthorizer authorizer = describeAuthorizer(name, region);
             if (authorizer.isDefaultAuthorizer()) {

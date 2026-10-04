@@ -13,6 +13,7 @@ import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -250,6 +251,28 @@ class IotAuthorizerServiceTest {
         assertAwsError("ResourceNotFoundException", 404, message,
                 () -> service.updateAuthorizer("missing", mapper.createObjectNode(), REGION));
         assertAwsError("ResourceNotFoundException", 404, message, () -> service.deleteAuthorizer("missing", REGION));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"describe", "update", "delete"})
+    void pathOperationsValidateTheNameBeforeTheLookup(String operation) {
+        String constraint = "Value at 'authorizerName' failed to satisfy constraint: ";
+        String pattern = constraint + "Member must satisfy regular expression pattern: [\\w=,@-]+";
+        String tooLong = constraint + "Member must have length less than or equal to 128";
+
+        assertInvalid("1 validation error detected: " + pattern, byName(operation, "bad name!"));
+        assertInvalid("1 validation error detected: " + tooLong, byName(operation, "a".repeat(129)));
+        assertInvalid("2 validation errors detected: " + pattern + "; " + tooLong, byName(operation, "!".repeat(129)));
+        assertAwsError("ResourceNotFoundException", 404, "Authorizer absent not found", byName(operation, "absent"));
+    }
+
+    private Executable byName(String operation, String name) {
+        return switch (operation) {
+            case "describe" -> () -> service.describeAuthorizer(name, REGION);
+            case "update" -> () -> service.updateAuthorizer(name, mapper.createObjectNode().put("status", "INACTIVE"), REGION);
+            case "delete" -> () -> service.deleteAuthorizer(name, REGION);
+            default -> throw new IllegalArgumentException(operation);
+        };
     }
 
     @Test
