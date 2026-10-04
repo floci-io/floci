@@ -391,7 +391,30 @@ class AccountContextFilterTest {
         assertTrue(body.contains("polygondwanaland-west-1"), body);
     }
 
+    @Test
+    void ignoresNonSigV4AuthHeader() {
+        ContainerRequestContext ctx = mockContext(
+                "X Credential=111122223333/20260617/us-west-2/s3/aws4_request",
+                null);
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
+    @Test
+    void ignoresPresignedCredentialWhenAlgorithmMissing() {
+        ContainerRequestContext ctx = mockContext(null,
+                "111122223333/20260617/eu-west-1/s3/aws4_request", null);
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {
+        return mockContext(authHeader, xAmzCredential, xAmzCredential != null ? "AWS4-HMAC-SHA256" : null);
+    }
+
+    private ContainerRequestContext mockContext(String authHeader, String xAmzCredential, String xAmzAlgorithm) {
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         when(ctx.getHeaderString("Authorization")).thenReturn(authHeader);
 
@@ -399,6 +422,9 @@ class AccountContextFilterTest {
         MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
         if (xAmzCredential != null) {
             queryParams.add("X-Amz-Credential", xAmzCredential);
+        }
+        if (xAmzAlgorithm != null) {
+            queryParams.add("X-Amz-Algorithm", xAmzAlgorithm);
         }
         when(uriInfo.getQueryParameters()).thenReturn(queryParams);
         when(uriInfo.getPath()).thenReturn("/");
