@@ -82,6 +82,7 @@ class ServerCertificateStateTest {
                 certificates,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", defaultAccount), false, null);
     }
 
