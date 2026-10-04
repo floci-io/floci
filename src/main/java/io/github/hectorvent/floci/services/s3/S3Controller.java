@@ -2102,11 +2102,13 @@ public class S3Controller {
      * Format: hex-size;chunk-signature=sig\r\n data \r\n ... 0;chunk-signature=sig\r\n
      */
     private byte[] decodeAwsChunked(byte[] body, String contentEncoding, String contentSha256) {
-        boolean isAwsChunked = (contentEncoding != null
-                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked"))
-                || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".equals(contentSha256)
+        boolean declaresStreamingPayload = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".equals(contentSha256)
                 || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
+                || "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD".equals(contentSha256)
+                || "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
                 || "STREAMING-UNSIGNED-PAYLOAD-TRAILER".equals(contentSha256);
+        boolean isAwsChunked = declaresStreamingPayload || (contentEncoding != null
+                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked"));
         if (!isAwsChunked) {
             return body;
         }
@@ -2115,6 +2117,7 @@ public class S3Controller {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             String raw = new String(body, StandardCharsets.ISO_8859_1);
             int pos = 0;
+            boolean sawFinalChunk = false;
             while (pos < raw.length()) {
                 int lineEnd = raw.indexOf('\n', pos);
                 if (lineEnd < 0) break;
@@ -2122,7 +2125,10 @@ public class S3Controller {
                 int semiColon = line.indexOf(';');
                 String hexSize = semiColon >= 0 ? line.substring(0, semiColon) : line;
                 int chunkSize = Integer.parseInt(hexSize.trim(), 16);
-                if (chunkSize == 0) break;
+                if (chunkSize == 0) {
+                    sawFinalChunk = true;
+                    break;
+                }
 
                 int dataStart = lineEnd + 1;
                 byte[] chunkData = new byte[chunkSize];
@@ -2133,8 +2139,20 @@ public class S3Controller {
                 if (pos < raw.length() && raw.charAt(pos) == '\r') pos++;
                 if (pos < raw.length() && raw.charAt(pos) == '\n') pos++;
             }
+            if (!sawFinalChunk) {
+                throw new IllegalArgumentException("aws-chunked body ends before its final chunk");
+            }
             return out.toByteArray();
         } catch (Exception e) {
+            // A streaming payload is always framed, so storing it raw would save the chunk
+            // headers as the object's content. Without that declaration, a Content-Encoding
+            // naming aws-chunked does not guarantee framing, and the body is kept as sent.
+            if (declaresStreamingPayload) {
+                LOG.debugv("Rejecting malformed aws-chunked body: {0}", e.getMessage());
+                throw new AwsException("IncompleteBody",
+                        "You did not provide the number of bytes specified by the Content-Length HTTP header.",
+                        400);
+            }
             LOG.debugv("Failed to decode aws-chunked body, using raw: {0}", e.getMessage());
             return body;
         }
