@@ -1049,7 +1049,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 // MinimumEngineVersion: the only value AWS documents; no valkey-specific one is published.
                 .elem("MinimumEngineVersion", "6.0")
                 .start("UserGroupIds").end("UserGroupIds")
-                .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "user:" + u.getUserId()).toString())
+                .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getRegion(), regionResolver.getAccountId(), "user:" + u.getUserId()).toString())
                 .build();
     }
 

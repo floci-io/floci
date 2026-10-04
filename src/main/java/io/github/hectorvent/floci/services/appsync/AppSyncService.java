@@ -736,9 +736,9 @@ public class AppSyncService {
         dn.setDescription((String) request.get("description"));
         dn.setCertificateArn((String) request.get("certificateArn"));
         String shortId = generateShortId();
-        dn.setAppsyncDomainName(shortId + "." + AwsEndpoints.host("appsync-api", regionResolver.getDefaultRegion()));
+        dn.setAppsyncDomainName(shortId + "." + AwsEndpoints.host("appsync-api", regionResolver.getRegion()));
         dn.setHostedZoneId("Z" + generateShortId());
-        dn.setDomainNameArn(regionResolver.buildArn("appsync", regionResolver.getDefaultRegion(),
+        dn.setDomainNameArn(regionResolver.buildArn("appsync", regionResolver.getRegion(),
             "domainnames/" + domainName));
 
         Object tagsObj = request.get("tags");
@@ -828,7 +828,7 @@ public class AppSyncService {
         ns.setName(name);
         ns.setApiId(apiId);
         ns.setDescription((String) request.get("description"));
-        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", regionResolver.getDefaultRegion(),
+        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", regionResolver.getRegion(),
             "apis/" + apiId + "/channelNamespaces/" + name));
         ns.setCodeHandlers((String) request.get("codeHandlers"));
         ns.setCreated(System.currentTimeMillis());
