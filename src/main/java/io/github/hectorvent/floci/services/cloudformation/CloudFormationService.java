@@ -452,14 +452,8 @@ public class CloudFormationService implements ResourceProvider {
     // ── DescribeChangeSet ─────────────────────────────────────────────────────
 
     public ChangeSet describeChangeSet(String stackName, String changeSetName, String region) {
-        Stack stack = getStackOrThrow(stackName, region);
-        ChangeSet cs = stack.getChangeSets().get(
-                resolveChangeSetName(changeSetName, region, currentAccount()));
-        if (cs == null) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetName + "] does not exist", 400);
-        }
-        return cs;
+        Stack stack = getStackForChangeSet(stackName, changeSetName, region, currentAccount());
+        return getChangeSetOrThrow(stack, changeSetName, region, currentAccount());
     }
 
     /**
@@ -827,8 +821,8 @@ public class CloudFormationService implements ResourceProvider {
     // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
     private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
                                               String accountId, boolean requireAvailable) {
-        String canonicalStackName = getStackOrThrow(stackNameOrArn, region, accountId).getStackName();
-        String resolvedChangeSetName = resolveChangeSetName(changeSetName, region, accountId);
+        String canonicalStackName = getStackForChangeSet(stackNameOrArn, changeSetName, region,
+                accountId).getStackName();
 
         ClaimedExecution[] claimed = new ClaimedExecution[1];
         StackMutationSnapshot[] snapshot = new StackMutationSnapshot[1];
@@ -837,11 +831,7 @@ public class CloudFormationService implements ResourceProvider {
                 throw new AwsException("ValidationError",
                         "Stack with id " + stackNameOrArn + " does not exist", 400);
             }
-            ChangeSet cs = existing.getChangeSets().get(resolvedChangeSetName);
-            if (cs == null) {
-                throw new AwsException("ChangeSetNotFoundException",
-                        "ChangeSet [" + changeSetName + "] does not exist", 400);
-            }
+            ChangeSet cs = getChangeSetOrThrow(existing, changeSetName, region, accountId);
             String executionStatus = cs.getExecutionStatus();
             boolean eligible = requireAvailable
                     ? "AVAILABLE".equals(executionStatus)
@@ -947,14 +937,10 @@ public class CloudFormationService implements ResourceProvider {
     // ── DeleteChangeSet ───────────────────────────────────────────────────────
 
     public void deleteChangeSet(String stackName, String changeSetName, String region) {
-        Stack stack = getStackOrThrow(stackName, region);
-        String name = resolveChangeSetName(changeSetName, region, currentAccount());
-        ChangeSet cs = stack.getChangeSets().get(name);
-        if (cs == null) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetName + "] does not exist", 400);
-        }
-        stack.getChangeSets().remove(name);
+        String accountId = currentAccount();
+        Stack stack = getStackForChangeSet(stackName, changeSetName, region, accountId);
+        ChangeSet cs = getChangeSetOrThrow(stack, changeSetName, region, accountId);
+        stack.getChangeSets().remove(cs.getChangeSetName());
         persistStack(stack);
     }
 
@@ -2937,10 +2923,45 @@ public class CloudFormationService implements ResourceProvider {
                 "Invalid change set ARN: " + changeSetNameOrArn, 400);
     }
 
+    private Stack getStackForChangeSet(String stackNameOrArn, String changeSetNameOrArn,
+                                       String region, String accountId) {
+        if (stackNameOrArn != null && !stackNameOrArn.isBlank()) {
+            return getStackOrThrow(stackNameOrArn, region, accountId);
+        }
+        if (changeSetNameOrArn == null || !changeSetNameOrArn.startsWith("arn:")) {
+            throw new AwsException("ValidationError", "StackName is required when ChangeSetName is not an ARN", 400);
+        }
+        // A change-set ARN contains its name and UUID, but not its stack name. Search only
+        // stacks in the caller's account and region, and match the complete ARN so another
+        // stack's change set with the same short name cannot be selected accidentally.
+        String changeSetName = resolveChangeSetName(changeSetNameOrArn, region, accountId);
+        for (Stack stack : stacks.values()) {
+            if (accountId.equals(ownerAccount(stack)) && region.equals(stack.getRegion())) {
+                ChangeSet changeSet = stack.getChangeSets().get(changeSetName);
+                if (changeSet != null && changeSetNameOrArn.equals(changeSet.getChangeSetId())) {
+                    return stack;
+                }
+            }
+        }
+        throw new AwsException("ChangeSetNotFoundException",
+                "ChangeSet [" + changeSetNameOrArn + "] does not exist", 400);
+    }
+
+    private ChangeSet getChangeSetOrThrow(Stack stack, String changeSetNameOrArn,
+                                          String region, String accountId) {
+        ChangeSet changeSet = stack.getChangeSets().get(
+                resolveChangeSetName(changeSetNameOrArn, region, accountId));
+        if (changeSet == null || (changeSetNameOrArn != null && changeSetNameOrArn.startsWith("arn:")
+                && !changeSetNameOrArn.equals(changeSet.getChangeSetId()))) {
+            throw new AwsException("ChangeSetNotFoundException",
+                    "ChangeSet [" + changeSetNameOrArn + "] does not exist", 400);
+        }
+        return changeSet;
+    }
+
     /**
-     * Resolves a stack by name or ARN. When an ARN is provided the stack name
-     * is extracted from the ARN path segment ({@code …:stack/<name>/<id>}).
-     * Falls back to a linear scan matching on stackId for robustness.
+     * Resolves a live stack by name or ARN. An ARN is a stack id and resolves only to the stack
+     * carrying that exact id, never to a newer stack that reused the name.
      */
     private Stack resolveStack(String stackNameOrArn, String region) {
         return resolveStack(stackNameOrArn, region, currentAccount());
@@ -2966,7 +2987,9 @@ public class CloudFormationService implements ResourceProvider {
             String extractedName = extractStackNameFromArn(stackNameOrArn);
             if (extractedName != null) {
                 stack = stacks.get(stackKey(accountId, extractedName, region));
-                if (stack != null) {
+                // A stack id names one stack: a live stack that reused the name is a different
+                // stack, so the id resolves to it only when the ids match.
+                if (stack != null && stackNameOrArn.equals(stack.getStackId())) {
                     return stack;
                 }
             }

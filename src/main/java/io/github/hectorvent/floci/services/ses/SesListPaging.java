@@ -32,9 +32,18 @@ public enum SesListPaging {
             false),
 
     V2_LIST_EMAIL_IDENTITIES(Namespace.IDENTITY, 25, 1000,
-            size -> badRequest("Value " + size + " for parameter PageSize is invalid. "
-                    + "PageSize must be between 1 and 1000."),
+            SesListPaging::emailIdentitiesPageSizeError,
             token -> badRequest("Invalid NextToken <" + token + ">."),
+            false),
+
+    /**
+     * ListEmailIdentities with a Filter (probed 2026-10-03): the same list, but a token SES refuses
+     * is answered without echoing it. Only a token from another filter could be observed; a token
+     * that is not one at all is taken to be refused the same way.
+     */
+    V2_LIST_EMAIL_IDENTITIES_FILTERED(Namespace.IDENTITY, 25, 1000,
+            SesListPaging::emailIdentitiesPageSizeError,
+            token -> badRequest("Invalid NextToken."),
             false),
 
     /** 195 identities came back whole without a MaxItems, so the default is taken to be the bound. */
@@ -309,6 +318,11 @@ public enum SesListPaging {
         } catch (NumberFormatException e) {
             throw new AwsException("MalformedInput", null, 400);
         }
+    }
+
+    private static AwsException emailIdentitiesPageSizeError(int size) {
+        return badRequest("Value " + size + " for parameter PageSize is invalid. "
+                + "PageSize must be between 1 and 1000.");
     }
 
     private static AwsException badRequest(String message) {

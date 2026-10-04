@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
@@ -915,17 +916,31 @@ public class EksClusterManager
      * cluster's workloads survive a Floci restart and are re-latched by {@link #restoreCluster}.
      */
     public void stopCluster(Cluster cluster) {
-        unregisterMetadataEndpoint(cluster);
-        Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
+        String resourceName = clusterResourceName(cluster);
         if (cluster.getContainerId() == null) {
-            closeQuietly(logStream);
+            unregisterMetadataEndpoint(cluster);
+            closeQuietly(clusterLogHandles.remove(resourceName));
             return;
         }
-        lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
-        if (cluster.getHostPort() > 0) {
-            portAllocator.release(cluster.getHostPort());
-            // Cleared so a delete retried after a failed backup cleanup cannot free a reused port.
+        Closeable logStream = clusterLogHandles.get(resourceName);
+        // Strict: a container Docker could not remove may still be running and publishing the
+        // port, so the delete fails and keeps the cluster record, its metadata endpoint, log
+        // handle and port reservation; a retried delete releases them once the container is gone.
+        lifecycleManager.stopAndRemoveStrict(cluster.getContainerId(), logStream);
+        unregisterMetadataEndpoint(cluster);
+        // Removed by value so an overlapping delete cannot drop a handle it does not own.
+        if (logStream != null) {
+            clusterLogHandles.remove(resourceName, logStream);
+        }
+        int hostPort;
+        // Read and cleared together so overlapping deletes, or a delete retried after a failed
+        // backup cleanup, cannot release a port that has since been reused.
+        synchronized (cluster) {
+            hostPort = cluster.getHostPort();
             cluster.setHostPort(0);
+        }
+        if (hostPort > 0) {
+            portAllocator.release(hostPort);
         }
         if (cluster.getDockerName() != null) {
             // A failed backup cleanup must not leave the live node running. Keep the cluster
@@ -1083,9 +1098,10 @@ public class EksClusterManager
             return;
         }
         String resourceName = clusterResourceName(cluster);
-        if (clusterLogHandles.containsKey(resourceName)) {
-            return;
-        }
+        // Logs are attached only for a container that was just started or adopted, so a handle
+        // still registered under this name follows an earlier container: close it rather than
+        // leave the new cluster without control-plane logs.
+        closeQuietly(clusterLogHandles.remove(resourceName));
         String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
         String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
         String region = clusterRegion(cluster);
@@ -1123,13 +1139,13 @@ public class EksClusterManager
         }
 
         if (handles.size() == 1) {
-            clusterLogHandles.put(resourceName, handles.getFirst());
+            closeQuietly(clusterLogHandles.put(resourceName, handles.getFirst()));
         } else if (handles.size() > 1) {
-            clusterLogHandles.put(resourceName, () -> {
+            closeQuietly(clusterLogHandles.put(resourceName, () -> {
                 for (Closeable h : handles) {
                     closeQuietly(h);
                 }
-            });
+            }));
         }
     }
 
@@ -1419,11 +1435,8 @@ public class EksClusterManager
      */
     private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(localFile)
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, localFile);
         } catch (Exception e) {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
@@ -1851,11 +1864,8 @@ public class EksClusterManager
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(REGISTRIES_TAR_ENTRY, content)))
-                    .withRemotePath("/etc")
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
+                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644);
             LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}", endpoint, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "

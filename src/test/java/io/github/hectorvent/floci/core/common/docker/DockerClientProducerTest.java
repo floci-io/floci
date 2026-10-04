@@ -255,6 +255,34 @@ class DockerClientProducerTest {
                 "An explicitly-configured docker-host should take priority over the Windows named-pipe fallback");
     }
 
+    // Control-plane calls (create/start/stop/remove/copyArchive) and long-lived streaming
+    // calls (log-follow, exec output streams) must not share one connection pool: a
+    // container's whole-lifetime streams would otherwise occupy pool slots that
+    // short-lived control-plane calls need, starving them into
+    // ConnectionRequestTimeoutException. The @Default and @StreamingDocker beans must
+    // therefore be genuinely separate DockerClient instances (and thus separate pools),
+    // not the same instance handed out under two qualifiers.
+    @Test
+    void dockerClientAndStreamingDockerClient_areDistinctInstances() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(config.docker()).thenReturn(docker);
+        when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
+        when(docker.dockerConfigPath()).thenReturn(Optional.empty());
+        when(docker.maxConnections()).thenReturn(100);
+        when(docker.streamingMaxConnections()).thenReturn(512);
+
+        DockerClientProducer producer = new DockerClientProducer(config);
+
+        DockerClient controlPlaneClient = producer.dockerClient();
+        DockerClient streamingClient = producer.streamingDockerClient();
+
+        assertNotNull(controlPlaneClient);
+        assertNotNull(streamingClient);
+        assertNotSame(controlPlaneClient, streamingClient,
+                "Control-plane and streaming DockerClient beans must use separate connection pools");
+    }
+
     private static void writeContextFixture(Path dockerConfigDir, String contextName, String host)
             throws IOException {
         writeContextFixture(dockerConfigDir, contextName, host, false);

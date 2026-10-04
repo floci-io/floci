@@ -118,7 +118,7 @@ class IamTest {
     private static final String ROLE_NAME = "sdk-test-role";
     private static final String POLICY_NAME = "sdk-test-policy";
     private static final String INSTANCE_PROFILE_NAME = "sdk-test-profile";
-    private static final String AWS_MANAGED_POLICY_PREFIX = "arn:aws:iam::aws:policy/";
+    private static final String AWS_MANAGED_POLICY_PREFIX = TestFixtures.globalArn("iam", "aws", "policy/");
     private static final String ADMIN_POLICY_ARN = AWS_MANAGED_POLICY_PREFIX + "AdministratorAccess";
     private static final String READ_ONLY_POLICY_ARN = AWS_MANAGED_POLICY_PREFIX + "ReadOnlyAccess";
     private static final String LAMBDA_BASIC_POLICY_ARN =
@@ -477,7 +477,11 @@ class IamTest {
     @Order(101)
     void getAccountSummary() {
         GetAccountSummaryResponse response = iam.getAccountSummary();
-        assertThat(response.summaryMap()).hasSize(34);
+        // GlobalEndpointTokenVersion reports the global STS endpoint, which only the commercial partition has.
+        boolean globalSts = "aws".equals(TestFixtures.partition());
+        assertThat(response.summaryMap()).hasSize(globalSts ? 34 : 33);
+        assertThat(response.summaryMap().containsKey(SummaryKeyType.GLOBAL_ENDPOINT_TOKEN_VERSION))
+                .isEqualTo(globalSts);
         assertThat(response.summaryMap().get(SummaryKeyType.USERS_QUOTA)).isEqualTo(5000);
         assertThat(response.summaryMap().get(SummaryKeyType.GROUPS_QUOTA)).isEqualTo(300);
         assertThat(response.summaryMap().get(SummaryKeyType.ROLES_QUOTA)).isEqualTo(1000);
@@ -491,7 +495,7 @@ class IamTest {
     @Order(24)
     void simulatePrincipalPolicy() {
         SimulatePrincipalPolicyResponse response = iam.simulatePrincipalPolicy(SimulatePrincipalPolicyRequest.builder()
-                .policySourceArn("arn:aws:iam::000000000000:user/" + USER_NAME)
+                .policySourceArn(TestFixtures.globalArn("iam", "000000000000", "user/" + USER_NAME))
                 .actionNames("s3:GetObject", "ec2:RunInstances")
                 .resourceArns("*")
                 .build());
@@ -817,7 +821,7 @@ class IamTest {
     void generateAndGetServiceLastAccessedDetails() {
         GenerateServiceLastAccessedDetailsResponse generated = iam.generateServiceLastAccessedDetails(
                 GenerateServiceLastAccessedDetailsRequest.builder()
-                        .arn("arn:aws:iam::000000000000:user/" + USER_NAME).build());
+                        .arn(TestFixtures.globalArn("iam", "000000000000", "user/" + USER_NAME)).build());
 
         assertThat(generated.jobId()).hasSize(36);
 
@@ -842,7 +846,7 @@ class IamTest {
     void getServiceLastAccessedDetailsWithEntitiesDescribesReachingEntities() {
         GenerateServiceLastAccessedDetailsResponse generated = iam.generateServiceLastAccessedDetails(
                 GenerateServiceLastAccessedDetailsRequest.builder()
-                        .arn("arn:aws:iam::000000000000:user/" + USER_NAME).build());
+                        .arn(TestFixtures.globalArn("iam", "000000000000", "user/" + USER_NAME)).build());
 
         GetServiceLastAccessedDetailsWithEntitiesResponse details =
                 iam.getServiceLastAccessedDetailsWithEntities(
@@ -874,7 +878,7 @@ class IamTest {
     void listPoliciesGrantingServiceAccessEchoesEachRequestedNamespace() {
         ListPoliciesGrantingServiceAccessResponse response = iam.listPoliciesGrantingServiceAccess(
                 ListPoliciesGrantingServiceAccessRequest.builder()
-                        .arn("arn:aws:iam::000000000000:user/" + USER_NAME)
+                        .arn(TestFixtures.globalArn("iam", "000000000000", "user/" + USER_NAME))
                         .serviceNamespaces("s3", "dynamodb").build());
 
         assertThat(response.policiesGrantingServiceAccess())

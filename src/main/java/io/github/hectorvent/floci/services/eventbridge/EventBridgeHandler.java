@@ -224,6 +224,7 @@ public class EventBridgeHandler {
                         input.isEmpty() ? null : input,
                         inputPath.isEmpty() ? null : inputPath
                 );
+                target.setRoleArn(t.path("RoleArn").asText(null));
                 target.setInputTransformer(InputTransformer.fromJson(t.path("InputTransformer")));
                 JsonNode sqsParamsNode = t.path("SqsParameters");
                 if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
@@ -316,6 +317,9 @@ public class EventBridgeHandler {
             }
             if (t.getRetryPolicy() != null) {
                 node.set("RetryPolicy", objectMapper.valueToTree(t.getRetryPolicy()));
+            }
+            if (t.getRoleArn() != null) {
+                node.put("RoleArn", t.getRoleArn());
             }
             if (t.getDeadLetterConfig() != null) {
                 node.set("DeadLetterConfig", objectMapper.valueToTree(t.getDeadLetterConfig()));

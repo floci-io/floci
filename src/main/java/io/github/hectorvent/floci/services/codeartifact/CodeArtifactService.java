@@ -73,7 +73,7 @@ public class CodeArtifactService implements Resettable {
      * and the backfill in {@link #ensureFormatContainerId} already handle it, including for
      * repositories created before that format's proxy existed.
      */
-    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm");
+    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
@@ -674,6 +674,17 @@ public class CodeArtifactService implements Resettable {
         requireNonBlank(version, "packageVersion");
         requireNonBlank(assetName, "asset");
         String owner = effectiveOwner(domainOwner);
+
+        // Maven, npm, and pypi are metadata-free passthroughs straight to their own sidecar
+        // (ReposiliteSidecarClient/VerdaccioSidecarManager/PypiserverSidecarManager): publish for
+        // these formats never goes through publishPackageVersion (it only ever accepts "generic"),
+        // so packageVersions can never hold a record for them. Bridge straight to the sidecar
+        // that actually has the asset instead of always 404ing here.
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            return getContainerBackedPackageVersionAsset(region, domain, owner, repository, format, namespace,
+                    packageName, version, assetName, packageVersionRevision);
+        }
+
         String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
         CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key)
                 .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
@@ -693,6 +704,53 @@ public class CodeArtifactService implements Resettable {
         // rather than trusting whatever happens to already be on the object.
         asset.setContent(readAssetContent(owner, key, assetName));
         return new PackageVersionAssetResult(asset, pv.getRevision());
+    }
+
+    /**
+     * There's no stored revision for a sidecar-backed format to compare against, so one is
+     * synthesized from the version coordinate itself (this repository's own sidecar container id,
+     * plus namespace/package/version), not the fetched asset's own bytes: a real revision is
+     * shared by every asset of one package version (a Maven version's JAR and POM alike), so
+     * hashing per-asset content would give a client that described the version once, then tried
+     * to fetch a second asset at that same revision, a spurious not-found on the second call even
+     * though both assets genuinely exist. Keying on the sidecar container id, not just the bare
+     * namespace/package/version strings, keeps two different repositories (even two with the
+     * identical coordinates) from ever synthesizing the same revision.
+     *
+     * <p>Doesn't change when a new asset is published to the version afterward, unlike a real
+     * stored revision: tracking that would mean enumerating every asset a sidecar holds for a
+     * version on every call, the same capability {@code DescribePackageVersion} would need and
+     * doesn't have either for these formats (see the Known limitations doc). Accepted for the
+     * same reason: nothing before this change ever let a client obtain a revision for these
+     * formats in the first place (not even a stale one), so this isn't a regression against any
+     * previously working staleness check.
+     */
+    private PackageVersionAssetResult getContainerBackedPackageVersionAsset(String region, String domain,
+            String owner, String repository, String format, String namespace, String packageName, String version,
+            String assetName, String packageVersionRevision) {
+        if ("maven".equals(format) && (namespace == null || namespace.isBlank())) {
+            throw validation("namespace is required when requesting an asset from a maven package version.");
+        }
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        String revisionKey = repoId + "/" + (namespace == null ? "" : namespace) + "/" + packageName + "/" + version;
+        String revision = sha256Hex(revisionKey.getBytes(StandardCharsets.UTF_8));
+        if (packageVersionRevision != null && !packageVersionRevision.equals(revision)) {
+            throw notFound("Package version '" + version + "' was not found at revision '"
+                    + packageVersionRevision + "'.", version, "package-version");
+        }
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace, packageName,
+                        version, assetName)
+                .orElseThrow(() -> notFound("Asset '" + assetName + "' was not found on package version '"
+                        + version + "'.", assetName, "asset"));
+        PackageAsset asset = new PackageAsset();
+        asset.setName(assetName);
+        asset.setSize(content.length);
+        asset.setContent(content);
+        asset.setHashes(computeHashes(content));
+        return new PackageVersionAssetResult(asset, revision);
     }
 
     // ------------------------------------------------------------ authorization

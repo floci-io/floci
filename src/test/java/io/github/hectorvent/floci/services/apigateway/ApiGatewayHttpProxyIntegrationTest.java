@@ -10,6 +10,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -129,6 +131,11 @@ class ApiGatewayHttpProxyIntegrationTest {
 
     private String createProxyApi(String name, String targetUri, String requestParametersJson,
                                   String authorizationType) {
+        return createProxyApi(name, targetUri, requestParametersJson, authorizationType, "/{proxy+}", "ANY");
+    }
+
+    private String createProxyApi(String name, String targetUri, String requestParametersJson,
+                                  String authorizationType, String resourcePath, String httpMethod) {
         String apiId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"name\":\"" + name + "\"}")
@@ -140,15 +147,18 @@ class ApiGatewayHttpProxyIntegrationTest {
         String rootId = given().when().get("/restapis/" + apiId + "/resources")
                 .then().statusCode(200).extract().path("item[0].id");
 
-        String resourceId = given()
-                .contentType(ContentType.JSON)
-                .body("{\"pathPart\":\"{proxy+}\"}")
-                .when().post("/restapis/" + apiId + "/resources/" + rootId)
-                .then().statusCode(201).extract().path("id");
+        String resourceId = rootId;
+        for (String pathPart : resourcePath.substring(1).split("/")) {
+            resourceId = given()
+                    .contentType(ContentType.JSON)
+                    .body(Map.of("pathPart", pathPart))
+                    .when().post("/restapis/" + apiId + "/resources/" + resourceId)
+                    .then().statusCode(201).extract().path("id");
+        }
 
         given().contentType(ContentType.JSON)
                 .body("{\"authorizationType\":\"" + authorizationType + "\"}")
-                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/ANY")
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/" + httpMethod)
                 .then().statusCode(201);
 
         String integrationBody = "{\"type\":\"HTTP_PROXY\",\"httpMethod\":\"ANY\",\"uri\":\"" + targetUri + "\""
@@ -156,17 +166,10 @@ class ApiGatewayHttpProxyIntegrationTest {
                 + "}";
         given().contentType(ContentType.JSON)
                 .body(integrationBody)
-                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/ANY/integration")
+                .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/" + httpMethod + "/integration")
                 .then().statusCode(201);
 
-        String deploymentId = given().contentType(ContentType.JSON)
-                .body("{\"description\":\"v1\"}")
-                .when().post("/restapis/" + apiId + "/deployments")
-                .then().statusCode(201).extract().path("id");
-        given().contentType(ContentType.JSON)
-                .body("{\"stageName\":\"test\",\"deploymentId\":\"" + deploymentId + "\"}")
-                .when().post("/restapis/" + apiId + "/stages")
-                .then().statusCode(201);
+        createStage(apiId, deploy(apiId));
 
         return apiId;
     }
@@ -226,6 +229,88 @@ class ApiGatewayHttpProxyIntegrationTest {
         assertEquals("GET", lastMethod.get());
         assertEquals("/orders/42", lastPath.get());
         assertEquals("limit=5", lastQuery.get());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "/{proxy+}, /checkpoint/status, /checkpoint/status",
+            "/api/v1/auth/signup/{proxy+}, /api/v1/auth/signup/status, /status",
+            "/api/v1/auth/signup/{proxy+}, /api/v1/auth/signup/checkpoint/status, /checkpoint/status"
+    })
+    void mapsOnlyTheGreedySuffixIntoTheIntegrationPath(String resourcePath, String requestPath,
+                                                      String expectedSuffix) {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-greedy-path-api",
+                "http://127.0.0.1:" + backendPort + "/api/v1/auth/signup/{proxy}",
+                "{\"integration.request.path.proxy\":\"method.request.path.proxy\"}",
+                "NONE", resourcePath, "ANY");
+
+        given().when().get("/execute-api/" + apiId + "/test" + requestPath)
+                .then().statusCode(200);
+
+        assertEquals("GET", lastMethod.get());
+        assertEquals("/api/v1/auth/signup" + expectedSuffix, lastPath.get());
+    }
+
+    @Test
+    void substitutesNestedGreedySuffixWithoutExplicitParameterMapping() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-implicit-greedy-api",
+                "http://127.0.0.1:" + backendPort + "/files/{proxy}", null,
+                "NONE", "/files/{proxy+}", "ANY");
+
+        given().when().get("/execute-api/" + apiId + "/test/files/images/logo.png")
+                .then().statusCode(200);
+
+        assertEquals("/files/images/logo.png", lastPath.get());
+    }
+
+    @Test
+    void mapsGreedyParameterWithADifferentName() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-named-greedy-api",
+                "http://127.0.0.1:" + backendPort + "/static/{remainder}",
+                "{\"integration.request.path.remainder\":\"method.request.path.rest\"}",
+                "NONE", "/assets/{rest+}", "ANY");
+
+        given().when().get("/execute-api/" + apiId + "/test/assets/images/logo.png")
+                .then().statusCode(200);
+
+        assertEquals("/static/images/logo.png", lastPath.get());
+    }
+
+    @Test
+    void mapsOrdinaryNamedParameters() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-named-path-api",
+                "http://127.0.0.1:" + backendPort + "/tenants/{tenant}/files/{file}",
+                "{\"integration.request.path.tenant\":\"method.request.path.tenantId\","
+                        + "\"integration.request.path.file\":\"method.request.path.fileId\"}",
+                "NONE", "/accounts/{tenantId}/assets/{fileId}", "ANY");
+
+        given().when().get("/execute-api/" + apiId + "/test/accounts/acme/assets/logo.png")
+                .then().statusCode(200);
+
+        assertEquals("/tenants/acme/files/logo.png", lastPath.get());
+    }
+
+    @Test
+    void forwardsUnauthenticatedOptionsWithOnlyTheGreedySuffix() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-options-greedy-api",
+                "http://127.0.0.1:" + backendPort + "/api/v1/auth/signup/{proxy}",
+                "{\"integration.request.path.proxy\":\"method.request.path.proxy\"}",
+                "NONE", "/api/v1/auth/signup/{proxy+}", "OPTIONS");
+
+        given()
+                .header("Origin", "https://example.com")
+                .header("Access-Control-Request-Method", "GET")
+                .when().options("/execute-api/" + apiId + "/test/api/v1/auth/signup/checkpoint/status")
+                .then().statusCode(200);
+
+        assertEquals("OPTIONS", lastMethod.get());
+        assertEquals("/api/v1/auth/signup/checkpoint/status", lastPath.get());
+        assertNull(lastAuthorization.get());
     }
 
     @Test

@@ -617,6 +617,14 @@ public class EcrService implements ResourceProvider {
     // Tag mutability + resource tags + policies (metadata round-trip)
     // ============================================================
 
+    public Repository putImageScanningConfiguration(String repositoryName, String registryId,
+                                                    boolean scanOnPush, String region) {
+        Repository repo = requireRepo(repositoryName, registryId, region);
+        repo.setScanOnPush(scanOnPush);
+        repoStore.put(key(region, repo.getRegistryId(), repositoryName), repo);
+        return repo;
+    }
+
     public Repository putImageTagMutability(String repositoryName, String registryId,
                                             String mutability, String region) {
         if (mutability == null

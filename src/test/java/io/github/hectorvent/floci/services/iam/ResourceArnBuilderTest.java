@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
@@ -15,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -48,6 +52,229 @@ class ResourceArnBuilderTest {
             contextProperties.put(inv.getArgument(0), inv.getArgument(1));
             return null;
         }).when(ctx).setProperty(any(), any());
+    }
+
+    /** Query-protocol services carry their parameters in a form body, as IAM does. */
+    private void setFormBody(String form) {
+        contextProperties.clear();
+        byte[] bytes = form.getBytes(StandardCharsets.UTF_8);
+        ByteArrayInputStream in = new ByteArrayInputStream(bytes);
+        when(ctx.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+        when(ctx.getEntityStream()).thenReturn(in);
+        doAnswer(inv -> {
+            InputStream newIn = inv.getArgument(0);
+            when(ctx.getEntityStream()).thenReturn(newIn);
+            return null;
+        }).when(ctx).setEntityStream(any(InputStream.class));
+    }
+
+    // ── IAM ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * A builder whose store holds one certificate under {@code name} with {@code arn}, which is
+     * what the check reads for every operation acting on a certificate that already exists.
+     */
+    private ResourceArnBuilder backedBy(String name, String arn) {
+        ServerCertificate stored = new ServerCertificate();
+        stored.setServerCertificateName(name);
+        stored.setArn(arn);
+        IamService service = mock(IamService.class);
+        when(service.findServerCertificate(name)).thenReturn(Optional.of(stored));
+        @SuppressWarnings("unchecked")
+        Instance<IamService> instance = mock(Instance.class);
+        when(instance.get()).thenReturn(service);
+        return new ResourceArnBuilder(new ObjectMapper(), instance);
+    }
+
+    /**
+     * The resource a certificate-specific policy statement has to match. Without this the action
+     * is evaluated against {@code *}, so a deny naming the certificate never applies.
+     */
+    @Test
+    void iamNamesTheServerCertificateBeingActedOn() {
+        String arn = "arn:aws:iam::000000000000:server-certificate/my-cert";
+        setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
+        assertEquals(arn, backedBy("my-cert", arn).build("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void iamNamesTheCertificateForEveryOperationThatTakesOne() {
+        String arn = "arn:aws:iam::000000000000:server-certificate/c1";
+        ResourceArnBuilder stored = backedBy("c1", arn);
+        for (String action : List.of("GetServerCertificate", "UpdateServerCertificate",
+                "DeleteServerCertificate", "TagServerCertificate", "UntagServerCertificate",
+                "ListServerCertificateTags")) {
+            setFormBody("Action=" + action + "&ServerCertificateName=c1");
+            assertEquals(arn, stored.build("iam", ctx, "us-east-1", "000000000000"), action);
+        }
+        // The upload is the one that mints rather than reads: nothing is stored yet.
+        setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1");
+        assertEquals(arn, builder.build("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
+     * The one invariant behind every way this has been got wrong: for an operation acting on a
+     * certificate that exists, the ARN the permission check uses is that certificate's own stored
+     * ARN -- whatever spelling named the operation, and whatever partition signed the request.
+     *
+     * <p>Enumerated rather than sampled, because each defect so far hid in a combination the
+     * narrower tests did not reach: the mapping missing entirely, then {@code Operation} skipping
+     * it, then the partition coming from the signing region. Nothing here derives an ARN, so a
+     * regression has to show up as a mismatch.
+     */
+    @Test
+    void iamChecksEveryRouteAndSigningRegionAgainstTheStoredArn() {
+        for (String storedArn : List.of(
+                "arn:aws:iam::000000000000:server-certificate/c1",
+                "arn:aws-cn:iam::000000000000:server-certificate/team/c1",
+                "arn:aws-us-gov:iam::000000000000:server-certificate/deep/nested/c1")) {
+            ResourceArnBuilder stored = backedBy("c1", storedArn);
+            for (String action : List.of("GetServerCertificate", "UpdateServerCertificate",
+                    "DeleteServerCertificate", "TagServerCertificate", "UntagServerCertificate",
+                    "ListServerCertificateTags")) {
+                for (String spelling : List.of("Action", "Operation")) {
+                    for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
+                        setFormBody(spelling + "=" + action + "&ServerCertificateName=c1");
+                        assertEquals(storedArn,
+                                stored.build("iam", ctx, region, "000000000000"),
+                                action + " named by " + spelling + ", signed in " + region);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * A rename is authorized against both names. The model requires the principal to be allowed on
+     * the old and the new one, and the filter authorizes a request once per resource, so naming
+     * both is what stops a rename into a name the caller may not write.
+     */
+    @Test
+    void iamNamesBothTheOldAndTheNewNameOnARename() {
+        String stored = "arn:aws:iam::000000000000:server-certificate/old";
+        setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old"
+                + "&NewServerCertificateName=new");
+        assertEquals(
+                List.of(stored, "arn:aws:iam::000000000000:server-certificate/new"),
+                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /** A move renames the path, so the destination path is named the same way. */
+    @Test
+    void iamNamesTheDestinationPathOnAMove() {
+        String stored = "arn:aws:iam::000000000000:server-certificate/old";
+        setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old&NewPath=/team/");
+        assertEquals(
+                List.of(stored, "arn:aws:iam::000000000000:server-certificate/team/old"),
+                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
+     * An update that renames and moves nothing acts on one resource, so it names one. Repeating
+     * the same ARN would make the request look like it touches two.
+     */
+    @Test
+    void iamNamesOneResourceWhenAnUpdateChangesNeitherNameNorPath() {
+        String stored = "arn:aws:iam::000000000000:server-certificate/old";
+        setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old");
+        assertEquals(List.of(stored),
+                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
+     * The destination is built beside the stored ARN, so it keeps the certificate's partition. A
+     * rename does not move a resource between partitions, and taking the partition from the
+     * caller's signing region would name one that does not exist.
+     */
+    @Test
+    void iamBuildsTheRenameDestinationInTheStoredPartition() {
+        String stored = "arn:aws-cn:iam::000000000000:server-certificate/old";
+        setFormBody("Action=UpdateServerCertificate&ServerCertificateName=old"
+                + "&NewServerCertificateName=new");
+        assertEquals(
+                List.of(stored, "arn:aws-cn:iam::000000000000:server-certificate/new"),
+                backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
+     * Nothing stored under that name means nothing to name: the operation fails as NoSuchEntity
+     * regardless, and minting an ARN for an absent resource would hand a policy something to match.
+     */
+    @Test
+    void iamFallsBackToTheWildcardWhenNoCertificateIsStored() {
+        setFormBody("Action=DeleteServerCertificate&ServerCertificateName=absent");
+        assertEquals("*", backedBy("other", "arn:aws:iam::000000000000:server-certificate/other")
+                .build("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
+     * An upload names a certificate that does not exist yet, so its path has to come from the
+     * request. Taking it from the store would resolve to the root path and let a policy scoped to
+     * one path authorize an upload into another.
+     */
+    @Test
+    void iamTakesTheUploadPathFromTheRequest() {
+        setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1&Path=/team/");
+        assertEquals("arn:aws:iam::000000000000:server-certificate/team/c1",
+                builder.build("iam", ctx, "us-east-1", "000000000000"));
+
+        // Written without surrounding slashes, it still lands as a path segment.
+        setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1&Path=team");
+        assertEquals("arn:aws:iam::000000000000:server-certificate/team/c1",
+                builder.build("iam", ctx, "us-east-1", "000000000000"));
+
+        // Omitted, it is the root path.
+        setFormBody("Action=UploadServerCertificate&ServerCertificateName=c1");
+        assertEquals("arn:aws:iam::000000000000:server-certificate/c1",
+                builder.build("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    /**
+     * IAM is global, so the ARN carries no region. An upload creates the certificate in the
+     * caller's own partition, so that is the partition its ARN is minted in.
+     */
+    @Test
+    void iamMintsAnUploadedCertificateArnInTheRequestPartition() {
+        setFormBody("Action=UploadServerCertificate&ServerCertificateName=my-cert");
+        assertEquals("arn:aws-cn:iam::000000000000:server-certificate/my-cert",
+                builder.build("iam", ctx, "cn-north-1", "000000000000"));
+
+        setFormBody("Action=UploadServerCertificate&ServerCertificateName=my-cert");
+        assertEquals("arn:aws-us-gov:iam::000000000000:server-certificate/my-cert",
+                builder.build("iam", ctx, "us-gov-west-1", "000000000000"));
+    }
+
+    /**
+     * An existing certificate stays in the partition it was created in, so the check reads the
+     * partition from its stored ARN. Deriving it from the caller's signing region instead would
+     * name an ARN no resource has, and a deny on the certificate's real ARN would not match it.
+     */
+    @Test
+    void iamKeepsTheStoredPartitionWhateverRegionSignedTheRequest() {
+        String arn = "arn:aws:iam::000000000000:server-certificate/my-cert";
+        ResourceArnBuilder stored = backedBy("my-cert", arn);
+
+        setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
+        assertEquals(arn, stored.build("iam", ctx, "cn-north-1", "000000000000"));
+
+        setFormBody("Action=DeleteServerCertificate&ServerCertificateName=my-cert");
+        assertEquals(arn, stored.build("iam", ctx, "us-gov-west-1", "000000000000"));
+    }
+
+    /**
+     * ListServerCertificates names no certificate, and every other IAM action is still unmapped,
+     * so both resolve to the wildcard rather than to a fabricated ARN.
+     */
+    @Test
+    void iamFallsBackToTheWildcardWhenNoCertificateIsNamed() {
+        setFormBody("Action=ListServerCertificates&PathPrefix=/team/");
+        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
+
+        setFormBody("Action=DeleteUser&UserName=bob");
+        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
+
+        setFormBody("Action=DeleteServerCertificate");
+        assertEquals("*", builder.build("iam", ctx, "us-east-1", "000000000000"));
     }
 
     private void setJsonBody(String json) {

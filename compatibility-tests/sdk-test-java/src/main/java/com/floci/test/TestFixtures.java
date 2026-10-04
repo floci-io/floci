@@ -3,6 +3,7 @@ package com.floci.test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.regions.RegionMetadata;
 import software.amazon.awssdk.services.account.AccountClient;
 import software.amazon.awssdk.services.accessanalyzer.AccessAnalyzerClient;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
@@ -204,6 +205,36 @@ public final class TestFixtures {
      */
     public static boolean isRealAws() {
         return "aws".equalsIgnoreCase(System.getenv("FLOCI_TARGET"));
+    }
+
+    /** The region every fixture client signs for, for tests that build or compare region-scoped values. */
+    public static Region region() {
+        return REGION;
+    }
+
+    /**
+     * The partition of {@link #region()} ({@code aws}, {@code aws-cn}, {@code aws-us-gov}, ...), from
+     * the SDK's own region metadata, so a test pins the partition its clients actually sign in. A region
+     * the SDK does not know is taken as commercial.
+     */
+    public static String partition() {
+        RegionMetadata metadata = REGION.metadata();
+        return metadata == null ? "aws" : metadata.partition().id();
+    }
+
+    /** A regional ARN in the fixture partition and region. */
+    public static String arn(String service, String accountId, String resource) {
+        return arn(service, REGION.id(), accountId, resource);
+    }
+
+    /** A regional ARN in the fixture partition and the given region of that partition. */
+    public static String arn(String service, String region, String accountId, String resource) {
+        return "arn:" + partition() + ":" + service + ":" + region + ":" + accountId + ":" + resource;
+    }
+
+    /** A regionless ARN (IAM, SSO, Organizations, ...) in the fixture partition. */
+    public static String globalArn(String service, String accountId, String resource) {
+        return "arn:" + partition() + ":" + service + "::" + accountId + ":" + resource;
     }
 
     /**

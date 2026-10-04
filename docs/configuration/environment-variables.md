@@ -111,7 +111,8 @@ This foundation release provides opt-in security-group filtering for EC2 Docker 
 | `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_HELPER_IMAGE` | `floci/network-helper:local` | Linux helper image containing nftables; Floci builds the default image locally when missing |
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket path or TCP address |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(none)_ | Path to a directory containing Docker's `config.json` for registry auth |
-| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's Docker client. Each live Lambda container holds two connections (log stream and exit watcher), so about half this many can run at once. See [Docker Configuration](docker.md#connection-pool) |
+| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's Docker client. Each live Lambda container holds one connection (its exit watcher) plus one per extension; log streams use the streaming pool. See [Docker Configuration](docker.md#connection-pool) |
+| `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `512` | Connection pool size for container log-follow streams, kept apart from the main pool so they never starve create, start, stop and remove. See [Docker Configuration](docker.md#connection-pool) |
 | `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04` |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Log rotation max size for spawned containers (e.g. `10m`, `1g`) |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep for spawned containers |
@@ -238,6 +239,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable the Lambda service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove Lambda containers immediately after each invocation |
 | `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` | `public.ecr.aws` | Registry (optionally with a path prefix) the Lambda runtime images are pulled from, e.g. `public.ecr.aws/lambda/python:3.12`. Legacy name `FLOCI_ECR_BASE_URI` still works |
+| `FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__PYTHON3_12__` | *(unset)* | Override the `python3.12` runtime image, for example with `registry.example/lambda-python:3.12`. The double underscores quote the runtime key; the unquoted form `FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES_PYTHON3_12` does not bind. Use the same form for other dotted runtime keys. |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default memory allocation for functions that don't specify one |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default invocation timeout in seconds |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API port range |

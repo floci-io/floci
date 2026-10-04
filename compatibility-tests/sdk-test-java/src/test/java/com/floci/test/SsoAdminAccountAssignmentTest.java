@@ -82,6 +82,9 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 @DisplayName("IAM Identity Center account assignments")
 class SsoAdminAccountAssignmentTest {
 
+    /** The AWS-owned custom application provider, in the partition the fixture clients sign in. */
+    private static final String CUSTOM_PROVIDER = TestFixtures.globalArn("sso", "aws", "applicationProvider/custom");
+
     @Test
     @DisplayName("adds an IAM Identity Center Region through the AWS SDK")
     void addRegionUsesAwsSdk() {
@@ -189,7 +192,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             CreateApplicationResponse created = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("Floci OAuth SDK")
                     .clientToken("sdk-create-application-token")
                     .status("DISABLED")
@@ -201,12 +204,13 @@ class SsoAdminAccountAssignmentTest {
                     .tags(tag -> tag.key("Environment").value("test")));
 
             assertThat(created.applicationArn()).matches(
-                    "arn:aws:sso::000000000000:application/ssoins-7223b02a5d9f7c8e/apl-[0-9a-f]{16}");
+                    TestFixtures.globalArn("sso", "000000000000",
+                            "application/ssoins-7223b02a5d9f7c8e/apl-[0-9a-f]{16}"));
             assertThat(created.identityStoreArn())
-                    .isEqualTo("arn:aws:identitystore::000000000000:identitystore/d-9067f2a3c1");
+                    .isEqualTo(TestFixtures.globalArn("identitystore", "000000000000", "identitystore/d-9067f2a3c1"));
             CreateApplicationResponse replay = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("Floci OAuth SDK")
                     .clientToken("sdk-create-application-token")
                     .status("DISABLED")
@@ -243,7 +247,7 @@ class SsoAdminAccountAssignmentTest {
                     .containsExactly("Environment=prod");
             CreateApplicationResponse replayAfterTagging = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("Floci OAuth SDK")
                     .clientToken("sdk-create-application-token")
                     .status("DISABLED")
@@ -271,18 +275,18 @@ class SsoAdminAccountAssignmentTest {
             assertThat(described.statusAsString()).isEqualTo("ENABLED");
             assertThat(described.instanceArn()).isEqualTo(instanceArn);
             assertThat(described.applicationAccount()).isEqualTo("000000000000");
-            assertThat(described.applicationProviderArn()).isEqualTo("arn:aws:sso::aws:applicationProvider/custom");
+            assertThat(described.applicationProviderArn()).isEqualTo(CUSTOM_PROVIDER);
             assertThat(described.portalOptions().signInOptions().originAsString()).isEqualTo("IDENTITY_CENTER");
 
             DescribeApplicationProviderResponse provider = sso.describeApplicationProvider(request -> request
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom"));
-            assertThat(provider.applicationProviderArn()).isEqualTo("arn:aws:sso::aws:applicationProvider/custom");
+                    .applicationProviderArn(CUSTOM_PROVIDER));
+            assertThat(provider.applicationProviderArn()).isEqualTo(CUSTOM_PROVIDER);
             assertThat(provider.federationProtocolAsString()).isEqualTo("OAUTH");
 
             ListApplicationProvidersResponse providers = sso.listApplicationProviders(request -> {});
             assertThat(providers.applicationProviders()).singleElement().satisfies(applicationProvider -> {
                 assertThat(applicationProvider.applicationProviderArn())
-                        .isEqualTo("arn:aws:sso::aws:applicationProvider/custom");
+                        .isEqualTo(CUSTOM_PROVIDER);
                 assertThat(applicationProvider.federationProtocolAsString()).isEqualTo("OAUTH");
             });
 
@@ -290,7 +294,7 @@ class SsoAdminAccountAssignmentTest {
                     .instanceArn(instanceArn)
                     .filter(filter -> filter
                             .applicationAccount("000000000000")
-                            .applicationProvider("arn:aws:sso::aws:applicationProvider/custom")));
+                            .applicationProvider(CUSTOM_PROVIDER)));
             assertThat(applications.applications()).anySatisfy(application ->
                     assertThat(application.applicationArn()).isEqualTo(created.applicationArn()));
 
@@ -351,7 +355,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SDK Assignment App")
                     .clientToken("sdk-assignment-app-token")).applicationArn();
 
@@ -408,7 +412,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SDK Delete Assignment App"))
                     .applicationArn();
             String principalId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -439,7 +443,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SDK Delete Authentication Method"))
                     .applicationArn();
 
@@ -498,7 +502,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SDK Delete Grant"))
                     .applicationArn();
 
@@ -572,7 +576,8 @@ class SsoAdminAccountAssignmentTest {
                                     .jwksRetrievalOption("OPEN_ID_DISCOVERY"))));
 
             assertThat(created.trustedTokenIssuerArn()).matches(
-                    "arn:aws:sso::000000000000:trustedTokenIssuer/ssoins-[0-9a-f]{16}/tti-[0-9a-f-]{36}");
+                    TestFixtures.globalArn("sso", "000000000000",
+                            "trustedTokenIssuer/ssoins-[0-9a-f]{16}/tti-[0-9a-f-]{36}"));
             CreateTrustedTokenIssuerResponse replay = sso.createTrustedTokenIssuer(request -> request
                     .instanceArn(instanceArn)
                     .name("SdkIssuer")
@@ -710,7 +715,7 @@ class SsoAdminAccountAssignmentTest {
             assertThat(listed).hasSize(1);
             assertThat(listed.get(0).instanceArn()).isEqualTo(instanceArn);
             assertThat(listed.get(0).ownerAccountId()).isEqualTo("333344445555");
-            assertThat(listed.get(0).primaryRegion()).isEqualTo("us-east-1");
+            assertThat(listed.get(0).primaryRegion()).isEqualTo(TestFixtures.region().id());
         }
     }
 
@@ -740,7 +745,7 @@ class SsoAdminAccountAssignmentTest {
                     .instanceArn();
             sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SdkDisposableApplication"));
 
             DeleteInstanceResponse deleted = sso.deleteInstance(request -> request.instanceArn(instanceArn));
@@ -758,7 +763,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SdkDeleteApplicationScope"))
                     .applicationArn();
 
@@ -782,7 +787,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SdkDeleteApplication"))
                     .applicationArn();
 
@@ -962,13 +967,13 @@ class SsoAdminAccountAssignmentTest {
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)
                     .permissionsBoundary(boundary -> boundary
-                            .managedPolicyArn("arn:aws:iam::aws:policy/PowerUserAccess")));
+                            .managedPolicyArn(TestFixtures.globalArn("iam", "aws", "policy/PowerUserAccess"))));
             assertThat(response.sdkHttpResponse().isSuccessful()).isTrue();
             GetPermissionsBoundaryForPermissionSetResponse boundary = sso.getPermissionsBoundaryForPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn));
             assertThat(boundary.permissionsBoundary().managedPolicyArn())
-                    .isEqualTo("arn:aws:iam::aws:policy/PowerUserAccess");
+                    .isEqualTo(TestFixtures.globalArn("iam", "aws", "policy/PowerUserAccess"));
             DeletePermissionsBoundaryFromPermissionSetResponse deleted = sso.deletePermissionsBoundaryFromPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn));
@@ -1102,7 +1107,7 @@ class SsoAdminAccountAssignmentTest {
                 sso.attachManagedPolicyToPermissionSet(request -> request
                         .instanceArn(instanceArn)
                         .permissionSetArn(permissionSetArn)
-                        .managedPolicyArn("arn:aws:iam::aws:policy/" + policy));
+                        .managedPolicyArn(TestFixtures.globalArn("iam", "aws", "policy/" + policy)));
             }
             ListManagedPoliciesInPermissionSetResponse firstPolicies = sso.listManagedPoliciesInPermissionSet(request -> request
                     .instanceArn(instanceArn)
