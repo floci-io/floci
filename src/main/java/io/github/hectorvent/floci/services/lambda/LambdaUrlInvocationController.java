@@ -161,7 +161,8 @@ public class LambdaUrlInvocationController {
         ctx.put("requestId", requestId);
         ctx.put("routeKey", "$default");
         ctx.put("stage", "$default");
-        ctx.put("time", DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z").withZone(ZoneOffset.UTC).format(Instant.now()));
+        ctx.put("time", DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z", Locale.ENGLISH)
+                .withZone(ZoneOffset.UTC).format(Instant.now()));
         ctx.put("timeEpoch", System.currentTimeMillis());
 
         ObjectNode httpNode = ctx.putObject("http");

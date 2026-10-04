@@ -3258,8 +3258,7 @@ public class ApiGatewayExecuteController {
         ctx.put("requestId", UUID.randomUUID().toString());
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
         ctx.put("stage", stageName);
-        ctx.put("time", java.time.format.DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
-                .format(java.time.ZonedDateTime.now()));
+        ctx.put("time", GATEWAY_REQUEST_TIME.format(Instant.now().atZone(ZoneOffset.UTC)));
         ctx.put("timeEpoch", System.currentTimeMillis());
 
         ObjectNode http = ctx.putObject("http");
@@ -3483,8 +3482,7 @@ public class ApiGatewayExecuteController {
         ctx.put("requestId", requestId);
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
         ctx.put("stage", stageName);
-        ctx.put("time", java.time.format.DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
-                .format(java.time.ZonedDateTime.now()));
+        ctx.put("time", GATEWAY_REQUEST_TIME.format(Instant.now().atZone(ZoneOffset.UTC)));
         ctx.put("timeEpoch", System.currentTimeMillis());
 
         ObjectNode http = ctx.putObject("http");
@@ -3579,8 +3577,8 @@ public class ApiGatewayExecuteController {
     // ──────────────────────────── Gateway responses ────────────────────────────
 
     private static final String GATEWAY_RESPONSE_HEADER_PREFIX = "gatewayresponse.header.";
-    private static final DateTimeFormatter GATEWAY_REQUEST_TIME =
-            DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z");
+    static final DateTimeFormatter GATEWAY_REQUEST_TIME =
+            DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z", Locale.ENGLISH);
 
     /**
      * The {@code {"message": ...}} answer a REST API gives when it, rather than the integration,

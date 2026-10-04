@@ -15,7 +15,10 @@ import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -484,6 +487,21 @@ class ApiGatewayExecuteControllerTest {
                     List.of("legacy=one; Path=/; HttpOnly", "legacy=two; Path=/; Secure"),
                     response.getStringHeaders().get(HttpHeaders.SET_COOKIE));
             assertEquals("rest-v1", response.getHeaderString("X-Trace"));
+        }
+    }
+
+    @Test
+    void requestTimeUsesEnglishMonthUnderNonEnglishDefaultLocale() {
+        // The formatter is built at class initialisation, so switching the default locale here
+        // cannot reach it: pinning its locale is what keeps the month ASCII on any machine.
+        assertEquals(Locale.ENGLISH, ApiGatewayExecuteController.GATEWAY_REQUEST_TIME.getLocale());
+        Locale original = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.JAPAN);
+            assertEquals("05/Oct/2026:13:45:30 +0000", ApiGatewayExecuteController.GATEWAY_REQUEST_TIME
+                    .format(Instant.parse("2026-10-05T13:45:30Z").atZone(ZoneOffset.UTC)));
+        } finally {
+            Locale.setDefault(original);
         }
     }
 }
