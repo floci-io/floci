@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.common.SshPublicKeyException;
+import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -31,8 +33,9 @@ import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
-import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
+import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
+import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.quarkus.runtime.Startup;
@@ -47,6 +50,7 @@ import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -148,15 +152,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int MAX_SERVER_CERTIFICATES = 20;
     /** IAM User Guide quota table, and GetAccountSummary's SigningCertificatesPerUserQuota. */
     private static final int MAX_SIGNING_CERTIFICATES_PER_USER = 2;
+    /** AWS General Reference, IAM service quotas: "SSH Public keys per user", not adjustable. */
+    private static final int MAX_SSH_PUBLIC_KEYS_PER_USER = 5;
+    /** publicKeyIdType is 20 to 128 of [\w]+, and AWS's own examples use the APKA prefix. */
+    private static final int SSH_PUBLIC_KEY_ID_SUFFIX_LENGTH = 16;
+    private static final int MIN_SSH_PUBLIC_KEY_BITS = 2048;
+    private static final int MAX_SSH_PUBLIC_KEY_BODY_LENGTH = 16384;
+    /** GetSSHPublicKey's Encoding: "To retrieve the public key in ssh-rsa format, use SSH." */
+    private static final Set<String> SSH_PUBLIC_KEY_ENCODINGS = Set.of("SSH", "PEM");
     /** certificateIdType is 24 to 128 of [\w]+, so a 32-character id sits inside that. */
     private static final int SIGNING_CERTIFICATE_ID_LENGTH = 32;
-    private static final String SIGNING_CERTIFICATE_ACTIVE = "Active";
+    private static final String CREDENTIAL_STATUS_ACTIVE = "Active";
     /**
-     * UpdateSigningCertificate's Status, whose documented valid values are Active, Inactive and
-     * Expired. The prose explains only the first two, so the third is easy to reject by mistake.
+     * statusType's values, shared by signing certificates and SSH public keys: Active, Inactive
+     * and Expired. Each operation's prose explains only the first two, so the third is easy to
+     * reject by mistake, while the API Reference lists all three as valid.
      */
-    private static final Set<String> SIGNING_CERTIFICATE_STATUSES =
-            Set.of(SIGNING_CERTIFICATE_ACTIVE, "Inactive", "Expired");
+    private static final Set<String> CREDENTIAL_STATUSES =
+            Set.of(CREDENTIAL_STATUS_ACTIVE, "Inactive", "Expired");
     /** {@code certificateBodyType} and {@code privateKeyType} are both 1 to 16384 characters. */
     private static final int MAX_CERTIFICATE_BODY_LENGTH = 16384;
     /** {@code certificateChainType} is far larger, at 1 to 2097152. */
@@ -232,6 +245,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** Server certificates, keyed by name, which is unique within the account. */
     private final StorageBackend<String, ServerCertificate> serverCertificates;
     private final StorageBackend<String, SigningCertificate> signingCertificates;
+    private final StorageBackend<String, SshPublicKey> sshPublicKeys;
     /**
      * Guards the check-then-write on a server certificate. Upload checks the name is free before
      * storing, and UpdateServerCertificate checks a new name is free before moving to it, so two
@@ -239,6 +253,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private final Object serverCertificateLock = new Object();
     private final Object signingCertificateLock = new Object();
+    private final Object sshPublicKeyLock = new Object();
     /**
      * Guards every check-then-write on an MFA device. Assignment is the reason it has to exist:
      * EnableMFADevice reads the device to confirm it is unassigned and reads the user's device
@@ -281,6 +296,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-virtual-mfa-devices.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-server-certificates.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-signing-certificates.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-ssh-public-keys.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -312,6 +328,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
     }
 
@@ -335,6 +352,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 accountAliases, passwordPolicies, new InMemoryStorage<>(), oidcProviders,
                 serviceLinkedRoleDeletions, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, seededAccountAlias);
     }
 
@@ -356,6 +374,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
     }
 
@@ -376,6 +395,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, VirtualMfaDevice> virtualMfaDevices,
                StorageBackend<String, ServerCertificate> serverCertificates,
                StorageBackend<String, SigningCertificate> signingCertificates,
+               StorageBackend<String, SshPublicKey> sshPublicKeys,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -396,6 +416,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.virtualMfaDevices = virtualMfaDevices;
         this.serverCertificates = serverCertificates;
         this.signingCertificates = signingCertificates;
+        this.sshPublicKeys = sshPublicKeys;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -571,20 +592,26 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     "Cannot delete entity, must delete access keys first.", 409);
         }
         // Both locks are held across the delete rather than just the checks: UploadSigningCertificate
-        // and EnableMFADevice confirm the user under their own lock, so neither can interleave into
-        // a credential owned by a deleted user. Taken in this order, and nowhere else in both, so
-        // the nesting cannot deadlock.
-        synchronized (signingCertificateLock) {
-            if (!userSigningCertificates(userName).isEmpty()) {
+        // UploadSigningCertificate and EnableMFADevice confirm the user under their own lock, so
+        // none of them can interleave into a credential owned by a deleted user. Taken in this
+        // order here and in UpdateUser, and nowhere else in more than one, so it cannot deadlock.
+        synchronized (sshPublicKeyLock) {
+            if (!userSshPublicKeys(userName).isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must delete signing certificates first.", 409);
+                        "Cannot delete entity, must delete SSH public keys first.", 409);
             }
-            synchronized (mfaDeviceLock) {
-                if (!mfaDevicesForUser(userName).isEmpty()) {
+            synchronized (signingCertificateLock) {
+                if (!userSigningCertificates(userName).isEmpty()) {
                     throw new AwsException("DeleteConflict",
-                            "Cannot delete entity, must deactivate MFA device first.", 409);
+                            "Cannot delete entity, must delete signing certificates first.", 409);
                 }
-                users.delete(userName);
+                synchronized (mfaDeviceLock) {
+                    if (!mfaDevicesForUser(userName).isEmpty()) {
+                        throw new AwsException("DeleteConflict",
+                                "Cannot delete entity, must deactivate MFA device first.", 409);
+                    }
+                    users.delete(userName);
+                }
             }
         }
         LOG.infov("Deleted IAM user: {0}", userName);
@@ -624,30 +651,37 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 }
                 List<AccessKey> keysToMove = userAccessKeys(userName);
                 // The rename publishes the user under its new name and moves the credentials that
-                // DeleteUser refuses to delete a user over: its MFA devices and its signing
-                // certificates. Each moves under the lock DeleteUser checks it with, because split
+                // DeleteUser refuses to delete a user over: its MFA devices, its signing
+                // certificates and its SSH public keys. Each moves under the lock DeleteUser checks it with, because split
                 // across that lock a DeleteUser for the new name could land after the user is
                 // published but before the credential follows, see none, and delete a user whose
                 // credential is about to be reassigned to it. The two locks are taken in the same
                 // order DeleteUser takes them, so the nesting cannot deadlock.
-                synchronized (signingCertificateLock) {
-                    List<SigningCertificate> certificatesToMove = userSigningCertificates(userName);
-                    synchronized (mfaDeviceLock) {
-                        users.delete(userName);
-                        user.setUserName(newUserName);
-                        if (newPath != null) {
-                            user.setPath(normalizePath(newPath));
+                synchronized (sshPublicKeyLock) {
+                    List<SshPublicKey> sshKeysToMove = userSshPublicKeys(userName);
+                    synchronized (signingCertificateLock) {
+                        List<SigningCertificate> certificatesToMove = userSigningCertificates(userName);
+                        synchronized (mfaDeviceLock) {
+                            users.delete(userName);
+                            user.setUserName(newUserName);
+                            if (newPath != null) {
+                                user.setPath(normalizePath(newPath));
+                            }
+                            user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
+                            users.put(newUserName, user);
+                            for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
+                                device.setUserName(newUserName);
+                                virtualMfaDevices.put(device.getSerialNumber(), device);
+                            }
                         }
-                        user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
-                        users.put(newUserName, user);
-                        for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
-                            device.setUserName(newUserName);
-                            virtualMfaDevices.put(device.getSerialNumber(), device);
+                        for (SigningCertificate certificate : certificatesToMove) {
+                            certificate.setUserName(newUserName);
+                            signingCertificates.put(certificate.getCertificateId(), certificate);
                         }
                     }
-                    for (SigningCertificate certificate : certificatesToMove) {
-                        certificate.setUserName(newUserName);
-                        signingCertificates.put(certificate.getCertificateId(), certificate);
+                    for (SshPublicKey key : sshKeysToMove) {
+                        key.setUserName(newUserName);
+                        sshPublicKeys.put(key.getSshPublicKeyId(), key);
                     }
                 }
                 loginProfiles.get(userName).ifPresent(profile -> {
@@ -2368,7 +2402,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             stored.setUserName(userName);
             stored.setCertificateId(randomId(SIGNING_CERTIFICATE_ID_LENGTH));
             stored.setCertificateBody(certificateBody);
-            stored.setStatus(SIGNING_CERTIFICATE_ACTIVE);
+            stored.setStatus(CREDENTIAL_STATUS_ACTIVE);
             stored.setUploadDate(Instant.now());
             signingCertificates.put(stored.getCertificateId(), stored);
             LOG.infov("Uploaded signing certificate {0} for user {1}",
@@ -2383,11 +2417,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateSigningCertificate(String userName, String certificateId, String status) {
-        if (status == null || !SIGNING_CERTIFICATE_STATUSES.contains(status)) {
+        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
             throw new AwsException("ValidationError",
                     "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
                             + "satisfy enum value set: [" + String.join(", ",
-                            SIGNING_CERTIFICATE_STATUSES) + "]", 400);
+                            CREDENTIAL_STATUSES) + "]", 400);
         }
         synchronized (signingCertificateLock) {
             SigningCertificate certificate = userSigningCertificate(userName, certificateId);
@@ -2453,6 +2487,189 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return false;
             }
         });
+    }
+
+    // SSH public keys
+    // =========================================================================
+
+    /**
+     * Stores an SSH public key against a user. AWS accepts the body in {@code ssh-rsa} form or as
+     * PEM, so both are read, and the body is kept exactly as it arrived: a caller that uploaded
+     * PEM gets that PEM back rather than a re-encoding of it.
+     *
+     * <p>The encoding is distinguished from the material, because the model separates them:
+     * something that is neither form is {@code UnrecognizedPublicKeyEncoding}, while something in
+     * a recognised form that will not parse is {@code InvalidPublicKey}.
+     */
+    public SshPublicKey uploadSshPublicKey(String userName, String body) {
+        if (body == null || body.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter SSHPublicKeyBody.", 400);
+        }
+        checkMaterialLength(body, "SSHPublicKeyBody", MAX_SSH_PUBLIC_KEY_BODY_LENGTH);
+        RSAPublicKey key = readSshPublicKey(body);
+        if (key.getModulus().bitLength() < MIN_SSH_PUBLIC_KEY_BITS) {
+            throw new AwsException("InvalidPublicKey",
+                    "The minimum bit-length of the public key is " + MIN_SSH_PUBLIC_KEY_BITS
+                            + " bits.", 400);
+        }
+        String fingerprint = SshPublicKeys.openSshFingerprint(SshPublicKeys.openSshBlob(key));
+        synchronized (sshPublicKeyLock) {
+            // Confirmed under the lock, not before it: DeleteUser checks for keys holding the same
+            // lock, so the two cannot interleave into a key owned by a user that no longer exists.
+            getUser(userName);
+            List<SshPublicKey> existing = userSshPublicKeys(userName);
+            if (existing.size() >= MAX_SSH_PUBLIC_KEYS_PER_USER) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for SSHPublicKeysPerUser: "
+                                + MAX_SSH_PUBLIC_KEYS_PER_USER, 409);
+            }
+            // DuplicateSSHPublicKey is per user, not account-wide: "already associated with the
+            // specified IAM user". Compared on the fingerprint, so the same key in the other
+            // encoding is still the same key.
+            if (existing.stream().anyMatch(k -> fingerprint.equals(k.getFingerprint()))) {
+                // 400, not 409. DuplicateCertificate next door is 409, but the model gives
+                // DuplicateSSHPublicKey a 400, so the neighbouring pattern is the wrong guide.
+                throw new AwsException("DuplicateSSHPublicKey",
+                        "The SSH public key is already associated with the specified IAM user.",
+                        400);
+            }
+            SshPublicKey stored = new SshPublicKey();
+            stored.setUserName(userName);
+            stored.setSshPublicKeyId("APKA" + randomId(SSH_PUBLIC_KEY_ID_SUFFIX_LENGTH));
+            stored.setFingerprint(fingerprint);
+            stored.setSshPublicKeyBody(body);
+            stored.setStatus(CREDENTIAL_STATUS_ACTIVE);
+            stored.setUploadDate(Instant.now());
+            sshPublicKeys.put(stored.getSshPublicKeyId(), stored);
+            LOG.infov("Uploaded SSH public key {0} for user {1}",
+                    stored.getSshPublicKeyId(), userName);
+            return stored;
+        }
+    }
+
+    /**
+     * The key in the requested encoding. {@code Encoding} is required and is one of SSH or PEM, so
+     * a stored PEM key asked for as SSH is converted, and the other way round.
+     */
+    public SshPublicKey getSshPublicKey(String userName, String keyId, String encoding) {
+        if (encoding == null || !SSH_PUBLIC_KEY_ENCODINGS.contains(encoding)) {
+            throw new AwsException("UnrecognizedPublicKeyEncoding",
+                    "The public key encoding format is unsupported or unrecognized.", 400);
+        }
+        synchronized (sshPublicKeyLock) {
+            SshPublicKey stored = userSshPublicKey(userName, keyId);
+            String body = stored.getSshPublicKeyBody();
+            boolean storedAsPem = SshPublicKeys.looksLikePem(body);
+            boolean wantPem = "PEM".equals(encoding);
+            // Returned unchanged when the encoding already matches, so a body is only ever
+            // rewritten to answer a request for the other form. Re-encoding it anyway would drop
+            // an OpenSSH line's trailing comment and re-wrap a caller's PEM.
+            String wanted = storedAsPem == wantPem
+                    ? body
+                    : convertSshPublicKey(body, wantPem);
+            // A copy, so re-encoding for one reader never rewrites what is stored.
+            SshPublicKey view = new SshPublicKey();
+            view.setUserName(stored.getUserName());
+            view.setSshPublicKeyId(stored.getSshPublicKeyId());
+            view.setFingerprint(stored.getFingerprint());
+            view.setSshPublicKeyBody(wanted);
+            view.setStatus(stored.getStatus());
+            view.setUploadDate(stored.getUploadDate());
+            return view;
+        }
+    }
+
+    public List<SshPublicKey> listSshPublicKeys(String userName) {
+        getUser(userName); // validates existence
+        return userSshPublicKeys(userName);
+    }
+
+    public void updateSshPublicKey(String userName, String keyId, String status) {
+        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
+            throw new AwsException("ValidationError",
+                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
+                            + "satisfy enum value set: [" + String.join(", ",
+                            CREDENTIAL_STATUSES) + "]", 400);
+        }
+        synchronized (sshPublicKeyLock) {
+            SshPublicKey stored = userSshPublicKey(userName, keyId);
+            stored.setStatus(status);
+            sshPublicKeys.put(stored.getSshPublicKeyId(), stored);
+        }
+    }
+
+    public void deleteSshPublicKey(String userName, String keyId) {
+        synchronized (sshPublicKeyLock) {
+            SshPublicKey stored = userSshPublicKey(userName, keyId);
+            sshPublicKeys.delete(stored.getSshPublicKeyId());
+        }
+    }
+
+    /** The key re-encoded into the other accepted form. */
+    private String convertSshPublicKey(String body, boolean toPem) {
+        RSAPublicKey key = readSshPublicKey(body);
+        return toPem ? SshPublicKeys.toPem(key) : SshPublicKeys.toOpenSsh(key);
+    }
+
+    /**
+     * Reads either accepted encoding. The distinction the model draws is between an encoding it
+     * does not recognise and material in a recognised encoding that will not parse.
+     */
+    private RSAPublicKey readSshPublicKey(String body) {
+        boolean pem = SshPublicKeys.looksLikePem(body);
+        // An OpenSSH line is recognised by its key-type token, not by whether something in it
+        // base64-decodes: splitting on whitespace and trying the second field would call any two
+        // words an OpenSSH key, because a short word is often valid base64.
+        boolean openSsh = !pem && !SshPublicKeys.opensAsPem(body)
+                && body.stripLeading().startsWith("ssh-");
+        if (!pem && !openSsh) {
+            throw new AwsException("UnrecognizedPublicKeyEncoding",
+                    "The public key encoding format is unsupported or unrecognized.", 400);
+        }
+        try {
+            if (pem) {
+                return SshPublicKeys.fromPem(body);
+            }
+            byte[] blob = SshPublicKeys.decodeBlob(body);
+            // The line's label has to agree with the type inside the blob, and rsaKeyOf only
+            // checks the blob. Without this, a line labelled ssh-ed25519 wrapped around a genuine
+            // ssh-rsa blob is accepted and stored under that label, and because the uploaded body
+            // is preserved, GetSSHPublicKey then hands the wrong label back to every reader.
+            String label = body.stripLeading().split("\\s+")[0];
+            String blobType = SshPublicKeys.keyType(blob);
+            if (!label.equals(blobType)) {
+                throw new SshPublicKeyException(
+                        "the line is labelled " + label + " but the blob declares " + blobType);
+            }
+            // A key type other than ssh-rsa reaches rsaKeyOf and fails there: the encoding was
+            // recognised, so what is wrong is the key, which is the error the model separates.
+            return SshPublicKeys.rsaKeyOf(blob);
+        } catch (SshPublicKeyException | NumberFormatException e) {
+            LOG.debugv("Rejected an unreadable SSH public key: {0}", e.getMessage());
+            throw new AwsException("InvalidPublicKey",
+                    "The public key is malformed or otherwise invalid.", 400);
+        }
+    }
+
+    /** A key of that id belonging to that user, reported as missing when it belongs to another. */
+    private SshPublicKey userSshPublicKey(String userName, String keyId) {
+        getUser(userName); // validates existence
+        SshPublicKey stored = sshPublicKeys.get(keyId)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The SSH Public Key with id " + keyId + " cannot be found.", 404));
+        if (!userName.equals(stored.getUserName())) {
+            throw new AwsException("NoSuchEntity",
+                    "The SSH Public Key with id " + keyId + " cannot be found.", 404);
+        }
+        return stored;
+    }
+
+    private List<SshPublicKey> userSshPublicKeys(String userName) {
+        return sshPublicKeys.scan(key -> true).stream()
+                .filter(k -> userName.equals(k.getUserName()))
+                .sorted(Comparator.comparing(SshPublicKey::getSshPublicKeyId))
+                .toList();
     }
 
     // Virtual MFA devices
@@ -4039,7 +4256,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private String signingCertificateActiveField(SigningCertificate certificate) {
-        return certificate != null && SIGNING_CERTIFICATE_ACTIVE.equals(certificate.getStatus())
+        return certificate != null && CREDENTIAL_STATUS_ACTIVE.equals(certificate.getStatus())
                 ? "TRUE" : "FALSE";
     }
 
@@ -4053,7 +4270,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private String signingCertificateRotatedField(SigningCertificate certificate) {
         return certificate != null
-                && SIGNING_CERTIFICATE_ACTIVE.equals(certificate.getStatus())
+                && CREDENTIAL_STATUS_ACTIVE.equals(certificate.getStatus())
                 ? isoDate(certificate.getUploadDate()) : "N/A";
     }
 

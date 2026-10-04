@@ -8,6 +8,8 @@ import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPublicKey;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -130,5 +132,60 @@ class SshPublicKeysTest {
         // A trailing field claiming far more bytes than follow it.
         out.put(good).putInt(Integer.MAX_VALUE).putInt(0);
         return out.array();
+    }
+
+    /**
+     * The worked {@code GetSSHPublicKey} example from the IAM API Reference returns this key with
+     * {@code Encoding=PEM} and reports the fingerprint below. Reproducing it is the only way to
+     * know, rather than assume, that IAM hashes the OpenSSH blob: the digest over the DER is a
+     * value of exactly the same shape, so nothing in a response would reveal the mistake.
+     */
+    @Test
+    void theOpenSshFingerprintReproducesTheDocumentedAwsExample() {
+        String awsExamplePem = """
+                -----BEGIN PUBLIC KEY-----
+                MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsu+WpO9hhmqGTctHI1BE
+                SJ/pq4GtAt9JJpIsDnjeB+mLbwnVJLFaaYzzoZuPOVhUc7yHMWjBLmfSEgJKfAH3
+                n8m8R9D3UFoRC0rtKR2jJwAwFO3Tp9wgnqzvPtLMnG7uBEuD/nHStanrd6bbBv83
+                kDSy5jiuc4yEWtTAEtyp8C8BxFTxHuCQ/sX4IbjtJ8M1IKZ3hjcJO5u6ooWCxZzQ
+                hXXlPDniK/RZnO+YOaJR5umaAv23HAB7qx5H3A6WpyUyzXy0eTo9eAmUrET+JDXZ
+                vqHufiDzO/MOCfb+KV1OJos2AxNtRuIFA1cTq7NF+upTIoV+gK1YJhCvjSuRkIJ/
+                cwIDAQAB
+                -----END PUBLIC KEY-----
+                """;
+        RSAPublicKey key = SshPublicKeys.fromPem(awsExamplePem);
+        assertEquals("7a:1d:ea:9e:b0:80:ac:f8:ec:d8:dc:e6:a7:2c:fc:51",
+                SshPublicKeys.openSshFingerprint(SshPublicKeys.openSshBlob(key)));
+
+        // And the DER digest is a different value, which is why the two are separate functions.
+        assertNotEquals(SshPublicKeys.openSshFingerprint(SshPublicKeys.openSshBlob(key)),
+                SshPublicKeys.md5ColonHex(key.getEncoded()),
+                "if these ever agree, this test is no longer protecting anything");
+    }
+
+    @Test
+    void aKeyRoundTripsBetweenPemAndTheOpenSshForm() {
+        String pem = SshPublicKeys.toPem(KEY);
+        assertTrue(SshPublicKeys.looksLikePem(pem));
+        assertEquals(KEY.getModulus(), SshPublicKeys.fromPem(pem).getModulus());
+
+        RSAPublicKey viaOpenSsh = SshPublicKeys.rsaKeyOf(
+                SshPublicKeys.decodeBlob(SshPublicKeys.toOpenSsh(KEY)));
+        assertEquals(KEY.getModulus(), SshPublicKeys.fromPem(SshPublicKeys.toPem(viaOpenSsh)).getModulus());
+    }
+
+    @Test
+    void whatIsNotPemIsRefused() {
+        assertFalse(SshPublicKeys.looksLikePem(null));
+        assertFalse(SshPublicKeys.looksLikePem("ssh-rsa AAAA"));
+        assertThrows(SshPublicKeyException.class, () -> SshPublicKeys.fromPem("not pem"));
+        assertThrows(SshPublicKeyException.class, () -> SshPublicKeys.fromPem(
+                "-----BEGIN PUBLIC KEY-----\nnot base64\n-----END PUBLIC KEY-----\n"));
+    }
+
+    @Test
+    void theTypeIsReadFromTheBlob() {
+        assertEquals("ssh-rsa", SshPublicKeys.keyType(
+                SshPublicKeys.decodeBlob(SshPublicKeys.toOpenSsh(KEY))));
     }
 }
