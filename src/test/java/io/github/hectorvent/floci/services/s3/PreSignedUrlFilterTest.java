@@ -232,7 +232,7 @@ class PreSignedUrlFilterTest {
         String entity = (String) response.getEntity();
         assertTrue(entity.contains("<Code>AuthorizationQueryParametersError</Code>"), entity);
         assertTrue(
-                entity.contains("Query-string authentication requires the X-Amz-Algorithm query parameter"),
+                entity.contains(S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE),
                 entity);
     }
 

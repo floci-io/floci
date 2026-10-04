@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
+import io.github.hectorvent.floci.services.s3.PreSignedUrlGenerator;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Typed;
@@ -93,6 +94,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     private final LambdaPodSpecFactory podSpecFactory;
     private final KubernetesPodLogStreamer logStreamer;
     private final S3Service s3Service;
+    private final PreSignedUrlGenerator presignGenerator;
 
     private final Object orphanSweepLock = new Object();
     private volatile boolean orphansSwept = false;
@@ -111,7 +113,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                                  LambdaLayerService layerService,
                                  LambdaPodSpecFactory podSpecFactory,
                                  KubernetesPodLogStreamer logStreamer,
-                                 S3Service s3Service) {
+                                 S3Service s3Service,
+                                 PreSignedUrlGenerator presignGenerator) {
         this.client = client;
         this.config = config;
         this.runtimeApiServerFactory = runtimeApiServerFactory;
@@ -122,6 +125,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         this.podSpecFactory = podSpecFactory;
         this.logStreamer = logStreamer;
         this.s3Service = s3Service;
+        this.presignGenerator = presignGenerator;
     }
 
     /**
@@ -423,16 +427,11 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     }
 
     /**
-     * Download URL for a tasks-bucket object. The init container fetches it over plain
-     * HTTP with no SigV4 header, so an {@code X-Amz-Credential} query steers Floci's
-     * account filter to the object's owning account. Without it a function or layer
-     * owned by a non-default account resolves the default-account prefix and 404s. A
-     * 12-digit account id doubles as its own access key id (LocalStack convention).
+     * Signed download URL for a tasks-bucket object owned by the given account.
      */
     private String downloadUrl(String bucket, String key, String account, String region) {
-        return addressResolver.downloadBaseUrl() + "/" + bucket + "/"
-                + LambdaService.encodeObjectPath(key)
-                + "?X-Amz-Credential=" + account + "%2F00010101%2F" + region + "%2Fs3%2Faws4_request";
+        return presignGenerator.generatePresignedUrl(addressResolver.downloadBaseUrl(),
+                bucket, key, "GET", 0, region, account);
     }
 
     private void awaitRunning(String namespace, String podName, String functionName) {

@@ -77,18 +77,9 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         this(presignGenerator, s3Service, iamService, currentVertxRequest, null);
     }
 
-    private boolean verifiesSignatures() {
-        return (s3Service != null && s3Service.isAuthEnforced())
-                || (presignGenerator != null && presignGenerator.shouldValidateSignatures());
-    }
-
-    private boolean routedToS3() {
-        return resourceInfo != null && S3Controller.class.equals(resourceInfo.getResourceClass());
-    }
-
     @Override
     public void filter(ContainerRequestContext requestContext) {
-        if (!routedToS3()) {
+        if (!S3SignatureFilterScope.routedToS3(resourceInfo)) {
             return;
         }
 
@@ -115,12 +106,12 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         // Only process if this is a pre-signed URL request
         String algorithm = queryParams.getFirst("X-Amz-Algorithm");
         if (algorithm == null) {
-            if (verifiesSignatures()) {
+            if (S3SignatureFilterScope.verifiesSignatures(s3Service, presignGenerator)) {
                 requestContext.abortWith(
                     errorResponse(
-                        400,
-                        "AuthorizationQueryParametersError",
-                        "Query-string authentication requires the X-Amz-Algorithm query parameter"
+                        S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_STATUS,
+                        S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_CODE,
+                        S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE
                     )
                 );
             }

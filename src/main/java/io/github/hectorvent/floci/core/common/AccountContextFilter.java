@@ -87,9 +87,8 @@ public class AccountContextFilter implements ContainerRequestFilter {
             boolean hasAuthHeader = auth != null && !auth.isBlank();
             String credential = hasAuthHeader
                     ? null : ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
-            if (credential != null && !credential.isEmpty()) {
-                // Floci's own download URLs (Lambda layers, Kubernetes init containers) carry only
-                // X-Amz-Credential, so it must steer the account without an algorithm.
+            if (credential != null && !credential.isEmpty()
+                    && ctx.getUriInfo().getQueryParameters().containsKey("X-Amz-Algorithm")) {
                 String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
                         resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));

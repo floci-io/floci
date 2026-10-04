@@ -428,12 +428,12 @@ class AccountContextFilterTest {
     }
 
     @Test
-    void presignedCredentialWithoutAlgorithmStillRoutesInternalDownloadUrls() {
+    void presignedCredentialWithoutAlgorithmDoesNotSelectAccount() {
         ContainerRequestContext ctx = mockContext(null,
                 "111122223333/20260617/eu-west-1/s3/aws4_request", null);
         filter.filter(ctx);
-        assertEquals("111122223333", requestContext.getAccountId());
-        assertEquals("eu-west-1", requestContext.getRegion());
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
     }
 
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {

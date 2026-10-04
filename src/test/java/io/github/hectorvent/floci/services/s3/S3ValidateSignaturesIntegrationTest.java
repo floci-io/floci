@@ -10,11 +10,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -44,6 +47,29 @@ class S3ValidateSignaturesIntegrationTest {
 
     private static String userAccessKeyId;
     private static String userSecretKey;
+
+    @Test
+    void layerContentLocationCanBeFetchedWithSignatureValidationEnabled() throws Exception {
+        ByteArrayOutputStream archive = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(archive)) {
+            zip.putNextEntry(new ZipEntry("nodejs/index.js"));
+            zip.write("module.exports = {};".getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        String location = given()
+            .contentType("application/json")
+            .body("""
+                    {"Content":{"ZipFile":"%s"}}
+                    """.formatted(Base64.getEncoder().encodeToString(archive.toByteArray())))
+        .when()
+            .post("/2018-10-31/layers/signed-location/versions")
+        .then()
+            .statusCode(201)
+            .body("Content.Location", containsString("X-Amz-Algorithm=AWS4-HMAC-SHA256"))
+            .extract().path("Content.Location");
+
+        given().urlEncodingEnabled(false).when().get(location).then().statusCode(200);
+    }
 
     @Test
     @Order(1)
@@ -231,7 +257,7 @@ class S3ValidateSignaturesIntegrationTest {
         .then()
             .statusCode(400)
             .body("Error.Code", equalTo("AuthorizationQueryParametersError"))
-            .body("Error.Message", equalTo("Query-string authentication requires the X-Amz-Algorithm query parameter"));
+            .body("Error.Message", equalTo(S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE));
 
         given().filter(LOCAL_SIGNER).when().get("/routing-check-missing-algo").then().statusCode(404);
     }

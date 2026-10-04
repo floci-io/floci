@@ -109,7 +109,8 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext ctx) throws IOException {
-        if (!routedToS3() || !verifiesSignatures()) {
+        if (!S3SignatureFilterScope.routedToS3(resourceInfo)
+                || !S3SignatureFilterScope.verifiesSignatures(s3Service, presignGenerator)) {
             return;
         }
         String authorization = ctx.getHeaderString("Authorization");
@@ -200,15 +201,6 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
             abort(ctx, 400, "XAmzContentSHA256Mismatch",
                     "The provided 'x-amz-content-sha256' header does not match what was computed.");
         }
-    }
-
-    private boolean verifiesSignatures() {
-        return (s3Service != null && s3Service.isAuthEnforced())
-                || (presignGenerator != null && presignGenerator.shouldValidateSignatures());
-    }
-
-    private boolean routedToS3() {
-        return resourceInfo != null && S3Controller.class.equals(resourceInfo.getResourceClass());
     }
 
     private boolean signatureMatches(ContainerRequestContext ctx, String secretKey, String scopeDate,
