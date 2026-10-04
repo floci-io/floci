@@ -202,6 +202,10 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     private boolean deletePending(StackResource resource, CfnResourceContext context) {
         ObjectNode cleanup = read(resource, CLEANUP_ATTR);
         if (cleanup != null) {
+            if (cleanup.path("attempts").asInt() >= 3) {
+                resource.getAttributes().remove(CLEANUP_ATTR);
+                return false;
+            }
             Identity pending = identity(cleanup);
             boolean claimed = context.managedElsewhere(other -> TYPE.equals(other.getResourceType())
                     && pending.poolId().equals(other.getAttributes().get(POOL_ATTR))
@@ -303,6 +307,10 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     @Override
     public void clearDeleteCleanup(StackResource resource) {
         // The rollback snapshot remains until deleting the managed server succeeds.
+        ObjectNode cleanup = read(resource, CLEANUP_ATTR);
+        if (cleanup != null && cleanup.path("attempts").asInt() >= 3) {
+            resource.getAttributes().remove(CLEANUP_ATTR);
+        }
     }
 
     private UpdateCleanupResult completeCleanup(StackResource resource, CfnResourceContext context) {
@@ -314,6 +322,11 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         if (retained(resource, cleanup)) {
             resource.getAttributes().remove(CLEANUP_ATTR);
             return new UpdateCleanupResult(true, true, identifier, 0, null);
+        }
+        int priorAttempts = cleanup.path("attempts").asInt();
+        if (priorAttempts >= 3) {
+            return new UpdateCleanupResult(true, false, identifier, priorAttempts,
+                    "Historical resource server cleanup exhausted");
         }
         try {
             if (deletePending(resource, context)) {
@@ -336,11 +349,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(UPDATE_ATTR);
-        ObjectNode cleanup = read(resource, CLEANUP_ATTR);
-        // AWS stops managing a committed replacement's old server after three failed deletions.
-        if (cleanup != null && cleanup.path("retainable").asBoolean() && cleanup.path("attempts").asInt() >= 3) {
-            resource.getAttributes().remove(CLEANUP_ATTR);
-        }
+        clearDeleteCleanup(resource);
     }
 
     @Override

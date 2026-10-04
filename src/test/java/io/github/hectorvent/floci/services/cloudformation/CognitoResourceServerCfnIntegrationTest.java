@@ -577,6 +577,8 @@ class CognitoResourceServerCfnIntegrationTest {
         createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
         doThrow(new AwsException("InternalErrorException", "temporary replacement delete failure", 500))
                 .when(cognitoService).deleteResourceServer(replacementPool, IDENTIFIER);
+        doThrow(new AwsException("InternalErrorException", "temporary managed delete failure", 500))
+                .when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
         try {
             ObjectNode attempted = template(replacementPool, IDENTIFIER, "Failed replacement", "write");
             addFailingDependentResource(attempted);
@@ -586,16 +588,25 @@ class CognitoResourceServerCfnIntegrationTest {
             cloudFormation("DeleteStack", null);
             assertEquals("DELETE_FAILED", CfnStackWaits.awaitTerminal(stack).status());
             verify(cognitoService, times(3)).deleteResourceServer(replacementPool, IDENTIFIER);
-            assertServerGone(originalPool, IDENTIFIER);
+            verify(cognitoService, times(1)).deleteResourceServer(originalPool, IDENTIFIER);
+            assertServer(originalPool, IDENTIFIER, "Original API", "read");
             assertServer(replacementPool, IDENTIFIER, "Failed replacement", "write");
 
             doCallRealMethod().when(cognitoService).deleteResourceServer(replacementPool, IDENTIFIER);
+            deleteServer(replacementPool);
+            createServer(replacementPool, "Directly reused API", "admin");
+            doCallRealMethod().when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
+            clearInvocations(cognitoService);
             cloudFormation("DeleteStack", null);
             CfnStackWaits.awaitStackDeleted(stack);
             createdStack = false;
-            assertServerGone(replacementPool, IDENTIFIER);
+            assertServer(replacementPool, IDENTIFIER, "Directly reused API", "admin");
+            verify(cognitoService, times(0)).deleteResourceServer(replacementPool, IDENTIFIER);
+            verify(cognitoService, times(1)).deleteResourceServer(originalPool, IDENTIFIER);
+            assertServerGone(originalPool, IDENTIFIER);
         } finally {
             doCallRealMethod().when(cognitoService).deleteResourceServer(replacementPool, IDENTIFIER);
+            doCallRealMethod().when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
         }
     }
 
