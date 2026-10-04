@@ -19,7 +19,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * {@code AWS::Cognito::UserPoolUserToGroupAttachment} end to end. The pool, user and groups are
  * seeded through the Cognito API and passed in as parameters, so the stack owns only the
- * membership, and every assertion reads the membership back from Cognito.
+ * membership, and every assertion reads the membership back from Cognito. Each test deletes the
+ * pool it seeded.
  */
 @QuarkusTest
 class CloudFormationCognitoUserToGroupAttachmentIntegrationTest {
@@ -80,21 +81,58 @@ class CloudFormationCognitoUserToGroupAttachmentIntegrationTest {
         deleteStack(stackName);
         awaitStackStatus(stackId, "DELETE_COMPLETE");
         groupsOf(poolId).body("Groups", empty());
+        deletePool(poolId);
     }
 
     @Test
     void deletingTheStackRemovesTheMembership() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String poolId = seedPoolUserAndGroups("cfn-attach-del-" + suffix);
+        createGroup(poolId, "grp|c");
         String stackName = "cfn-cognito-attach-del-" + suffix;
 
-        String stackId = stackCall("CreateStack", stackName, poolId, "grp-a");
+        String stackId = stackCall("CreateStack", stackName, poolId, "grp|c");
         awaitStackStatus(stackId, "CREATE_COMPLETE");
+        assertEquals(poolId + "|grp|c|" + USER, outputValue(stackId, "AttachRef"));
+        groupsOf(poolId).body("Groups.GroupName", contains("grp|c"));
+
+        deleteStack(stackName);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+        groupsOf(poolId).body("Groups", empty());
+        deletePool(poolId);
+    }
+
+    @Test
+    void anAliasUpdateOfTheSameUserRollsBackAndKeepsTheMembership() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String email = "user-" + suffix + "@example.com";
+        String poolId = cognito("CreateUserPool", """
+                {"PoolName": "cfn-attach-alias-%s", "AliasAttributes": ["email"]}
+                """.formatted(suffix))
+                .statusCode(200)
+                .extract().path("UserPool.Id");
+        cognito("AdminCreateUser", """
+                {"UserPoolId": "%s", "Username": "%s", "MessageAction": "SUPPRESS",
+                 "UserAttributes": [{"Name": "email", "Value": "%s"}, {"Name": "email_verified", "Value": "true"}]}
+                """.formatted(poolId, USER, email)).statusCode(200);
+        createGroup(poolId, "grp-a");
+        String stackName = "cfn-cognito-attach-alias-" + suffix;
+        String aliasRef = poolId + "|grp-a|" + email;
+
+        String stackId = stackCall("CreateStack", stackName, poolId, "grp-a", email);
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+        assertEquals(aliasRef, outputValue(stackId, "AttachRef"));
+        groupsOf(poolId).body("Groups.GroupName", contains("grp-a"));
+
+        stackCall("UpdateStack", stackName, poolId, "grp-a", USER);
+        awaitStackStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
+        assertEquals(aliasRef, outputValue(stackId, "AttachRef"));
         groupsOf(poolId).body("Groups.GroupName", contains("grp-a"));
 
         deleteStack(stackName);
         awaitStackStatus(stackId, "DELETE_COMPLETE");
         groupsOf(poolId).body("Groups", empty());
+        deletePool(poolId);
     }
 
     private String seedPoolUserAndGroups(String poolName) {
@@ -105,11 +143,21 @@ class CloudFormationCognitoUserToGroupAttachmentIntegrationTest {
                 {"UserPoolId": "%s", "Username": "%s", "MessageAction": "SUPPRESS"}
                 """.formatted(poolId, USER)).statusCode(200);
         for (String group : new String[] {"grp-a", "grp-b"}) {
-            cognito("CreateGroup", """
-                    {"UserPoolId": "%s", "GroupName": "%s"}
-                    """.formatted(poolId, group)).statusCode(200);
+            createGroup(poolId, group);
         }
         return poolId;
+    }
+
+    private void createGroup(String poolId, String groupName) {
+        cognito("CreateGroup", """
+                {"UserPoolId": "%s", "GroupName": "%s"}
+                """.formatted(poolId, groupName)).statusCode(200);
+    }
+
+    private void deletePool(String poolId) {
+        cognito("DeleteUserPool", """
+                {"UserPoolId": "%s"}
+                """.formatted(poolId)).statusCode(200);
     }
 
     private ValidatableResponse groupsOf(String poolId) {
@@ -118,8 +166,14 @@ class CloudFormationCognitoUserToGroupAttachmentIntegrationTest {
                 """.formatted(poolId, USER)).statusCode(200);
     }
 
-    /** CreateStack or UpdateStack with the attachment template; returns the stack id. */
+    /** CreateStack or UpdateStack with the attachment template for the seeded user; returns the stack id. */
     private static String stackCall(String action, String stackName, String poolId, String groupName) {
+        return stackCall(action, stackName, poolId, groupName, USER);
+    }
+
+    /** CreateStack or UpdateStack with the attachment template; returns the stack id. */
+    private static String stackCall(String action, String stackName, String poolId, String groupName,
+                                    String username) {
         String xml = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -131,7 +185,7 @@ class CloudFormationCognitoUserToGroupAttachmentIntegrationTest {
             .formParam("Parameters.member.2.ParameterKey", "GroupName")
             .formParam("Parameters.member.2.ParameterValue", groupName)
             .formParam("Parameters.member.3.ParameterKey", "Username")
-            .formParam("Parameters.member.3.ParameterValue", USER)
+            .formParam("Parameters.member.3.ParameterValue", username)
         .when()
             .post("/")
         .then()
