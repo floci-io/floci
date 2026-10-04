@@ -19,8 +19,14 @@ class RequestRegionArnIntegrationTest {
 
     private static final String REGION = "eu-west-1";
 
+    private static final String OTHER_REGION = "us-west-2";
+
     private static String auth(String service) {
-        return "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + REGION + "/" + service
+        return auth(REGION, service);
+    }
+
+    private static String auth(String region, String service) {
+        return "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 
@@ -98,7 +104,7 @@ class RequestRegionArnIntegrationTest {
     }
 
     @Test
-    void appSyncDomainNameAndChannelNamespaceUseTheRequestRegion() {
+    void appSyncDomainNameUsesTheRequestRegionAndChannelNamespaceItsApisRegion() {
         String domain = "region-arn-" + System.nanoTime() + ".example.com";
         given()
                 .header("Authorization", auth("appsync"))
@@ -124,8 +130,9 @@ class RequestRegionArnIntegrationTest {
             .then()
                 .statusCode(200)
                 .extract().path("graphqlApi.apiId");
+        // A namespace lives in its API's region, even when the request is signed for another one.
         given()
-                .header("Authorization", auth("appsync"))
+                .header("Authorization", auth(OTHER_REGION, "appsync"))
                 .contentType("application/json")
                 .body("{\"name\": \"region-arn-ns\"}")
             .when()
@@ -139,7 +146,7 @@ class RequestRegionArnIntegrationTest {
     }
 
     @Test
-    void elastiCacheUserArnUsesTheRequestRegion() {
+    void elastiCacheUserArnIsMintedOnceInTheCreateRegion() {
         given()
                 .header("Authorization", auth("elasticache"))
                 .formParam("Action", "CreateUser")
@@ -153,6 +160,18 @@ class RequestRegionArnIntegrationTest {
             .then()
                 .statusCode(200)
                 .body("CreateUserResponse.CreateUserResult.ARN", startsWith("arn:aws:elasticache:" + REGION + ":"));
+
+        // Users are not stored per region, so another region can read this one; its ARN must not change.
+        given()
+                .header("Authorization", auth(OTHER_REGION, "elasticache"))
+                .formParam("Action", "DescribeUsers")
+                .formParam("UserId", "region-arn-user")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeUsersResponse.DescribeUsersResult.Users.member.ARN",
+                        startsWith("arn:aws:elasticache:" + REGION + ":"));
 
         given()
                 .header("Authorization", auth("elasticache"))
