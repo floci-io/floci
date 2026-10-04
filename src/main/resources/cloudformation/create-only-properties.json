@@ -63,6 +63,12 @@
     "StageName",
     "ApiId"
   ],
+  "AWS::ApiGatewayV2::DomainName": [
+    "DomainName"
+  ],
+  "AWS::ApiGatewayV2::ApiMapping": [
+    "DomainName"
+  ],
   "AWS::AppSync::ApiKey": [
     "ApiId"
   ],

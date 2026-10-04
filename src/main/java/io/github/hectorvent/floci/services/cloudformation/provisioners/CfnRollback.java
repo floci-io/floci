@@ -96,6 +96,22 @@ public final class CfnRollback {
     public static final String API_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociApiKeyUpdateSnapshot";
 
     /**
+     * Holds the certificate, security policy, endpoint type and tags an API Gateway v2 custom domain
+     * carried before an in-place update changed them, so a failed stack update can put them back.
+     * Written by {@code ApiGatewayV2DomainCfnProvisioner} before its first mutating call and spent
+     * by its {@code rollbackUpdate}.
+     */
+    public static final String API_GATEWAY_V2_DOMAIN_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayV2DomainUpdateSnapshot";
+
+    /**
+     * Holds the key, API and stage an API Gateway v2 API mapping carried before an in-place update
+     * changed them, with the domain that addresses it, so a failed stack update can put them back.
+     * Written by {@code ApiGatewayV2DomainCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String API_MAPPING_UPDATE_SNAPSHOT_ATTR = "__FlociApiMappingUpdateSnapshot";
+
+    /**
      * Holds the complete prior metric filter, identity, name mode and per-address mutation outcomes
      * and ownership states.
      * Written before either an in-place put or a delete-then-create replacement; retained across

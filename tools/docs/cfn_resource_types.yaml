@@ -94,7 +94,7 @@ type_order:
   AWS::AutoScaling: [LaunchConfiguration, AutoScalingGroup, LifecycleHook]
   AWS::Route53: [HostedZone, RecordSet]
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping, GatewayResponse]
-  AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment]
+  AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment, DomainName, ApiMapping]
   AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]

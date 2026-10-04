@@ -117,8 +117,9 @@ public class CloudControlService {
                 String identifier = created.entrySet().stream()
                         .filter(resource -> resource.getValue() == recovered)
                         .map(Map.Entry::getKey)
-                        .map(key -> key.substring((accountId + "|").length()))
-                        .map(key -> key.substring(key.lastIndexOf('|') + 1))
+                        // account|region|type|identifier: the identifier is everything after the
+                        // third separator, since a compound one holds separators of its own.
+                        .map(key -> key.split("\\|", 4)[3])
                         .findFirst().orElse(normalized.identifier());
                 normalized = new ProgressEvent(normalized.typeName(), identifier, normalized.requestToken(),
                         normalized.operation(), "SUCCESS", null, recovered.model(), accountId);
@@ -261,12 +262,13 @@ public class CloudControlService {
                 if (resource == null || resource.getPhysicalId() == null) {
                     record(pending.failed("CreateResource is not supported for " + typeName + "."));
                 } else {
+                    String identifier = identifierOf(typeName, resource.getPhysicalId(), props);
                     String model = resourceModel(region, typeName, resource.getPhysicalId(), props);
                     CreatedResource createdResource = new CreatedResource(token, accountId,
                             resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model);
-                    created.put(createdKey(accountId, region, typeName, resource.getPhysicalId()), createdResource);
-                    persistCreated(accountId, region, typeName, resource.getPhysicalId(), createdResource);
-                    record(new ProgressEvent(typeName, resource.getPhysicalId(),
+                    created.put(createdKey(accountId, region, typeName, identifier), createdResource);
+                    persistCreated(accountId, region, typeName, identifier, createdResource);
+                    record(new ProgressEvent(typeName, identifier,
                             token, "CREATE", "SUCCESS", null, model, accountId));
                 }
             } catch (Exception e) {
@@ -300,6 +302,20 @@ public class CloudControlService {
         return propertiesString(model);
     }
 
+    /**
+     * The identifier Cloud Control hands out for a created resource: the type's primary identifier,
+     * which for most types is the physical id. A compound one joins its parts with {@code |}, as
+     * Cloud Control does; an {@code AWS::ApiGatewayV2::ApiMapping} is {@code <ApiMappingId>|<DomainName>},
+     * where CloudFormation's {@code Ref} is the bare id.
+     */
+    private static String identifierOf(String typeName, String physicalId, JsonNode desiredState) {
+        if ("AWS::ApiGatewayV2::ApiMapping".equals(typeName) && desiredState != null
+                && desiredState.path("DomainName").isTextual()) {
+            return physicalId + "|" + desiredState.path("DomainName").asText();
+        }
+        return physicalId;
+    }
+
     /** The read-only primary identifier property name for the common EC2/IAM types. */
     private static String primaryIdentifierField(String typeName) {
         return switch (typeName) {
@@ -310,6 +326,7 @@ public class CloudControlService {
             case "AWS::EC2::InternetGateway" -> "InternetGatewayId";
             case "AWS::EC2::RouteTable" -> "RouteTableId";
             case "AWS::EC2::LaunchTemplate" -> "LaunchTemplateId";
+            case "AWS::ApiGatewayV2::ApiMapping" -> "ApiMappingId";
             default -> "Id";
         };
     }

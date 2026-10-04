@@ -7,6 +7,12 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as path from 'path';
 import { Construct } from 'constructs';
 
@@ -105,6 +111,39 @@ export class FlociTestStack extends cdk.Stack {
       dnsTtl: cdk.Duration.seconds(30),
     });
 
+    // API Gateway custom domains: an HTTP API mapped at the root of an AWS::ApiGatewayV2::DomainName
+    // with an alias record to it, and a REST API under a key with several levels, which CDK maps
+    // with AWS::ApiGatewayV2::ApiMapping because a base path mapping takes one level only.
+    const apiZone = new route53.PublicHostedZone(this, 'ApiZone', { zoneName: 'floci-cdk-api.example.com' });
+    const httpApiDomain = new apigwv2.DomainName(this, 'HttpApiDomain', {
+      domainName: 'http.floci-cdk-api.example.com',
+      certificate: new acm.Certificate(this, 'HttpApiCertificate', {
+        domainName: 'http.floci-cdk-api.example.com',
+        validation: acm.CertificateValidation.fromDns(apiZone),
+      }),
+    });
+    const httpApi = new apigwv2.HttpApi(this, 'TestHttpApi', {
+      defaultIntegration: new apigwv2Integrations.HttpUrlIntegration('Backend', 'https://example.com'),
+      defaultDomainMapping: { domainName: httpApiDomain },
+    });
+    new route53.ARecord(this, 'HttpApiAlias', {
+      zone: apiZone,
+      recordName: 'http.floci-cdk-api.example.com',
+      target: route53.RecordTarget.fromAlias(new route53Targets.ApiGatewayv2DomainProperties(
+        httpApiDomain.regionalDomainName, httpApiDomain.regionalHostedZoneId)),
+    });
+    const restApi = new apigateway.RestApi(this, 'TestRestApi');
+    restApi.root.addResource('items').addMethod('GET', new apigateway.HttpIntegration('https://example.com'));
+    new apigateway.DomainName(this, 'RestApiDomain', {
+      domainName: 'rest.floci-cdk-api.example.com',
+      certificate: new acm.Certificate(this, 'RestApiCertificate', {
+        domainName: 'rest.floci-cdk-api.example.com',
+        validation: acm.CertificateValidation.fromDns(apiZone),
+      }),
+      mapping: restApi,
+      basePath: 'orders/v1',
+    });
+
     new cdk.CfnOutput(this, 'BucketName', { value: bucket.bucketName });
     new cdk.CfnOutput(this, 'QueueUrl', { value: queue.queueUrl });
     new cdk.CfnOutput(this, 'TableName', { value: table.tableName });
@@ -114,5 +153,7 @@ export class FlociTestStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AlbArn', { value: alb.loadBalancerArn });
     new cdk.CfnOutput(this, 'NamespaceId', { value: namespace.namespaceId });
     new cdk.CfnOutput(this, 'ServiceId', { value: service.serviceId });
+    new cdk.CfnOutput(this, 'HttpApiId', { value: httpApi.apiId });
+    new cdk.CfnOutput(this, 'RestApiId', { value: restApi.restApiId });
   }
 }

@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.swagger.parser.OpenAPIParser;
 import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
@@ -54,6 +55,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
@@ -62,6 +64,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -116,6 +119,8 @@ public class ApiGatewayService implements ResourceProvider {
     private final TlsCertificateManager certificateManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    /** The v2 APIs an API mapping can point at; a custom domain is shared by both APIs. */
+    private final ApiGatewayV2Service apiGatewayV2Service;
 
     // Constants
     private static final String EPC_KEY = "endpointConfiguration";
@@ -123,6 +128,21 @@ public class ApiGatewayService implements ResourceProvider {
     private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
     private static final String EPC_TYPES_PATH = "/endpointConfiguration/types/";
     private static final String EPC_VPC_IDS_PATH = "/endpointConfiguration/vpcEndpointIds";
+    private static final String TLS_1_2 = "TLS_1_2";
+    /** The API type a mapping to a REST API is stored with, beside a v2 API's protocol type. */
+    private static final String REST_API_TYPE = "REST";
+    /** What AWS answers for a v2 API mapping call on an edge-optimized domain. */
+    private static final String V2_EDGE_DOMAIN_MESSAGE = "Only REGIONAL domain names can be managed through the "
+            + "API Gateway V2 API. For EDGE domain names, please use the API Gateway V1 API. Also note that only REST "
+            + "APIs can be attached to EDGE domain names.";
+    /** What AWS answers for a v2 domain created or updated with the EDGE endpoint type. */
+    private static final String V2_EDGE_ENDPOINT_TYPE_MESSAGE =
+            "EDGE endpoint type is not supported for APIGatewayV2 domainName";
+    /** The characters AWS allows in an API mapping key, its level separator included, and the most it takes. */
+    private static final Pattern API_MAPPING_KEY = Pattern.compile("[A-Za-z0-9$\\-_.+!*'(),/]+");
+    private static final int MAX_API_MAPPING_KEY_LENGTH = 300;
+    private static final String MAPPING_KEY_SLASHES_MESSAGE =
+            "API mapping key should not start with a '/' or have consecutive '/'s.";
 
     ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
                       TlsCertificateManager certificateManager) {
@@ -130,12 +150,20 @@ public class ApiGatewayService implements ResourceProvider {
                 new RegionResolver(config.defaultRegion(), config.defaultAccountId()));
     }
 
+    ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
+                      TlsCertificateManager certificateManager, RegionResolver regionResolver) {
+        this(storageFactory, config, certificateManager, regionResolver,
+                new ApiGatewayV2Service(storageFactory, config, regionResolver));
+    }
+
     @Inject
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
-                             TlsCertificateManager certificateManager, RegionResolver regionResolver) {
+                             TlsCertificateManager certificateManager, RegionResolver regionResolver,
+                             ApiGatewayV2Service apiGatewayV2Service) {
         this.certificateManager = certificateManager;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.apiGatewayV2Service = apiGatewayV2Service;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -2166,6 +2194,9 @@ public class ApiGatewayService implements ResourceProvider {
                 throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
             }
         }
+        if (!Objects.equals(newSecurityPolicy, domain.getSecurityPolicy())) {
+            requireMappingsAllowSecurityPolicy(region, domainName, newSecurityPolicy);
+        }
         // Only a change of type is held to the partition: an EDGE domain stored before the rule
         // existed must still take certificate or security-policy updates.
         if (!Objects.equals(newEndpointConfigurationType, domain.getEndpointConfigurationType())) {
@@ -2194,11 +2225,11 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     public BasePathMapping createBasePathMapping(String region, String domainName, Map<String, Object> request) {
-        return createBasePathMapping(region, domainName, request, "REST");
+        return createBasePathMapping(region, domainName, request, REST_API_TYPE, Set.of());
     }
 
-    BasePathMapping createBasePathMapping(String region, String domainName,
-                                          Map<String, Object> request, String apiType) {
+    private BasePathMapping createBasePathMapping(String region, String domainName, Map<String, Object> request,
+                                                  String apiType, Set<String> excludedIds) {
         String basePath = canonicalBasePath((String) request.get("basePath"));
         String apiId = (String) request.get("restApiId");
         String stage = (String) request.get("stage");
@@ -2211,6 +2242,8 @@ public class ApiGatewayService implements ResourceProvider {
             if (basePathMappingStore.get(key).isPresent()) {
                 throw new AwsException("ConflictException", "Base path already exists for this domain name", 409);
             }
+            requireProtocolTypesCompatible(region, domainName, apiType, null);
+            mapping.setApiMappingId(unusedApiMappingId(region, domainName, basePath, excludedIds));
             basePathMappingStore.put(key, mapping);
         }
         LOG.infov("Created mapping for {0} path={1} -> API {2}", domainName, basePath, apiId);
@@ -2336,6 +2369,415 @@ public class ApiGatewayService implements ResourceProvider {
         mapping.setStage(newStage);
         basePathMappingStore.put(mappingKey(region, domainName, normalizedPath), mapping);
         return mapping;
+    }
+
+    // ──────────────────────────── Custom Domains and API Mappings (v2) ────────────────────────────
+    //
+    // A custom domain is one resource in AWS, reachable through both APIs, so the v2 operations read
+    // and write the same records the v1 ones do. The rules live here rather than in the controller
+    // because CloudFormation's AWS::ApiGatewayV2 types go through them too.
+
+    /** {@code CreateDomainName} through the v2 API, from its request body. */
+    public CustomDomain createV2DomainName(String region, Map<String, Object> request) {
+        return createDomainName(region, toV1DomainRequest(request));
+    }
+
+    /**
+     * {@code UpdateDomainName} through the v2 API: a body with a configuration replaces the domain's
+     * as {@link #replaceV2DomainConfiguration} does. One without changes nothing, after the same
+     * refusals: of what Floci does not emulate, and of an edge-optimized domain, which the v2 API
+     * does not manage.
+     */
+    public CustomDomain updateV2DomainName(String region, String domainName, Map<String, Object> request) {
+        if (request.get("domainNameConfigurations") != null) {
+            return replaceV2DomainConfiguration(region, domainName, request);
+        }
+        rejectUnemulatedDomainInputs(request, Map.of());
+        CustomDomain domain = getDomainName(region, domainName);
+        requireRegionalDomain(domain);
+        return domain;
+    }
+
+    /**
+     * Drives a domain's configuration to the one in a v2 {@code CreateDomainName} body, validated the
+     * same way. This is what an update of {@code DomainNameConfigurations} does on AWS: the list is
+     * replaced as a whole, so a certificate the body leaves out is cleared and a security policy it
+     * leaves out takes the {@code TLS_1_2} default. Tags are not touched.
+     */
+    public CustomDomain replaceV2DomainConfiguration(String region, String domainName,
+                                                     Map<String, Object> request) {
+        Map<String, Object> v1Request = toV1DomainRequest(request);
+        String securityPolicy = (String) v1Request.getOrDefault("securityPolicy", TLS_1_2);
+        synchronized (domainNameLock) {
+            CustomDomain domain = getDomainName(region, domainName);
+            requireRegionalDomain(domain);
+            if (!Objects.equals(securityPolicy, domain.getSecurityPolicy())) {
+                requireMappingsAllowSecurityPolicy(region, domainName, securityPolicy);
+            }
+            domain.setCertificateArn((String) v1Request.get("certificateArn"));
+            domain.setCertificateName((String) v1Request.get("certificateName"));
+            domain.setSecurityPolicy(securityPolicy);
+            applyEndpointType(domain, endpointTypeOf(v1Request), region);
+            domainStore.put(domainKey(region, domainName), domain);
+            return domain;
+        }
+    }
+
+    /**
+     * Flattens a v2 {@code CreateDomainName} body onto the keys the shared custom-domain store is
+     * written with, after refusing what floci does not emulate.
+     */
+    private static Map<String, Object> toV1DomainRequest(Map<String, Object> request) {
+        // HTTP APIs require exactly one configuration, where the REST API takes none at all. It has
+        // to be an object: a scalar or a list there is still a body AWS would not have accepted.
+        if (!(request.get("domainNameConfigurations") instanceof List<?> configurations)
+                || configurations.size() != 1
+                || !(configurations.getFirst() instanceof Map<?, ?> configuration)) {
+            throw new AwsException("BadRequestException",
+                    "Invalid input. Expected one domain name configuration", 400);
+        }
+        if ("EDGE".equals(configuration.get("endpointType"))) {
+            throw new AwsException("BadRequestException", V2_EDGE_ENDPOINT_TYPE_MESSAGE, 400);
+        }
+        rejectUnemulatedDomainInputs(request, configuration);
+        Map<String, Object> v1Request = new HashMap<>();
+        v1Request.put("domainName", request.get("domainName"));
+        copyIfPresent(request, v1Request, "tags", "tags");
+        copyIfPresent(configuration, v1Request, "certificateArn", "certificateArn");
+        copyIfPresent(configuration, v1Request, "certificateName", "certificateName");
+        // An HTTP API domain is regional: API Gateway creates or keeps any other endpoint type it is
+        // given, PRIVATE or one it does not know, as REGIONAL (measured, eu-west-1, 2026-10-04).
+        v1Request.put("endpointType", "REGIONAL");
+        copyIfPresent(configuration, v1Request, "securityPolicy", "securityPolicy");
+        return v1Request;
+    }
+
+    /**
+     * Refuses the parts of a domain that floci does not emulate, rather than accepting them and
+     * answering with a domain that behaves differently from the one that was asked for.
+     */
+    private static void rejectUnemulatedDomainInputs(Map<String, Object> request, Map<?, ?> configuration) {
+        Object routingMode = request.get("routingMode");
+        if (routingMode != null && !"API_MAPPING_ONLY".equals(routingMode)) {
+            throw new AwsException("BadRequestException",
+                    "Only API_MAPPING_ONLY routing is supported", 400);
+        }
+        if (request.get("mutualTlsAuthentication") != null) {
+            throw new AwsException("BadRequestException",
+                    "Mutual TLS authentication is not supported", 400);
+        }
+        Object ipAddressType = configuration.get("ipAddressType");
+        if (ipAddressType != null && !"ipv4".equals(ipAddressType)) {
+            throw new AwsException("BadRequestException",
+                    "Only the ipv4 address type is supported", 400);
+        }
+        if (configuration.get("ownershipVerificationCertificateArn") != null) {
+            throw new AwsException("BadRequestException",
+                    "Ownership verification certificates are not supported", 400);
+        }
+    }
+
+    private static void copyIfPresent(Map<?, ?> source, Map<String, Object> target, String from, String to) {
+        Object value = source.get(from);
+        if (value != null) {
+            target.put(to, value);
+        }
+    }
+
+    /** A v2 API mapping: the base path mapping record, with the base path it is stored under. */
+    public record StoredMapping(String storedPath, BasePathMapping mapping) {
+
+        /** The id stored on the record, or for a record persisted before ids were stored, the derived one. */
+        public String apiMappingId() {
+            return mapping.getApiMappingId() != null
+                    ? mapping.getApiMappingId()
+                    : ApiGatewayService.apiMappingId(storedPath);
+        }
+    }
+
+    /** What a mapping routes to: an API, one of its stages, and the type of API it is routed as. */
+    private record MappingTarget(String apiId, String stage, String apiType) {}
+
+    /** The mappings of a domain, refused for an edge-optimized one as AWS refuses every v2 call on it. */
+    public List<StoredMapping> getApiMappings(String region, String domainName) {
+        requireRegionalDomain(getDomainName(region, domainName));
+        List<StoredMapping> mappings = new ArrayList<>();
+        basePathMappingsByStoredPath(region, domainName)
+                .forEach((storedPath, mapping) -> mappings.add(new StoredMapping(storedPath, mapping)));
+        return mappings;
+    }
+
+    /**
+     * Creates a v2 API mapping, stored as a base path mapping that remembers the type of API it
+     * routes to.
+     */
+    public StoredMapping createApiMapping(String region, String domainName, String apiMappingKey,
+                                          String apiId, String stage) {
+        return createApiMapping(region, domainName, apiMappingKey, apiId, stage, Set.of());
+    }
+
+    /**
+     * As above, with ids the new mapping must not be given. A caller that still tracks a mapping on
+     * another domain under one of them would otherwise hold two mappings it cannot tell apart; on
+     * AWS a new mapping never takes the id of another.
+     */
+    public StoredMapping createApiMapping(String region, String domainName, String apiMappingKey,
+                                          String apiId, String stage, Set<String> excludedIds) {
+        // A mapping to an API or stage that does not exist would route nowhere, so AWS refuses it
+        // rather than answering 201 with something unusable.
+        requireValidApiMappingKey(apiMappingKey, false);
+        MappingTarget target = requireMappingTarget(region, apiId, stage);
+        String basePath = canonicalBasePath(apiMappingKey);
+        synchronized (domainNameLock) {
+            requireMappingAllowed(getDomainName(region, domainName), basePath, target.apiType());
+            requireApiMappingKeyFree(region, domainName, basePath);
+
+            Map<String, Object> v1Request = new HashMap<>();
+            v1Request.put("restApiId", target.apiId());
+            v1Request.put("stage", target.stage());
+            v1Request.put("basePath", basePath);
+            return new StoredMapping(basePath,
+                    createBasePathMapping(region, domainName, v1Request, target.apiType(), excludedIds));
+        }
+    }
+
+    /**
+     * Points a v2 API mapping at a new key, API and stage, the v2 {@code UpdateApiMapping}. The id
+     * names the mapping rather than its key, so it stays with the record when the key changes, as on
+     * AWS.
+     */
+    public StoredMapping updateApiMapping(String region, String domainName, String apiMappingId,
+                                          String apiMappingKey, String apiId, String stage) {
+        requireValidApiMappingKey(apiMappingKey, true);
+        MappingTarget target = requireMappingTarget(region, apiId, stage);
+        String basePath = canonicalBasePath(apiMappingKey);
+        synchronized (domainNameLock) {
+            CustomDomain domain = getDomainName(region, domainName);
+            StoredMapping found = getApiMapping(region, domainName, apiMappingId);
+            requireMappingAllowed(domain, basePath, target.apiType());
+            requireProtocolTypesCompatible(region, domainName, target.apiType(), found.storedPath());
+            BasePathMapping mapping = found.mapping();
+            String storedPath = found.storedPath();
+            if (!basePath.equals(canonicalBasePath(storedPath))) {
+                requireApiMappingKeyFree(region, domainName, basePath);
+                // Pinned before the record leaves the path a legacy id was derived from.
+                mapping.setApiMappingId(found.apiMappingId());
+                basePathMappingStore.delete(mappingKey(region, domainName, storedPath));
+                mapping.setBasePath(basePath);
+                storedPath = basePath;
+            }
+            mapping.setRestApiId(target.apiId());
+            mapping.setStage(target.stage());
+            mapping.setApiType(target.apiType());
+            basePathMappingStore.put(mappingKey(region, domainName, storedPath), mapping);
+            return new StoredMapping(storedPath, mapping);
+        }
+    }
+
+    /**
+     * The API and stage a v2 API mapping points at. AWS takes a REST API here as well as an HTTP or
+     * WebSocket API, which is how a REST API gets a mapping with more than one level, and refuses an
+     * API or stage that does not exist rather than creating a mapping that routes nowhere. A v2 API
+     * answers first, as it did before REST APIs were accepted.
+     */
+    private MappingTarget requireMappingTarget(String region, String apiId, String stageName) {
+        String apiType = v2ApiType(region, apiId);
+        boolean restApi = apiType == null && restApiExists(region, apiId);
+        if (apiType == null && !restApi) {
+            throw new AwsException("BadRequestException", "Invalid API identifier specified: " + apiId, 400);
+        }
+        try {
+            if (restApi) {
+                getStage(region, apiId, stageName);
+            } else {
+                apiGatewayV2Service.getStage(region, apiId, stageName);
+            }
+        } catch (AwsException e) {
+            throw new AwsException("BadRequestException", "Invalid stage identifier specified", 400);
+        }
+        return new MappingTarget(apiId, stageName, restApi ? REST_API_TYPE : apiType);
+    }
+
+    private String v2ApiType(String region, String apiId) {
+        try {
+            return apiGatewayV2Service.getApi(region, apiId).getProtocolType();
+        } catch (AwsException notAV2Api) {
+            LOG.debugv("{0} is not an HTTP or WebSocket API in {1}: {2}", apiId, region, notAV2Api.getMessage());
+            return null;
+        }
+    }
+
+    private boolean restApiExists(String region, String apiId) {
+        try {
+            getRestApi(region, apiId);
+            return true;
+        } catch (AwsException notARestApi) {
+            LOG.debugv("{0} is not a REST API in {1}: {2}", apiId, region, notARestApi.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * The restrictions AWS puts on an API mapping: only a regional domain is reachable through the v2
+     * API, a key holds only the characters AWS allows and at most 300 of them, and an HTTP API or a
+     * key with more than one level needs a domain on the TLS 1.2 security policy.
+     */
+    /**
+     * Refuses an API mapping key that API Gateway refuses, with its messages (measured, eu-west-1,
+     * 2026-10-04). No key or an empty one is the root mapping, and so is a key of whitespace only
+     * on a create; an update refuses that one.
+     */
+    private static void requireValidApiMappingKey(String apiMappingKey, boolean update) {
+        if (apiMappingKey == null || apiMappingKey.isEmpty()) {
+            return;
+        }
+        if (apiMappingKey.isBlank()) {
+            if (update) {
+                throw new AwsException("BadRequestException", MAPPING_KEY_SLASHES_MESSAGE, 400);
+            }
+            return;
+        }
+        if (apiMappingKey.length() > MAX_API_MAPPING_KEY_LENGTH) {
+            throw new AwsException("BadRequestException",
+                    "ApiMapping key length must be under " + MAX_API_MAPPING_KEY_LENGTH + " characters.", 400);
+        }
+        if (apiMappingKey.endsWith("/")) {
+            throw new AwsException("BadRequestException", "API mapping key should not end with a '/'.", 400);
+        }
+        if (apiMappingKey.startsWith("/") || apiMappingKey.contains("//")) {
+            throw new AwsException("BadRequestException", MAPPING_KEY_SLASHES_MESSAGE, 400);
+        }
+        if (!API_MAPPING_KEY.matcher(apiMappingKey).matches()) {
+            throw new AwsException("BadRequestException",
+                    "An API mapping key may contain only letters, numbers and one of $-_.+!*'(), characters.", 400);
+        }
+    }
+
+    private static void requireMappingAllowed(CustomDomain domain, String basePath, String apiType) {
+        requireRegionalDomain(domain);
+        boolean root = "(none)".equals(basePath);
+        if (!TLS_1_2.equals(securityPolicyOf(domain))) {
+            if ("HTTP".equals(apiType)) {
+                throw new AwsException("BadRequestException",
+                        "HTTP APIs can only be mapped to a regional custom domain name with the TLS 1.2 security policy",
+                        400);
+            }
+            if (!root && basePath.contains("/")) {
+                throw new AwsException("BadRequestException",
+                        "API mappings with multiple levels require a regional custom domain name with the TLS 1.2 "
+                                + "security policy", 400);
+            }
+        }
+    }
+
+    private static void requireRegionalDomain(CustomDomain domain) {
+        if ("EDGE".equals(domain.getEndpointConfigurationType())) {
+            throw new AwsException("BadRequestException", V2_EDGE_DOMAIN_MESSAGE, 400);
+        }
+    }
+
+    /**
+     * A domain whose mappings need TLS 1.2, an HTTP API or a key with more than one level, cannot be
+     * moved to another security policy: the mappings AWS accepted would no longer be allowed on it.
+     */
+    private void requireMappingsAllowSecurityPolicy(String region, String domainName, String securityPolicy) {
+        if (TLS_1_2.equals(securityPolicy == null ? TLS_1_2 : securityPolicy)) {
+            return;
+        }
+        for (Map.Entry<String, BasePathMapping> entry : basePathMappingsByStoredPath(region, domainName).entrySet()) {
+            String basePath = canonicalBasePath(entry.getKey());
+            if ("HTTP".equals(entry.getValue().getApiType())
+                    || (!"(none)".equals(basePath) && basePath.contains("/"))) {
+                throw new AwsException("BadRequestException", "Custom domain name " + domainName
+                        + " has HTTP API mappings or API mappings with multiple levels, which require the TLS 1.2 "
+                        + "security policy", 400);
+            }
+        }
+    }
+
+    /**
+     * AWS keeps WebSocket APIs off a custom domain name that an HTTP or REST API is mapped to, and the
+     * other way round. {@code ignoredStoredPath} is the mapping being changed, if any. A record
+     * persisted before mappings remembered their API type is not held against either.
+     */
+    private void requireProtocolTypesCompatible(String region, String domainName, String apiType,
+                                                String ignoredStoredPath) {
+        boolean webSocket = "WEBSOCKET".equals(apiType);
+        for (Map.Entry<String, BasePathMapping> entry : basePathMappingsByStoredPath(region, domainName).entrySet()) {
+            String otherType = entry.getValue().getApiType();
+            if (otherType == null || entry.getKey().equals(ignoredStoredPath)) {
+                continue;
+            }
+            if (webSocket != "WEBSOCKET".equals(otherType)) {
+                throw new AwsException("BadRequestException",
+                        "WebSocket APIs can't be mapped to the same custom domain name as an HTTP API or REST API",
+                        400);
+            }
+        }
+    }
+
+    private static String securityPolicyOf(CustomDomain domain) {
+        return domain.getSecurityPolicy() == null ? TLS_1_2 : domain.getSecurityPolicy();
+    }
+
+    /** Whichever spelling an earlier record was written under, "" and an omitted key are one key. */
+    private void requireApiMappingKeyFree(String region, String domainName, String basePath) {
+        boolean keyTaken = basePathMappingsByStoredPath(region, domainName).keySet().stream()
+                .anyMatch(existing -> canonicalBasePath(existing).equals(basePath));
+        if (keyTaken) {
+            throw new AwsException("ConflictException",
+                    "ApiMapping key already exists for this domain name", 409);
+        }
+    }
+
+    public StoredMapping getApiMapping(String region, String domainName, String apiMappingId) {
+        requireRegionalDomain(getDomainName(region, domainName));
+        return basePathMappingsByStoredPath(region, domainName).entrySet().stream()
+                .map(entry -> new StoredMapping(entry.getKey(), entry.getValue()))
+                .filter(stored -> stored.apiMappingId().equals(apiMappingId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Unable to find ApiMapping with ID " + apiMappingId, 404));
+    }
+
+    /**
+     * The id a new mapping on {@code basePath} is given: the one derived from the path, so a mapping
+     * gets the id it always had, unless a mapping whose key changed since it was created still holds
+     * it, or the caller excludes it. Then a numbered variant, so no two mappings on a domain share one.
+     */
+    private String unusedApiMappingId(String region, String domainName, String basePath, Set<String> excludedIds) {
+        Set<String> taken = new HashSet<>(excludedIds);
+        basePathMappingsByStoredPath(region, domainName)
+                .forEach((storedPath, mapping) -> taken.add(new StoredMapping(storedPath, mapping).apiMappingId()));
+        String derived = apiMappingId(basePath);
+        String id = derived;
+        for (int n = 2; taken.contains(id); n++) {
+            id = derived + "-" + n;
+        }
+        return id;
+    }
+
+    public void deleteApiMapping(String region, String domainName, String apiMappingId) {
+        // Deleted by the path the selected record is stored under, so the record that answered the
+        // lookup is the record that goes.
+        StoredMapping found = getApiMapping(region, domainName, apiMappingId);
+        deleteBasePathMappingRecord(region, domainName, found.storedPath());
+    }
+
+    /**
+     * Derives a mapping id from the path the mapping is stored under. A new mapping is given this id
+     * and stores it, so the id outlives a later change of key; a record persisted before ids were
+     * stored is still read under it. The base path is encoded rather than hashed: two base paths
+     * sharing a hash would share an id, and a read or delete by that id would pick between them.
+     */
+    public static String apiMappingId(String storedPath) {
+        // Encoded from the key the record is stored under: not its canonical form, and not the
+        // record's own field, which BasePathMapping normalises on construction. State written
+        // before writes were canonicalised can sit under "" or "/" beside "(none)", and reading
+        // identity from anywhere but the key hands several records one id for a read or a delete
+        // to choose between. The prefix keeps an empty stored path from producing an empty id.
+        return "m" + HexFormat.of().formatHex(
+                (storedPath == null ? "" : storedPath).getBytes(StandardCharsets.UTF_8));
     }
 
     // ──────────────────────────── Custom Domain Resolution ────────────────────────────

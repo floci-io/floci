@@ -12,8 +12,10 @@ AWS::ApiGateway::Stage	ApiGatewayRestApiCfnProvisioner
 AWS::ApiGateway::UsagePlan	ApiGatewayUsagePlanCfnProvisioner
 AWS::ApiGateway::UsagePlanKey	ApiGatewayUsagePlanCfnProvisioner
 AWS::ApiGatewayV2::Api	ApiGatewayV2CfnProvisioner
+AWS::ApiGatewayV2::ApiMapping	ApiGatewayV2DomainCfnProvisioner
 AWS::ApiGatewayV2::Authorizer	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Deployment	ApiGatewayV2CfnProvisioner
+AWS::ApiGatewayV2::DomainName	ApiGatewayV2DomainCfnProvisioner
 AWS::ApiGatewayV2::Integration	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Route	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Stage	ApiGatewayV2CfnProvisioner

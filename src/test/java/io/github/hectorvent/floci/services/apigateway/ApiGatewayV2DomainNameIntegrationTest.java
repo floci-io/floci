@@ -433,6 +433,207 @@ class ApiGatewayV2DomainNameIntegrationTest {
             .statusCode(404);
     }
 
+    @Test
+    @Order(11)
+    void aRestApiCanBeMappedUnderAKeyWithSeveralLevels() {
+        // AWS takes a REST API here too: the v2 API is how a REST API gets a multi-level mapping.
+        String restApiId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"v2-mapped-rest-api\"}")
+            .when()
+                .post("/restapis")
+            .then()
+                .statusCode(201)
+                .extract().path("id");
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"stageName\":\"prod\"}")
+        .when()
+            .post("/restapis/" + restApiId + "/deployments")
+        .then()
+            .statusCode(201);
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainName":"rest-multi-level.example.com","domainNameConfigurations":[
+                        {"certificateArn":"arn:aws:acm:us-east-1:000000000000:certificate/abc","endpointType":"REGIONAL"}]}
+                    """)
+        .when()
+            .post("/v2/domainnames")
+        .then()
+            .statusCode(201);
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"apiId\":\"%s\",\"stage\":\"prod\",\"apiMappingKey\":\"orders/v1/items\"}".formatted(restApiId))
+        .when()
+            .post("/v2/domainnames/rest-multi-level.example.com/apimappings")
+        .then()
+            .statusCode(201)
+            .body("apiId", is(restApiId))
+            .body("apiMappingKey", is("orders/v1/items"));
+    }
+
+    @Test
+    @Order(12)
+    void anEdgeDomainCannotBeManagedThroughTheV2Api() {
+        String message = "Only REGIONAL domain names can be managed through the API Gateway V2 API. For EDGE "
+                + "domain names, please use the API Gateway V1 API. Also note that only REST APIs can be attached "
+                + "to EDGE domain names.";
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainName":"edge-only.example.com",
+                     "certificateArn":"arn:aws:acm:us-east-1:000000000000:certificate/abc",
+                     "endpointConfiguration":{"types":["EDGE"]}}
+                    """)
+        .when()
+            .post("/domainnames")
+        .then()
+            .statusCode(201);
+
+        given()
+        .when()
+            .get("/v2/domainnames/edge-only.example.com/apimappings")
+        .then()
+            .statusCode(400)
+            .body("message", is(message));
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainName":"edge-v2.example.com","domainNameConfigurations":[{"endpointType":"EDGE"}]}
+                    """)
+        .when()
+            .post("/v2/domainnames")
+        .then()
+            .statusCode(400)
+            // Measured against API Gateway (eu-west-1, 2026-10-04): a v2 create names the endpoint type.
+            .body("message", is("EDGE endpoint type is not supported for APIGatewayV2 domainName"));
+    }
+
+    @Test
+    @Order(13)
+    void anHttpApiIsMappedOnlyOntoADomainOnTls12() {
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainName":"tls10.example.com",
+                     "regionalCertificateArn":"arn:aws:acm:us-east-1:000000000000:certificate/abc",
+                     "endpointConfiguration":{"types":["REGIONAL"]},"securityPolicy":"TLS_1_0"}
+                    """)
+        .when()
+            .post("/domainnames")
+        .then()
+            .statusCode(201);
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"apiId\":\"%s\",\"stage\":\"$default\"}".formatted(apiId))
+        .when()
+            .post("/v2/domainnames/tls10.example.com/apimappings")
+        .then()
+            .statusCode(400)
+            .body(containsString("TLS 1.2"));
+    }
+
+    /** Measured against API Gateway (eu-west-1, 2026-10-04): what an update leaves out keeps its value. */
+    @Test
+    @Order(14)
+    void updateApiMappingChangesOnlyWhatItNames() {
+        String domain = "patch-mapping.example.com";
+        createRegionalDomain(domain);
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"stageName\":\"s2\"}")
+        .when()
+            .post("/v2/apis/" + apiId + "/stages")
+        .then()
+            .statusCode(201);
+        String id = given()
+                .contentType(ContentType.JSON)
+                .body("{\"apiId\":\"%s\",\"stage\":\"$default\",\"apiMappingKey\":\"patched\"}".formatted(apiId))
+            .when()
+                .post("/v2/domainnames/" + domain + "/apimappings")
+            .then()
+                .statusCode(201)
+                .extract().path("apiMappingId");
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"apiId\":\"%s\",\"stage\":\"s2\"}".formatted(apiId))
+        .when()
+            .patch("/v2/domainnames/" + domain + "/apimappings/" + id)
+        .then()
+            .statusCode(200)
+            .body("apiMappingId", is(id))
+            .body("apiMappingKey", is("patched"))
+            .body("stage", is("s2"));
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"apiId\":\"%s\",\"apiMappingKey\":\"patched-again\"}".formatted(apiId))
+        .when()
+            .patch("/v2/domainnames/" + domain + "/apimappings/" + id)
+        .then()
+            .statusCode(200)
+            .body("apiMappingId", is(id))
+            .body("apiMappingKey", is("patched-again"))
+            .body("stage", is("s2"));
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"apiId\":\"%s\"}".formatted(apiId))
+        .when()
+            .patch("/v2/domainnames/" + domain + "/apimappings/zzzzzz")
+        .then()
+            .statusCode(404);
+    }
+
+    /** Measured against API Gateway (eu-west-1, 2026-10-04): an HTTP API domain stays regional. */
+    @Test
+    @Order(14)
+    void updateDomainNameKeepsTheDomainRegional() {
+        String domain = "patch-domain.example.com";
+        createRegionalDomain(domain);
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainNameConfigurations":[
+                        {"certificateArn":"arn:aws:acm:us-east-1:000000000000:certificate/def","endpointType":"PRIVATE"}]}
+                    """)
+        .when()
+            .patch("/v2/domainnames/" + domain)
+        .then()
+            .statusCode(200)
+            .body("domainNameConfigurations[0].endpointType", is("REGIONAL"))
+            .body("domainNameConfigurations[0].certificateArn", containsString("certificate/def"));
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainNameConfigurations":[
+                        {"certificateArn":"arn:aws:acm:us-east-1:000000000000:certificate/def","endpointType":"EDGE"}]}
+                    """)
+        .when()
+            .patch("/v2/domainnames/" + domain)
+        .then()
+            .statusCode(400)
+            .body("message", is("EDGE endpoint type is not supported for APIGatewayV2 domainName"));
+    }
+
+    private static void createRegionalDomain(String domain) {
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainName":"%s","domainNameConfigurations":[
+                        {"certificateArn":"arn:aws:acm:us-east-1:000000000000:certificate/abc","endpointType":"REGIONAL"}]}
+                    """.formatted(domain))
+        .when()
+            .post("/v2/domainnames")
+        .then()
+            .statusCode(201);
+    }
+
     private static org.hamcrest.Matcher<Iterable<? super String>> hasItemEqualTo(String value) {
         return org.hamcrest.Matchers.hasItem(equalTo(value));
     }

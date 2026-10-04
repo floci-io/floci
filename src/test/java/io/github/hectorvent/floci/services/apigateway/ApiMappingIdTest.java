@@ -20,9 +20,9 @@ class ApiMappingIdTest {
 
     @Test
     void rootLikeKeysThatWerePersistedSeparatelyKeepSeparateIds() {
-        String canonical = ApiGatewayController.apiMappingId("(none)");
-        String slash = ApiGatewayController.apiMappingId("/");
-        String empty = ApiGatewayController.apiMappingId("");
+        String canonical = ApiGatewayService.apiMappingId("(none)");
+        String slash = ApiGatewayService.apiMappingId("/");
+        String empty = ApiGatewayService.apiMappingId("");
 
         assertNotEquals(canonical, slash);
         assertNotEquals(canonical, empty);
@@ -32,17 +32,17 @@ class ApiMappingIdTest {
     @Test
     void everyIdIsNonEmptyAndStable() {
         // A record stored under an empty key must still produce an id a caller can put in a URL.
-        assertFalse(ApiGatewayController.apiMappingId("").isEmpty());
-        assertFalse(ApiGatewayController.apiMappingId(null).isEmpty());
+        assertFalse(ApiGatewayService.apiMappingId("").isEmpty());
+        assertFalse(ApiGatewayService.apiMappingId(null).isEmpty());
 
-        assertEquals(ApiGatewayController.apiMappingId("orders"),
-                ApiGatewayController.apiMappingId("orders"));
+        assertEquals(ApiGatewayService.apiMappingId("orders"),
+                ApiGatewayService.apiMappingId("orders"));
     }
 
     @Test
     void distinctKeysSharingAJavaHashKeepDistinctIds() {
         assertEquals("Aa".hashCode(), "BB".hashCode());
-        assertNotEquals(ApiGatewayController.apiMappingId("Aa"),
-                ApiGatewayController.apiMappingId("BB"));
+        assertNotEquals(ApiGatewayService.apiMappingId("Aa"),
+                ApiGatewayService.apiMappingId("BB"));
     }
 }

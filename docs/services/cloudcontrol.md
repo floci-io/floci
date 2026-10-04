@@ -39,6 +39,10 @@ Cloud Control.
   `ResourceDescriptions`. This applies to any type Floci does not enumerate on the
   read side, whether or not the type is real in AWS, since Floci has no CloudFormation
   type registry to tell the two apart.
+- **Identifiers**: a resource is identified by its type's primary identifier, which for
+  most types is the physical id CloudFormation's `Ref` returns. A compound one joins its
+  parts with `|`, as Cloud Control does: an `AWS::ApiGatewayV2::ApiMapping` is
+  `<ApiMappingId>|<DomainName>`.
 - **Delete needs create-time state**: types whose delete depends on attributes
   captured at create time (currently `AWS::EKS::Nodegroup` and `AWS::IAM::Policy`, plus
   any `Custom::*` / `AWS::CloudFormation::CustomResource`) fail `DeleteResource` with a

@@ -240,3 +240,41 @@ setup() {
     svc_name=$(json_get "$output" '.Services[] | select(.Name == "floci-cdk-svc") | .Name')
     [ "$svc_name" = "floci-cdk-svc" ]
 }
+
+# --- API Gateway custom domains ---
+#
+# CloudFormation must create the CDK-generated AWS::ApiGatewayV2::DomainName and
+# AWS::ApiGatewayV2::ApiMapping instead of stubbing them, both for an HTTP API and for a REST API
+# mapped under a key with several levels, and Fn::GetAtt on the domain must feed the alias record
+# real values.
+
+@test "CDK: HTTP API is mapped at the root of its v2 custom domain" {
+    run aws_cmd apigatewayv2 get-api-mappings --domain-name http.floci-cdk-api.example.com
+    assert_success
+    [ "$(json_get "$output" '.Items | length')" = "1" ]
+    [ "$(json_get "$output" '.Items[0].ApiMappingKey')" = "" ]
+    [ "$(json_get "$output" '.Items[0].Stage')" = '$default' ]
+}
+
+@test "CDK: alias record targets the v2 custom domain's regional name" {
+    run aws_cmd apigatewayv2 get-domain-name --domain-name http.floci-cdk-api.example.com
+    assert_success
+    regional=$(json_get "$output" '.DomainNameConfigurations[0].ApiGatewayDomainName')
+    [ -n "$regional" ]
+
+    run aws_cmd route53 list-hosted-zones-by-name --dns-name floci-cdk-api.example.com
+    assert_success
+    zone_id=$(json_get "$output" '.HostedZones[0].Id')
+
+    run aws_cmd route53 list-resource-record-sets --hosted-zone-id "$zone_id"
+    assert_success
+    alias=$(json_get "$output" '.ResourceRecordSets[] | select(.Name == "http.floci-cdk-api.example.com." and .Type == "A") | .AliasTarget.DNSName')
+    [ "${alias%.}" = "$regional" ]
+}
+
+@test "CDK: REST API is mapped under a key with several levels" {
+    run aws_cmd apigatewayv2 get-api-mappings --domain-name rest.floci-cdk-api.example.com
+    assert_success
+    [ "$(json_get "$output" '.Items[0].ApiMappingKey')" = "orders/v1" ]
+    [ "$(json_get "$output" '.Items[0].Stage')" = "prod" ]
+}
