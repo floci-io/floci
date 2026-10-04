@@ -29,6 +29,7 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -217,6 +218,25 @@ class CognitoUserPoolUserToGroupAttachmentCfnProvisionerTest {
         verify(cognito, never()).adminRemoveUserFromGroup(POOL, "grp-a", "user-one");
         assertEquals(ID_A, r.getPhysicalId());
         assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void aReplacementWhoseRollbackDeleteFailsIsRemovedFromItsRecordedPartsByTheNextCleanup() {
+        String priorId = POOL + "|g|alice";
+        StackResource r = created(POOL, "g", "alice");
+        provisioner.provision(r, props(POOL, "b|c", "alice"), ctx(priorId));
+        doThrow(new AwsException("InternalErrorException", "storage unavailable", 500)).doNothing()
+                .when(cognito).adminRemoveUserFromGroup(POOL, "b|c", "alice");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals("InternalErrorException", failure.getErrorCode());
+        assertEquals(priorId, r.getPhysicalId());
+
+        assertTrue(provisioner.completeUpdate(r).complete());
+
+        verify(cognito, times(2)).adminRemoveUserFromGroup(POOL, "b|c", "alice");
+        verify(cognito, never()).adminRemoveUserFromGroup(POOL, "g", "alice");
     }
 
     @Test
