@@ -101,7 +101,8 @@ class MacieOrganizationIntegrationTest {
                 .body("{\"adminAccountId\":\"" + ADMIN_ACCOUNT + "\"}")
                 .post("/admin").then().statusCode(200);
 
-        given().queryParam("X-Amz-Credential",
+        given().queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+                .queryParam("X-Amz-Credential",
                         MANAGEMENT_ACCOUNT + "/20260101/us-east-1/macie2/aws4_request")
                 .get("/admin").then().statusCode(200)
                 .body("adminAccounts[0].accountId", equalTo(ADMIN_ACCOUNT));
