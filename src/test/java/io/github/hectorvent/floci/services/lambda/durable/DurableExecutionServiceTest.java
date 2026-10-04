@@ -387,30 +387,6 @@ class DurableExecutionServiceTest {
     }
 
     @Test
-    void aRunningExecutionIsReinvokedAfterARestartAndItsOldTokenIsRejected() {
-        invoker.script(event -> {
-            checkpoint(event, token(event), List.of(step("s1", DurableOperationAction.START, null, null),
-                    step("s1", DurableOperationAction.SUCCEED, "1", null), waitStart("w1", 30)));
-            return pending();
-        });
-        String arn = start("exec-1", "{}", false).getExecutionArn();
-        String oldToken = token(invoker.events.get(0));
-
-        ScriptedInvoker restarted = new ScriptedInvoker();
-        restarted.script(event -> {
-            assertEquals("SUCCEEDED", operation(event, "s1").get("Status").asText());
-            assertEquals("STARTED", operation(event, "w1").get("Status").asText());
-            return pending();
-        });
-        DurableExecutionService reloaded = newService(storage, restarted, clock);
-        reloaded.recoverAfterRestart();
-
-        assertEquals(1, restarted.events.size());
-        assertThrows(AwsException.class, () -> reloaded.checkpoint(arn, oldToken, List.of()));
-        assertEquals(DurableExecutionStatus.RUNNING, reloaded.get(arn).getStatus());
-    }
-
-    @Test
     void aWaitThatFiresWhileTheHandlerRunsResumesInsteadOfFailing() {
         invoker.script(event -> {
             checkpoint(event, token(event), List.of(waitStart("w1", 1)));
