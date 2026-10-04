@@ -27,10 +27,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Provisions an {@code AWS::Events::Archive} through a CloudFormation stack and reads it back
  * through the EventBridge API. {@code Ref} is the archive name and {@code Fn::GetAtt Arn} its ARN;
- * a description, pattern or retention change updates the archive in place and a property removed
- * from the template keeps its value; a source change replaces the archive, and is refused for an
- * explicitly named one; and the stack delete removes it. The source buses are created through the
- * EventBridge API so the stacks hold only the archive.
+ * a description, pattern or retention change updates the archive in place, a property removed
+ * from the template keeps its value, and a later resource failing rolls the change back; a source
+ * change replaces the archive, and is refused for an explicitly named one; and the stack delete
+ * removes it. Custom source buses are created through the EventBridge API so the stacks hold only
+ * archives.
  */
 @QuarkusTest
 class CloudFormationEventsArchiveIntegrationTest {
@@ -201,6 +202,21 @@ class CloudFormationEventsArchiveIntegrationTest {
     }
 
     @Test
+    void failedUpdateRestoresTheInPlaceChangeMadeBeforeALaterResourceFailed() throws Exception {
+        String name = "orders-" + suffix();
+        String broken = "broken-" + suffix();
+        String stack = createStack(defaultBusTemplate(name, "orders archive", 7, null), "CREATE_COMPLETE");
+
+        updateStack(stack, defaultBusTemplate(name, "changed archive", 30, broken));
+        awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        JsonPath archive = describeArchive(name).then().statusCode(200).extract().jsonPath();
+        assertEquals("orders archive", archive.getString("Description"));
+        assertEquals(7, archive.getInt("RetentionDays"));
+        assertArchiveGone(broken);
+    }
+
+    @Test
     void deleteStackRemovesTheArchive() throws Exception {
         String name = "orders-" + suffix();
         String stack = createStack(template(archiveProperties(name, createBus())), "CREATE_COMPLETE");
@@ -292,7 +308,7 @@ class CloudFormationEventsArchiveIntegrationTest {
                 .extract().jsonPath().getString("__type"));
     }
 
-    private static Map<String, Object> archiveProperties(String name, String sourceArn) {
+    private static Map<String, Object> archiveProperties(String name, Object sourceArn) {
         Map<String, Object> properties = new LinkedHashMap<>();
         if (name != null) {
             properties.put("ArchiveName", name);
@@ -308,5 +324,27 @@ class CloudFormationEventsArchiveIntegrationTest {
         return MAPPER.writeValueAsString(Map.of(
                 "Resources", Map.of("Archive", Map.of("Type", "AWS::Events::Archive", "Properties", archiveProperties)),
                 "Outputs", outputs));
+    }
+
+    /**
+     * An archive on the default bus and, when {@code brokenName} is given, a second one that depends
+     * on it and names a bus that does not exist, so it fails after the first one changed.
+     */
+    private static String defaultBusTemplate(String name, String description, int retention, String brokenName)
+            throws Exception {
+        Map<String, Object> archive = archiveProperties(name, busArnSub("default"));
+        archive.put("Description", description);
+        archive.put("RetentionDays", retention);
+        Map<String, Object> resources = new LinkedHashMap<>();
+        resources.put("Archive", Map.of("Type", "AWS::Events::Archive", "Properties", archive));
+        if (brokenName != null) {
+            resources.put("Broken", Map.of("Type", "AWS::Events::Archive", "DependsOn", "Archive",
+                    "Properties", archiveProperties(brokenName, busArnSub(brokenName + "-missing-bus"))));
+        }
+        return MAPPER.writeValueAsString(Map.of("Resources", resources));
+    }
+
+    private static Map<String, String> busArnSub(String bus) {
+        return Map.of("Fn::Sub", "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/" + bus);
     }
 }

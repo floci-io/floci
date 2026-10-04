@@ -130,6 +130,56 @@ class CloudFormationEventsArchiveTest {
                 .isInstanceOf(ResourceNotFoundException.class);
     }
 
+    @Test
+    void failedUpdateRestoresTheInPlaceChangeMadeBeforeALaterResourceFailed() throws InterruptedException {
+        String name = TestFixtures.uniqueName("orders");
+        String broken = TestFixtures.uniqueName("broken");
+        createStack(defaultBusTemplate(name, "orders archive", 7, null), List.of());
+
+        cfn.updateStack(r -> r.stackName(stackName)
+                .templateBody(defaultBusTemplate(name, "changed archive", 30, broken)));
+        awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+
+        DescribeArchiveResponse archive = eventBridge.describeArchive(r -> r.archiveName(name));
+        assertThat(archive.description()).isEqualTo("orders archive");
+        assertThat(archive.retentionDays()).isEqualTo(7);
+        assertThatThrownBy(() -> eventBridge.describeArchive(r -> r.archiveName(broken)))
+                .as("the archive on a missing bus is never created")
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    /**
+     * An archive on the account's default bus and, when {@code brokenName} is given, a second one
+     * that depends on it and names a bus that does not exist, so it fails after the first changed.
+     */
+    private static String defaultBusTemplate(String name, String description, int retention, String brokenName) {
+        String broken = brokenName == null ? "" : """
+                ,
+                    "Broken": {
+                      "Type": "AWS::Events::Archive",
+                      "DependsOn": "Archive",
+                      "Properties": {
+                        "ArchiveName": "%s",
+                        "SourceArn": {"Fn::Sub": "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/%s"}
+                      }
+                    }""".formatted(brokenName, brokenName + "-missing-bus");
+        return """
+                {
+                  "Resources": {
+                    "Archive": {
+                      "Type": "AWS::Events::Archive",
+                      "Properties": {
+                        "ArchiveName": "%s",
+                        "Description": "%s",
+                        "SourceArn": {"Fn::Sub": "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"},
+                        "RetentionDays": %d
+                      }
+                    }%s
+                  }
+                }
+                """.formatted(name, description, retention, broken);
+    }
+
     private static String template(String archiveName, boolean withDescription) {
         String name = archiveName == null ? "" : "\"ArchiveName\": \"" + archiveName + "\",";
         String description = withDescription ? "\"Description\": \"orders archive\"," : "";
@@ -173,7 +223,12 @@ class CloudFormationEventsArchiveTest {
     }
 
     private void createStack(String template, List<Parameter> parameters) throws InterruptedException {
-        cfn.createStack(r -> r.stackName(stackName).templateBody(template).parameters(parameters));
+        cfn.createStack(r -> {
+            r.stackName(stackName).templateBody(template);
+            if (!parameters.isEmpty()) {
+                r.parameters(parameters);
+            }
+        });
         stackCreated = true;
         awaitStatus("CREATE_COMPLETE");
     }
@@ -184,11 +239,12 @@ class CloudFormationEventsArchiveTest {
                 .findFirst().orElseThrow();
     }
 
+    /** Waits for {@code expected}, failing as soon as the stack settles on any other status. */
     private void awaitStatus(String expected) throws InterruptedException {
         await(() -> {
             Stack stack = cfn.describeStacks(r -> r.stackName(stackName)).stacks().get(0);
             String status = stack.stackStatusAsString();
-            if (status.endsWith("_FAILED") || status.contains("ROLLBACK")) {
+            if (!expected.equals(status) && !status.endsWith("_IN_PROGRESS")) {
                 throw new AssertionError(stackName + " reached " + status + ": " + stack.stackStatusReason());
             }
             return expected.equals(status);
