@@ -113,7 +113,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AWS Service Catalog](service-catalog.md) | `POST /` + `X-Amz-Target: AWS242ServiceCatalogService.*` | JSON 1.1 | 89 |
 | [Service Quotas](servicequotas.md) | `POST /` + `X-Amz-Target: ServiceQuotasV20190624.*` | JSON 1.1 | 6 |
 | [AWS Budgets](budgets.md) | `POST /` + `X-Amz-Target: AWSBudgetServiceGateway.*` | JSON 1.1 | 26 |
-| [AWS RAM](ram.md) | `POST /{operationname}` (lowercase), `DELETE /deleteresourceshare` | REST JSON | 14 |
+| [AWS RAM](ram.md) | `POST /{operationname}` (lowercase), `DELETE /deleteresourceshare` | REST JSON | 15 |
 | [Control Catalog](controlcatalog.md) | `/get-control`, `/list-controls` | REST JSON | 2 |
 | [AWS Marketplace](marketplace.md) | Marketplace Catalog API | REST JSON | 56 |
 | [Control Tower](controltower.md) | `/list-landingzones`, `/get-landingzone`, `/create-landingzone`, `/*-baseline*` | REST JSON | 15 |
