@@ -327,6 +327,15 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void anEmptyStatusFilterMatchesNothingButStillChecksTheMarker() {
+        invoker.script(event -> succeeded("1"));
+        start("a", "{}", true);
+
+        assertTrue(service.list(listRequest(Set.of(), null, null, null)).items().isEmpty());
+        assertThrows(AwsException.class, () -> service.list(listRequest(Set.of(), null, null, "bogus")));
+    }
+
+    @Test
     void historyPagesInBothDirections() {
         invoker.script(event -> {
             checkpoint(event, token(event), List.of(step("s1", DurableOperationAction.START, null, null),

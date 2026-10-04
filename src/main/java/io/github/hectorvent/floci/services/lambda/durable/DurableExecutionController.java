@@ -148,7 +148,6 @@ public class DurableExecutionController {
                                    @QueryParam("MaxItems") String maxItems) {
         String region = regionResolver.resolveRegion(headers);
         Set<DurableExecutionStatus> statusFilter = parseStatuses(statuses);
-        boolean onlyUnmodelledStatuses = statuses != null && !statuses.isEmpty() && statusFilter.isEmpty();
         LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
         boolean qualified = (qualifier != null && !qualifier.isBlank())
                 || LambdaArnUtils.resolve(functionName).qualifier() != null;
@@ -157,9 +156,6 @@ public class DurableExecutionController {
                 parseTimestamp(startedAfter, "startedAfter"), parseTimestamp(startedBefore, "startedBefore"),
                 Boolean.parseBoolean(reverseOrder), parseMaxItems(maxItems), marker);
         PaginatedResult<DurableExecution> page = service.list(request);
-        if (onlyUnmodelledStatuses) {
-            page = new PaginatedResult<>(List.of(), null);
-        }
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode executions = response.putArray("DurableExecutions");
         for (DurableExecution execution : page.items()) {
@@ -214,10 +210,10 @@ public class DurableExecutionController {
     }
 
     private static Set<DurableExecutionStatus> parseStatuses(List<String> statuses) {
-        Set<DurableExecutionStatus> parsed = EnumSet.noneOf(DurableExecutionStatus.class);
-        if (statuses == null) {
-            return parsed;
+        if (statuses == null || statuses.isEmpty()) {
+            return null;
         }
+        Set<DurableExecutionStatus> parsed = EnumSet.noneOf(DurableExecutionStatus.class);
         for (String status : statuses) {
             if (UNMODELLED_STATUSES.contains(status)) {
                 continue;

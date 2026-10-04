@@ -177,10 +177,13 @@ public class DurableExecutionService implements Resettable {
         }
     }
 
+    /** A non-null but empty {@code statuses} matches nothing, and the page parameters are still checked. */
     public PaginatedResult<DurableExecution> list(ListRequest request) {
         List<DurableExecution> matching = new ArrayList<>();
-        for (DurableExecution execution : store.scanForAccount(request.accountId(),
-                key -> key.startsWith(request.region() + "/"))) {
+        boolean matchesNothing = request.statuses() != null && request.statuses().isEmpty();
+        List<DurableExecution> candidates = matchesNothing ? List.of() : store.scanForAccount(request.accountId(),
+                key -> key.startsWith(request.region() + "/"));
+        for (DurableExecution execution : candidates) {
             if (!request.functionName().equals(execution.getFunctionName())) {
                 continue;
             }
@@ -190,8 +193,7 @@ public class DurableExecutionService implements Resettable {
             if (request.executionName() != null && !request.executionName().equals(execution.getName())) {
                 continue;
             }
-            if (request.statuses() != null && !request.statuses().isEmpty()
-                    && !request.statuses().contains(execution.getStatus())) {
+            if (request.statuses() != null && !request.statuses().contains(execution.getStatus())) {
                 continue;
             }
             if (request.startedAfter() != null && execution.getStartTimestamp() <= request.startedAfter()) {
