@@ -1231,7 +1231,7 @@ class EventBridgeServiceTest {
                 null, null, REGION);
 
         for (String endpoint : List.of("ftp://example.com/x", "file:///etc/passwd", "https:///no-host",
-                "https://*.example.com/hook", "not a url")) {
+                "https://:8080/path", "https://*.example.com/hook", "not a url")) {
             AwsException ex = assertThrows(AwsException.class, () -> service.createApiDestination(
                     "bad-endpoint", null, conn.getConnectionArn(), endpoint, "POST", null, REGION));
             assertEquals("ValidationException", ex.getErrorCode());

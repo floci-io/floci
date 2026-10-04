@@ -138,6 +138,53 @@ class EventBridgeApiDestinationDeliveryIntegrationTest {
     }
 
     @Test
+    void aTargetCannotOverrideTheConnectionCredentials() throws Exception {
+        CountDownLatch delivered = new CountDownLatch(1);
+        AtomicReference<List<String>> apiKeyValues = new AtomicReference<>();
+        AtomicReference<List<String>> tenantValues = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            apiKeyValues.set(exchange.getRequestHeaders().get("X-Api-Key"));
+            tenantValues.set(exchange.getRequestHeaders().get("x-tenant"));
+            exchange.getRequestBody().readAllBytes();
+            reply(exchange, "{}");
+            delivered.countDown();
+        });
+        server.start();
+
+        try {
+            String connectionArn = createConnection("override-conn", """
+                    {"ApiKeyAuthParameters": {"ApiKeyName": "X-Api-Key", "ApiKeyValue": "from-connection"}}
+                    """, "API_KEY");
+            String destinationArn = createDestination("override-dest", connectionArn,
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/hook");
+            given()
+                    .contentType(EB_CT)
+                    .header("X-Amz-Target", "AWSEvents.PutRule")
+                    .body("{\"Name\": \"override-rule\", \"EventPattern\": \"{\\\"source\\\":[\\\"override.test\\\"]}\"}")
+                    .when().post("/")
+                    .then().statusCode(200);
+            given()
+                    .contentType(EB_CT)
+                    .header("X-Amz-Target", "AWSEvents.PutTargets")
+                    .body(String.format("""
+                            {"Rule": "override-rule", "Targets": [{"Id": "t1", "Arn": "%s",
+                              "HttpParameters": {"HeaderParameters": {"x-api-key": "from-target", "x-tenant": "alpha"}}}]}
+                            """, destinationArn))
+                    .when().post("/")
+                    .then().statusCode(200);
+
+            putEvent("override.test");
+
+            assertTrue(delivered.await(5, TimeUnit.SECONDS), "webhook should receive the delivery");
+            assertEquals(List.of("from-connection"), apiKeyValues.get());
+            assertEquals(List.of("alpha"), tenantValues.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void aServerErrorIsRetriedUntilTheEndpointSucceeds() throws Exception {
         CountDownLatch delivered = new CountDownLatch(1);
         AtomicInteger requests = new AtomicInteger();

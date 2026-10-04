@@ -1739,10 +1739,10 @@ public class EventBridgeService implements ResourceProvider {
             throw new AwsException("ValidationException",
                     "InvocationEndpoint must be an HTTP or HTTPS URL.", 400);
         }
-        // A '*' in the host makes getHost() return null, so such a URL could never be delivered; AWS only allows the wildcard in the path
-        if (uri.getRawAuthority() == null || uri.getRawAuthority().isBlank() || uri.getRawAuthority().contains("*")) {
+        // getHost() is null for a missing host (https://:8080), and for a '*' in the host, which AWS only allows in the path
+        if (uri.getHost() == null) {
             throw new AwsException("ValidationException",
-                    "InvocationEndpoint must include a host, and a '*' wildcard is only allowed in the path.", 400);
+                    "InvocationEndpoint must include a valid host, and a '*' wildcard is only allowed in the path.", 400);
         }
     }
 

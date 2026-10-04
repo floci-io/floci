@@ -60,6 +60,7 @@ public class EventBridgeInvoker {
 
     // AWS can't route an event from a sender bus on to a third bus; the second hop is dropped.
     private static final int MAX_BUS_TO_BUS_DEPTH = 1;
+    private static final int MAX_IDLE_RATE_WINDOWS = 256;
     // Headers the JDK HttpClient manages itself; setting them by hand throws IllegalArgumentException.
     private static final Set<String> RESTRICTED_HEADERS =
             Set.of("connection", "content-length", "expect", "host", "transfer-encoding", "upgrade");
@@ -518,10 +519,12 @@ public class EventBridgeInvoker {
         JsonNode authNode = readAuthParameters(connection);
         JsonNode invocationHttp = authNode.path("InvocationHttpParameters");
 
-        Map<String, String> queryParams = readKeyValues(invocationHttp.path("QueryStringParameters"));
+        // The connection's parameters are applied last so a target cannot override what the connection configures
+        Map<String, String> queryParams = new LinkedHashMap<>();
         if (httpParameters != null && httpParameters.getQueryStringParameters() != null) {
             queryParams.putAll(httpParameters.getQueryStringParameters());
         }
+        queryParams.putAll(readKeyValues(invocationHttp.path("QueryStringParameters")));
         String resolvedUrl = appendQueryParameters(
                 substitutePathParameters(rawUrl,
                         httpParameters != null ? httpParameters.getPathParameterValues() : null),
@@ -530,11 +533,11 @@ public class EventBridgeInvoker {
         URI uri = parseDeliveryUri(resolvedUrl);
 
         Map<String, String> headers = new LinkedHashMap<>();
-        applyConnectionAuth(connection, authNode, headers);
-        headers.putAll(readKeyValues(invocationHttp.path("HeaderParameters")));
         if (httpParameters != null && httpParameters.getHeaderParameters() != null) {
-            headers.putAll(httpParameters.getHeaderParameters());
+            httpParameters.getHeaderParameters().forEach((name, value) -> putHeader(headers, name, value));
         }
+        readKeyValues(invocationHttp.path("HeaderParameters")).forEach((name, value) -> putHeader(headers, name, value));
+        applyConnectionAuth(connection, authNode, headers);
 
         String method = destination.getHttpMethod() != null ? destination.getHttpMethod().toUpperCase() : "POST";
         boolean hasBody = "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
@@ -599,8 +602,12 @@ public class EventBridgeInvoker {
         if (limit == null) {
             return;
         }
-        RateWindow window = rateWindows.computeIfAbsent(destination.getArn(), key -> new RateWindow());
         long nowSecond = Instant.now().getEpochSecond();
+        // Windows of deleted or idle destinations would otherwise pile up, so stale ones are swept once the map grows
+        if (rateWindows.size() > MAX_IDLE_RATE_WINDOWS) {
+            rateWindows.values().removeIf(stale -> nowSecond - stale.second > 1);
+        }
+        RateWindow window = rateWindows.computeIfAbsent(destination.getArn(), key -> new RateWindow());
         synchronized (window) {
             if (window.second != nowSecond) {
                 window.second = nowSecond;
@@ -615,7 +622,7 @@ public class EventBridgeInvoker {
     }
 
     private static final class RateWindow {
-        private long second;
+        private volatile long second;
         private int used;
     }
 
@@ -734,6 +741,12 @@ public class EventBridgeInvoker {
         return result;
     }
 
+    // Header names are case-insensitive: a later value replaces an earlier one that differs only by case
+    private static void putHeader(Map<String, String> headers, String name, String value) {
+        headers.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
+        headers.put(name, value);
+    }
+
     private static boolean containsHeader(Map<String, String> headers, String name) {
         return headers.keySet().stream().anyMatch(name::equalsIgnoreCase);
     }
@@ -783,7 +796,7 @@ public class EventBridgeInvoker {
             case "BASIC" -> {
                 JsonNode basic = authNode.path("BasicAuthParameters");
                 if (!basic.isMissingNode()) {
-                    headers.put("Authorization", basicAuthorization(
+                    putHeader(headers, "Authorization", basicAuthorization(
                             basic.path("Username").asText(""), basic.path("Password").asText("")));
                 }
             }
@@ -792,11 +805,11 @@ public class EventBridgeInvoker {
                 String name = apiKey.path("ApiKeyName").asText(null);
                 String value = apiKey.path("ApiKeyValue").asText(null);
                 if (name != null && value != null) {
-                    headers.put(name, value);
+                    putHeader(headers, name, value);
                 }
             }
             case "OAUTH_CLIENT_CREDENTIALS" ->
-                    headers.put("Authorization", fetchOAuthAuthorization(authNode.path("OAuthParameters")));
+                    putHeader(headers, "Authorization", fetchOAuthAuthorization(authNode.path("OAuthParameters")));
             default -> LOG.warnv("Unsupported connection authorization type: {0}", authType);
         }
     }
