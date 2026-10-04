@@ -25,7 +25,8 @@ import java.util.Set;
  * recorded per physical id, because a group name or username may contain {@code |}, and a membership
  * is removed from its recorded parts, as on AWS. Without a record, as for a Cloud Control delete of a
  * membership it did not create, the membership is removed from its id when the id splits into exactly
- * three parts, and refused otherwise. Adding a user who is already in the group is refused as
+ * three parts. An id of fewer parts names no membership, so the delete does nothing, and an id of more
+ * parts is refused as ambiguous. Adding a user who is already in the group is refused as
  * AlreadyExists, and a change that keeps the Ref is refused as a custom-named replacement, as on AWS.
  */
 @ApplicationScoped
