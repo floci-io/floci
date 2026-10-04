@@ -185,6 +185,7 @@ Not emulated yet:
 - Payload encryption. `KMSKeyArn` is stored and returned only.
 - EventBridge status-change events, the X-Ray `TraceHeader`, and a dead-letter queue or
   destinations for durable executions.
+- The per-execution limits of 3,000 operations and 100 MB of persisted payload.
 
 ## Hot-Reloading via Reactive S3 Sync
 
