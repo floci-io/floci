@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -19,11 +20,16 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,7 +38,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -74,6 +82,14 @@ class CodePipelineRetryRollbackTest {
                 mock(CodeDeployService.class), lambda, s3);
     }
 
+    private CodePipelineService newService(StorageFactory storage, LambdaService lambda,
+                                           EventBridgeService eventBridge) {
+        return new CodePipelineService(storage, mapper, mock(CodeBuildService.class),
+                mock(CodeDeployService.class), lambda, s3,
+                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L,
+                TimeUnit.SECONDS.toNanos(5), () -> { });
+    }
+
     @AfterEach
     void tearDown() {
         service.shutdown();
@@ -100,7 +116,7 @@ class CodePipelineRetryRollbackTest {
         assertEquals(firstId, rollback.path("rollbackMetadata").path("rollbackTargetPipelineExecutionId").asText());
         // ListActionExecutions orders by start time, and Fetch and Deploy can share a millisecond,
         // so compare which stages ran, not their order.
-        assertEquals(java.util.Set.of("Fetch", "Deploy"), java.util.Set.copyOf(ranStages("rollable", rollbackId)));
+        assertEquals(Set.of("Fetch", "Deploy"), Set.copyOf(ranStages("rollable", rollbackId)));
     }
 
     // Catches: RollbackStage accepting a target execution in which the stage never succeeded.
@@ -185,8 +201,8 @@ class CodePipelineRetryRollbackTest {
         service.resumePersistedExecutions();
 
         awaitStatus("restartable", rollbackId, "Succeeded");
-        assertEquals(java.util.Set.of("Fetch", "Deploy"),
-                java.util.Set.copyOf(ranStages("restartable", rollbackId)));
+        assertEquals(Set.of("Fetch", "Deploy"),
+                Set.copyOf(ranStages("restartable", rollbackId)));
     }
 
     // Catches: retrying a failed target stage of a ROLLBACK execution carrying on into the stages
@@ -213,8 +229,156 @@ class CodePipelineRetryRollbackTest {
                 REGION, ACCOUNT);
 
         awaitStatus("retry-rollback", rollbackId, "Succeeded");
-        assertEquals(java.util.Set.of("Fetch", "Deploy"),
-                java.util.Set.copyOf(ranStages("retry-rollback", rollbackId)));
+        assertEquals(Set.of("Fetch", "Deploy"),
+                Set.copyOf(ranStages("retry-rollback", rollbackId)));
+    }
+
+    // Catches: rollback eligibility read from action statuses, so a stage whose onSuccess condition
+    // failed (every action Succeeded, stage Failed) is accepted as a rollback target.
+    @Test
+    void rollbackStageRejectsStageWhoseOnSuccessConditionFailed() {
+        ObjectNode deploy = lambdaStage("Deploy");
+        ObjectNode condition = deploy.putObject("onSuccess").putArray("conditions").addObject();
+        condition.put("result", "FAIL");
+        ObjectNode rule = condition.putArray("rules").addObject();
+        rule.put("name", "gate");
+        rule.putObject("ruleTypeId")
+                .put("category", "Rule").put("owner", "AWS").put("provider", "VariableCheck").put("version", "1");
+        rule.putObject("configuration")
+                .put("Variable", "#{variables.env}").put("Value", "prod").put("Operator", "EQ");
+        createPipeline("gated", sourceStage(), deploy);
+        String failedId = startExecution("gated");
+        awaitStatus("gated", failedId, "Failed");
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "gated")
+                                .put("stageName", "Deploy")
+                                .put("targetPipelineExecutionId", failedId),
+                        REGION, ACCOUNT));
+        assertEquals("UnableToRollbackStageException", error.getErrorCode());
+    }
+
+    // Catches: RollbackStage accepting a target execution that ran an earlier pipeline version,
+    // whose stage layout the current pipeline no longer has.
+    @Test
+    void rollbackStageRejectsTargetFromEarlierPipelineVersion() {
+        createPipeline("versioned", sourceStage(), lambdaStage("Deploy"));
+        String firstId = startExecution("versioned");
+        awaitStatus("versioned", firstId, "Succeeded");
+        service.handle("UpdatePipeline", mapper.createObjectNode()
+                .set("pipeline", declaration("versioned", sourceStage(), lambdaStage("Deploy"))), REGION, ACCOUNT);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "versioned")
+                                .put("stageName", "Deploy")
+                                .put("targetPipelineExecutionId", firstId),
+                        REGION, ACCOUNT));
+        assertEquals("UnableToRollbackStageException", error.getErrorCode());
+    }
+
+    // Catches: a manual rollback reporting triggerType RollbackStage, which is not a value of the
+    // AWS TriggerType enum (ManualRollback is).
+    @Test
+    void rollbackStageExecutionTriggerTypeIsManualRollback() {
+        createPipeline("trigger-type", sourceStage(), lambdaStage("Deploy"));
+        String firstId = startExecution("trigger-type");
+        awaitStatus("trigger-type", firstId, "Succeeded");
+
+        String rollbackId = service.handle("RollbackStage", mapper.createObjectNode()
+                        .put("pipelineName", "trigger-type")
+                        .put("stageName", "Deploy")
+                        .put("targetPipelineExecutionId", firstId),
+                REGION, ACCOUNT).path("pipelineExecutionId").asText();
+
+        JsonNode rollback = awaitStatus("trigger-type", rollbackId, "Succeeded");
+        assertEquals("ManualRollback", rollback.path("trigger").path("triggerType").asText());
+        assertEquals(firstId, rollback.path("trigger").path("triggerDetail").asText());
+    }
+
+    // Catches: a rollback execution that never publishes the pipeline STARTED state-change event.
+    @Test
+    void rollbackStagePublishesPipelineStartedEvent() {
+        EventBridgeService eventBridge = mock(EventBridgeService.class);
+        service.shutdown();
+        service = newService(new InMemoryStorageFactory(), lambdaService, eventBridge);
+        createPipeline("started-event", sourceStage(), lambdaStage("Deploy"));
+        String firstId = startExecution("started-event");
+        awaitStatus("started-event", firstId, "Succeeded");
+
+        String rollbackId = service.handle("RollbackStage", mapper.createObjectNode()
+                        .put("pipelineName", "started-event")
+                        .put("stageName", "Deploy")
+                        .put("targetPipelineExecutionId", firstId),
+                REGION, ACCOUNT).path("pipelineExecutionId").asText();
+        awaitStatus("started-event", rollbackId, "Succeeded");
+
+        assertEquals(List.of("STARTED", "SUCCEEDED"), pipelineStates(eventBridge, rollbackId));
+    }
+
+    // Catches: a rollback whose scheduling is rejected leaving the STARTED event without a FAILED one.
+    @Test
+    @SuppressWarnings("unchecked")
+    void rollbackStageRejectedSchedulePublishesPipelineFailedEvent() {
+        EventBridgeService eventBridge = mock(EventBridgeService.class);
+        service.shutdown();
+        service = newService(new InMemoryStorageFactory(), lambdaService, eventBridge);
+        createPipeline("rejected-event", sourceStage(), lambdaStage("Deploy"));
+        String firstId = startExecution("rejected-event");
+        awaitStatus("rejected-event", firstId, "Succeeded");
+        service.shutdown();
+
+        assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "rejected-event")
+                                .put("stageName", "Deploy")
+                                .put("targetPipelineExecutionId", firstId),
+                        REGION, ACCOUNT));
+
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
+        verify(eventBridge, atLeastOnce()).putEvents(events.capture(), anyString(), anyString());
+        List<String> states = new ArrayList<>();
+        for (List<Map<String, Object>> batch : events.getAllValues()) {
+            for (Map<String, Object> entry : batch) {
+                JsonNode detail = parseDetail((String) entry.get("Detail"));
+                if ("CodePipeline Pipeline Execution State Change".equals(entry.get("DetailType"))
+                        && !firstId.equals(detail.path("execution-id").asText())) {
+                    states.add(detail.path("state").asText());
+                }
+            }
+        }
+        assertEquals(List.of("STARTED", "FAILED"), states);
+    }
+
+    // Catches: a ROLLBACK execution whose target stage is no longer found (older record with no
+    // rollbackStageName, or a renamed stage) running only the source stage and ending Succeeded.
+    @Test
+    void rollbackWhoseTargetStageIsMissingEndsFailed() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        service.shutdown();
+        service = newService(storage, lambdaService);
+        createPipeline("orphaned", sourceStage(), lambdaStage("Deploy"));
+        String firstId = startExecution("orphaned");
+        awaitStatus("orphaned", firstId, "Succeeded");
+        String rollbackId = service.handle("RollbackStage", mapper.createObjectNode()
+                        .put("pipelineName", "orphaned")
+                        .put("stageName", "Deploy")
+                        .put("targetPipelineExecutionId", firstId),
+                REGION, ACCOUNT).path("pipelineExecutionId").asText();
+        awaitStatus("orphaned", rollbackId, "Succeeded");
+
+        for (CodePipelineExecution persisted : storage.executions().scanAllAccounts()) {
+            if (rollbackId.equals(persisted.getPipelineExecutionId())) {
+                persisted.setStatus("InProgress");
+                persisted.setRollbackStageName(null);
+            }
+        }
+        service.shutdown();
+        service = newService(storage, lambdaService);
+        service.resumePersistedExecutions();
+
+        awaitStatus("orphaned", rollbackId, "Failed");
     }
 
     // ---------------------------------------------------------------- helpers
@@ -253,7 +417,7 @@ class CodePipelineRetryRollbackTest {
         return stage;
     }
 
-    private void createPipeline(String name, ObjectNode... stages) {
+    private ObjectNode declaration(String name, ObjectNode... stages) {
         ObjectNode declaration = mapper.createObjectNode();
         declaration.put("name", name);
         declaration.put("roleArn", "arn:aws:iam::000000000000:role/cp");
@@ -262,7 +426,37 @@ class CodePipelineRetryRollbackTest {
         for (ObjectNode stage : stages) {
             stageArray.add(stage);
         }
-        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", declaration), REGION, ACCOUNT);
+        return declaration;
+    }
+
+    private void createPipeline(String name, ObjectNode... stages) {
+        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", declaration(name, stages)),
+                REGION, ACCOUNT);
+    }
+
+    private JsonNode parseDetail(String detail) {
+        try {
+            return mapper.readTree(detail);
+        } catch (IOException e) {
+            return fail("Unparseable event detail: " + detail);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> pipelineStates(EventBridgeService eventBridge, String executionId) {
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
+        verify(eventBridge, atLeastOnce()).putEvents(events.capture(), anyString(), anyString());
+        List<String> states = new ArrayList<>();
+        for (List<Map<String, Object>> batch : events.getAllValues()) {
+            for (Map<String, Object> entry : batch) {
+                JsonNode detail = parseDetail((String) entry.get("Detail"));
+                if ("CodePipeline Pipeline Execution State Change".equals(entry.get("DetailType"))
+                        && executionId.equals(detail.path("execution-id").asText())) {
+                    states.add(detail.path("state").asText());
+                }
+            }
+        }
+        return states;
     }
 
     private String startExecution(String pipelineName) {
@@ -302,7 +496,7 @@ class CodePipelineRetryRollbackTest {
         List<JsonNode> details = new ArrayList<>();
         response.path("actionExecutionDetails").forEach(details::add);
         // ListActionExecutions returns newest first; tests read oldest first.
-        java.util.Collections.reverse(details);
+        Collections.reverse(details);
         return details;
     }
 
@@ -322,7 +516,7 @@ class CodePipelineRetryRollbackTest {
 
     /** Hands every service the same backends, so a second service sees the first one's state. */
     private static final class SharedStorageFactory extends StorageFactory {
-        private final Map<String, AccountAwareStorageBackend<?>> backends = new java.util.HashMap<>();
+        private final Map<String, AccountAwareStorageBackend<?>> backends = new HashMap<>();
 
         private SharedStorageFactory() {
             super(null, null);

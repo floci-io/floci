@@ -49,7 +49,7 @@ version rather than the latest upload.
 
 `RollbackStage` starts a new execution with `executionType: ROLLBACK` and
 `rollbackMetadata.rollbackTargetPipelineExecutionId` pointing at the target execution. The stage must
-have succeeded in the target execution, otherwise the call fails with `UnableToRollbackStageException`.
+have succeeded in the target execution (judged by the stage status, so a stage whose `onSuccess` condition failed does not qualify), and the pipeline version must not have changed since that execution ran; otherwise the call fails with `UnableToRollbackStageException`. The execution's `trigger.triggerType` is `ManualRollback`. GitHub source actions are pinned to the commit the target execution resolved.
 The emulator has no per-execution artifact archive, so source-only stages re-run first to seed input
 artifacts, then only the rolled-back stage executes; intermediate stages are skipped.
 

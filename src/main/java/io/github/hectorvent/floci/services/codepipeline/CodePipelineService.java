@@ -130,6 +130,9 @@ public class CodePipelineService {
     private final long runFinishWaitNanos;
     private final Runnable beforeOverrideTimeoutCleanup;
 
+    /** Internal override type: a rollback pins a GitHub source action to the target's commit. */
+    private static final String GITHUB_COMMIT_ID = "GITHUB_COMMIT_ID";
+
     private static final long DEFAULT_RUN_FINISH_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     /** Matches the {@code source-poll-interval-ms} default in application.yml. */
@@ -955,9 +958,14 @@ public class CodePipelineService {
         requireStage(pipeline, stageName);
         CodePipelineExecution target = requireExecution(
                 account, region, pipelineName, text(request, "targetPipelineExecutionId"));
-        Map<String, String> targetStatuses = latestActionStatuses(target, stageName);
-        boolean stageSucceededInTarget = !targetStatuses.isEmpty()
-                && targetStatuses.values().stream().allMatch("Succeeded"::equals);
+        if (!Objects.equals(target.getPipelineVersion(), pipeline.getVersion())) {
+            throw new AwsException("UnableToRollbackStageException",
+                    "The pipeline structure changed after the target execution ran.", 400);
+        }
+        // The stage status, not the action statuses: a stage whose onSuccess condition failed has
+        // only Succeeded actions but is itself Failed.
+        boolean stageSucceededInTarget = !latestActionStatuses(target, stageName).isEmpty()
+                && "Succeeded".equals(stageExecutionStatus(target, stageName));
         if (!stageSucceededInTarget) {
             throw new AwsException("UnableToRollbackStageException",
                     "The stage did not complete successfully in the target execution.", 400);
@@ -995,9 +1003,10 @@ public class CodePipelineService {
             // the sources with these overrides reproduces the target's artifacts.
             rollback.setSourceRevisionOverrides(new ArrayList<>(target.getSourceRevisionOverrides()));
         }
+        pinGitHubCommits(pipeline, rollback, target);
         rollback.setVariables(new ArrayList<>(target.getVariables()));
         Map<String, String> trigger = new LinkedHashMap<>();
-        trigger.put("triggerType", "RollbackStage");
+        trigger.put("triggerType", "ManualRollback");
         trigger.put("triggerDetail", target.getPipelineExecutionId());
         rollback.setTrigger(trigger);
         if (!persistExecutionIfSlotAvailable(rollback)) {
@@ -1005,7 +1014,7 @@ public class CodePipelineService {
                     "The pipeline has reached the limit for concurrent pipeline executions", 400);
         }
         applyExecutionMode(rollback);
-
+        eventPublisher.pipelineStateChange(rollback, "STARTED");
         try {
             executor.submit(() -> runExecution(pipeline, rollback));
         } catch (RejectedExecutionException exception) {
@@ -1013,11 +1022,42 @@ public class CodePipelineService {
             rollback.setStatusSummary("Pipeline execution could not be scheduled.");
             rollback.setLastUpdateTime(now());
             putExecution(rollback);
-            throw new AwsException("ConflictException",
-                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
-                            + "Try again later.", 400);
+            eventPublisher.pipelineStateChange(rollback, "FAILED");
+            throw pipelineBusy();
         }
         return rollback;
+    }
+
+    /**
+     * Pins each GitHub source action of a rollback to the commit the target execution resolved, so
+     * the source re-run reproduces the target's artifact instead of the branch head.
+     */
+    private void pinGitHubCommits(CodePipelinePipeline pipeline, CodePipelineExecution rollback,
+                                  CodePipelineExecution target) {
+        Set<String> githubActions = new HashSet<>();
+        for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
+            for (JsonNode action : stage.path("actions")) {
+                JsonNode type = action.path("actionTypeId");
+                if ("Source".equals(type.path("category").asText())
+                        && "GitHub".equals(type.path("provider").asText())) {
+                    githubActions.add(action.path("name").asText());
+                }
+            }
+        }
+        synchronized (target) {
+            for (Map<String, Object> revision : target.getSourceRevisions()) {
+                Object actionName = revision.get("actionName");
+                Object commit = revision.get("revisionId");
+                if (actionName == null || commit == null || !githubActions.contains(actionName.toString())) {
+                    continue;
+                }
+                Map<String, Object> pin = new LinkedHashMap<>();
+                pin.put("actionName", actionName);
+                pin.put("revisionType", GITHUB_COMMIT_ID);
+                pin.put("revisionValue", commit);
+                rollback.getSourceRevisionOverrides().add(pin);
+            }
+        }
     }
 
     private ObjectNode overrideStageCondition(JsonNode request, String region, String account) {
@@ -1417,10 +1457,12 @@ public class CodePipelineService {
         }
         String stageName = execution.getRollbackStageName();
         Set<String> include = new LinkedHashSet<>();
+        boolean targetFound = false;
         for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
             String name = stage.path("name").asText();
             if (name.equals(stageName)) {
                 include.add(name);
+                targetFound = true;
                 break;
             }
             boolean sourceOnly = stage.path("actions").size() > 0;
@@ -1433,6 +1475,11 @@ public class CodePipelineService {
             if (sourceOnly) {
                 include.add(name);
             }
+        }
+        if (!targetFound) {
+            // Running only the sources would end the rollback Succeeded without rolling anything back.
+            throw new AwsException("StageNotFoundException",
+                    "Rollback target stage " + stageName + " is not in the pipeline.", 400);
         }
         return include;
     }
@@ -2001,9 +2048,11 @@ public class CodePipelineService {
                     "GitHub source Owner and Repo must be non-empty and contain no '/' or '..', "
                             + "and Branch must be non-empty with no leading '/', '..' or whitespace", 400);
         }
+        String pinnedCommit = sourceRevisionOverride(execution, state.getActionName(), GITHUB_COMMIT_ID);
+        String archiveRef = pinnedCommit != null
+                ? pinnedCommit : "refs/heads/" + encodeRefPath(branch);
         byte[] archive = fetchGitHubArchive(URI.create(
-                githubArchiveBaseUrl() + "/" + repoOwner + "/" + repo
-                        + "/zip/refs/heads/" + encodeRefPath(branch)));
+                githubArchiveBaseUrl() + "/" + repoOwner + "/" + repo + "/zip/" + archiveRef));
         if (archive.length > maxArchiveBytes()) {
             throw archiveDownloadTooLarge();
         }

@@ -102,6 +102,29 @@ class CodePipelineGitHubSourceServiceTest {
     }
 
     @Test
+    void rollbackFetchesTheCommitTheTargetExecutionResolved() throws Exception {
+        // Catches: a rollback re-fetching the branch head instead of the commit the target resolved
+        byte[] archive = zip(zos -> {
+            dir(zos, "repo-main/");
+            file(zos, "repo-main/README.md", "hello", 0, ZipEntry.DEFLATED);
+        });
+        service = serviceServing(archive);
+        createPipeline("github-rollback", "awslabs", "lza", "main");
+        String targetId = start("github-rollback");
+        awaitStatus("github-rollback", targetId, "Succeeded");
+
+        String rollbackId = service.handle("RollbackStage", mapper.createObjectNode()
+                        .put("pipelineName", "github-rollback")
+                        .put("stageName", "Publish")
+                        .put("targetPipelineExecutionId", targetId),
+                REGION, ACCOUNT).path("pipelineExecutionId").asText();
+        awaitStatus("github-rollback", rollbackId, "Succeeded");
+
+        assertEquals(List.of("https://codeload.github.com/awslabs/lza/zip/refs/heads/main",
+                "https://codeload.github.com/awslabs/lza/zip/" + SHA), fetched);
+    }
+
+    @Test
     void rejectsPathTraversalInOwnerRepoOrBranch() throws Exception {
         // Catches: a pipeline-declared Repo reshaping the codeload request path
         service = serviceServing(new byte[0]);
