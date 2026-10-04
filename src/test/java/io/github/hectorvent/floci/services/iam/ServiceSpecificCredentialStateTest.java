@@ -70,6 +70,7 @@ class ServiceSpecificCredentialStateTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 credentials,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", defaultAccount), false, null);
     }
 

@@ -531,6 +531,52 @@ ready. `GenerateCredentialReport`'s `State`/`Description` for the no-report-exis
 own documented example response (`STARTED` / "No report exists. Starting a new report generation
 task"); the wording for the report-expired case is Floci's own, since AWS does not document it.
 
+### Account Properties and Outbound Federation
+
+| Action | Description |
+|--------|-------------|
+| GetAccountProperties | Returns the account's properties as a `Namespace/PropertyName` to value map. |
+| PutAccountProperties | Sets account properties, all of which must share one namespace. |
+| SetSecurityTokenServicePreferences | Sets the account's global endpoint token version, `v1Token` or `v2Token`. |
+| EnableOutboundWebIdentityFederation | Turns on outbound web identity federation and returns the account's issuer URL. |
+| DisableOutboundWebIdentityFederation | Turns it off. |
+| GetOutboundWebIdentityFederationInfo | Returns the issuer URL and whether JWT vending is on. |
+
+A property key is `Namespace/PropertyName` with exactly one forward slash and neither a leading nor
+a trailing one, 1 to 50 characters matching `^[A-Za-z][A-Za-z0-9/_-]*$`, and a value of 1 to 1024.
+**Every key in one `PutAccountProperties` request must belong to the same namespace**, which AWS
+states directly, so a request mixing namespaces is rejected whole rather than partly applied. Role
+Manager is the only namespace AWS names, and any well-formed key is accepted rather than only that
+one, since an allowlist of one would refuse keys AWS takes.
+
+**Enabling federation twice is an error, and so is disabling it twice**, which is the asymmetry
+worth noticing: `EnableOutboundWebIdentityFederation` answers `FeatureEnabled` with status 409,
+while `DisableOutboundWebIdentityFederation` answers `FeatureDisabled` with status **404**. AWS
+documents both, including the message wording. `GetOutboundWebIdentityFederationInfo` answers
+`FeatureDisabled` too when the feature is off, reusing the disable operation's own text, so a getter
+reports that the feature cannot be disabled twice. That reads oddly and is matched rather than
+improved.
+
+The issuer URL is `https://<uuid>.tokens.sts.global.<dual-stack suffix>`, which the API Reference
+shows as `https://a1d2b0fd-1177-4468-9351-2fEXAMPLE723.tokens.sts.global.api.aws`. The suffix comes
+from the request's partition rather than the literal, since `api.aws` is only the commercial
+partition's. It is minted once per account and kept across a disable, so re-enabling returns the
+same URL. AWS does not document which way that goes; the reasoning is that a relying party
+verifying tokens will have pinned the URL, so regenerating it would break verification silently.
+
+Two things the feature references are not modeled. The issuer URL is documented as hosting OIDC
+discovery endpoints at `/.well-known/openid-configuration` and `/.well-known/jwks.json`, and the
+operation's description points at a `GetWebIdentityToken` API for obtaining JWTs. Neither is served
+here: these six are the management operations only. `JwtVendingEnabled` is therefore reported as
+true whenever the feature is enabled, which is the only reading available, since nothing in the API
+toggles it separately.
+
+`SetSecurityTokenServicePreferences` stores the version, and `GetAccountSummary` reports it as
+`GlobalEndpointTokenVersion`, which the operation's own description requires. What does not follow
+it is STS itself: Floci does not vary its token format by account preference, so the setting is
+observable in the summary rather than in a token. `v1Token` is reported as the default for an account
+that has never set one.
+
 ### Organizations Root Access
 
 | Action | Description |

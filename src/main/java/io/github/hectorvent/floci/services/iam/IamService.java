@@ -9,7 +9,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -37,6 +39,7 @@ import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
+import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
@@ -121,6 +124,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int MAX_OIDC_THUMBPRINTS = 5;
     private static final int MAX_OIDC_URL_LENGTH = 255;
     private static final String ACCOUNT_PASSWORD_POLICY_KEY = "account-password-policy";
+    private static final String STS_PREFERENCES_KEY = "sts-preferences";
+    private static final String OUTBOUND_FEDERATION_KEY = "outbound-web-identity-federation";
+    /** accountPropertiesMapType's key: 1 to 50 of this, and a value of 1 to 1024. */
+    private static final Pattern ACCOUNT_PROPERTY_KEY_PATTERN =
+            Pattern.compile("^[A-Za-z][A-Za-z0-9/_-]*$");
+    private static final int MAX_ACCOUNT_PROPERTY_KEY_LENGTH = 50;
+    private static final int MAX_ACCOUNT_PROPERTY_VALUE_LENGTH = 1024;
+    /** globalEndpointTokenVersion's only two values. */
+    private static final Set<String> GLOBAL_ENDPOINT_TOKEN_VERSIONS = Set.of("v1Token", "v2Token");
     /** AWS-documented bounds for the account password policy's numeric fields. */
     private static final int MIN_PASSWORD_LENGTH_FLOOR = 6;
     private static final int MIN_PASSWORD_LENGTH_CEILING = 128;
@@ -297,6 +309,36 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * single-value-per-account shape as {@link #accountAliases}.
      */
     private final StorageBackend<String, AccountPasswordPolicy> passwordPolicies;
+    /**
+     * One entry per account property, keyed by the property key AWS defines
+     * ({@code Namespace/PropertyName}). Keyed per property rather than one entry holding a map,
+     * because PutAccountProperties sets a subset while GetAccountProperties returns all of them,
+     * which a key-per-entry store does without a read-modify-write.
+     */
+    private final StorageBackend<String, String> accountProperties;
+    /**
+     * Guards the batch in PutAccountProperties. A request carries several keys and AWS models
+     * ConcurrentModification for it, so the keys land together rather than interleaved with
+     * another request's.
+     */
+    private final Object accountPropertiesLock = new Object();
+    /**
+     * Holds at most one entry per account under {@link #STS_PREFERENCES_KEY}, the value being the
+     * global endpoint token version. Same single-value-per-account shape as
+     * {@link #accountAliases}.
+     */
+    private final StorageBackend<String, String> stsPreferences;
+    /**
+     * Holds at most one entry per account under {@link #OUTBOUND_FEDERATION_KEY}, present once the
+     * feature has ever been enabled.
+     */
+    private final StorageBackend<String, OutboundWebIdentityFederation> outboundFederation;
+    /**
+     * Guards the check-then-act in enable and disable. Both answer an error when the feature is
+     * already in the state asked for, so two racing enables must not both mint an issuer and both
+     * report success.
+     */
+    private final Object outboundFederationLock = new Object();
     private final StorageBackend<String, LoginProfile> loginProfiles;
     private final StorageBackend<String, OpenIDConnectProvider> oidcProviders;
     /** Deletion is synchronous, so an issued task id is a completed one; the value is its role. */
@@ -368,6 +410,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-signing-certificates.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-ssh-public-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-service-specific-credentials.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-account-properties.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-sts-preferences.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-outbound-federation.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -401,6 +446,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
     }
 
@@ -426,6 +472,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, seededAccountAlias);
     }
 
@@ -449,6 +496,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
     }
 
@@ -471,6 +519,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, SigningCertificate> signingCertificates,
                StorageBackend<String, SshPublicKey> sshPublicKeys,
                StorageBackend<String, ServiceSpecificCredential> serviceCredentials,
+               StorageBackend<String, String> accountProperties,
+               StorageBackend<String, String> stsPreferences,
+               StorageBackend<String, OutboundWebIdentityFederation> outboundFederation,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -493,6 +544,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.signingCertificates = signingCertificates;
         this.sshPublicKeys = sshPublicKeys;
         this.serviceCredentials = serviceCredentials;
+        this.accountProperties = accountProperties;
+        this.stsPreferences = stsPreferences;
+        this.outboundFederation = outboundFederation;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -1461,8 +1515,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("AccountPasswordPresent", 0L);
         // The STS global endpoint (and so the v1/v2 token choice it reports) exists only where
         // the partition publishes one: aws today. Elsewhere AWS has no such entry to report.
+        //
+        // The value follows SetSecurityTokenServicePreferences, whose own description says the
+        // version it sets "is reported in the GlobalEndpointTokenVersion entry of the response of
+        // the GetAccountSummary operation". Reporting a constant would leave a caller that set
+        // v2Token reading back 1.
         if (AwsPartitions.byId(regionResolver.getPartition()).hasGlobalSts()) {
-            summary.put("GlobalEndpointTokenVersion", 1L);
+            summary.put("GlobalEndpointTokenVersion",
+                    "v2Token".equals(getGlobalEndpointTokenVersion()) ? 2L : 1L);
         }
         return summary;
     }
@@ -2225,6 +2285,176 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                             + " characters, either a bare forward slash or a string that begins and ends "
                             + "with a forward slash.", 400);
         }
+    }
+
+    // Account properties and outbound web identity federation
+    // =========================================================================
+
+    /** Every account property, as GetAccountProperties returns them. */
+    public Map<String, String> getAccountProperties() {
+        Map<String, String> properties = new LinkedHashMap<>();
+        for (String key : accountProperties.keys()) {
+            accountProperties.get(key).ifPresent(value -> properties.put(key, value));
+        }
+        return properties;
+    }
+
+    /**
+     * Sets account properties, all of which must be in one namespace.
+     *
+     * <p>The key is {@code Namespace/PropertyName}: AWS requires exactly one {@code /}, forbids a
+     * leading or trailing one, and states that "all keys must belong to the same namespace". A
+     * request mixing namespaces is rejected whole rather than partly applied.
+     */
+    public void putAccountProperties(Map<String, String> properties) {
+        if (properties == null || properties.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "Value null at 'properties' failed to satisfy constraint: Member must not be "
+                            + "null", 400);
+        }
+        String namespace = null;
+        for (Map.Entry<String, String> entry : properties.entrySet()) {
+            String keyNamespace = validateAccountPropertyKey(entry.getKey());
+            validateAccountPropertyValue(entry.getKey(), entry.getValue());
+            if (namespace == null) {
+                namespace = keyNamespace;
+            } else if (!namespace.equals(keyNamespace)) {
+                throw new AwsException("InvalidInput",
+                        "All property keys must belong to the same namespace, but the request "
+                                + "names both " + namespace + " and " + keyNamespace + ".", 400);
+            }
+        }
+        synchronized (accountPropertiesLock) {
+            for (Map.Entry<String, String> entry : properties.entrySet()) {
+                accountProperties.put(entry.getKey(), entry.getValue());
+            }
+        }
+        LOG.infov("Set {0} account property/properties in namespace {1}",
+                properties.size(), namespace);
+    }
+
+    /** The namespace half of the key, having checked the whole key against the model. */
+    private String validateAccountPropertyKey(String key) {
+        if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
+                || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
+            throw new AwsException("InvalidInput",
+                    "Value '" + key + "' at 'properties' failed to satisfy constraint: Map keys "
+                            + "must satisfy constraint: [Member must have length less than or "
+                            + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
+                            + "satisfy regular expression pattern: "
+                            + ACCOUNT_PROPERTY_KEY_PATTERN.pattern() + "]", 400);
+        }
+        int separator = key.indexOf('/');
+        if (separator <= 0 || separator != key.lastIndexOf('/') || separator == key.length() - 1) {
+            throw new AwsException("InvalidInput",
+                    "Value '" + key + "' at 'properties' failed to satisfy constraint: a key is "
+                            + "Namespace/PropertyName, with exactly one forward slash and neither "
+                            + "a leading nor a trailing one.", 400);
+        }
+        return key.substring(0, separator);
+    }
+
+    private void validateAccountPropertyValue(String key, String value) {
+        if (value == null || value.isEmpty()
+                || value.length() > MAX_ACCOUNT_PROPERTY_VALUE_LENGTH) {
+            throw new AwsException("InvalidInput",
+                    "Value at 'properties." + key + "' failed to satisfy constraint: Member must "
+                            + "have length between 1 and " + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH,
+                    400);
+        }
+    }
+
+    /** The account's global endpoint token version, {@code v1Token} or {@code v2Token}. */
+    public void setSecurityTokenServicePreferences(String globalEndpointTokenVersion) {
+        if (globalEndpointTokenVersion == null
+                || !GLOBAL_ENDPOINT_TOKEN_VERSIONS.contains(globalEndpointTokenVersion)) {
+            throw new AwsException("ValidationError",
+                    "Value '" + globalEndpointTokenVersion + "' at 'globalEndpointTokenVersion' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: ["
+                            + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]", 400);
+        }
+        stsPreferences.put(STS_PREFERENCES_KEY, globalEndpointTokenVersion);
+        LOG.infov("Set the global endpoint token version to {0}", globalEndpointTokenVersion);
+    }
+
+    /** The stored token version, which AWS defaults to {@code v1Token} for an existing account. */
+    public String getGlobalEndpointTokenVersion() {
+        return stsPreferences.get(STS_PREFERENCES_KEY).orElse("v1Token");
+    }
+
+    /**
+     * Turns on outbound web identity federation and returns the account's issuer URL. Enabling an
+     * already-enabled account is {@code FeatureEnabled}, which AWS states directly: "You cannot
+     * enable the feature multiple times."
+     *
+     * <p>The issuer is minted once and kept across a disable, so re-enabling returns the same URL.
+     * See {@link OutboundWebIdentityFederation} for why.
+     */
+    public String enableOutboundWebIdentityFederation() {
+        synchronized (outboundFederationLock) {
+            OutboundWebIdentityFederation state =
+                    outboundFederation.get(OUTBOUND_FEDERATION_KEY).orElse(null);
+            if (state != null && state.isEnabled()) {
+                throw new AwsException("FeatureEnabled",
+                        "Outbound identity federation is already enabled for your AWS account. "
+                                + "You cannot enable the feature multiple times.", 409);
+            }
+            if (state == null) {
+                state = new OutboundWebIdentityFederation();
+                state.setIssuerIdentifier(mintIssuerIdentifier());
+            }
+            state.setEnabled(true);
+            outboundFederation.put(OUTBOUND_FEDERATION_KEY, state);
+            LOG.infov("Enabled outbound web identity federation with issuer {0}",
+                    state.getIssuerIdentifier());
+            return state.getIssuerIdentifier();
+        }
+    }
+
+    /** Turns it off. Disabling an already-disabled account is {@code FeatureDisabled}. */
+    public void disableOutboundWebIdentityFederation() {
+        synchronized (outboundFederationLock) {
+            OutboundWebIdentityFederation state = enabledOutboundFederation();
+            state.setEnabled(false);
+            outboundFederation.put(OUTBOUND_FEDERATION_KEY, state);
+            LOG.info("Disabled outbound web identity federation");
+        }
+    }
+
+    /** The issuer URL and whether JWT vending is on, which it is while the feature is enabled. */
+    public OutboundWebIdentityFederation getOutboundWebIdentityFederationInfo() {
+        synchronized (outboundFederationLock) {
+            return enabledOutboundFederation();
+        }
+    }
+
+    /**
+     * The federation state, or {@code FeatureDisabled} when the feature is off. AWS answers the
+     * getter with the disable operation's own wording, so a getter reports that the feature cannot
+     * be disabled twice. Matched rather than improved.
+     */
+    private OutboundWebIdentityFederation enabledOutboundFederation() {
+        OutboundWebIdentityFederation state =
+                outboundFederation.get(OUTBOUND_FEDERATION_KEY).orElse(null);
+        if (state == null || !state.isEnabled()) {
+            throw new AwsException("FeatureDisabled",
+                    "Outbound identity federation is already disabled for your AWS account. You "
+                            + "cannot disable the feature multiple times", 404);
+        }
+        return state;
+    }
+
+    /**
+     * The issuer URL AWS mints for an account: a per-account host under
+     * {@code tokens.sts.global.<dual-stack suffix>}, which the API Reference shows as
+     * {@code https://<uuid>.tokens.sts.global.api.aws}. The suffix comes from the request's
+     * partition rather than the literal, since {@code api.aws} is only the commercial one.
+     */
+    private String mintIssuerIdentifier() {
+        String suffix = AwsPartitions.find(regionResolver.getPartition())
+                .map(AwsPartition::dualStackDnsSuffix)
+                .orElseGet(() -> AwsRegions.dnsSuffixFor(regionResolver.getDefaultRegion()));
+        return "https://" + UUID.randomUUID() + ".tokens.sts.global." + suffix;
     }
 
     // Server certificates
