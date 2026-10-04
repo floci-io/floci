@@ -262,8 +262,25 @@ class CognitoUserPoolUserToGroupAttachmentCfnProvisionerTest {
     }
 
     @Test
-    void deleteOfAnIdNeverRecordedCallsNothing() {
-        provisioner.delete(resource(ID_A), "us-east-1");
+    void deleteOfAnIdNeverRecordedRemovesTheMembershipItNames() {
+        provisioner.delete(resource(POOL + "|grp|alice"), "us-east-1");
+
+        verify(cognito).adminRemoveUserFromGroup(POOL, "grp", "alice");
+    }
+
+    @Test
+    void deleteOfAnUnrecordedIdHoldingAnExtraPipeIsRefused() {
+        StackResource r = resource(POOL + "|a|b|c");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.delete(r, "us-east-1"));
+
+        assertEquals("InvalidRequest", failure.getErrorCode());
+        verifyNoInteractions(cognito);
+    }
+
+    @Test
+    void deleteOfAnIdThatIsNotACompositeCallsNothing() {
+        assertDoesNotThrow(() -> provisioner.delete(resource("stub-id"), "us-east-1"));
 
         verifyNoInteractions(cognito);
     }

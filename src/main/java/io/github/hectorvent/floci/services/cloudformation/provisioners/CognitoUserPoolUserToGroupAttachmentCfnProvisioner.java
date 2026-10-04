@@ -23,8 +23,10 @@ import java.util.Set;
  * <p>Every property is createOnly, so any change is a replacement: the new membership is added and
  * the old one is removed once the update commits, through {@link ReplacementCleanup}. The parts are
  * recorded per physical id, because a group name or username may contain {@code |}, and a membership
- * is removed from its recorded parts, as on AWS. Adding a user who is already in the group is refused
- * as AlreadyExists, and a change that keeps the Ref is refused as a custom-named replacement, as on AWS.
+ * is removed from its recorded parts, as on AWS. Without a record, as for a Cloud Control delete of a
+ * membership it did not create, the membership is removed from its id when the id splits into exactly
+ * three parts, and refused otherwise. Adding a user who is already in the group is refused as
+ * AlreadyExists, and a change that keeps the Ref is refused as a custom-named replacement, as on AWS.
  */
 @ApplicationScoped
 public class CognitoUserPoolUserToGroupAttachmentCfnProvisioner implements CfnResourceProvisioner {
@@ -120,16 +122,37 @@ public class CognitoUserPoolUserToGroupAttachmentCfnProvisioner implements CfnRe
     }
 
     private void removeMembership(Map<String, String> attributes, String physicalId) {
-        JsonNode parts = physicalId == null ? null : memberships(attributes).get(physicalId);
-        if (parts == null || !parts.isArray() || parts.size() != 3) {
+        String[] parts = physicalId == null ? null : membershipParts(attributes, physicalId);
+        if (parts == null) {
             return;
         }
-        String userPoolId = parts.get(0).asText();
-        String groupName = parts.get(1).asText();
-        String username = parts.get(2).asText();
+        String userPoolId = parts[0];
+        String groupName = parts[1];
+        String username = parts[2];
         CfnDeletes.safeDelete("Cognito group membership", physicalId,
                 () -> cognitoService.adminRemoveUserFromGroup(userPoolId, groupName, username),
                 "UserNotFoundException", "ResourceNotFoundException");
+    }
+
+    /**
+     * The [UserPoolId, GroupName, Username] of a membership: its recorded parts, else its id split on
+     * {@code |}. Null when the id is not a membership id; refused when a name holding {@code |} makes
+     * the split ambiguous.
+     */
+    private static String[] membershipParts(Map<String, String> attributes, String physicalId) {
+        JsonNode recorded = memberships(attributes).get(physicalId);
+        if (recorded != null && recorded.isArray() && recorded.size() == 3) {
+            return new String[] {recorded.get(0).asText(), recorded.get(1).asText(), recorded.get(2).asText()};
+        }
+        String[] parts = physicalId.split("\\|", -1);
+        if (parts.length < 3) {
+            return null;
+        }
+        if (parts.length > 3) {
+            throw new AwsException("InvalidRequest", "Cannot tell the GroupName and Username of " + physicalId
+                    + " apart without the attachment's recorded properties, because one of them holds |.", 400);
+        }
+        return parts;
     }
 
     /**
