@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -212,6 +213,19 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
         return array.toString();
     }
 
+    private static JsonNode parseConfigParametersAttribute(String text) {
+        try {
+            JsonNode parsed = MAPPER.readTree(text);
+            if (parsed != null && parsed.isArray()) {
+                return parsed;
+            }
+        } catch (JsonProcessingException e) {
+            LOG.debugv(e, "ConfigParameters is not valid JSON: {0}", text);
+        }
+        throw new AwsException("ValidationException",
+                "ConfigParameters must be a list of ParameterKey/ParameterValue pairs, got: " + text, 400);
+    }
+
     /**
      * CloudFormation drives a resource to the template, so a property the template omits means its
      * default, not "keep what is stored". Every setting that has a default is therefore sent with it,
@@ -221,6 +235,9 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
     private WorkgroupSettings settings(JsonNode props, ProvisionContext ctx) {
         List<ConfigParameter> configParameters = new ArrayList<>();
         JsonNode configNode = props != null ? ctx.engine().resolveNode(props.get("ConfigParameters")) : null;
+        if (configNode != null && configNode.isTextual() && !configNode.textValue().isBlank()) {
+            configNode = parseConfigParametersAttribute(configNode.textValue());
+        }
         if (configNode != null && configNode.isArray()) {
             for (JsonNode entry : configNode) {
                 configParameters.add(new ConfigParameter(ctx.engine().resolve(entry.path("ParameterKey")),

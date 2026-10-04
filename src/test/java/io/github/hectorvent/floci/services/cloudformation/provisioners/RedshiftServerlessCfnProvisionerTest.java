@@ -229,6 +229,37 @@ class RedshiftServerlessCfnProvisionerTest {
     }
 
     @Test
+    void createWorkgroupParsesConfigParametersResolvedFromAnotherWorkgroupAttribute() {
+        when(service.createWorkgroup(eq("my-wg"), eq("my-ns"), any(WorkgroupSettings.class), anyMap(), eq(REGION)))
+                .thenReturn(workgroup("my-wg", "my-ns"));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("WorkgroupName", "my-wg");
+        props.put("NamespaceName", "my-ns");
+        props.put("ConfigParameters", "[{\"ParameterKey\":\"datestyle\",\"ParameterValue\":\"ISO, MDY\"}]");
+
+        provisioner.provision(resource(WORKGROUP_TYPE, null), props, ctx(null));
+
+        ArgumentCaptor<WorkgroupSettings> settings = ArgumentCaptor.forClass(WorkgroupSettings.class);
+        verify(service).createWorkgroup(eq("my-wg"), eq("my-ns"), settings.capture(), anyMap(), eq(REGION));
+        assertEquals(1, settings.getValue().configParameters().size());
+        assertEquals("datestyle", settings.getValue().configParameters().get(0).getParameterKey());
+        assertEquals("ISO, MDY", settings.getValue().configParameters().get(0).getParameterValue());
+    }
+
+    @Test
+    void createWorkgroupRejectsConfigParametersThatAreNotAList() {
+        ObjectNode props = mapper.createObjectNode();
+        props.put("WorkgroupName", "my-wg");
+        props.put("NamespaceName", "my-ns");
+        props.put("ConfigParameters", "not-json");
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(WORKGROUP_TYPE, null), props, ctx(null)));
+
+        assertEquals("ValidationException", rejected.getErrorCode());
+    }
+
+    @Test
     void createWorkgroupMapsEveryPropertyAndRecordsTheEndpointAttributes() {
         when(service.createWorkgroup(eq("my-wg"), eq("my-ns"), any(WorkgroupSettings.class), anyMap(), eq(REGION)))
                 .thenReturn(workgroup("my-wg", "my-ns"));
