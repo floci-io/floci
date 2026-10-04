@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -17,12 +18,15 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.ContextNotActiveException;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -272,15 +276,24 @@ public class SqsService implements Resettable, ResourceProvider {
     private final SnsService snsService;
     private final Clock clock;
     private final String receiptHandleSecret;
+    private final Instance<RequestContext> requestContextInstance;
+    private final IamService iamService;
 
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                       SnsService snsService) {
         this(storageFactory, config, regionResolver, snsService, Clock.systemUTC());
     }
 
-    @Inject
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                       SnsService snsService, Clock clock) {
+        this(storageFactory, config, regionResolver, snsService, clock, null, null);
+    }
+
+    @Inject
+    public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                      SnsService snsService, Clock clock,
+                      Instance<RequestContext> requestContextInstance,
+                      IamService iamService) {
         this(
                 storageFactory.create("sqs", "sqs-queues.json",
                         new TypeReference<Map<String, Queue>>() {
@@ -301,7 +314,9 @@ public class SqsService implements Resettable, ResourceProvider {
                 config.services().sqs().clearFifoDeduplicationCacheOnPurge(),
                 snsService,
                 clock,
-                config.services().sqs().receiptHandleSecret()
+                config.services().sqs().receiptHandleSecret(),
+                requestContextInstance,
+                iamService
         );
     }
 
@@ -318,6 +333,14 @@ public class SqsService implements Resettable, ResourceProvider {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl, Clock clock) {
         this(queueStore, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
                 new RegionResolver("us-east-1", "000000000000"), false, null, clock); // partition-literal: test-shaped constructor default
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl, Clock clock,
+               Instance<RequestContext> requestContextInstance, IamService iamService) {
+        this(queueStore, null, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock, // partition-literal: test-shaped constructor default
+                ReceiptHandle.DEFAULT_SECRET, requestContextInstance, iamService);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
@@ -363,6 +386,18 @@ public class SqsService implements Resettable, ResourceProvider {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService, Clock clock, String receiptHandleSecret) {
+        this(queueStore, messageStore, dedupStore, dedupIdentityStore, defaultVisibilityTimeout, maxMessageSize,
+                baseUrl, regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, clock,
+                receiptHandleSecret, null, null);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               StorageBackend<String, Map<String, Map<String, String>>> dedupIdentityStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, Clock clock, String receiptHandleSecret,
+               Instance<RequestContext> requestContextInstance, IamService iamService) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -376,6 +411,8 @@ public class SqsService implements Resettable, ResourceProvider {
         this.snsService = snsService;
         this.clock = clock;
         this.receiptHandleSecret = receiptHandleSecret;
+        this.requestContextInstance = requestContextInstance;
+        this.iamService = iamService;
         this.moveTasksByHandle = new MoveTaskStore(clock);
         loadPersistedMessages();
         loadPersistedDedup();
@@ -755,6 +792,29 @@ public class SqsService implements Resettable, ResourceProvider {
         return filtered;
     }
 
+    String resolveCurrentSenderId() {
+        if (requestContextInstance != null) {
+            try {
+                RequestContext ctx = requestContextInstance.get();
+                if (ctx != null) {
+                    String akid = ctx.getAccessKeyId();
+                    if (akid != null && iamService != null) {
+                        Optional<String> principalId = iamService.resolveCallerUserId(akid);
+                        if (principalId.isPresent()) {
+                            return principalId.get();
+                        }
+                    }
+                    if (ctx.getAccountId() != null) {
+                        return ctx.getAccountId();
+                    }
+                }
+            } catch (ContextNotActiveException ignored) {
+                // outside request scope, fall through to default
+            }
+        }
+        return regionResolver.getAccountId();
+    }
+
     public Message sendMessage(String queueUrl, String body, Integer delaySeconds, String region) {
         return sendMessage(queueUrl, body, delaySeconds, null, null, region);
     }
@@ -872,6 +932,7 @@ public class SqsService implements Resettable, ResourceProvider {
                     // continues tracking the deduplication ID for the full interval.
                     // Return the original identity without re-enqueueing a message.
                     Message response = new Message(body);
+                    response.setSenderId(resolveCurrentSenderId());
                     if (identity != null) {
                         response.setMessageId(identity.messageId());
                         response.setSequenceNumber(identity.sequenceNumber());
@@ -890,6 +951,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 persistDedup(storageKey);
 
                 Message message = new Message(body);
+                message.setSenderId(resolveCurrentSenderId());
                 message.setMessageGroupId(messageGroupId);
                 message.setMessageDeduplicationId(dedupId);
                 message.setSequenceNumber(sequenceCounter.incrementAndGet());
@@ -919,6 +981,7 @@ public class SqsService implements Resettable, ResourceProvider {
         // Standard queue. MessageGroupId is retained for ReceiveMessage to
         // return (fair queues); it has no effect on standard-queue delivery.
         Message message = new Message(body);
+        message.setSenderId(resolveCurrentSenderId());
         message.setMessageGroupId(messageGroupId);
         message.setAwsTraceHeader(awsTraceHeader);
         if (effectiveDelaySeconds > 0) {
