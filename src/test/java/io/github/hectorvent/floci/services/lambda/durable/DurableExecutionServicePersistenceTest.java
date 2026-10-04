@@ -55,7 +55,7 @@ class DurableExecutionServicePersistenceTest {
         PersistentStorageFactory firstStorage = new PersistentStorageFactory(directory);
         DurableExecutionService first = newService(firstStorage, before);
         before.script((service, event) -> {
-            service.checkpoint(arn(event), token(event), List.of(
+            service.checkpoint(arn(event), token(event), null, List.of(
                     update("s1", DurableOperationType.STEP, DurableOperationAction.START, null, null),
                     update("s1", DurableOperationType.STEP, DurableOperationAction.SUCCEED, "\"saved\"", null),
                     update("w1", DurableOperationType.WAIT, DurableOperationAction.START, null, 5)));
@@ -80,7 +80,7 @@ class DurableExecutionServicePersistenceTest {
         });
         restarted.recoverAfterRestart();
 
-        assertThrows(AwsException.class, () -> restarted.checkpoint(executionArn, oldToken, List.of()));
+        assertThrows(AwsException.class, () -> restarted.checkpoint(executionArn, oldToken, null, List.of()));
         clock.advance(Duration.ofSeconds(5));
         restarted.sweep();
 

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.lambda.durable.DurableFunctionInvoker.DurableInvocationResult;
 import io.github.hectorvent.floci.services.lambda.durable.DurableFunctionInvoker.ResolvedDurableTarget;
+import io.github.hectorvent.floci.services.lambda.durable.model.DurableCheckpointReplay;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecution;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecutionStatus;
@@ -232,11 +233,17 @@ public class DurableExecutionService implements Resettable {
         return String.format("%019d", ascending ? value : Long.MAX_VALUE - value);
     }
 
-    public CheckpointResult checkpoint(String executionArn, String checkpointToken, List<DurableOperationUpdate> updates) {
+    /** A retry of the last checkpoint with the same {@code clientToken} gets the same answer again. */
+    public CheckpointResult checkpoint(String executionArn, String checkpointToken, String clientToken,
+                                       List<DurableOperationUpdate> updates) {
         ArnParts arn = parseArn(executionArn);
         List<Runnable> effects = new ArrayList<>();
         CheckpointResult result;
         synchronized (lockFor(arn)) {
+            CheckpointResult replayed = replayLastCheckpoint(arn, checkpointToken, clientToken);
+            if (replayed != null) {
+                return replayed;
+            }
             DurableExecution execution = loadWithCurrentToken(arn, checkpointToken);
             long now = clock.millis();
             DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution, updates, now);
@@ -252,6 +259,10 @@ public class DurableExecutionService implements Resettable {
                 nextToken = DurableTokens.checkpointToken(execution.getExecutionArn(),
                         execution.getCurrentInvocationId(), execution.getCheckpointSequence());
             }
+            // AWS does not replay the checkpoint that closed the execution.
+            execution.setLastCheckpoint(clientToken == null || nextToken == null ? null
+                    : new DurableCheckpointReplay(checkpointToken, clientToken, nextToken,
+                            changed.stream().map(DurableOperation::getId).toList()));
             execution.setSeenSequence(execution.getChangeSequence());
             save(execution);
             result = new CheckpointResult(nextToken, changed);
@@ -610,6 +621,31 @@ public class DurableExecutionService implements Resettable {
                 waiter.complete(execution);
             }
         });
+    }
+
+    /** Null unless this is the last checkpoint again, with the same ClientToken, and its token is still current. */
+    private CheckpointResult replayLastCheckpoint(ArnParts arn, String checkpointToken, String clientToken) {
+        if (clientToken == null) {
+            return null;
+        }
+        DurableExecution execution = store.getForAccount(arn.accountId(), arn.storeKey())
+                .filter(candidate -> candidate.getExecutionArn().equals(arn.arn()))
+                .orElse(null);
+        DurableCheckpointReplay last = execution == null ? null : execution.getLastCheckpoint();
+        if (last == null || execution.isClosed() || execution.getCurrentInvocationId() == null
+                || !clientToken.equals(last.getClientToken()) || !last.getRequestToken().equals(checkpointToken)
+                || !last.getResponseToken().equals(DurableTokens.checkpointToken(execution.getExecutionArn(),
+                        execution.getCurrentInvocationId(), execution.getCheckpointSequence()))) {
+            return null;
+        }
+        List<DurableOperation> operations = new ArrayList<>();
+        for (String id : last.getOperationIds()) {
+            DurableOperation operation = execution.getOperations().get(id);
+            if (operation != null) {
+                operations.add(operation);
+            }
+        }
+        return new CheckpointResult(last.getResponseToken(), operations);
     }
 
     /** Checkpoint and state calls answer an unknown execution as a bad token, not as ResourceNotFoundException. */

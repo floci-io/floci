@@ -69,7 +69,8 @@ public class DurableExecutionController {
     public Response checkpoint(@Context HttpHeaders headers, @PathParam("arn") String arn, String body) {
         Map<String, Object> request = readObject(body);
         DurableExecutionService.CheckpointResult result = service.checkpoint(ownedArn(headers, arn),
-                stringMember(request, "CheckpointToken"), DurableWire.parseUpdates(request.get("Updates")));
+                stringMember(request, "CheckpointToken"), stringMember(request, "ClientToken"),
+                DurableWire.parseUpdates(request.get("Updates")));
         ObjectNode response = objectMapper.createObjectNode();
         if (result.checkpointToken() != null) {
             response.put("CheckpointToken", result.checkpointToken());

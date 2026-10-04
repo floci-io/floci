@@ -51,6 +51,7 @@ public class DurableExecution {
     private boolean reinvokeRequested;
     private int consecutiveInvocationFailures;
     private Long nextInvocationAttemptAt;
+    private DurableCheckpointReplay lastCheckpoint;
 
     public DurableExecution() {
     }
@@ -192,4 +193,7 @@ public class DurableExecution {
     public void setNextInvocationAttemptAt(Long nextInvocationAttemptAt) {
         this.nextInvocationAttemptAt = nextInvocationAttemptAt;
     }
+
+    public DurableCheckpointReplay getLastCheckpoint() { return lastCheckpoint; }
+    public void setLastCheckpoint(DurableCheckpointReplay lastCheckpoint) { this.lastCheckpoint = lastCheckpoint; }
 }

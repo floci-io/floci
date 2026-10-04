@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObje
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecution;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecutionStatus;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableHistoryEvent;
+import io.github.hectorvent.floci.services.lambda.durable.model.DurableOperation;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableOperationAction;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableOperationStatus;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableOperationType;
@@ -190,7 +191,7 @@ class DurableExecutionServiceTest {
             String arn = event.get("DurableExecutionArn").asText();
             String otherArn = arn.substring(0, arn.lastIndexOf('/') + 1) + "other-id";
             AwsException other = assertThrows(AwsException.class,
-                    () -> service.checkpoint(otherArn, second, List.of()));
+                    () -> service.checkpoint(otherArn, second, null, List.of()));
             assertEquals("Checkpoint token is not valid for the durable execution ARN", other.getMessage());
             CheckpointResult closing = checkpoint(event, second, List.of(executionSucceed("\"r\"")));
             assertNull(closing.checkpointToken(), "the closing checkpoint carries no token");
@@ -201,6 +202,28 @@ class DurableExecutionServiceTest {
         DurableExecution execution = service.get(start("exec-1", "{}", true).getExecutionArn());
         assertEquals(DurableExecutionStatus.SUCCEEDED, execution.getStatus());
         assertEquals("\"r\"", execution.getResult(), "the checkpointed result wins over the handler return");
+    }
+
+    @Test
+    void aRetriedCheckpointWithTheSameClientTokenGetsTheSameAnswer() {
+        invoker.script(event -> {
+            String arn = event.get("DurableExecutionArn").asText();
+            String first = token(event);
+            List<DurableOperationUpdate> updates = List.of(step("s1", DurableOperationAction.START, null, null),
+                    step("s1", DurableOperationAction.SUCCEED, "\"r\"", null));
+            CheckpointResult accepted = service.checkpoint(arn, first, "ct-1", updates);
+            CheckpointResult retried = service.checkpoint(arn, first, "ct-1", List.of());
+            assertEquals(accepted.checkpointToken(), retried.checkpointToken());
+            assertEquals(List.of("s1"), retried.newExecutionState().stream().map(DurableOperation::getId).toList());
+            assertThrows(AwsException.class, () -> service.checkpoint(arn, first, "ct-2", updates));
+            service.checkpoint(arn, accepted.checkpointToken(), "ct-3", List.of());
+            assertThrows(AwsException.class, () -> service.checkpoint(arn, first, "ct-1", updates));
+            return succeeded("");
+        });
+
+        DurableExecution execution = service.get(start("exec-1", "{}", true).getExecutionArn());
+        assertEquals(List.of("ExecutionStarted", "StepStarted", "StepSucceeded", "InvocationCompleted",
+                "ExecutionSucceeded"), eventTypes(execution));
     }
 
     @Test
@@ -278,7 +301,7 @@ class DurableExecutionServiceTest {
         assertNull(stopped.getError().getErrorMessage());
         assertEquals(stopped.getEndTimestamp(), service.stop(arn, DurableErrorObject.of("x", "y")).getEndTimestamp());
         assertNull(service.get(arn).getError().getErrorType(), "a second stop does not overwrite the first");
-        assertThrows(AwsException.class, () -> service.checkpoint(arn, token, List.of()));
+        assertThrows(AwsException.class, () -> service.checkpoint(arn, token, null, List.of()));
         assertEquals("ExecutionStopped", eventTypes(service.get(arn)).getLast());
 
         clock.advance(Duration.ofSeconds(60));
@@ -499,7 +522,7 @@ class DurableExecutionServiceTest {
     }
 
     private CheckpointResult checkpoint(JsonNode event, String token, List<DurableOperationUpdate> updates) {
-        return service.checkpoint(event.get("DurableExecutionArn").asText(), token, updates);
+        return service.checkpoint(event.get("DurableExecutionArn").asText(), token, null, updates);
     }
 
     private static ListRequest listRequest(Set<DurableExecutionStatus> statuses, String name, Integer maxItems,
