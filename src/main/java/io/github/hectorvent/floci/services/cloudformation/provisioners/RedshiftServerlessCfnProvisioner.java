@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
@@ -32,6 +34,7 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
 
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessCfnProvisioner.class);
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String NAMESPACE = "AWS::RedshiftServerless::Namespace";
     private static final String WORKGROUP = "AWS::RedshiftServerless::Workgroup";
     private static final int NAME_MAX_LENGTH = 64;
@@ -191,11 +194,22 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
         r.getAttributes().put("Workgroup.CreationDate", workgroup.getCreationDate().toString());
         r.getAttributes().put("Workgroup.SecurityGroupIds", String.join(",", workgroup.getSecurityGroupIds()));
         r.getAttributes().put("Workgroup.SubnetIds", String.join(",", workgroup.getSubnetIds()));
+        r.getAttributes().put("Workgroup.ConfigParameters", configParametersJson(workgroup.getConfigParameters()));
         r.getAttributes().put("Workgroup.Endpoint.Address", workgroup.getEndpoint().getAddress());
         r.getAttributes().put("Workgroup.Endpoint.Port", String.valueOf(workgroup.getEndpoint().getPort()));
         if (workgroup.getMaxCapacity() != null) {
             r.getAttributes().put("Workgroup.MaxCapacity", String.valueOf(workgroup.getMaxCapacity()));
         }
+    }
+
+    private static String configParametersJson(List<ConfigParameter> parameters) {
+        ArrayNode array = MAPPER.createArrayNode();
+        for (ConfigParameter parameter : parameters) {
+            array.addObject()
+                    .put("ParameterKey", parameter.getParameterKey())
+                    .put("ParameterValue", parameter.getParameterValue());
+        }
+        return array.toString();
     }
 
     /**

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.redshiftserverless.WorkgroupSettings;
+import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
@@ -96,6 +97,7 @@ class RedshiftServerlessCfnProvisionerTest {
         workgroup.setCreationDate(Instant.parse("2026-10-03T00:00:00Z"));
         workgroup.setSecurityGroupIds(new ArrayList<>(List.of("sg-1", "sg-2")));
         workgroup.setEndpoint(new Endpoint("localhost", 7100));
+        workgroup.setConfigParameters(new ArrayList<>(List.of(new ConfigParameter("datestyle", "ISO, MDY"))));
         return workgroup;
     }
 
@@ -271,6 +273,8 @@ class RedshiftServerlessCfnProvisionerTest {
         assertEquals("7100", attributes.get("Workgroup.Endpoint.Port"));
         assertEquals("32", attributes.get("Workgroup.BaseCapacity"));
         assertEquals("sg-1,sg-2", attributes.get("Workgroup.SecurityGroupIds"));
+        assertEquals("[{\"ParameterKey\":\"datestyle\",\"ParameterValue\":\"ISO, MDY\"}]",
+                attributes.get("Workgroup.ConfigParameters"));
         assertEquals("AVAILABLE", attributes.get("Workgroup.Status"));
         assertFalse(attributes.containsKey("Workgroup.MaxCapacity"), "unset on the stored workgroup");
     }
