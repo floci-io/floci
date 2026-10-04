@@ -144,7 +144,7 @@ class IotAuthorizerTest {
     }
 
     @Test
-    @DisplayName("Create a signed authorizer stores the token key name and the PEM verbatim")
+    @DisplayName("Create a signed authorizer stores the token key name and the PEM verbatim, text before the header included")
     void createSignedAuthorizerStoresPublicKeyVerbatim() {
         String name = name("signed");
 
@@ -160,6 +160,15 @@ class IotAuthorizerTest {
         assertThat(description.tokenSigningPublicKeys()).containsExactly(Map.entry("k1", rsaKey1));
         assertThat(description.status()).isEqualTo(AuthorizerStatus.INACTIVE);
         assertThat(description.enableCachingForHttp()).isFalse();
+
+        String prefixed = name("prefixed");
+        String prefixedPem = "junk\n" + rsaKey2;
+        create(prefixed, b -> b.authorizerFunctionArn(functionArn("fn"))
+                .tokenKeyName("tok")
+                .tokenSigningPublicKeys(Map.of("k1", prefixedPem)));
+        assertThat(describe(prefixed).tokenSigningPublicKeys())
+                .as("text before the PEM header is skipped and the value is stored verbatim")
+                .containsExactly(Map.entry("k1", prefixedPem));
     }
 
     @Test
@@ -200,6 +209,27 @@ class IotAuthorizerTest {
                         .tokenKeyName("tok")
                         .tokenSigningPublicKeys(Map.of("k1", rsa1024Key)),
                 "Authorizer " + shortRsa + " public key for key name k1 invalid: Key must be 2048 bits but was 1024 bits");
+
+        List<String> body = rsaKey1.lines().filter(line -> !line.startsWith("-----")).toList();
+        String base64 = String.join("", body);
+        String bodyLines = String.join("\n", body);
+        Map<String, String> notRsa = new LinkedHashMap<>();
+        notRsa.put("rawb64", base64);
+        notRsa.put("bodyonly", bodyLines);
+        notRsa.put("oneline", "-----BEGIN PUBLIC KEY-----" + base64 + "-----END PUBLIC KEY-----");
+        notRsa.forEach((suffix, pem) -> {
+            String envelope = name(suffix);
+            assertCreateRejected(envelope, b -> b.authorizerFunctionArn(functionArn("fn"))
+                            .tokenKeyName("tok")
+                            .tokenSigningPublicKeys(Map.of("k1", pem)),
+                    "Authorizer " + envelope + " public key for key name k1 not a valid RSA key");
+        });
+
+        String noEnd = name("noend");
+        assertCreateRejected(noEnd, b -> b.authorizerFunctionArn(functionArn("fn"))
+                        .tokenKeyName("tok")
+                        .tokenSigningPublicKeys(Map.of("k1", "-----BEGIN PUBLIC KEY-----\n" + bodyLines)),
+                "Cannot convert public key PEM for authorizer " + noEnd + " to RSA key");
     }
 
     @Test

@@ -10,6 +10,9 @@ import io.github.hectorvent.floci.services.iot.model.IotAuthorizer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -20,6 +23,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -124,6 +128,37 @@ class IotAuthorizerServiceTest {
         assertEquals(Map.of("k1", rsaKey1 + "\n"), created.getTokenSigningPublicKeys());
         assertEquals("ACTIVE", created.getStatus());
         assertTrue(created.isEnableCachingForHttp());
+    }
+
+    /** The envelopes measured on AWS, which reads the PEM line by line. */
+    static Stream<Arguments> malformedPemEnvelopes() {
+        List<String> body = rsaKey1.lines().filter(line -> !line.startsWith("-----")).toList();
+        String base64 = String.join("", body);
+        String bodyLines = String.join("\n", body);
+        String notRsa = "Authorizer a public key for key name k1 not a valid RSA key";
+        return Stream.of(
+                Arguments.of("raw base64, no envelope", base64, notRsa),
+                Arguments.of("body lines, no envelope", bodyLines, notRsa),
+                Arguments.of("indented header line", "\n  " + rsaKey1 + "  \n", notRsa),
+                Arguments.of("envelope on one line", "-----BEGIN PUBLIC KEY-----" + base64 + "-----END PUBLIC KEY-----", notRsa),
+                Arguments.of("header without end line", "-----BEGIN PUBLIC KEY-----\n" + bodyLines,
+                        "Cannot convert public key PEM for authorizer a to RSA key"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("malformedPemEnvelopes")
+    void createRejectsAPemEnvelopeAwsCannotRead(String label, String pem, String message) {
+        assertInvalid(message, () -> service.createAuthorizer("a", signed(Map.of("k1", pem)), REGION));
+    }
+
+    @Test
+    void createSkipsTextBeforeThePemHeaderAndKeepsTheValueVerbatim() {
+        String pem = "junk\n" + rsaKey1;
+
+        IotAuthorizer created = service.createAuthorizer("prefixed", signed(Map.of("k1", pem)), REGION);
+
+        assertEquals(Map.of("k1", pem), created.getTokenSigningPublicKeys());
+        assertEquals(Map.of("k1", pem), service.describeAuthorizer("prefixed", REGION).getTokenSigningPublicKeys());
     }
 
     @Test

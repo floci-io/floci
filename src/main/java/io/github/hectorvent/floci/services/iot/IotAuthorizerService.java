@@ -311,14 +311,25 @@ public class IotAuthorizerService {
         if (pem == null || pem.isEmpty()) {
             throw invalid("Token signing public keys for authorizer " + name + " cannot be null or empty");
         }
-        // ponytail: a header check stands in for AWS's PEM object parser, which tells a private key apart.
+        // ponytail: a line scan stands in for AWS's PEM object parser: text before the header is skipped,
+        // no header line is not a key, a header without its end line cannot convert, and a private key
+        // header is told apart first.
         if (pem.contains("PRIVATE KEY")) {
+            throw invalid("Cannot convert public key PEM for authorizer " + name + " to RSA key");
+        }
+        List<String> lines = pem.lines().toList();
+        int begin = lines.indexOf("-----BEGIN PUBLIC KEY-----");
+        if (begin < 0) {
+            throw invalid("Authorizer " + name + " public key for key name " + keyName + " not a valid RSA key");
+        }
+        List<String> rest = lines.subList(begin + 1, lines.size());
+        int end = rest.indexOf("-----END PUBLIC KEY-----");
+        if (end < 0) {
             throw invalid("Cannot convert public key PEM for authorizer " + name + " to RSA key");
         }
         RSAPublicKey key;
         try {
-            byte[] der = Base64.getMimeDecoder().decode(
-                    pem.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", ""));
+            byte[] der = Base64.getDecoder().decode(String.join("", rest.subList(0, end)));
             key = (RSAPublicKey) KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
         } catch (GeneralSecurityException | IllegalArgumentException e) {
             throw invalid("Authorizer " + name + " public key for key name " + keyName + " not a valid RSA key");
