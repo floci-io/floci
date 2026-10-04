@@ -257,7 +257,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         String auth = ctx.getHeaderString("Authorization");
-        if (auth == null) {
+        if (auth == null || auth.isBlank()) {
             auth = requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
         }
         if (auth == null) {
