@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.servicequotas;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -40,6 +43,33 @@ class ServiceQuotasServiceTest {
                 .map(ServiceQuotasService.QuotaDefinition::quotaCode)
                 .toList();
         assertTrue(codes.contains("L-2DC20C30"), codes.toString());
+    }
+
+    @Test
+    void vpcResolvesRealQuotaCodesWithNamesThroughGetAndList() {
+        Map<String, String> want = Map.of(
+                "L-FE5A380F", "NAT gateways per Availability Zone",
+                "L-2AEEBF1A", "Rules per network ACL");
+        Map<String, Double> defaults = Map.of("L-FE5A380F", 5.0, "L-2AEEBF1A", 20.0);
+        for (Map.Entry<String, String> e : want.entrySet()) {
+            JsonNode quota = service.getServiceQuota("vpc", e.getKey(), "us-east-1", "000000000000").path("Quota");
+            assertEquals(e.getKey(), quota.path("QuotaCode").asText());
+            assertEquals(e.getValue(), quota.path("QuotaName").asText());
+            assertEquals(defaults.get(e.getKey()), quota.path("Value").asDouble());
+            assertEquals("Amazon Virtual Private Cloud (Amazon VPC)", quota.path("ServiceName").asText());
+        }
+        Map<String, String> listed = new HashMap<>();
+        service.listServiceQuotas("vpc", null, null, 100, "us-east-1", "000000000000").withArray("Quotas")
+                .forEach(q -> listed.put(q.path("QuotaCode").asText(), q.path("QuotaName").asText()));
+        want.forEach((code, name) -> assertEquals(name, listed.get(code), listed.toString()));
+        assertEquals(want.size() + 3, listed.size(), "synthetic quotas still appended: " + listed);
+    }
+
+    @Test
+    void vpcUnknownQuotaCodeStillThrowsNoSuchResource() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.getServiceQuota("vpc", "L-DOESNOTEX", "us-east-1", "000000000000"));
+        assertEquals("NoSuchResourceException", e.getErrorCode());
     }
 
     @Test

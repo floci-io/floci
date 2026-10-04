@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
@@ -10,6 +12,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Deployment;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
+import io.github.hectorvent.floci.services.apigatewayv2.model.VpcLink;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -48,6 +51,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     private static final String INTEGRATION = "AWS::ApiGatewayV2::Integration";
     private static final String STAGE = "AWS::ApiGatewayV2::Stage";
     private static final String DEPLOYMENT = "AWS::ApiGatewayV2::Deployment";
+    private static final String VPC_LINK = "AWS::ApiGatewayV2::VpcLink";
 
     private static final String BODY_ROUTE_IDS_ATTR = "__FlociApiGatewayV2BodyRouteIds";
     private static final String BODY_INTEGRATION_IDS_ATTR = "__FlociApiGatewayV2BodyIntegrationIds";
@@ -67,7 +71,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(API, AUTHORIZER, ROUTE, INTEGRATION, STAGE, DEPLOYMENT);
+        return Set.of(API, AUTHORIZER, ROUTE, INTEGRATION, STAGE, DEPLOYMENT, VPC_LINK);
     }
 
     @Override
@@ -79,6 +83,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
             case INTEGRATION -> provisionIntegration(r, props, ctx);
             case STAGE -> provisionStage(r, props, ctx);
             case DEPLOYMENT -> provisionDeployment(r, props, ctx);
+            case VPC_LINK -> provisionVpcLink(r, props, ctx);
             default -> throw new IllegalStateException("Unhandled type: " + r.getResourceType());
         }
     }
@@ -100,10 +105,55 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                     }
                 }
             }
+            case VPC_LINK -> delete(VPC_LINK, resource.getPhysicalId(), region);
             default -> {
                 // Route, Integration, Stage and Deployment are removed when their Api is deleted.
             }
         }
+    }
+
+    @Override
+    public void delete(String resourceType, String physicalId, String region) {
+        if (VPC_LINK.equals(resourceType) && physicalId != null && !physicalId.isBlank()) {
+            CfnDeletes.safeDelete("API Gateway V2 VPC link", physicalId,
+                    () -> apiGatewayV2Service.deleteVpcLink(region, physicalId), "NotFoundException");
+        }
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.VPC_LINK_UPDATE_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        if (VPC_LINK.equals(resource.getResourceType())) {
+            return rollbackVpcLinkUpdate(resource);
+        }
+        if (INTEGRATION.equals(resource.getResourceType())) {
+            return rollbackIntegrationConnection(resource);
+        }
+        return false;
     }
 
     @Override
@@ -813,15 +863,93 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         req.put("integrationType", ctx.resolveOptional(props, "IntegrationType"));
         req.put("integrationUri", ctx.resolveOptional(props, "IntegrationUri"));
         req.put("payloadFormatVersion", ctx.resolveOrDefault(props, "PayloadFormatVersion", "2.0"));
+        String connectionType = ctx.resolveOptional(props, "ConnectionType");
+        String connectionId = ctx.resolveOptional(props, "ConnectionId");
+        req.put("connectionType", connectionType);
+        req.put("connectionId", connectionId);
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
 
         Integration integration;
         if (r.getPhysicalId() == null) {
             integration = apiGatewayV2Service.createIntegration(region, apiId, req);
         } else {
-            integration = apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req);
+            Integration prior = apiGatewayV2Service.getIntegration(region, apiId, r.getPhysicalId());
+            r.getAttributes().put(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR,
+                    integrationConnectionSnapshot(region, apiId, prior, req));
+            // The connection changes first, in one call. If the update after it fails, the connection
+            // is the only change to undo.
+            try {
+                // A connection removed from the template is removed here too. INTERNET is the AWS default.
+                apiGatewayV2Service.replaceIntegrationConnection(region, apiId, r.getPhysicalId(),
+                        connectionType != null ? connectionType : "INTERNET", connectionId);
+                integration = apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req);
+            } catch (RuntimeException failure) {
+                // The stack skips rollbackUpdate for a resource whose own update failed, so undo it here.
+                try {
+                    rollbackIntegrationConnection(r);
+                } catch (RuntimeException restoreFailure) {
+                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                            "Could not roll back the connection of integration " + r.getPhysicalId() + ": "
+                                    + restoreFailure.getMessage());
+                    if (restoreFailure != failure) {
+                        failure.addSuppressed(restoreFailure);
+                    }
+                }
+                throw failure;
+            }
         }
         r.setPhysicalId(integration.getIntegrationId());
         r.getAttributes().put("IntegrationId", integration.getIntegrationId());
+    }
+
+    /**
+     * The connection the integration had before this update, and whether the update also changes
+     * another field. UpdateIntegration keeps a field the request leaves out, so only a value that
+     * is set and differs counts as a change.
+     */
+    private String integrationConnectionSnapshot(String region, String apiId, Integration prior,
+                                                 Map<String, Object> req) {
+        boolean otherFieldChanged = changes(req.get("integrationType"), prior.getIntegrationType())
+                || changes(req.get("integrationUri"), prior.getIntegrationUri())
+                || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion());
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("apiId", apiId);
+        snapshot.put("connectionType", prior.getConnectionType());
+        snapshot.put("connectionId", prior.getConnectionId());
+        snapshot.put("otherFieldChanged", otherFieldChanged);
+        return snapshot.toString();
+    }
+
+    private static boolean changes(Object requested, String current) {
+        return requested != null && !requested.equals(current);
+    }
+
+    /**
+     * Puts the connection back from the snapshot taken before the update. Answers true only when the
+     * update changed nothing else: this provisioner keeps no copy of the other fields, so the stack
+     * must still report that their rollback is not implemented.
+     */
+    private boolean rollbackIntegrationConnection(StackResource resource) {
+        String raw = resource.getAttributes().get(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = objectMapper.readTree(raw);
+        } catch (JsonProcessingException e) {
+            LOG.errorv("Could not parse integration connection snapshot for {0}: {1}",
+                    resource.getLogicalId(), e.getMessage());
+            return false;
+        }
+        apiGatewayV2Service.replaceIntegrationConnection(snapshot.path("region").asText(),
+                snapshot.path("apiId").asText(), resource.getPhysicalId(),
+                textOrNull(snapshot, "connectionType"), textOrNull(snapshot, "connectionId"));
+        // Spent only once the restore succeeded, so a restore that throws can be tried again.
+        resource.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
+        return !snapshot.path("otherFieldChanged").asBoolean();
     }
 
     // ── Stage ────────────────────────────────────────────────────────────────
@@ -863,6 +991,147 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         Deployment deployment = apiGatewayV2Service.createDeployment(ctx.region(), apiId, req);
         r.setPhysicalId(deployment.getDeploymentId());
         r.getAttributes().put("DeploymentId", deployment.getDeploymentId());
+    }
+
+    // ── VpcLink ──────────────────────────────────────────────────────────────
+
+    /**
+     * Creates the VPC link, or updates it in place when its subnets and security groups did not
+     * change: on AWS only {@code Name} and {@code Tags} update without replacement. Any other change
+     * creates a new link, and {@link ReplacementCleanup} deletes the old one after the update.
+     */
+    private void provisionVpcLink(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String region = ctx.region();
+        String name = ctx.resolveOptional(props, "Name");
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationError", VPC_LINK + " requires Name", 400);
+        }
+        List<String> subnetIds = ctx.resolveStringList(props, "SubnetIds");
+        if (subnetIds.isEmpty()) {
+            throw new AwsException("ValidationError", VPC_LINK + " requires SubnetIds", 400);
+        }
+        List<String> securityGroupIds = ctx.resolveStringList(props, "SecurityGroupIds");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.VPC_LINK_UPDATE_SNAPSHOT_ATTR);
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+
+        VpcLink prior = ctx.isUpdate() ? findVpcLink(region, ctx.priorPhysicalId()) : null;
+        String vpcLinkId;
+        if (prior != null && subnetIds.equals(listOrEmpty(prior.getSubnetIds()))
+                && securityGroupIds.equals(listOrEmpty(prior.getSecurityGroupIds()))) {
+            vpcLinkId = prior.getVpcLinkId();
+            r.getAttributes().put(CfnRollback.VPC_LINK_UPDATE_SNAPSHOT_ATTR, vpcLinkSnapshot(prior, region));
+            r.setPhysicalId(vpcLinkId);
+            // Tags go first: the service refuses a reserved tag key, and refusing it before the
+            // rename leaves the name as the stack last committed it.
+            try {
+                reconcileVpcLinkTags(region, vpcLinkId, tags);
+                apiGatewayV2Service.updateVpcLink(region, vpcLinkId, Map.of("name", name));
+            } catch (RuntimeException failure) {
+                // The stack skips rollbackUpdate for a resource whose own update failed, so undo it here.
+                try {
+                    rollbackVpcLinkUpdate(r);
+                } catch (RuntimeException restoreFailure) {
+                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                            "Could not roll back the update of VPC link " + vpcLinkId + ": "
+                                    + restoreFailure.getMessage());
+                    if (restoreFailure != failure) {
+                        failure.addSuppressed(restoreFailure);
+                    }
+                }
+                throw failure;
+            }
+        } else {
+            Map<String, Object> req = new HashMap<>();
+            req.put("name", name);
+            req.put("subnetIds", subnetIds);
+            req.put("securityGroupIds", securityGroupIds);
+            if (!tags.isEmpty()) {
+                req.put("tags", tags);
+            }
+            vpcLinkId = apiGatewayV2Service.createVpcLink(region, req).getVpcLinkId();
+        }
+        r.setPhysicalId(vpcLinkId);
+        r.getAttributes().put("VpcLinkId", vpcLinkId);
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    private VpcLink findVpcLink(String region, String vpcLinkId) {
+        try {
+            return apiGatewayV2Service.getVpcLink(region, vpcLinkId);
+        } catch (AwsException e) {
+            if (!"NotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            // The prior link is gone, so the update creates a new one.
+            return null;
+        }
+    }
+
+    private void reconcileVpcLinkTags(String region, String vpcLinkId, Map<String, String> desired) {
+        String arn = AwsArnUtils.Arn.of("apigateway", region, "", "/vpclinks/" + vpcLinkId).toString();
+        Map<String, String> current = apiGatewayV2Service.getTags(arn);
+        // Only new or changed tags are sent: TagResource refuses a reserved key, even one the link
+        // already carries from its creation.
+        Map<String, String> changed = new LinkedHashMap<>();
+        desired.forEach((key, value) -> {
+            if (!value.equals(current.get(key))) {
+                changed.put(key, value);
+            }
+        });
+        if (!changed.isEmpty()) {
+            apiGatewayV2Service.tagResource(arn, changed);
+        }
+        List<String> stale = ProvisionContext.staleTagKeys(current, desired);
+        if (!stale.isEmpty()) {
+            apiGatewayV2Service.untagResource(arn, stale);
+        }
+    }
+
+    private String vpcLinkSnapshot(VpcLink link, String region) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("name", link.getName());
+        ObjectNode tags = snapshot.putObject("tags");
+        if (link.getTags() != null) {
+            link.getTags().forEach(tags::put);
+        }
+        return snapshot.toString();
+    }
+
+    /**
+     * Puts the name and tags back from the snapshot taken before an in-place update. With no
+     * snapshot, this update did not change the link.
+     */
+    private boolean rollbackVpcLinkUpdate(StackResource resource) {
+        String raw = resource.getAttributes().get(CfnRollback.VPC_LINK_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return true;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = objectMapper.readTree(raw);
+        } catch (JsonProcessingException e) {
+            LOG.errorv("Could not parse VPC link update snapshot for {0}: {1}",
+                    resource.getLogicalId(), e.getMessage());
+            return false;
+        }
+        String region = snapshot.path("region").asText();
+        Map<String, String> tags = new LinkedHashMap<>();
+        snapshot.path("tags").properties().forEach(e -> tags.put(e.getKey(), e.getValue().asText()));
+        if (snapshot.path("name").isTextual()) {
+            apiGatewayV2Service.updateVpcLink(region, resource.getPhysicalId(),
+                    Map.of("name", snapshot.path("name").asText()));
+        }
+        reconcileVpcLinkTags(region, resource.getPhysicalId(), tags);
+        // Spent only once the restore succeeded, so a restore that throws can be tried again.
+        resource.getAttributes().remove(CfnRollback.VPC_LINK_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    private static List<String> listOrEmpty(List<String> values) {
+        return values == null ? List.of() : values;
     }
 
     // ── Local copies of shared utilities (still used by staying monolith types) ──

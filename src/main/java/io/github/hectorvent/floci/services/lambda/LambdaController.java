@@ -1,16 +1,17 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
-import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -29,12 +30,14 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -238,8 +241,12 @@ public class LambdaController {
     @Path("/functions/{functionName}/invocations")
     @Consumes(MediaType.WILDCARD)
     public Response invoke(@Context HttpHeaders headers,
+                           @Context UriInfo uriInfo,
                            @PathParam("functionName") String functionName,
                            byte[] payload) {
+        // Read from the query itself: @QueryParam reports a present but empty Qualifier as null, which
+        // would hide it from the Qualifier validation.
+        String qualifier = uriInfo.getQueryParameters().getFirst("Qualifier");
         String region = regionResolver.resolveRegion(headers);
         String invocationTypeHeader = headers.getHeaderString("X-Amz-Invocation-Type");
         InvocationType type = InvocationType.parse(invocationTypeHeader);
@@ -258,7 +265,10 @@ public class LambdaController {
                     .build();
         }
 
-        InvokeResult result = lambdaService.invoke(region, functionName, payload, type);
+        String clientContext = type == InvocationType.RequestResponse
+                ? decodeClientContext(headers.getHeaderString("X-Amz-Client-Context")) : null;
+
+        InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext);
 
         if (type != InvocationType.Event
                 && result.getPayload() != null
@@ -286,6 +296,20 @@ public class LambdaController {
         }
 
         return builder.build();
+    }
+
+    private String decodeClientContext(String encoded) {
+        if (encoded == null || encoded.isEmpty()) {
+            return null;
+        }
+        try {
+            byte[] decoded = Base64.getDecoder().decode(encoded);
+            return objectMapper.writer().with(JsonGenerator.Feature.ESCAPE_NON_ASCII)
+                    .writeValueAsString(objectMapper.readTree(decoded));
+        } catch (IOException | IllegalArgumentException e) {
+            throw new AwsException("InvalidRequestContentException",
+                    "Could not parse the client context: it must be base64-encoded JSON.", 400);
+        }
     }
 
     // ──────────────────────────── Event Source Mappings ────────────────────────────
@@ -765,10 +789,24 @@ public class LambdaController {
         putSnapStart(node, fn);
         putLoggingConfig(node, fn);
         putRuntimeVersionConfig(node, fn);
+        putDurableConfig(node, fn);
 
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);
         return result;
+    }
+
+    /** Only durable functions carry a DurableConfig; AWS omits the member for every other function. */
+    private void putDurableConfig(ObjectNode node, LambdaFunction fn) {
+        if (!fn.isDurable()) {
+            return;
+        }
+        ObjectNode durable = node.putObject("DurableConfig");
+        durable.put("ExecutionTimeout", fn.getDurableExecutionTimeout());
+        durable.put("RetentionPeriodInDays", fn.getDurableRetentionPeriodInDays());
+        if (fn.getDurableKmsKeyArn() != null) {
+            durable.put("KMSKeyArn", fn.getDurableKmsKeyArn());
+        }
     }
 
     /**

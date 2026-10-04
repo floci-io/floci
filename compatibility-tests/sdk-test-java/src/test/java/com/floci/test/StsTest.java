@@ -11,6 +11,8 @@ import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.CreateRoleRequest;
 import software.amazon.awssdk.services.iam.model.CreateSamlProviderRequest;
 import software.amazon.awssdk.services.iam.model.CreateSamlProviderResponse;
+import software.amazon.awssdk.services.iam.model.DeleteRoleRequest;
+import software.amazon.awssdk.services.iam.model.NoSuchEntityException;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.*;
 import org.w3c.dom.Document;
@@ -44,6 +46,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -59,11 +62,38 @@ class StsTest {
     private static String allowedRoleArn;
     private static String allowedRoleName;
 
+    // The console sign-on URL a bearer assertion names, per partition (the CDK region facts). A
+    // partition the CDK lists none for keeps the commercial URL, as Floci does.
+    private static final Map<String, String> SAML_SIGN_ON_URLS = Map.of(
+            "aws", "https://signin.aws.amazon.com/saml",
+            "aws-cn", "https://signin.amazonaws.cn/saml",
+            "aws-us-gov", "https://signin.amazonaws-us-gov.com/saml",
+            "aws-iso", "https://signin.c2shome.ic.gov/saml",
+            "aws-iso-b", "https://signin.sc2shome.sgov.gov/saml");
+    private static final String OPEN_TRUST_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":\"sts:AssumeRole\"}]}";
+
     @BeforeAll
     static void setup() throws Exception {
         sts = TestFixtures.stsClient();
         iam = TestFixtures.iamClient();
         signingKeys = createSigningKeys();
+
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("sdk-test-assumed-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("my-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("short-lived-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("web-identity-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
 
         String issuer = "https://sdk-test.example.test/saml";
         String providerName = TestFixtures.uniqueName("sdk-saml");
@@ -88,11 +118,26 @@ class StsTest {
 
     @AfterAll
     static void cleanup() {
+        safeDeleteRole("sdk-test-assumed-role");
+        safeDeleteRole("my-role");
+        safeDeleteRole("short-lived-role");
+        safeDeleteRole("web-identity-role");
+        safeDeleteRole(allowedRoleName);
         if (iam != null) {
             iam.close();
         }
         if (sts != null) {
             sts.close();
+        }
+    }
+
+    private static void safeDeleteRole(String roleName) {
+        if (iam != null && roleName != null) {
+            try {
+                iam.deleteRole(DeleteRoleRequest.builder().roleName(roleName).build());
+            } catch (NoSuchEntityException ignored) {
+                // Safe to ignore if the role was already cleaned up or never created.
+            }
         }
     }
 
@@ -209,6 +254,31 @@ class StsTest {
                 .isInstanceOf(StsException.class)
                 .extracting(e -> ((StsException) e).statusCode())
                 .isEqualTo(400);
+    }
+
+    @Test
+    void assumeRoleNonExistentRoleThrows403() {
+        assertThatThrownBy(() -> sts.assumeRole(AssumeRoleRequest.builder()
+                .roleArn("arn:aws:iam::000000000000:role/non-existent-role-" + UUID.randomUUID())
+                .roleSessionName("sdk-test-session")
+                .build()))
+                .isInstanceOf(StsException.class)
+                .extracting(e -> ((StsException) e).statusCode())
+                .isEqualTo(403);
+    }
+
+    @Test
+    void assumeRoleWithWebIdentityNonExistentRoleThrows403() {
+        assertThatThrownBy(() -> sts.assumeRoleWithWebIdentity(
+                AssumeRoleWithWebIdentityRequest.builder()
+                        .roleArn("arn:aws:iam::000000000000:role/non-existent-role-" + UUID.randomUUID())
+                        .roleSessionName("sdk-test-session")
+                        .webIdentityToken("eyJhbGciOiJSUzI1NiJ9.test-token")
+                        .durationSeconds(3600)
+                        .build()))
+                .isInstanceOf(StsException.class)
+                .extracting(e -> ((StsException) e).statusCode())
+                .isEqualTo(403);
     }
 
     @Test
@@ -372,7 +442,8 @@ class StsTest {
         String xml = "<saml:Assertion xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"" + id
                 + "\" Version=\"2.0\" IssueInstant=\"" + Instant.now() + "\"><saml:Issuer>" + issuer
                 + "</saml:Issuer><saml:Subject><saml:NameID Format=\"persistent\">sdk-test-subject</saml:NameID>"
-                + "<saml:SubjectConfirmation Method=\"urn:oasis:names:tc:SAML:2.0:cm:bearer\"><saml:SubjectConfirmationData Recipient=\"https://signin.aws.amazon.com/saml\" NotOnOrAfter=\""
+                + "<saml:SubjectConfirmation Method=\"urn:oasis:names:tc:SAML:2.0:cm:bearer\">"
+                + "<saml:SubjectConfirmationData Recipient=\"" + samlSignOnUrl() + "\" NotOnOrAfter=\""
                 + expiry + "\"/></saml:SubjectConfirmation></saml:Subject><saml:Conditions NotBefore=\""
                 + Instant.now().minusSeconds(30) + "\" NotOnOrAfter=\"" + expiry
                 + "\"><saml:AudienceRestriction><saml:Audience>urn:amazon:webservices</saml:Audience></saml:AudienceRestriction></saml:Conditions>"
@@ -400,5 +471,9 @@ class StsTest {
         } catch (Exception e) {
             throw new IllegalStateException("Could not create SAML assertion", e);
         }
+    }
+
+    private static String samlSignOnUrl() {
+        return SAML_SIGN_ON_URLS.getOrDefault(TestFixtures.partition(), SAML_SIGN_ON_URLS.get("aws"));
     }
 }

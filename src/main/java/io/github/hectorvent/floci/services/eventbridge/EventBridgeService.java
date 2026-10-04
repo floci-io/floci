@@ -406,14 +406,20 @@ public class EventBridgeService implements ResourceProvider {
     // ──────────────────────────── Targets ────────────────────────────
 
     public int putTargets(String ruleName, String busName, List<Target> newTargets, String region) {
-        validateRetrySettings(newTargets);
+        validateTargetSettings(newTargets);
         String effectiveBus = resolvedBusName(busName);
         String key = ruleKey(region, effectiveBus, ruleName);
-        ruleStore.get(key)
+        Rule rule = ruleStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + ruleName, 400));
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
         for (Target newTarget : newTargets) {
+            if (newTarget.getRoleArn() == null && isCrossAccountEventBus(newTarget.getArn(), rule)) {
+                existing.stream()
+                        .filter(t -> t.getId().equals(newTarget.getId()) && newTarget.getArn().equals(t.getArn()))
+                        .findFirst()
+                        .ifPresent(t -> newTarget.setRoleArn(t.getRoleArn()));
+            }
             existing.removeIf(t -> t.getId().equals(newTarget.getId()));
             existing.add(newTarget);
         }
@@ -422,7 +428,16 @@ public class EventBridgeService implements ResourceProvider {
         return 0;
     }
 
-    private static void validateRetrySettings(List<Target> targets) {
+    private boolean isCrossAccountEventBus(String targetArn, Rule rule) {
+        if (!AwsArnUtils.isArnFor(targetArn, "events")) {
+            return false;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(targetArn);
+        String accountId = rule.getAccountId() != null ? rule.getAccountId() : regionResolver.getAccountId();
+        return arn.resource().startsWith("event-bus/") && AwsArnUtils.isForeignAccount(arn, accountId);
+    }
+
+    private static void validateTargetSettings(List<Target> targets) {
         for (int i = 0; i < targets.size(); i++) {
             Target target = targets.get(i);
             Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;
@@ -443,6 +458,12 @@ public class EventBridgeService implements ResourceProvider {
                 field = "deadLetterConfig.arn";
                 value = arn;
                 constraint = arn.isEmpty() ? "length greater than or equal to 1" : "length less than or equal to 1600";
+            } else if (target.getRoleArn() != null
+                    && (target.getRoleArn().isEmpty() || target.getRoleArn().length() > 1600)) {
+                field = "roleArn";
+                value = target.getRoleArn();
+                constraint = target.getRoleArn().isEmpty()
+                        ? "length greater than or equal to 1" : "length less than or equal to 1600";
             }
             if (field != null) {
                 throw new AwsException("ValidationException", "1 validation error detected: Value '" + value

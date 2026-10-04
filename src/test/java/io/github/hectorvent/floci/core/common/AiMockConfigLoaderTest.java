@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -27,53 +28,53 @@ class AiMockConfigLoaderTest {
     Path tempDir;
 
     private AiMockConfigLoader loader(String content) throws IOException {
-        var file = tempDir.resolve("ai-mock-config.json");
+        Path file = tempDir.resolve("ai-mock-config.json");
         Files.writeString(file, content);
         return new AiMockConfigLoader(Optional.of(file.toString()), new ObjectMapper());
     }
 
     @Test
     void resolvesMatchingEntry() throws IOException {
-        var loader = loader(CONFIG);
-        var result = loader.lookup("comprehend", "I love this", "DetectSentiment");
+        AiMockConfigLoader loader = loader(CONFIG);
+        Optional<JsonNode> result = loader.lookup("comprehend", "I love this", "DetectSentiment");
         assertTrue(result.isPresent());
         assertEquals("POSITIVE", result.get().path("Sentiment").asText());
     }
 
     @Test
     void fallsBackWhenServiceKeyUnmatched() throws IOException {
-        var loader = loader(CONFIG);
+        AiMockConfigLoader loader = loader(CONFIG);
         assertTrue(loader.lookup("rekognition", "I love this", "DetectSentiment").isEmpty());
     }
 
     @Test
     void fallsBackWhenLookupKeyUnmatched() throws IOException {
-        var loader = loader(CONFIG);
+        AiMockConfigLoader loader = loader(CONFIG);
         assertTrue(loader.lookup("comprehend", "I hate this", "DetectSentiment").isEmpty());
     }
 
     @Test
     void fallsBackWhenActionUnmatched() throws IOException {
-        var loader = loader(CONFIG);
+        AiMockConfigLoader loader = loader(CONFIG);
         assertTrue(loader.lookup("comprehend", "I love this", "DetectKeyPhrases").isEmpty());
     }
 
     @Test
     void fallsBackWhenLookupKeyIsNull() throws IOException {
         // Bytes-backed images/documents have no natural lookup key.
-        var loader = loader(CONFIG);
+        AiMockConfigLoader loader = loader(CONFIG);
         assertTrue(loader.lookup("comprehend", null, "DetectSentiment").isEmpty());
     }
 
     @Test
     void fallsBackWhenNoConfigConfigured() {
-        var loader = new AiMockConfigLoader(Optional.empty(), new ObjectMapper());
+        AiMockConfigLoader loader = new AiMockConfigLoader(Optional.empty(), new ObjectMapper());
         assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isEmpty());
     }
 
     @Test
     void fallsBackWhenFileMissing() {
-        var loader = new AiMockConfigLoader(
+        AiMockConfigLoader loader = new AiMockConfigLoader(
                 Optional.of(tempDir.resolve("absent.json").toString()), new ObjectMapper());
         assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isEmpty());
     }
@@ -82,33 +83,33 @@ class AiMockConfigLoaderTest {
     void fallsBackWhenConfiguredPathIsUnparseable() {
         // An embedded NUL byte makes Path.of() throw InvalidPathException, an unchecked
         // exception that a plain "catch (IOException)" does not cover.
-        var loader = new AiMockConfigLoader(Optional.of("bad\0path.json"), new ObjectMapper());
+        AiMockConfigLoader loader = new AiMockConfigLoader(Optional.of("bad\0path.json"), new ObjectMapper());
         assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isEmpty());
     }
 
     @Test
     void fallsBackWhenFileIsNotAJsonObject() throws IOException {
-        var loader = loader("[1, 2, 3]");
+        AiMockConfigLoader loader = loader("[1, 2, 3]");
         assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isEmpty());
     }
 
     @Test
     void fallsBackWhenFileIsMalformedJson() throws IOException {
-        var loader = loader("{not valid json");
+        AiMockConfigLoader loader = loader("{not valid json");
         assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isEmpty());
     }
 
     @Test
     void treatsBlankConfiguredPathAsUnconfigured() {
-        var loader = new AiMockConfigLoader(Optional.of("  "), new ObjectMapper());
+        AiMockConfigLoader loader = new AiMockConfigLoader(Optional.of("  "), new ObjectMapper());
         assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isEmpty());
     }
 
     @Test
     void reloadsFileWhenModified() throws IOException, InterruptedException {
-        var file = tempDir.resolve("ai-mock-config.json");
+        Path file = tempDir.resolve("ai-mock-config.json");
         Files.writeString(file, CONFIG);
-        var loader = new AiMockConfigLoader(Optional.of(file.toString()), new ObjectMapper());
+        AiMockConfigLoader loader = new AiMockConfigLoader(Optional.of(file.toString()), new ObjectMapper());
         assertTrue(loader.lookup("comprehend", "I love this", "DetectSentiment").isPresent());
         assertFalse(loader.lookup("comprehend", "I hate this", "DetectSentiment").isPresent());
 

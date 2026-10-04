@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -34,8 +35,7 @@ class PreSignedUrlIntegrationTest {
 
     private static final String BUCKET = "presign-test-bucket";
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/s3/aws4_request";
+    private static final S3RequestSigner LOCAL_SIGNER = S3RequestSigner.signedAs("test", "test");
 
     @Inject
     PreSignedUrlGenerator presignGenerator;
@@ -220,7 +220,7 @@ class PreSignedUrlIntegrationTest {
         // Must be a signed request per AWS spec (response-* params require Authorization or presigned URL).
         given()
             .urlEncodingEnabled(false)
-            .header("Authorization", AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22file.txt%22")
         .then()
@@ -233,7 +233,7 @@ class PreSignedUrlIntegrationTest {
     void getObjectAppliesAllResponseOverrides() {
         given()
             .urlEncodingEnabled(false)
-            .header("Authorization", AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + BUCKET + "/disposition-file.txt"
                 + "?response-content-type=application%2Fpdf"
@@ -269,7 +269,7 @@ class PreSignedUrlIntegrationTest {
     void headObjectAppliesResponseContentDispositionOverride() {
         given()
             .urlEncodingEnabled(false)
-            .header("Authorization", AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .head("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22head.txt%22")
         .then()
@@ -295,7 +295,7 @@ class PreSignedUrlIntegrationTest {
     void rangeRequestAppliesResponseContentDispositionOverride() {
         given()
             .urlEncodingEnabled(false)
-            .header("Authorization", AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .header("Range", "bytes=0-3")
         .when()
             .get("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22range.txt%22")

@@ -109,7 +109,7 @@ final class DynamoDbAccessPathValidator {
 
         boolean conditionOnNonKeyAttribute = false;
 
-        for (var rawCondition : conditions) {
+        for (Expr rawCondition : conditions) {
             Expr condition = normalizeOperandOrder(rawCondition);
             if (conditionOperand(condition) instanceof PathOperand(List<String> segments) && segments.size() > 1) {
                 throw new AwsException("ValidationException",

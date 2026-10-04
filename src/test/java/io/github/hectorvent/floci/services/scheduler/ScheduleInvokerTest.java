@@ -91,6 +91,15 @@ class ScheduleInvokerTest {
     }
 
     @Test
+    void aScheduleWithoutAnArnLivesInTheDeploymentDefaultRegion() {
+        Schedule schedule = new Schedule();
+        assertEquals("cn-north-1", ScheduleInvoker.regionOf(schedule, "cn-north-1"));
+
+        schedule.setArn("arn:aws:scheduler:eu-west-1:000000000000:schedule/default/nightly");
+        assertEquals("eu-west-1", ScheduleInvoker.regionOf(schedule, "cn-north-1"));
+    }
+
+    @Test
     void universalSnsPublishForwardsMessageAttributes() {
         Target target = new Target();
         target.setArn("arn:aws:scheduler:::aws-sdk:sns:publish");

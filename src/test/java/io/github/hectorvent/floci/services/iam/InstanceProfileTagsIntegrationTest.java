@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
@@ -68,7 +69,7 @@ class InstanceProfileTagsIntegrationTest {
 
     private static io.restassured.specification.RequestSpecification tagRequest(String profile,
                                                                                 int from, int to) {
-        var request = given()
+        RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "TagInstanceProfile")
             .formParam("InstanceProfileName", profile)
@@ -139,7 +140,7 @@ class InstanceProfileTagsIntegrationTest {
         String profile = "untag-limit-" + UUID.randomUUID().toString().substring(0, 8);
         createProfile(profile);
 
-        var request = given()
+        RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UntagInstanceProfile")
             .formParam("InstanceProfileName", profile)

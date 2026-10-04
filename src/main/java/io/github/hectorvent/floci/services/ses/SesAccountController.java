@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
@@ -197,10 +198,8 @@ public class SesAccountController {
                 }
             }
             JsonNode productionAccess = request.path("ProductionAccessEnabled");
-            if (!productionAccess.isMissingNode() && !productionAccess.isNull() && !productionAccess.isBoolean()) {
-                throw new AwsException("SerializationException", null, 400);
-            }
-            boolean productionAccessEnabled = productionAccess.asBoolean(false);
+            boolean productionAccessEnabled = !productionAccess.isMissingNode() && !productionAccess.isNull()
+                    && coerceBoolean(productionAccess);
 
             // The service owns validation and the synthetic review/case so they can't be bypassed; the
             // controller only parses the REST JSON and rejects wrong JSON types.
@@ -226,8 +225,8 @@ public class SesAccountController {
             JsonNode enabledNode = request.path("AutoWarmupEnabled");
             // AutoWarmupEnabled has a default of false: the SDK omits it when false, so a missing
             // member is treated as false rather than rejected. A present value goes through the
-            // shared SES v2 boolean coercion (string→true, null/number/container→SerializationException).
-            boolean enabled = enabledNode.isMissingNode() ? false : coerceBoolean(enabledNode);
+            // shared SES v2 boolean coercion.
+            boolean enabled = coerceBooleanOrFalse(enabledNode);
             accountService.setDedicatedIpAutoWarmup(region, enabled);
             LOG.infov("SES V2 PutAccountDedicatedIpWarmupAttributes: {0}", enabled);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -274,13 +273,9 @@ public class SesAccountController {
     public Response putAccountSendingAttributes(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = objectMapper.readTree(body);
-            JsonNode sendingEnabledNode = request.get("SendingEnabled");
-            if (sendingEnabledNode == null || !sendingEnabledNode.isBoolean()) {
-                throw new AwsException("BadRequestException",
-                        "SendingEnabled must be present and must be a boolean", 400);
-            }
-            accountService.setAccountSendingEnabled(region, sendingEnabledNode.booleanValue());
+            JsonNode request = readOptionBody(objectMapper, body);
+            accountService.setAccountSendingEnabled(region,
+                    coerceBooleanOrFalse(request.path("SendingEnabled")));
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);

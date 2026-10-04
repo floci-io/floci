@@ -4,12 +4,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.lightsail.LightsailClient;
 import software.amazon.awssdk.services.lightsail.model.CreateInstancesRequest;
+import software.amazon.awssdk.services.lightsail.model.CreateInstancesResponse;
+import software.amazon.awssdk.services.lightsail.model.CreateKeyPairResponse;
+import software.amazon.awssdk.services.lightsail.model.Disk;
+import software.amazon.awssdk.services.lightsail.model.Instance;
 import software.amazon.awssdk.services.lightsail.model.InstanceState;
 import software.amazon.awssdk.services.lightsail.model.NetworkProtocol;
 import software.amazon.awssdk.services.lightsail.model.PortInfo;
+import software.amazon.awssdk.services.lightsail.model.StaticIp;
 import software.amazon.awssdk.services.lightsail.model.Tag;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class LightsailTest {
 
@@ -24,6 +30,8 @@ class LightsailTest {
 
     @Test
     void sdkCanCreateAndManageCoreLightsailResources() {
+        assumeTrue("aws".equals(TestFixtures.partition()),
+                "Lightsail has no region outside the commercial partition");
         String instanceName = suffix + "-web";
         String diskName = suffix + "-data";
         String staticIpName = suffix + "-ip";
@@ -38,7 +46,7 @@ class LightsailTest {
         assertThat(lightsail.getRegions(r -> r.includeAvailabilityZones(true)).regions().get(0).availabilityZones())
                 .isNotEmpty();
 
-        var keyPair = lightsail.createKeyPair(r -> r
+        CreateKeyPairResponse keyPair = lightsail.createKeyPair(r -> r
                 .keyPairName(keyPairName)
                 .tags(Tag.builder().key("owner").value("sdk").build()));
         assertThat(keyPair.keyPair().name()).isEqualTo(keyPairName);
@@ -46,7 +54,7 @@ class LightsailTest {
         assertThat(keyPair.privateKeyBase64()).isNotBlank();
         assertThat(keyPair.operation().operationTypeAsString()).isEqualTo("CreateKeyPair");
 
-        var createInstances = lightsail.createInstances(CreateInstancesRequest.builder()
+        CreateInstancesResponse createInstances = lightsail.createInstances(CreateInstancesRequest.builder()
                 .instanceNames(instanceName)
                 .availabilityZone("us-east-1a")
                 .blueprintId("ubuntu_22_04")
@@ -57,7 +65,7 @@ class LightsailTest {
         assertThat(createInstances.operations()).hasSize(1);
         assertThat(createInstances.operations().get(0).operationTypeAsString()).isEqualTo("CreateInstance");
 
-        var instance = lightsail.getInstance(r -> r.instanceName(instanceName)).instance();
+        Instance instance = lightsail.getInstance(r -> r.instanceName(instanceName)).instance();
         assertThat(instance.name()).isEqualTo(instanceName);
         assertThat(instance.arn()).startsWith("arn:aws:lightsail:");
         assertThat(instance.location().regionNameAsString()).isEqualTo("us-east-1");
@@ -90,14 +98,14 @@ class LightsailTest {
 
         lightsail.createDisk(r -> r.diskName(diskName).availabilityZone("us-east-1a").sizeInGb(8));
         lightsail.attachDisk(r -> r.diskName(diskName).instanceName(instanceName).diskPath("/dev/xvdf"));
-        var disk = lightsail.getDisk(r -> r.diskName(diskName)).disk();
+        Disk disk = lightsail.getDisk(r -> r.diskName(diskName)).disk();
         assertThat(disk.name()).isEqualTo(diskName);
         assertThat(disk.attachedTo()).isEqualTo(instanceName);
         assertThat(disk.isAttached()).isTrue();
 
         lightsail.allocateStaticIp(r -> r.staticIpName(staticIpName));
         lightsail.attachStaticIp(r -> r.staticIpName(staticIpName).instanceName(instanceName));
-        var staticIp = lightsail.getStaticIp(r -> r.staticIpName(staticIpName)).staticIp();
+        StaticIp staticIp = lightsail.getStaticIp(r -> r.staticIpName(staticIpName)).staticIp();
         assertThat(staticIp.name()).isEqualTo(staticIpName);
         assertThat(staticIp.attachedTo()).isEqualTo(instanceName);
         assertThat(staticIp.isAttached()).isTrue();

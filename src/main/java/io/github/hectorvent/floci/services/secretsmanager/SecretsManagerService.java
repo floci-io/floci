@@ -673,38 +673,41 @@ public class SecretsManagerService implements ResourceProvider {
                     "The RecoveryWindowInDays value must be between 7 and 30 days, inclusive.", 400);
         }
 
-        Secret secret = resolveSecret(secretId, region);
-        throwIfReplica(secret);
-        // AWS: "You can't delete a primary secret that is replicated to other Regions. You must
-        // first delete the replicas." Deleting it here would strand every replica with no primary
-        // to sync from and no way to remove them.
-        if (secret.getReplicationStatus() != null && !secret.getReplicationStatus().isEmpty()) {
-            throw new AwsException("InvalidRequestException",
-                    "You can't delete a secret that is replicated to other Regions. "
-                            + "Remove the replicas with RemoveRegionsFromReplication first.", 400);
-        }
-        String storageKey = regionKey(region, secret.getName());
+        Secret resolved = resolveSecret(secretId, region);
+        synchronized (lockFor(resolved.getArn())) {
+            Secret secret = resolveSecret(resolved.getArn(), region);
+            throwIfReplica(secret);
+            // AWS: "You can't delete a primary secret that is replicated to other Regions. You must
+            // first delete the replicas." Deleting it here would strand every replica with no primary
+            // to sync from and no way to remove them.
+            if (secret.getReplicationStatus() != null && !secret.getReplicationStatus().isEmpty()) {
+                throw new AwsException("InvalidRequestException",
+                        "You can't delete a secret that is replicated to other Regions. "
+                                + "Remove the replicas with RemoveRegionsFromReplication first.", 400);
+            }
+            String storageKey = regionKey(region, secret.getName());
 
-        if (forceDelete) {
-            store.delete(storageKey);
-            LOG.infov("Force-deleted secret: {0}", secret.getName());
-            secret.setDeletedDate(Instant.now());
+            if (forceDelete) {
+                store.delete(storageKey);
+                LOG.infov("Force-deleted secret: {0}", secret.getName());
+                secret.setDeletedDate(Instant.now());
+                return secret;
+            }
+
+            // Guard placed AFTER the force-delete branch on purpose: force-deleting a secret that is
+            // already inside its recovery window is a legitimate "skip the window, remove it now"
+            // escape hatch, so only the scheduling path is refused. Re-scheduling an already-scheduled
+            // secret silently moved its DeletionDate, which would quietly extend a window a caller
+            // believed was already counting down.
+            throwIfPendingDeletion(secret);
+
+            int windowDays = (recoveryWindowInDays != null) ? recoveryWindowInDays : defaultRecoveryWindowDays;
+            Instant deletedDate = Instant.now().plusSeconds((long) windowDays * 86400);
+            secret.setDeletedDate(deletedDate);
+            store.put(storageKey, secret);
+            LOG.infov("Scheduled deletion of secret: {0} at {1}", secret.getName(), deletedDate);
             return secret;
         }
-
-        // Guard placed AFTER the force-delete branch on purpose: force-deleting a secret that is
-        // already inside its recovery window is a legitimate "skip the window, remove it now"
-        // escape hatch, so only the scheduling path is refused. Re-scheduling an already-scheduled
-        // secret silently moved its DeletionDate, which would quietly extend a window a caller
-        // believed was already counting down.
-        throwIfPendingDeletion(secret);
-
-        int windowDays = (recoveryWindowInDays != null) ? recoveryWindowInDays : defaultRecoveryWindowDays;
-        Instant deletedDate = Instant.now().plusSeconds((long) windowDays * 86400);
-        secret.setDeletedDate(deletedDate);
-        store.put(storageKey, secret);
-        LOG.infov("Scheduled deletion of secret: {0} at {1}", secret.getName(), deletedDate);
-        return secret;
     }
 
     // ─── Multi-region replication ──────────────────────────────────────────────
@@ -1139,16 +1142,14 @@ public class SecretsManagerService implements ResourceProvider {
         // One full ARN for the permission check, the lookup and the invoke, so all three reach the same
         // function: a name or partial ARN would otherwise be invoked in whatever account the rotation
         // thread resolves, which is not necessarily the one that was checked.
-        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
-        String functionArn = serviceManaged
-                ? null
-                : LambdaArnUtils.functionArn(finalLambdaArn, secretArn.partition(), region, secretArn.accountId());
+        String functionArn = serviceManaged ? null : rotationFunctionArn(finalLambdaArn, secret, region);
         if (!serviceManaged) {
             authorizeInvoke.accept(functionArn);
         }
 
-        // A function that cannot be invoked is reported the way AWS reports it, whatever the reason:
-        // AccessDeniedException with HTTP 400, and the secret left as it was.
+        // A function that cannot be found is reported the way AWS reports it, AccessDeniedException with
+        // HTTP 400; any other reference Lambda refuses is an invalid RotationLambdaARN. Either way the
+        // secret is left as it was.
         if (!serviceManaged && lambdaService != null) {
             try {
                 lambdaService.getFunction(region, functionArn);
@@ -1158,6 +1159,9 @@ public class SecretsManagerService implements ResourceProvider {
                             "Secrets Manager cannot invoke the specified Lambda function. Ensure that the function "
                                     + "policy grants access to the principal " + ServicePrincipals.of("secretsmanager")
                                     + ".", 400);
+                }
+                if (e.getHttpStatus() == 400) {
+                    throw invalidRotationFunction(e.getMessage());
                 }
                 throw e;
             }
@@ -1214,6 +1218,39 @@ public class SecretsManagerService implements ResourceProvider {
         return secret;
     }
 
+    /**
+     * The full ARN of the rotation function {@code reference} names, in the secret's partition and
+     * account unless the reference names its own. A reference Lambda cannot read is refused with
+     * Secrets Manager's {@code InvalidParameterException}: Lambda's codes for it,
+     * {@code InvalidParameterValueException} and {@code ValidationException}, are not among the
+     * errors {@code RotateSecret} declares, so an SDK client could not type them.
+     */
+    private static String rotationFunctionArn(String reference, Secret secret, String region) {
+        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
+        String functionArn;
+        try {
+            functionArn = LambdaArnUtils.functionArn(reference, secretArn.partition(), region, secretArn.accountId());
+        } catch (AwsException e) {
+            throw invalidRotationFunction(e.getMessage());
+        }
+        // Lambda refuses a function ARN from another Region; refusing it here keeps it with the other
+        // bad references, ahead of the caller check.
+        String functionRegion = AwsArnUtils.parse(functionArn).region();
+        if (!region.equals(functionRegion)) {
+            throw invalidRotationFunction(
+                    "Region '" + functionRegion + "' in ARN does not match request region '" + region + "'");
+        }
+        return functionArn;
+    }
+
+    /**
+     * RotateSecret's own error for a function reference Lambda refuses, keeping Lambda's reason: the
+     * operation declares {@code InvalidParameterException} and none of Lambda's codes.
+     */
+    private static AwsException invalidRotationFunction(String reason) {
+        return new AwsException("InvalidParameterException",
+                "RotationLambdaARN is not a valid Lambda function reference: " + reason, 400);
+    }
 
     /**
      * The outcome of {@link #cancelRotateSecret}: the secret with rotation turned off, plus the id
@@ -1305,10 +1342,12 @@ public class SecretsManagerService implements ResourceProvider {
             }
             invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "testSecret", region);
             invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "finishSecret", region);
-            
-            Secret refreshed = resolveSecret(secretArn, region);
-            refreshed.setLastRotatedDate(Instant.now());
-            persist(refreshed, region);
+
+            synchronized (lockFor(secretArn)) {
+                Secret refreshed = resolveSecret(secretArn, region);
+                refreshed.setLastRotatedDate(Instant.now());
+                persist(refreshed, region);
+            }
         } catch (Exception e) {
             LOG.errorv(e, "Error during rotation steps for secret {0}", secretArn);
             throw e;

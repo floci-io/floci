@@ -69,7 +69,7 @@ class CloudFormationEventBusTest {
                 .stacks().get(0);
         Map<String, String> outputs = createdStack.outputs().stream()
                 .collect(Collectors.toMap(Output::outputKey, Output::outputValue));
-        String busArn = "arn:aws:events:us-east-1:000000000000:event-bus/" + busName;
+        String busArn = TestFixtures.arn("events", "000000000000", "event-bus/" + busName);
         assertThat(outputs)
                 .containsEntry("BusRef", busName)
                 .containsEntry("BusName", busName)

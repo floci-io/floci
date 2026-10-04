@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -90,8 +91,54 @@ class CodeArtifactMavenDockerIntegrationTest {
                 .then().statusCode(200);
     }
 
+    /**
+     * Reposilite's {@code redeployment: false} rejects a redeploy to an existing GAV path
+     * unconditionally, even when the new content is byte-identical to what is already there. AWS's
+     * own CodeArtifact docs ("Overwriting package assets" in packages-overview.html) say that case
+     * specifically succeeds because the operation is idempotent; only a genuine content mismatch,
+     * covered by {@link #redeployingDifferentBytesStillConflicts}, is a real conflict.
+     */
     @Test
     @Order(2)
+    void redeployingTheExactSameBytesSucceedsIdempotently() {
+        byte[] content = "real-jar-bytes".getBytes(StandardCharsets.UTF_8);
+
+        given().header("Authorization", "Bearer " + bearerToken).body(content)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + GAV)
+                .then().statusCode(200);
+
+        byte[] fetched = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + GAV)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals(new String(content, StandardCharsets.UTF_8), new String(fetched, StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The real content-mismatch counterpart to the idempotent-retry test above, against the live
+     * shared Reposilite container rather than a fake server: proves the fix only closes the
+     * byte-identical-retry gap and leaves Reposilite's own {@code redeployment: false} enforcement
+     * for a genuine conflict untouched, so a config change there that started allowing silent
+     * overwrites would still be caught here.
+     */
+    @Test
+    @Order(3)
+    void redeployingDifferentBytesStillConflicts() {
+        byte[] different = "different-jar-bytes".getBytes(StandardCharsets.UTF_8);
+
+        given().header("Authorization", "Bearer " + bearerToken).body(different)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + GAV)
+                .then().statusCode(409);
+
+        byte[] fetched = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + GAV)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("real-jar-bytes", new String(fetched, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @Order(4)
     void missingArtifactAndMissingRepositoryAreNotFound() {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/does/not/exist.jar")
@@ -103,7 +150,7 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(5)
     void repositoriesAreIsolatedFromEachOther() {
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository?domain=" + DOMAIN + "&repository=other-repo")
@@ -115,7 +162,7 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(6)
     void missingOrWrongDomainTokensAreUnauthorized() {
         // Challenges as Basic, not Bearer: a real Maven wagon client only retries a 401 with its
         // configured settings.xml credentials when the challenge scheme matches what it sent.
@@ -141,7 +188,7 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(7)
     void concurrentFirstUseOfANewRepositoryOnlyProvisionsItOnce() throws InterruptedException {
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository?domain=" + DOMAIN + "&repository=concurrent-repo")
@@ -186,7 +233,7 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(8)
     void recreatingASameNamedRepositoryDoesNotInheritThePreviousOnesArtifacts() {
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository?domain=" + DOMAIN + "&repository=reused-name")
@@ -208,7 +255,7 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(9)
     void aRealMavenClientsBasicAuthCredentialsAreAcceptedWithTheTokenAsThePassword() {
         String basic = "Basic " + Base64.getEncoder().encodeToString(("aws:" + bearerToken).getBytes(StandardCharsets.UTF_8));
         byte[] content = "basic-auth-bytes".getBytes(StandardCharsets.UTF_8);
@@ -225,7 +272,7 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(10)
     void aDomainCreatedInANonDefaultRegionIsServedThroughTheTokensOwnRegionNotTheDefault() {
         // The default region here is us-east-1 (application.yml). Every other test in this class
         // creates its domain under an AUTH header whose SigV4 scope is also us-east-1, so those
@@ -259,7 +306,7 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void aDomainCreatedUnderANonDefaultAccountIsServedThroughTheTokensOwnAccountNotTheDefault() {
         // Every other test in this class authenticates as the default account (000000000000), so
         // none of them would notice if the owner half of the token-scope fix regressed and every
@@ -291,7 +338,7 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void deletingARepositoryReleasesItsStorageFromTheSharedReposiliteInstance() throws Exception {
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository?domain=" + DOMAIN + "&repository=released-repo")
@@ -310,6 +357,44 @@ class CodeArtifactMavenDockerIntegrationTest {
         // entry, specifically, is what disappeared from the real shared instance's own settings
         // list, not just that Floci stopped tracking the CodeArtifact-side metadata.
         assertEquals(repositoryCountBeforeDelete - 1, reposiliteSettingsRepositoryCount());
+    }
+
+    /**
+     * The real-world gap this closes: {@code GetPackageVersionAsset} used to 404 for every
+     * Maven-deployed artifact since Floci's generic-format package-version store never had a
+     * record for it (Maven publishing goes straight to Reposilite, bypassing it entirely). Proves
+     * the JSON API now bridges to the same artifact {@link #deployThenFetchRoundTripsTheExactBytes}
+     * already confirmed is really there, through the real sidecar, not a mock.
+     */
+    @Test
+    @Order(12)
+    void getPackageVersionAssetBridgesToTheRealReposiliteSidecar() {
+        byte[] fetched = given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike&version=1.0.0&asset=spike-1.0.0.jar")
+                .then().statusCode(200)
+                .header("X-AssetName", equalTo("spike-1.0.0.jar"))
+                .header("X-PackageVersion", equalTo("1.0.0"))
+                .extract().asByteArray();
+        assertEquals("real-jar-bytes", new String(fetched, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @Order(12)
+    void getPackageVersionAssetRequiresANamespaceForMaven() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&package=spike&version=1.0.0&asset=spike-1.0.0.jar")
+                .then().statusCode(400);
+    }
+
+    @Test
+    @Order(12)
+    void getPackageVersionAssetReturns404ForAMavenAssetThatWasNeverDeployed() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike&version=1.0.0&asset=does-not-exist.jar")
+                .then().statusCode(404);
     }
 
     /**

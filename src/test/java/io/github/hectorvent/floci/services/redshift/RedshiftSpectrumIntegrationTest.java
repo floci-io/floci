@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
@@ -35,6 +36,15 @@ class RedshiftSpectrumIntegrationTest {
     @Inject
     S3Service s3Service;
 
+    @Inject
+    IamService iamService;
+
+    private static final String ROLE_NAME = "SpectrumItRole";
+    private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/" + ROLE_NAME;
+    private static final String TRUST_POLICY = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Principal":{"Service":"redshift.amazonaws.com"},"Action":"sts:AssumeRole"}]}""";
+
     private String clusterId;
     private String bucket;
 
@@ -53,6 +63,17 @@ class RedshiftSpectrumIntegrationTest {
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    private Cluster createClusterWithRole(String identifier) {
+        if (iamService.findRole("000000000000", ROLE_NAME).isEmpty()) {
+            iamService.createRole(ROLE_NAME, "/", TRUST_POLICY, null, 0, null);
+            iamService.putRolePolicy(ROLE_NAME, "AllowS3", """
+                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                    "Action":["s3:GetObject","s3:ListBucket"],"Resource":"*"}]}""");
+        }
+        return redshiftService.createCluster(identifier, "dc2.large", "admin", "Secret123",
+                null, List.of(), List.of(ROLE_ARN));
     }
 
     @AfterEach
@@ -75,13 +96,13 @@ class RedshiftSpectrumIntegrationTest {
         s3Service.putObject(bucket, "events/part-1.csv",
                 "id,name\n1,Alice\n2,Bob\n".getBytes(StandardCharsets.UTF_8), "text/csv", null);
         clusterId = "it-spectrum-" + System.nanoTime();
-        Cluster cluster = redshiftService.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        Cluster cluster = createClusterWithRole(clusterId);
 
         try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
             Statement statement = connection.createStatement()) {
-            statement.execute("CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'dev' IAM_ROLE 'role'");
+            statement.execute("CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '" + ROLE_ARN + "'");
             SQLException duplicateSchema = assertThrows(SQLException.class, () -> statement.execute(
-                    "CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'dev' IAM_ROLE 'role'"));
+                    "CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '" + ROLE_ARN + "'"));
             assertEquals("42P06", duplicateSchema.getSQLState());
             statement.execute("CREATE EXTERNAL TABLE analytics.events (id INTEGER, name VARCHAR) "
                     + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/events/' "
@@ -117,7 +138,7 @@ class RedshiftSpectrumIntegrationTest {
         s3Service.putObject(bucket, "events/part-1.csv",
                 "id,name\n1,Alice\n2,Bob\n".getBytes(StandardCharsets.UTF_8), "text/csv", null);
         clusterId = "it-spectrum-ext-" + System.nanoTime();
-        Cluster cluster = redshiftService.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        Cluster cluster = createClusterWithRole(clusterId);
 
         String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
                 + "/dev?socketTimeout=20&loginTimeout=20";
@@ -125,7 +146,7 @@ class RedshiftSpectrumIntegrationTest {
                 .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
                 .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
             Statement setup = connection.createStatement()) {
-            setup.execute("CREATE EXTERNAL SCHEMA analytics_ext FROM DATA CATALOG DATABASE 'dev' IAM_ROLE 'role'");
+            setup.execute("CREATE EXTERNAL SCHEMA analytics_ext FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '" + ROLE_ARN + "'");
             setup.execute("CREATE EXTERNAL TABLE analytics_ext.events (id INTEGER, name VARCHAR) "
                     + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/events/' "
                     + "TBLPROPERTIES ('skip.header.line.count'='1')");
@@ -156,7 +177,7 @@ class RedshiftSpectrumIntegrationTest {
                 "id,name\n1,Alice\n2,Bob\n3,Carol\n4,Dave\n5,Eve\n".getBytes(StandardCharsets.UTF_8),
                 "text/csv", null);
         clusterId = "it-spectrum-fetch-" + System.nanoTime();
-        Cluster cluster = redshiftService.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        Cluster cluster = createClusterWithRole(clusterId);
 
         String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
                 + "/dev?socketTimeout=20&loginTimeout=20";
@@ -164,7 +185,7 @@ class RedshiftSpectrumIntegrationTest {
                 .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
                 .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
              Statement setup = connection.createStatement()) {
-            setup.execute("CREATE EXTERNAL SCHEMA analytics_fetch FROM DATA CATALOG DATABASE 'dev' IAM_ROLE 'role'");
+            setup.execute("CREATE EXTERNAL SCHEMA analytics_fetch FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '" + ROLE_ARN + "'");
             setup.execute("CREATE EXTERNAL TABLE analytics_fetch.events (id INTEGER, name VARCHAR) "
                     + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/events/' "
                     + "TBLPROPERTIES ('skip.header.line.count'='1')");

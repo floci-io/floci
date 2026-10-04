@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -191,7 +192,7 @@ class EcsCapacityCfnProvisionerTest {
         ObjectNode props = mapper.createObjectNode();
         props.put("Name", "the-provider");
         props.putObject("AutoScalingGroupProvider").put("AutoScalingGroupArn", ASG_ARN);
-        var tags = props.putArray("Tags");
+        ArrayNode tags = props.putArray("Tags");
         tags.addObject().put("Key", "keep").put("Value", "1");
 
         provisioner.provision(r, props, ctx());
@@ -243,7 +244,7 @@ class EcsCapacityCfnProvisionerTest {
         StackResource r = resource(PROVIDER_TYPE, "Provider");
         ObjectNode props = mapper.createObjectNode();
         props.put("Name", "the-provider");
-        var tags = props.putArray("Tags");
+        ArrayNode tags = props.putArray("Tags");
         tags.addObject().put("Key", "env").put("Value", "prod");
         tags.addObject().put("Key", "team").put("Value", "platform");
 
@@ -260,10 +261,10 @@ class EcsCapacityCfnProvisionerTest {
         StackResource r = resource(ASSOCIATIONS_TYPE, "Assoc");
         ObjectNode props = mapper.createObjectNode();
         props.put("Cluster", "the-cluster");
-        var providers = props.putArray("CapacityProviders");
+        ArrayNode providers = props.putArray("CapacityProviders");
         providers.add("the-provider");
         providers.add("FARGATE");
-        var strategy = props.putArray("DefaultCapacityProviderStrategy");
+        ArrayNode strategy = props.putArray("DefaultCapacityProviderStrategy");
         strategy.addObject().put("CapacityProvider", "the-provider").put("Weight", 2).put("Base", 1);
 
         provisioner.provision(r, props, ctx());

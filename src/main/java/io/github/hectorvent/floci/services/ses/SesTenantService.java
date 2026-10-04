@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -18,9 +19,11 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.List;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -133,13 +136,61 @@ public class SesTenantService {
                 .orElseThrow(() -> tenantNotFound(tenantName));
     }
 
+    public PaginatedResult<Tenant> listTenants(String region, SesListPaging paging, Integer pageSize,
+                                               String nextToken) {
+        return paging.page(region, listTenants(region), Tenant::tenantName, pageSize, nextToken);
+    }
+
+    /** By name, as SES lists them; the paged list resumes on the same order. */
     public List<Tenant> listTenants(String region) {
         String prefix = tenantKeyPrefix(region);
         return tenantStore.scan(k -> k.startsWith(prefix)).stream()
-                .sorted(Comparator.comparing(Tenant::createdTimestamp,
-                                Comparator.nullsLast(Comparator.naturalOrder()))
-                        .thenComparing(Tenant::tenantName, Comparator.nullsLast(Comparator.naturalOrder())))
+                .sorted(Comparator.comparing(Tenant::tenantName))
                 .toList();
+    }
+
+    /**
+     * ListTenants with a {@code Filter}, probed 2026-10-03. The controller has already checked the
+     * filter's keys and values; SES then checks the page size and an empty token, the filter's
+     * values, and last the token. The name is not trimmed and is found anywhere in a tenant's name
+     * without regard to case, the keys combine, and a token is bound to the filter it came from.
+     * Whether SES checks the name or the status first could not be observed.
+     */
+    public PaginatedResult<Tenant> listTenants(String region, Map<String, String> filter, Integer pageSize,
+                                               String nextToken) {
+        SesListPaging paging = SesListPaging.V2_LIST_TENANTS;
+        paging.checkRequest(pageSize, nextToken);
+        String name = filterName(filter.get("TENANT_NAME_CONTAINS"));
+        String status = filterSendingStatus(filter.get("SENDING_STATUS"));
+        List<Tenant> matching = listTenants(region).stream()
+                .filter(t -> name == null || t.tenantName().toLowerCase(Locale.ROOT).contains(name))
+                .filter(t -> status == null || status.equals(t.sendingStatus()))
+                .toList();
+        // The status goes first: its values never hold the separator, so no name can pass for
+        // another filter.
+        String scope = filter.isEmpty() ? "" : Objects.toString(status, "") + "/" + Objects.toString(name, "");
+        return paging.page(region, scope, matching, Tenant::tenantName, pageSize, nextToken);
+    }
+
+    /** SES sets no upper bound short of the name's own: 65 characters were accepted. */
+    private static String filterName(String value) {
+        if (value == null) {
+            return null;
+        }
+        if (value.codePointCount(0, value.length()) < 3) {
+            throw new AwsException("BadRequestException", "TENANT_NAME_CONTAINS must be at least 3 characters.", 400);
+        }
+        return value.toLowerCase(Locale.ROOT);
+    }
+
+    private static String filterSendingStatus(String value) {
+        if (value == null) {
+            return null;
+        }
+        return switch (value) {
+            case "ENABLED", "REINSTATED", "DISABLED" -> value;
+            default -> throw new AwsException("BadRequestException", "Invalid sending status <" + value + ">.", 400);
+        };
     }
 
     public void deleteTenant(String tenantName, String region) {
@@ -413,7 +464,19 @@ public class SesTenantService {
                 ref.arn(), tenant.tenantName(), region);
     }
 
-    /** AWS returns the tenant's resources ordered by ARN. */
+    // Probe-confirmed order: the tenant is resolved first and the filter is checked next, so a bad page
+    // on a missing tenant is the 404; the page size and token come last.
+    public PaginatedResult<TenantResourceAssociation> listTenantResources(String tenantName, String typeFilter,
+                                                                          String region, SesListPaging paging,
+                                                                          Integer pageSize, String nextToken) {
+        Tenant tenant = tenantForAssociation(tenantName, region);
+        validateResourceTypeFilter(typeFilter);
+        return paging.page(region, tenant.tenantId() + "/" + Objects.toString(typeFilter, ""),
+                listTenantResources(tenant, typeFilter, region), TenantResourceAssociation::resourceArn,
+                pageSize, nextToken);
+    }
+
+    /** AWS returns the tenant's resources ordered by ARN; the paged list resumes on the same order. */
     public List<TenantResourceAssociation> listTenantResources(Tenant tenant, String typeFilter,
                                                                String region) {
         String prefix = associationKeyPrefix(region, tenant.tenantId());
@@ -428,7 +491,14 @@ public class SesTenantService {
     // itself contain the "::" delimiter (Floci barely restricts identity and template names), so a
     // suffix match on the key could alias one resource's associations to another's.
 
-    /** AWS returns a resource's tenants ordered by association time. */
+    public PaginatedResult<TenantResourceAssociation> listResourceTenants(AssociationResource ref, String region,
+                                                                          SesListPaging paging, Integer pageSize,
+                                                                          String nextToken) {
+        return paging.page(region, ref.arn(), listResourceTenants(ref, region),
+                SesTenantService::associationCursor, pageSize, nextToken);
+    }
+
+    /** AWS returns a resource's tenants ordered by association time; the paged list resumes on the same order. */
     public List<TenantResourceAssociation> listResourceTenants(AssociationResource ref, String region) {
         String regionPrefix = "tenantAssoc::" + region + "::";
         return associationStore.scan(k -> k.startsWith(regionPrefix)).stream()
@@ -438,6 +508,10 @@ public class SesTenantService {
                         .thenComparing(TenantResourceAssociation::tenantName,
                                 Comparator.nullsLast(Comparator.naturalOrder())))
                 .toList();
+    }
+
+    private static String associationCursor(TenantResourceAssociation association) {
+        return SesListPaging.oldestFirst(association.associatedTimestamp(), association.tenantName());
     }
 
     /**
@@ -464,21 +538,6 @@ public class SesTenantService {
         if (value != null && !SUPPORTED_RESOURCE_TYPES.contains(value)) {
             throw new AwsException("BadRequestException",
                     "Invalid resource type " + value + " specified.", 400);
-        }
-    }
-
-    /**
-     * The list operations return everything in one page, so any client-supplied NextToken is invalid —
-     * which is also what AWS answers for a token it cannot decrypt. PageSize is still range-checked.
-     */
-    public static void validateListPaging(Integer pageSize, String nextToken) {
-        if (pageSize != null && pageSize < 1) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value '" + pageSize + "' at 'pageSize' failed to "
-                            + "satisfy constraint: Member must have value greater than or equal to 1", 400);
-        }
-        if (nextToken != null) {
-            throw new AwsException("BadRequestException", "Invalid Next Token", 400);
         }
     }
 

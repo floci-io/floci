@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -100,6 +101,21 @@ class ApiGatewayRestApiCfnProvisionerTest {
     }
 
     @Test
+    void restApiUpdateRejectsMoreThanOneEndpointTypeBeforeChangingAnything() throws Exception {
+        existingApi(restApi("api-1", "shop", "v1", "REGIONAL"));
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        // CreateRestApi rejects the same list.
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"Name": "shop", "Description": "v2", "EndpointConfiguration": {"Types": ["REGIONAL", "EDGE"]}}
+                """), ctx("api-1")));
+
+        assertEquals("BadRequestException", e.getErrorCode());
+        verify(api, never()).updateRestApi(anyString(), anyString(), any());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
     void restApiRollbackPutsBackWhatTheUpdatePatched() throws Exception {
         existingApi(restApi("api-1", "shop", "v1", "REGIONAL"));
         StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
@@ -164,6 +180,47 @@ class ApiGatewayRestApiCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r));
         assertEquals("api-1", r.getPhysicalId());
         verify(api).deleteRestApi("us-east-1", "api-2");
+    }
+
+    @Test
+    void restApiUpdateDeletesTheRecreatedApiWhenItsBodyIsRejected() throws Exception {
+        when(api.getRestApi("us-east-1", "api-1"))
+                .thenThrow(new AwsException("NotFoundException", "Invalid API id specified", 404));
+        when(api.createRestApi(eq("us-east-1"), anyMap())).thenReturn(restApi("api-2", "shop", null, "REGIONAL"));
+        when(api.findRootResourceId("us-east-1", "api-2")).thenReturn(Optional.of("root-2"));
+        when(api.putRestApi(eq("us-east-1"), eq("api-2"), eq("overwrite"), anyString()))
+                .thenThrow(new AwsException("BadRequestException", "Invalid OpenAPI input", 400));
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"Name": "shop", "Body": {"openapi": "3.0.1", "paths": {}}}
+                """), ctx("api-1")));
+
+        // The failed update leaves the stack with its previous resource, so nothing else would delete it.
+        verify(api).deleteRestApi("us-east-1", "api-2");
+    }
+
+    @Test
+    void restApiUpdateListsARecreatedApiItCannotDeleteAndReportsTheRollbackFailure() throws Exception {
+        when(api.getRestApi("us-east-1", "api-1"))
+                .thenThrow(new AwsException("NotFoundException", "Invalid API id specified", 404));
+        when(api.createRestApi(eq("us-east-1"), anyMap())).thenReturn(restApi("api-2", "shop", null, "REGIONAL"));
+        when(api.findRootResourceId("us-east-1", "api-2")).thenReturn(Optional.of("root-2"));
+        when(api.putRestApi(eq("us-east-1"), eq("api-2"), eq("overwrite"), anyString()))
+                .thenThrow(new AwsException("BadRequestException", "Invalid OpenAPI input", 400));
+        doThrow(new AwsException("TooManyRequestsException", "Too Many Requests", 429))
+                .when(api).deleteRestApi("us-east-1", "api-2");
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"Name": "shop", "Body": {"openapi": "3.0.1", "paths": {}}}
+                """), ctx("api-1")));
+
+        assertEquals("BadRequestException", failure.getErrorCode());
+        assertEquals(1, failure.getSuppressed().length);
+        assertTrue(r.getAttributes().getOrDefault(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, "").contains("api-2"));
+        // Listed for the next cleanup, which the resource the engine restores inherits.
+        assertTrue(r.getAttributes().getOrDefault(CfnRollback.REPLACEMENT_CLEANUP_ATTR, "").contains("\"api-2\""));
     }
 
     @Test
@@ -286,6 +343,30 @@ class ApiGatewayRestApiCfnProvisionerTest {
 
         assertEquals("auth-1", r.getPhysicalId());
         assertEquals("auth-1", r.getAttributes().get("AuthorizerId"));
+    }
+
+    /**
+     * A COGNITO_USER_POOLS authorizer with no provider ARNs rejects every token, so dropping the
+     * property turns a correct template into a 401 on every request.
+     */
+    @Test
+    void authorizerForwardsProviderArns() throws Exception {
+        Authorizer authorizer = new Authorizer();
+        authorizer.setId("auth-1");
+        when(api.createAuthorizer(eq("us-east-1"), eq("api-1"), anyMap())).thenReturn(authorizer);
+
+        StackResource r = resource("AWS::ApiGateway::Authorizer", "Auth");
+        provisioner.provision(r, props("""
+                {"RestApiId": "api-1", "Name": "cognito", "Type": "COGNITO_USER_POOLS",
+                 "IdentitySource": "method.request.header.Authorization",
+                 "ProviderARNs": ["arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_abc"]}
+                """), ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(api).createAuthorizer(eq("us-east-1"), eq("api-1"), request.capture());
+        assertEquals(List.of("arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_abc"),
+                request.getValue().get("providerARNs"));
     }
 
     @Test

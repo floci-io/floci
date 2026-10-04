@@ -357,9 +357,9 @@ public class FirehoseParquetConverter {
                 // schema over a 128 MiB batch would otherwise cost columns x fields.
                 // First occurrence wins, as the per-column scan it replaces did.
                 Map<String, JsonNode> byLowerKey = new LinkedHashMap<>();
-                var fields = record.fields();
+                Iterator<Map.Entry<String, JsonNode>> fields = record.fields();
                 while (fields.hasNext()) {
-                    var field = fields.next();
+                    Map.Entry<String, JsonNode> field = fields.next();
                     byLowerKey.putIfAbsent(field.getKey().toLowerCase(Locale.ROOT), field.getValue());
                 }
                 return byLowerKey;

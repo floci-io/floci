@@ -136,6 +136,20 @@ class LambdaIntegrationTest {
     }
 
     @Test
+    @Order(7)
+    void syncInvoke_malformedClientContext_returns400() {
+        given()
+            .header("X-Amz-Client-Context", "not-base64-json!")
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post(BASE_PATH + "/functions/hello-world/invocations")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestContentException"));
+    }
+
+    @Test
     @Order(8)
     void createFunctionMissingRole_returns400() {
         given()

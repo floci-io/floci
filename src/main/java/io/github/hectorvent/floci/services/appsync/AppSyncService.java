@@ -736,9 +736,9 @@ public class AppSyncService {
         dn.setDescription((String) request.get("description"));
         dn.setCertificateArn((String) request.get("certificateArn"));
         String shortId = generateShortId();
-        dn.setAppsyncDomainName(shortId + "." + AwsEndpoints.host("appsync-api", regionResolver.getDefaultRegion()));
+        dn.setAppsyncDomainName(shortId + "." + AwsEndpoints.host("appsync-api", regionResolver.getRegion()));
         dn.setHostedZoneId("Z" + generateShortId());
-        dn.setDomainNameArn(regionResolver.buildArn("appsync", regionResolver.getDefaultRegion(),
+        dn.setDomainNameArn(regionResolver.buildArn("appsync", regionResolver.getRegion(),
             "domainnames/" + domainName));
 
         Object tagsObj = request.get("tags");
@@ -814,7 +814,7 @@ public class AppSyncService {
 
     public ChannelNamespace createChannelNamespace(String apiId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        getGraphqlApi(apiId);
+        GraphqlApi api = getGraphqlApi(apiId);
         String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
             throw new AwsException("BadRequestException", "A channel namespace name is required", 400);
@@ -828,7 +828,7 @@ public class AppSyncService {
         ns.setName(name);
         ns.setApiId(apiId);
         ns.setDescription((String) request.get("description"));
-        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", regionResolver.getDefaultRegion(),
+        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", apiRegion(api),
             "apis/" + apiId + "/channelNamespaces/" + name));
         ns.setCodeHandlers((String) request.get("codeHandlers"));
         ns.setCreated(System.currentTimeMillis());
@@ -1153,6 +1153,14 @@ public class AppSyncService {
         return apiId + "::" + typeName + "::" + fieldName;
     }
 
+    /** The region of an API's ARN, where its child resources live; the request region if it has none. */
+    private String apiRegion(GraphqlApi api) {
+        if (api.getArn() != null && AwsArnUtils.isArn(api.getArn())) {
+            return AwsArnUtils.parse(api.getArn()).region();
+        }
+        return regionResolver.getRegion();
+    }
+
     private String buildApiArn(String apiId, String region) {
         return regionResolver.buildArn("appsync", region, "apis/" + apiId);
     }
@@ -1265,7 +1273,7 @@ public class AppSyncService {
     private Map<String, String> castStringMap(Object value) {
         if (value instanceof Map) {
             Map<String, String> result = new HashMap<>();
-            for (var entry : ((Map<Object, Object>) value).entrySet()) {
+            for (Map.Entry<Object, Object> entry : ((Map<Object, Object>) value).entrySet()) {
                 result.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
             }
             return result;

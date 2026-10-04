@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x509.Extension;
@@ -392,7 +393,7 @@ public class TlsConfigSource implements ConfigSource {
     private static List<String> servedSans(Path certFile) {
         List<String> sans = new ArrayList<>();
         try {
-            X509Certificate cert = new CertificateGenerator().parseCertificate(Files.readString(certFile));
+            X509Certificate cert = Pem.parseCertificate(Files.readString(certFile));
             if (cert.getSubjectAlternativeNames() != null) {
                 for (List<?> entry : cert.getSubjectAlternativeNames()) {
                     sans.add(String.valueOf(entry.get(1)));
@@ -432,7 +433,7 @@ public class TlsConfigSource implements ConfigSource {
      */
     private boolean isValidLocalLeaf(FlociCertificateAuthority ca, Path certFile) {
         try {
-            X509Certificate cert = new CertificateGenerator().parseCertificate(Files.readString(certFile));
+            X509Certificate cert = Pem.parseCertificate(Files.readString(certFile));
             if (!ca.isIssuedByUs(cert)) {
                 LOG.infov("TLS: existing server certificate was not issued by the local CA; regenerating");
                 return false;

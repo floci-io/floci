@@ -3,9 +3,77 @@ package com.floci.test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
+import software.amazon.awssdk.services.ssoadmin.model.AddRegionResponse;
+import software.amazon.awssdk.services.ssoadmin.model.AttachCustomerManagedPolicyReferenceToPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.CreateAccountAssignmentResponse;
+import software.amazon.awssdk.services.ssoadmin.model.CreateApplicationAssignmentResponse;
+import software.amazon.awssdk.services.ssoadmin.model.CreateApplicationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.CreateInstanceAccessControlAttributeConfigurationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.CreateTrustedTokenIssuerResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DeleteAccountAssignmentResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DeleteApplicationAssignmentResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DeleteApplicationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DeleteInstanceAccessControlAttributeConfigurationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DeleteInstanceResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DeletePermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DeletePermissionsBoundaryFromPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DeleteTrustedTokenIssuerResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeAccountAssignmentCreationStatusResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeAccountAssignmentDeletionStatusResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeApplicationAssignmentResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeApplicationProviderResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeApplicationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeInstanceAccessControlAttributeConfigurationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeInstanceResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribePermissionSetProvisioningStatusResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeRegionResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DescribeTrustedTokenIssuerResponse;
+import software.amazon.awssdk.services.ssoadmin.model.DetachCustomerManagedPolicyReferenceFromPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.GetApplicationAccessScopeResponse;
+import software.amazon.awssdk.services.ssoadmin.model.GetApplicationAssignmentConfigurationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.GetApplicationAuthenticationMethodResponse;
+import software.amazon.awssdk.services.ssoadmin.model.GetApplicationGrantResponse;
+import software.amazon.awssdk.services.ssoadmin.model.GetApplicationSessionConfigurationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.GetPermissionsBoundaryForPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.InstanceMetadata;
+import software.amazon.awssdk.services.ssoadmin.model.ListAccountAssignmentCreationStatusResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListAccountAssignmentDeletionStatusResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListAccountAssignmentsForPrincipalResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListAccountAssignmentsResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListAccountsForProvisionedPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListApplicationAccessScopesResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListApplicationAssignmentsForPrincipalResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListApplicationAssignmentsResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListApplicationAuthenticationMethodsResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListApplicationGrantsResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListApplicationProvidersResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListApplicationsResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListCustomerManagedPolicyReferencesInPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListManagedPoliciesInPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListPermissionSetProvisioningStatusResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListPermissionSetsProvisionedToAccountResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListRegionsResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListTagsForResourceResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ListTrustedTokenIssuersResponse;
 import software.amazon.awssdk.services.ssoadmin.model.PrincipalType;
+import software.amazon.awssdk.services.ssoadmin.model.ProvisionPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.PutApplicationAccessScopeResponse;
+import software.amazon.awssdk.services.ssoadmin.model.PutApplicationAssignmentConfigurationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.PutApplicationAuthenticationMethodResponse;
+import software.amazon.awssdk.services.ssoadmin.model.PutApplicationGrantResponse;
+import software.amazon.awssdk.services.ssoadmin.model.PutApplicationSessionConfigurationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.PutPermissionsBoundaryToPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.RemoveRegionResponse;
+import software.amazon.awssdk.services.ssoadmin.model.TagResourceResponse;
 import software.amazon.awssdk.services.ssoadmin.model.TargetType;
+import software.amazon.awssdk.services.ssoadmin.model.UntagResourceResponse;
+import software.amazon.awssdk.services.ssoadmin.model.UpdateApplicationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.UpdateInstanceAccessControlAttributeConfigurationResponse;
+import software.amazon.awssdk.services.ssoadmin.model.UpdateInstanceResponse;
+import software.amazon.awssdk.services.ssoadmin.model.UpdateTrustedTokenIssuerResponse;
 import software.amazon.awssdk.services.ssoadmin.model.ValidationException;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -14,6 +82,9 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 @DisplayName("IAM Identity Center account assignments")
 class SsoAdminAccountAssignmentTest {
 
+    /** The AWS-owned custom application provider, in the partition the fixture clients sign in. */
+    private static final String CUSTOM_PROVIDER = TestFixtures.globalArn("sso", "aws", "applicationProvider/custom");
+
     @Test
     @DisplayName("adds an IAM Identity Center Region through the AWS SDK")
     void addRegionUsesAwsSdk() {
@@ -21,13 +92,13 @@ class SsoAdminAccountAssignmentTest {
 
         try (SsoAdminClient sso = TestFixtures.ssoAdminClient()) {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
-            var added = sso.addRegion(request -> request
+            AddRegionResponse added = sso.addRegion(request -> request
                     .instanceArn(instanceArn)
                     .regionName("ap-southeast-3"));
 
             assertThat(added.statusAsString()).isEqualTo("ADDING");
 
-            var described = sso.describeRegion(request -> request
+            DescribeRegionResponse described = sso.describeRegion(request -> request
                     .instanceArn(instanceArn)
                     .regionName("ap-southeast-3"));
             assertThat(described.regionName()).isEqualTo("ap-southeast-3");
@@ -35,13 +106,13 @@ class SsoAdminAccountAssignmentTest {
             assertThat(described.isPrimaryRegion()).isFalse();
             assertThat(described.addedDate()).isNotNull();
 
-            var regions = sso.listRegions(request -> request.instanceArn(instanceArn));
+            ListRegionsResponse regions = sso.listRegions(request -> request.instanceArn(instanceArn));
             assertThat(regions.regions()).anySatisfy(region -> {
                 assertThat(region.regionName()).isEqualTo("ap-southeast-3");
                 assertThat(region.statusAsString()).isEqualTo("ACTIVE");
             });
 
-            var removed = sso.removeRegion(request -> request
+            RemoveRegionResponse removed = sso.removeRegion(request -> request
                     .instanceArn(instanceArn)
                     .regionName("ap-southeast-3"));
             assertThat(removed.statusAsString()).isEqualTo("REMOVING");
@@ -71,7 +142,7 @@ class SsoAdminAccountAssignmentTest {
                     .permissionSet()
                     .permissionSetArn();
 
-            var response = sso.attachCustomerManagedPolicyReferenceToPermissionSet(request -> request
+            AttachCustomerManagedPolicyReferenceToPermissionSetResponse response = sso.attachCustomerManagedPolicyReferenceToPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)
                     .customerManagedPolicyReference(reference -> reference
@@ -79,7 +150,7 @@ class SsoAdminAccountAssignmentTest {
                             .path("/platform/")));
 
             assertThat(response.sdkHttpResponse().isSuccessful()).isTrue();
-            var references = sso.listCustomerManagedPolicyReferencesInPermissionSet(request -> request
+            ListCustomerManagedPolicyReferencesInPermissionSetResponse references = sso.listCustomerManagedPolicyReferencesInPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn));
             assertThat(references.customerManagedPolicyReferences())
@@ -95,7 +166,7 @@ class SsoAdminAccountAssignmentTest {
                             .path("/platform/"))))
                     .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ConflictException.class);
 
-            var detached = sso.detachCustomerManagedPolicyReferenceFromPermissionSet(request -> request
+            DetachCustomerManagedPolicyReferenceFromPermissionSetResponse detached = sso.detachCustomerManagedPolicyReferenceFromPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)
                     .customerManagedPolicyReference(reference -> reference
@@ -119,9 +190,9 @@ class SsoAdminAccountAssignmentTest {
 
         try (SsoAdminClient sso = TestFixtures.ssoAdminClient()) {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
-            var created = sso.createApplication(request -> request
+            CreateApplicationResponse created = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("Floci OAuth SDK")
                     .clientToken("sdk-create-application-token")
                     .status("DISABLED")
@@ -133,12 +204,13 @@ class SsoAdminAccountAssignmentTest {
                     .tags(tag -> tag.key("Environment").value("test")));
 
             assertThat(created.applicationArn()).matches(
-                    "arn:aws:sso::000000000000:application/ssoins-7223b02a5d9f7c8e/apl-[0-9a-f]{16}");
+                    TestFixtures.globalArn("sso", "000000000000",
+                            "application/ssoins-7223b02a5d9f7c8e/apl-[0-9a-f]{16}"));
             assertThat(created.identityStoreArn())
-                    .isEqualTo("arn:aws:identitystore::000000000000:identitystore/d-9067f2a3c1");
-            var replay = sso.createApplication(request -> request
+                    .isEqualTo(TestFixtures.globalArn("identitystore", "000000000000", "identitystore/d-9067f2a3c1"));
+            CreateApplicationResponse replay = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("Floci OAuth SDK")
                     .clientToken("sdk-create-application-token")
                     .status("DISABLED")
@@ -150,14 +222,14 @@ class SsoAdminAccountAssignmentTest {
                     .tags(tag -> tag.key("Environment").value("test")));
             assertThat(replay.applicationArn()).isEqualTo(created.applicationArn());
 
-            var tags = sso.listTagsForResource(request -> request
+            ListTagsForResourceResponse tags = sso.listTagsForResource(request -> request
                     .instanceArn(instanceArn)
                     .resourceArn(created.applicationArn()));
             assertThat(tags.tags()).singleElement().satisfies(tag -> {
                 assertThat(tag.key()).isEqualTo("Environment");
                 assertThat(tag.value()).isEqualTo("test");
             });
-            var tagged = sso.tagResource(request -> request
+            TagResourceResponse tagged = sso.tagResource(request -> request
                     .instanceArn(instanceArn)
                     .resourceArn(created.applicationArn())
                     .tags(tag -> tag.key("Environment").value("prod"),
@@ -166,16 +238,16 @@ class SsoAdminAccountAssignmentTest {
             assertThat(sso.listTagsForResource(request -> request.resourceArn(created.applicationArn())).tags())
                     .extracting(tag -> tag.key() + "=" + tag.value())
                     .containsExactly("Environment=prod", "Owner=platform");
-            var untagged = sso.untagResource(request -> request
+            UntagResourceResponse untagged = sso.untagResource(request -> request
                     .resourceArn(created.applicationArn())
                     .tagKeys("Owner"));
             assertThat(untagged.sdkHttpResponse().isSuccessful()).isTrue();
             assertThat(sso.listTagsForResource(request -> request.resourceArn(created.applicationArn())).tags())
                     .extracting(tag -> tag.key() + "=" + tag.value())
                     .containsExactly("Environment=prod");
-            var replayAfterTagging = sso.createApplication(request -> request
+            CreateApplicationResponse replayAfterTagging = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("Floci OAuth SDK")
                     .clientToken("sdk-create-application-token")
                     .status("DISABLED")
@@ -187,7 +259,7 @@ class SsoAdminAccountAssignmentTest {
                     .tags(tag -> tag.key("Environment").value("test")));
             assertThat(replayAfterTagging.applicationArn()).isEqualTo(created.applicationArn());
 
-            var updatedApplication = sso.updateApplication(request -> request
+            UpdateApplicationResponse updatedApplication = sso.updateApplication(request -> request
                     .applicationArn(created.applicationArn())
                     .name("Floci OAuth SDK Updated")
                     .description("Updated through SDK")
@@ -196,52 +268,52 @@ class SsoAdminAccountAssignmentTest {
                             .origin("IDENTITY_CENTER"))));
             assertThat(updatedApplication.sdkHttpResponse().isSuccessful()).isTrue();
 
-            var described = sso.describeApplication(request -> request.applicationArn(created.applicationArn()));
+            DescribeApplicationResponse described = sso.describeApplication(request -> request.applicationArn(created.applicationArn()));
             assertThat(described.applicationArn()).isEqualTo(created.applicationArn());
             assertThat(described.name()).isEqualTo("Floci OAuth SDK Updated");
             assertThat(described.description()).isEqualTo("Updated through SDK");
             assertThat(described.statusAsString()).isEqualTo("ENABLED");
             assertThat(described.instanceArn()).isEqualTo(instanceArn);
             assertThat(described.applicationAccount()).isEqualTo("000000000000");
-            assertThat(described.applicationProviderArn()).isEqualTo("arn:aws:sso::aws:applicationProvider/custom");
+            assertThat(described.applicationProviderArn()).isEqualTo(CUSTOM_PROVIDER);
             assertThat(described.portalOptions().signInOptions().originAsString()).isEqualTo("IDENTITY_CENTER");
 
-            var provider = sso.describeApplicationProvider(request -> request
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom"));
-            assertThat(provider.applicationProviderArn()).isEqualTo("arn:aws:sso::aws:applicationProvider/custom");
+            DescribeApplicationProviderResponse provider = sso.describeApplicationProvider(request -> request
+                    .applicationProviderArn(CUSTOM_PROVIDER));
+            assertThat(provider.applicationProviderArn()).isEqualTo(CUSTOM_PROVIDER);
             assertThat(provider.federationProtocolAsString()).isEqualTo("OAUTH");
 
-            var providers = sso.listApplicationProviders(request -> {});
+            ListApplicationProvidersResponse providers = sso.listApplicationProviders(request -> {});
             assertThat(providers.applicationProviders()).singleElement().satisfies(applicationProvider -> {
                 assertThat(applicationProvider.applicationProviderArn())
-                        .isEqualTo("arn:aws:sso::aws:applicationProvider/custom");
+                        .isEqualTo(CUSTOM_PROVIDER);
                 assertThat(applicationProvider.federationProtocolAsString()).isEqualTo("OAUTH");
             });
 
-            var applications = sso.listApplications(request -> request
+            ListApplicationsResponse applications = sso.listApplications(request -> request
                     .instanceArn(instanceArn)
                     .filter(filter -> filter
                             .applicationAccount("000000000000")
-                            .applicationProvider("arn:aws:sso::aws:applicationProvider/custom")));
+                            .applicationProvider(CUSTOM_PROVIDER)));
             assertThat(applications.applications()).anySatisfy(application ->
                     assertThat(application.applicationArn()).isEqualTo(created.applicationArn()));
 
-            var assignmentConfiguration = sso.getApplicationAssignmentConfiguration(request -> request
+            GetApplicationAssignmentConfigurationResponse assignmentConfiguration = sso.getApplicationAssignmentConfiguration(request -> request
                     .applicationArn(created.applicationArn()));
             assertThat(assignmentConfiguration.assignmentRequired()).isTrue();
-            var putAssignmentConfiguration = sso.putApplicationAssignmentConfiguration(request -> request
+            PutApplicationAssignmentConfigurationResponse putAssignmentConfiguration = sso.putApplicationAssignmentConfiguration(request -> request
                     .applicationArn(created.applicationArn())
                     .assignmentRequired(false));
             assertThat(putAssignmentConfiguration.sdkHttpResponse().isSuccessful()).isTrue();
             assertThat(sso.getApplicationAssignmentConfiguration(request -> request
                     .applicationArn(created.applicationArn())).assignmentRequired()).isFalse();
 
-            var putScope = sso.putApplicationAccessScope(request -> request
+            PutApplicationAccessScopeResponse putScope = sso.putApplicationAccessScope(request -> request
                     .applicationArn(created.applicationArn())
                     .scope("api:read")
                     .authorizedTargets(instanceArn));
             assertThat(putScope.sdkHttpResponse().isSuccessful()).isTrue();
-            var accessScope = sso.getApplicationAccessScope(request -> request
+            GetApplicationAccessScopeResponse accessScope = sso.getApplicationAccessScope(request -> request
                     .applicationArn(created.applicationArn())
                     .scope("api:read"));
             assertThat(accessScope.scope()).isEqualTo("api:read");
@@ -251,7 +323,7 @@ class SsoAdminAccountAssignmentTest {
                     .applicationArn(created.applicationArn())
                     .scope("api:write")
                     .authorizedTargets(instanceArn));
-            var firstScopePage = sso.listApplicationAccessScopes(request -> request
+            ListApplicationAccessScopesResponse firstScopePage = sso.listApplicationAccessScopes(request -> request
                     .applicationArn(created.applicationArn())
                     .maxResults(1));
             assertThat(firstScopePage.scopes()).singleElement().satisfies(scope -> {
@@ -260,7 +332,7 @@ class SsoAdminAccountAssignmentTest {
             });
             assertThat(firstScopePage.nextToken()).isNotBlank();
 
-            var secondScopePage = sso.listApplicationAccessScopes(request -> request
+            ListApplicationAccessScopesResponse secondScopePage = sso.listApplicationAccessScopes(request -> request
                     .applicationArn(created.applicationArn())
                     .maxResults(1)
                     .nextToken(firstScopePage.nextToken()));
@@ -283,17 +355,17 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SDK Assignment App")
                     .clientToken("sdk-assignment-app-token")).applicationArn();
 
-            var response = sso.createApplicationAssignment(request -> request
+            CreateApplicationAssignmentResponse response = sso.createApplicationAssignment(request -> request
                     .applicationArn(applicationArn)
                     .principalId("11111111-2222-3333-4444-555555555555")
                     .principalType("USER"));
             assertThat(response.sdkHttpResponse().isSuccessful()).isTrue();
 
-            var described = sso.describeApplicationAssignment(request -> request
+            DescribeApplicationAssignmentResponse described = sso.describeApplicationAssignment(request -> request
                     .applicationArn(applicationArn)
                     .principalId("11111111-2222-3333-4444-555555555555")
                     .principalType("USER"));
@@ -301,7 +373,7 @@ class SsoAdminAccountAssignmentTest {
             assertThat(described.principalId()).isEqualTo("11111111-2222-3333-4444-555555555555");
             assertThat(described.principalTypeAsString()).isEqualTo("USER");
 
-            var listed = sso.listApplicationAssignments(request -> request.applicationArn(applicationArn).maxResults(1));
+            ListApplicationAssignmentsResponse listed = sso.listApplicationAssignments(request -> request.applicationArn(applicationArn).maxResults(1));
             assertThat(listed.applicationAssignments()).singleElement().satisfies(assignment -> {
                 assertThat(assignment.applicationArn()).isEqualTo(applicationArn);
                 assertThat(assignment.principalId()).isEqualTo("11111111-2222-3333-4444-555555555555");
@@ -319,7 +391,7 @@ class SsoAdminAccountAssignmentTest {
                     .applicationArn(applicationArn)
                     .principalId(groupId)
                     .principalType("GROUP"));
-            var principalAssignments = sso.listApplicationAssignmentsForPrincipal(request -> request
+            ListApplicationAssignmentsForPrincipalResponse principalAssignments = sso.listApplicationAssignmentsForPrincipal(request -> request
                     .instanceArn(instanceArn)
                     .principalId(groupId)
                     .principalType("GROUP"));
@@ -340,7 +412,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SDK Delete Assignment App"))
                     .applicationArn();
             String principalId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -349,7 +421,7 @@ class SsoAdminAccountAssignmentTest {
                     .principalId(principalId)
                     .principalType("GROUP"));
 
-            var deleted = sso.deleteApplicationAssignment(request -> request
+            DeleteApplicationAssignmentResponse deleted = sso.deleteApplicationAssignment(request -> request
                     .applicationArn(applicationArn)
                     .principalId(principalId)
                     .principalType("GROUP"));
@@ -371,11 +443,11 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SDK Delete Authentication Method"))
                     .applicationArn();
 
-            var putMethod = sso.putApplicationAuthenticationMethod(request -> request
+            PutApplicationAuthenticationMethodResponse putMethod = sso.putApplicationAuthenticationMethod(request -> request
                     .applicationArn(applicationArn)
                     .authenticationMethodType("IAM")
                     .authenticationMethod(method -> method.iam(iam -> iam.actorPolicy(
@@ -385,12 +457,12 @@ class SsoAdminAccountAssignmentTest {
                                             java.util.List.of()))
                                     .build()))));
             assertThat(putMethod.sdkHttpResponse().isSuccessful()).isTrue();
-            var fetchedMethod = sso.getApplicationAuthenticationMethod(request -> request
+            GetApplicationAuthenticationMethodResponse fetchedMethod = sso.getApplicationAuthenticationMethod(request -> request
                     .applicationArn(applicationArn)
                     .authenticationMethodType("IAM"));
             assertThat(fetchedMethod.authenticationMethod().iam().actorPolicy().asMap().get("Version").asString())
                     .isEqualTo("2012-10-17");
-            var listedMethods = sso.listApplicationAuthenticationMethods(request -> request
+            ListApplicationAuthenticationMethodsResponse listedMethods = sso.listApplicationAuthenticationMethods(request -> request
                     .applicationArn(applicationArn));
             assertThat(listedMethods.authenticationMethods()).singleElement().satisfies(method -> {
                 assertThat(method.authenticationMethodTypeAsString()).isEqualTo("IAM");
@@ -430,32 +502,32 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SDK Delete Grant"))
                     .applicationArn();
 
-            var sessionConfiguration = sso.getApplicationSessionConfiguration(request -> request
+            GetApplicationSessionConfigurationResponse sessionConfiguration = sso.getApplicationSessionConfiguration(request -> request
                     .applicationArn(applicationArn));
             assertThat(sessionConfiguration.userBackgroundSessionApplicationStatusAsString()).isEqualTo("DISABLED");
-            var putSessionConfiguration = sso.putApplicationSessionConfiguration(request -> request
+            PutApplicationSessionConfigurationResponse putSessionConfiguration = sso.putApplicationSessionConfiguration(request -> request
                     .applicationArn(applicationArn)
                     .userBackgroundSessionApplicationStatus("ENABLED"));
             assertThat(putSessionConfiguration.sdkHttpResponse().isSuccessful()).isTrue();
             assertThat(sso.getApplicationSessionConfiguration(request -> request.applicationArn(applicationArn))
                     .userBackgroundSessionApplicationStatusAsString()).isEqualTo("ENABLED");
 
-            var putGrant = sso.putApplicationGrant(request -> request
+            PutApplicationGrantResponse putGrant = sso.putApplicationGrant(request -> request
                     .applicationArn(applicationArn)
                     .grantType("authorization_code")
                     .grant(grant -> grant.authorizationCode(code -> code
                             .redirectUris("https://example.com/callback"))));
             assertThat(putGrant.sdkHttpResponse().isSuccessful()).isTrue();
-            var fetchedGrant = sso.getApplicationGrant(request -> request
+            GetApplicationGrantResponse fetchedGrant = sso.getApplicationGrant(request -> request
                     .applicationArn(applicationArn)
                     .grantType("authorization_code"));
             assertThat(fetchedGrant.grant().authorizationCode().redirectUris())
                     .containsExactly("https://example.com/callback");
-            var listedGrants = sso.listApplicationGrants(request -> request.applicationArn(applicationArn));
+            ListApplicationGrantsResponse listedGrants = sso.listApplicationGrants(request -> request.applicationArn(applicationArn));
             assertThat(listedGrants.grants()).singleElement().satisfies(grant -> {
                 assertThat(grant.grantTypeAsString()).isEqualTo("authorization_code");
                 assertThat(grant.grant().authorizationCode().redirectUris())
@@ -491,7 +563,7 @@ class SsoAdminAccountAssignmentTest {
 
         try (SsoAdminClient sso = TestFixtures.ssoAdminClient()) {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
-            var created = sso.createTrustedTokenIssuer(request -> request
+            CreateTrustedTokenIssuerResponse created = sso.createTrustedTokenIssuer(request -> request
                     .instanceArn(instanceArn)
                     .name("SdkIssuer")
                     .clientToken("sdk-tti-token")
@@ -504,8 +576,9 @@ class SsoAdminAccountAssignmentTest {
                                     .jwksRetrievalOption("OPEN_ID_DISCOVERY"))));
 
             assertThat(created.trustedTokenIssuerArn()).matches(
-                    "arn:aws:sso::000000000000:trustedTokenIssuer/ssoins-[0-9a-f]{16}/tti-[0-9a-f-]{36}");
-            var replay = sso.createTrustedTokenIssuer(request -> request
+                    TestFixtures.globalArn("sso", "000000000000",
+                            "trustedTokenIssuer/ssoins-[0-9a-f]{16}/tti-[0-9a-f-]{36}"));
+            CreateTrustedTokenIssuerResponse replay = sso.createTrustedTokenIssuer(request -> request
                     .instanceArn(instanceArn)
                     .name("SdkIssuer")
                     .clientToken("sdk-tti-token")
@@ -518,7 +591,7 @@ class SsoAdminAccountAssignmentTest {
                                     .jwksRetrievalOption("OPEN_ID_DISCOVERY"))));
             assertThat(replay.trustedTokenIssuerArn()).isEqualTo(created.trustedTokenIssuerArn());
 
-            var updateResponse = sso.updateTrustedTokenIssuer(request -> request
+            UpdateTrustedTokenIssuerResponse updateResponse = sso.updateTrustedTokenIssuer(request -> request
                     .trustedTokenIssuerArn(created.trustedTokenIssuerArn())
                     .name("SdkIssuerUpdated")
                     .trustedTokenIssuerConfiguration(configuration -> configuration
@@ -526,21 +599,21 @@ class SsoAdminAccountAssignmentTest {
                                     .identityStoreAttributePath("emails.value")
                                     .jwksRetrievalOption("OPEN_ID_DISCOVERY"))));
             assertThat(updateResponse.sdkHttpResponse().isSuccessful()).isTrue();
-            var described = sso.describeTrustedTokenIssuer(request -> request
+            DescribeTrustedTokenIssuerResponse described = sso.describeTrustedTokenIssuer(request -> request
                     .trustedTokenIssuerArn(created.trustedTokenIssuerArn()));
             assertThat(described.name()).isEqualTo("SdkIssuerUpdated");
             assertThat(described.trustedTokenIssuerTypeAsString()).isEqualTo("OIDC_JWT");
             assertThat(described.trustedTokenIssuerConfiguration().oidcJwtConfiguration().issuerUrl())
                     .isEqualTo("https://issuer.example.com");
 
-            var issuers = sso.listTrustedTokenIssuers(request -> request.instanceArn(instanceArn));
+            ListTrustedTokenIssuersResponse issuers = sso.listTrustedTokenIssuers(request -> request.instanceArn(instanceArn));
             assertThat(issuers.trustedTokenIssuers()).anySatisfy(issuer -> {
                 assertThat(issuer.trustedTokenIssuerArn()).isEqualTo(created.trustedTokenIssuerArn());
                 assertThat(issuer.name()).isEqualTo("SdkIssuerUpdated");
                 assertThat(issuer.trustedTokenIssuerTypeAsString()).isEqualTo("OIDC_JWT");
             });
 
-            var deleteResponse = sso.deleteTrustedTokenIssuer(request -> request
+            DeleteTrustedTokenIssuerResponse deleteResponse = sso.deleteTrustedTokenIssuer(request -> request
                     .trustedTokenIssuerArn(created.trustedTokenIssuerArn()));
             assertThat(deleteResponse.sdkHttpResponse().isSuccessful()).isTrue();
             assertThatThrownBy(() -> sso.deleteTrustedTokenIssuer(request -> request
@@ -556,7 +629,7 @@ class SsoAdminAccountAssignmentTest {
 
         try (SsoAdminClient sso = TestFixtures.ssoAdminClient()) {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
-            var response = sso.createInstanceAccessControlAttributeConfiguration(request -> request
+            CreateInstanceAccessControlAttributeConfigurationResponse response = sso.createInstanceAccessControlAttributeConfiguration(request -> request
                     .instanceArn(instanceArn)
                     .instanceAccessControlAttributeConfiguration(configuration -> configuration
                             .accessControlAttributes(attribute -> attribute
@@ -565,7 +638,7 @@ class SsoAdminAccountAssignmentTest {
 
             assertThat(response.sdkHttpResponse().isSuccessful()).isTrue();
 
-            var described = sso.describeInstanceAccessControlAttributeConfiguration(request -> request.instanceArn(instanceArn));
+            DescribeInstanceAccessControlAttributeConfigurationResponse described = sso.describeInstanceAccessControlAttributeConfiguration(request -> request.instanceArn(instanceArn));
             assertThat(described.statusAsString()).isEqualTo("ENABLED");
             assertThat(described.instanceAccessControlAttributeConfiguration().accessControlAttributes())
                     .singleElement().satisfies(attribute -> {
@@ -581,7 +654,7 @@ class SsoAdminAccountAssignmentTest {
                                     .value(value -> value.source("${path:enterprise.department}"))))))
                     .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ConflictException.class);
 
-            var updateResponse = sso.updateInstanceAccessControlAttributeConfiguration(request -> request
+            UpdateInstanceAccessControlAttributeConfigurationResponse updateResponse = sso.updateInstanceAccessControlAttributeConfiguration(request -> request
                     .instanceArn(instanceArn)
                     .instanceAccessControlAttributeConfiguration(configuration -> configuration
                             .accessControlAttributes(attribute -> attribute
@@ -592,11 +665,11 @@ class SsoAdminAccountAssignmentTest {
                     .instanceAccessControlAttributeConfiguration().accessControlAttributes())
                     .singleElement().satisfies(attribute -> assertThat(attribute.key()).isEqualTo("CostCenter"));
 
-            var deleteResponse = sso.deleteInstanceAccessControlAttributeConfiguration(request -> request
+            DeleteInstanceAccessControlAttributeConfigurationResponse deleteResponse = sso.deleteInstanceAccessControlAttributeConfiguration(request -> request
                     .instanceArn(instanceArn));
             assertThat(deleteResponse.sdkHttpResponse().isSuccessful()).isTrue();
 
-            var recreateResponse = sso.createInstanceAccessControlAttributeConfiguration(request -> request
+            CreateInstanceAccessControlAttributeConfigurationResponse recreateResponse = sso.createInstanceAccessControlAttributeConfiguration(request -> request
                     .instanceArn(instanceArn)
                     .instanceAccessControlAttributeConfiguration(configuration -> configuration
                             .accessControlAttributes(attribute -> attribute
@@ -619,7 +692,7 @@ class SsoAdminAccountAssignmentTest {
                     .tags(tag -> tag.key("Environment").value("test")))
                     .instanceArn();
 
-            var described = sso.describeInstance(request -> request.instanceArn(instanceArn));
+            DescribeInstanceResponse described = sso.describeInstance(request -> request.instanceArn(instanceArn));
             assertThat(described.instanceArn()).isEqualTo(instanceArn);
             assertThat(described.ownerAccountId()).isEqualTo("333344445555");
             assertThat(described.name()).isEqualTo("SdkAccountInstance");
@@ -627,10 +700,10 @@ class SsoAdminAccountAssignmentTest {
             assertThat(described.permissionSetsEnabled()).isFalse();
             assertThat(described.encryptionConfigurationDetails().keyTypeAsString()).isEqualTo("AWS_OWNED_KMS_KEY");
 
-            var renamed = sso.updateInstance(request -> request.instanceArn(instanceArn).name("SdkAccountRenamed"));
+            UpdateInstanceResponse renamed = sso.updateInstance(request -> request.instanceArn(instanceArn).name("SdkAccountRenamed"));
             assertThat(renamed.sdkHttpResponse().isSuccessful()).isTrue();
             sso.updateInstance(request -> request.instanceArn(instanceArn).permissionSetsEnabled(true));
-            var updated = sso.describeInstance(request -> request.instanceArn(instanceArn));
+            DescribeInstanceResponse updated = sso.describeInstance(request -> request.instanceArn(instanceArn));
             assertThat(updated.name()).isEqualTo("SdkAccountRenamed");
             assertThat(updated.permissionSetsEnabled()).isTrue();
             assertThat(sso.createInstance(request -> request
@@ -638,11 +711,11 @@ class SsoAdminAccountAssignmentTest {
                     .clientToken("sdk-create-instance")
                     .tags(tag -> tag.key("Environment").value("test"))).instanceArn()).isEqualTo(instanceArn);
 
-            var listed = sso.listInstances(request -> {}).instances();
+            List<InstanceMetadata> listed = sso.listInstances(request -> {}).instances();
             assertThat(listed).hasSize(1);
             assertThat(listed.get(0).instanceArn()).isEqualTo(instanceArn);
             assertThat(listed.get(0).ownerAccountId()).isEqualTo("333344445555");
-            assertThat(listed.get(0).primaryRegion()).isEqualTo("us-east-1");
+            assertThat(listed.get(0).primaryRegion()).isEqualTo(TestFixtures.region().id());
         }
     }
 
@@ -672,10 +745,10 @@ class SsoAdminAccountAssignmentTest {
                     .instanceArn();
             sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SdkDisposableApplication"));
 
-            var deleted = sso.deleteInstance(request -> request.instanceArn(instanceArn));
+            DeleteInstanceResponse deleted = sso.deleteInstance(request -> request.instanceArn(instanceArn));
             assertThat(deleted.sdkHttpResponse().isSuccessful()).isTrue();
             assertThat(sso.listInstances(request -> {}).instances()).isEmpty();
         }
@@ -690,7 +763,7 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SdkDeleteApplicationScope"))
                     .applicationArn();
 
@@ -714,11 +787,11 @@ class SsoAdminAccountAssignmentTest {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String applicationArn = sso.createApplication(request -> request
                     .instanceArn(instanceArn)
-                    .applicationProviderArn("arn:aws:sso::aws:applicationProvider/custom")
+                    .applicationProviderArn(CUSTOM_PROVIDER)
                     .name("SdkDeleteApplication"))
                     .applicationArn();
 
-            var response = sso.deleteApplication(request -> request.applicationArn(applicationArn));
+            DeleteApplicationResponse response = sso.deleteApplication(request -> request.applicationArn(applicationArn));
             assertThat(response.sdkHttpResponse().isSuccessful()).isTrue();
             assertThatThrownBy(() -> sso.deleteApplication(request -> request.applicationArn(applicationArn)))
                     .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
@@ -747,7 +820,7 @@ class SsoAdminAccountAssignmentTest {
                         .principalId(principalId));
             }
 
-            var first = sso.listAccountAssignmentsForPrincipal(request -> request
+            ListAccountAssignmentsForPrincipalResponse first = sso.listAccountAssignmentsForPrincipal(request -> request
                     .instanceArn(instanceArn)
                     .principalId(principalId)
                     .principalType(PrincipalType.GROUP)
@@ -755,7 +828,7 @@ class SsoAdminAccountAssignmentTest {
             assertThat(first.accountAssignments()).hasSize(1);
             assertThat(first.nextToken()).isNotBlank();
 
-            var second = sso.listAccountAssignmentsForPrincipal(request -> request
+            ListAccountAssignmentsForPrincipalResponse second = sso.listAccountAssignmentsForPrincipal(request -> request
                     .instanceArn(instanceArn)
                     .principalId(principalId)
                     .principalType(PrincipalType.GROUP)
@@ -764,7 +837,7 @@ class SsoAdminAccountAssignmentTest {
             assertThat(second.accountAssignments()).hasSize(1);
             assertThat(second.nextToken()).isNull();
 
-            var filtered = sso.listAccountAssignmentsForPrincipal(request -> request
+            ListAccountAssignmentsForPrincipalResponse filtered = sso.listAccountAssignmentsForPrincipal(request -> request
                     .instanceArn(instanceArn)
                     .principalId(principalId)
                     .principalType(PrincipalType.GROUP)
@@ -785,7 +858,7 @@ class SsoAdminAccountAssignmentTest {
                             .name("ProvisionSdkAdmins"))
                     .permissionSet().permissionSetArn();
 
-            var response = sso.provisionPermissionSet(request -> request
+            ProvisionPermissionSetResponse response = sso.provisionPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)
                     .targetType("AWS_ACCOUNT")
@@ -797,14 +870,14 @@ class SsoAdminAccountAssignmentTest {
             assertThat(response.permissionSetProvisioningStatus().permissionSetArn()).isEqualTo(permissionSetArn);
             assertThat(response.permissionSetProvisioningStatus().requestId()).isNotBlank();
 
-            var described = sso.describePermissionSetProvisioningStatus(request -> request
+            DescribePermissionSetProvisioningStatusResponse described = sso.describePermissionSetProvisioningStatus(request -> request
                     .instanceArn(instanceArn)
                     .provisionPermissionSetRequestId(response.permissionSetProvisioningStatus().requestId()));
             assertThat(described.permissionSetProvisioningStatus().requestId())
                     .isEqualTo(response.permissionSetProvisioningStatus().requestId());
             assertThat(described.permissionSetProvisioningStatus().statusAsString()).isEqualTo("SUCCEEDED");
 
-            var listed = sso.listPermissionSetProvisioningStatus(request -> request
+            ListPermissionSetProvisioningStatusResponse listed = sso.listPermissionSetProvisioningStatus(request -> request
                     .instanceArn(instanceArn)
                     .filter(filter -> filter.status("SUCCEEDED")));
             assertThat(listed.permissionSetsProvisioningStatus())
@@ -829,7 +902,7 @@ class SsoAdminAccountAssignmentTest {
                     .targetType("AWS_ACCOUNT")
                     .targetId("210987654321"));
 
-            var response = sso.listPermissionSetsProvisionedToAccount(request -> request
+            ListPermissionSetsProvisionedToAccountResponse response = sso.listPermissionSetsProvisionedToAccount(request -> request
                     .instanceArn(instanceArn)
                     .accountId("210987654321")
                     .provisioningStatus("LATEST_PERMISSION_SET_PROVISIONED"));
@@ -854,7 +927,7 @@ class SsoAdminAccountAssignmentTest {
                     .targetType("AWS_ACCOUNT")
                     .targetId("321098765432"));
 
-            var response = sso.listAccountsForProvisionedPermissionSet(request -> request
+            ListAccountsForProvisionedPermissionSetResponse response = sso.listAccountsForProvisionedPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)
                     .provisioningStatus("LATEST_PERMISSION_SET_PROVISIONED"));
@@ -890,18 +963,18 @@ class SsoAdminAccountAssignmentTest {
             String permissionSetArn = sso.createPermissionSet(request -> request
                             .instanceArn(instanceArn).name("PutBoundarySdkAdmins"))
                     .permissionSet().permissionSetArn();
-            var response = sso.putPermissionsBoundaryToPermissionSet(request -> request
+            PutPermissionsBoundaryToPermissionSetResponse response = sso.putPermissionsBoundaryToPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)
                     .permissionsBoundary(boundary -> boundary
-                            .managedPolicyArn("arn:aws:iam::aws:policy/PowerUserAccess")));
+                            .managedPolicyArn(TestFixtures.globalArn("iam", "aws", "policy/PowerUserAccess"))));
             assertThat(response.sdkHttpResponse().isSuccessful()).isTrue();
-            var boundary = sso.getPermissionsBoundaryForPermissionSet(request -> request
+            GetPermissionsBoundaryForPermissionSetResponse boundary = sso.getPermissionsBoundaryForPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn));
             assertThat(boundary.permissionsBoundary().managedPolicyArn())
-                    .isEqualTo("arn:aws:iam::aws:policy/PowerUserAccess");
-            var deleted = sso.deletePermissionsBoundaryFromPermissionSet(request -> request
+                    .isEqualTo(TestFixtures.globalArn("iam", "aws", "policy/PowerUserAccess"));
+            DeletePermissionsBoundaryFromPermissionSetResponse deleted = sso.deletePermissionsBoundaryFromPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn));
             assertThat(deleted.sdkHttpResponse().isSuccessful()).isTrue();
@@ -923,7 +996,7 @@ class SsoAdminAccountAssignmentTest {
                             .instanceArn(instanceArn)
                             .name("DeletePermissionSetSdkAdmins"))
                     .permissionSet().permissionSetArn();
-            var response = sso.deletePermissionSet(request -> request
+            DeletePermissionSetResponse response = sso.deletePermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn));
             assertThat(response.sdkHttpResponse().isSuccessful()).isTrue();
@@ -953,7 +1026,7 @@ class SsoAdminAccountAssignmentTest {
                     .principalType(PrincipalType.GROUP)
                     .principalId("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
 
-            var deleted = sso.deleteAccountAssignment(request -> request
+            DeleteAccountAssignmentResponse deleted = sso.deleteAccountAssignment(request -> request
                     .instanceArn(instanceArn)
                     .targetId("123456789012")
                     .targetType(TargetType.AWS_ACCOUNT)
@@ -964,14 +1037,14 @@ class SsoAdminAccountAssignmentTest {
             assertThat(deleted.accountAssignmentDeletionStatus()).isNotNull();
             assertThat(deleted.accountAssignmentDeletionStatus().statusAsString()).isEqualTo("SUCCEEDED");
             assertThat(deleted.accountAssignmentDeletionStatus().requestId()).isNotBlank();
-            var describedDeletion = sso.describeAccountAssignmentDeletionStatus(request -> request
+            DescribeAccountAssignmentDeletionStatusResponse describedDeletion = sso.describeAccountAssignmentDeletionStatus(request -> request
                     .instanceArn(instanceArn)
                     .accountAssignmentDeletionRequestId(deleted.accountAssignmentDeletionStatus().requestId()));
             assertThat(describedDeletion.accountAssignmentDeletionStatus().requestId())
                     .isEqualTo(deleted.accountAssignmentDeletionStatus().requestId());
             assertThat(describedDeletion.accountAssignmentDeletionStatus().statusAsString()).isEqualTo("SUCCEEDED");
 
-            var deletionStatuses = sso.listAccountAssignmentDeletionStatus(request -> request
+            ListAccountAssignmentDeletionStatusResponse deletionStatuses = sso.listAccountAssignmentDeletionStatus(request -> request
                     .instanceArn(instanceArn)
                     .filter(filter -> filter.status("SUCCEEDED")));
             assertThat(deletionStatuses.accountAssignmentsDeletionStatus())
@@ -997,7 +1070,7 @@ class SsoAdminAccountAssignmentTest {
                     .permissionSet()
                     .permissionSetArn();
 
-            var created = sso.createAccountAssignment(request -> request
+            CreateAccountAssignmentResponse created = sso.createAccountAssignment(request -> request
                     .instanceArn(instanceArn)
                     .targetId("123456789012")
                     .targetType(TargetType.AWS_ACCOUNT)
@@ -1008,19 +1081,19 @@ class SsoAdminAccountAssignmentTest {
             assertThat(created.accountAssignmentCreationStatus()).isNotNull();
             assertThat(created.accountAssignmentCreationStatus().requestId()).isNotBlank();
 
-            var status = sso.describeAccountAssignmentCreationStatus(request -> request
+            DescribeAccountAssignmentCreationStatusResponse status = sso.describeAccountAssignmentCreationStatus(request -> request
                     .instanceArn(instanceArn)
                     .accountAssignmentCreationRequestId(created.accountAssignmentCreationStatus().requestId()));
             assertThat(status.accountAssignmentCreationStatus().statusAsString()).isEqualTo("SUCCEEDED");
             assertThat(status.accountAssignmentCreationStatus().createdDate()).isNotNull();
 
-            var creationStatuses = sso.listAccountAssignmentCreationStatus(request -> request
+            ListAccountAssignmentCreationStatusResponse creationStatuses = sso.listAccountAssignmentCreationStatus(request -> request
                     .instanceArn(instanceArn)
                     .filter(filter -> filter.status("SUCCEEDED")));
             assertThat(creationStatuses.accountAssignmentsCreationStatus())
                     .anyMatch(operation -> created.accountAssignmentCreationStatus().requestId().equals(operation.requestId()));
 
-            var assignments = sso.listAccountAssignments(request -> request
+            ListAccountAssignmentsResponse assignments = sso.listAccountAssignments(request -> request
                     .instanceArn(instanceArn)
                     .accountId("123456789012")
                     .permissionSetArn(permissionSetArn));
@@ -1034,15 +1107,15 @@ class SsoAdminAccountAssignmentTest {
                 sso.attachManagedPolicyToPermissionSet(request -> request
                         .instanceArn(instanceArn)
                         .permissionSetArn(permissionSetArn)
-                        .managedPolicyArn("arn:aws:iam::aws:policy/" + policy));
+                        .managedPolicyArn(TestFixtures.globalArn("iam", "aws", "policy/" + policy)));
             }
-            var firstPolicies = sso.listManagedPoliciesInPermissionSet(request -> request
+            ListManagedPoliciesInPermissionSetResponse firstPolicies = sso.listManagedPoliciesInPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)
                     .maxResults(1));
             assertThat(firstPolicies.attachedManagedPolicies()).hasSize(1);
             assertThat(firstPolicies.nextToken()).isNotBlank();
-            var secondPolicies = sso.listManagedPoliciesInPermissionSet(request -> request
+            ListManagedPoliciesInPermissionSetResponse secondPolicies = sso.listManagedPoliciesInPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)
                     .maxResults(1)

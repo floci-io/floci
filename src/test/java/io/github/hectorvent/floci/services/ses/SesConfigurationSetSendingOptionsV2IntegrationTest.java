@@ -193,7 +193,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     @Test
     @Order(13)
     void putSendingOptions_stringSendingEnabled_coercesToTrue() {
-        // Real AWS coerces any string to true (200), matching CreateConfigurationSet. Verify the
+        // Real AWS coerces "yes" to true (200), matching CreateConfigurationSet. Verify the
         // persisted value, not just the status — CS was disabled by @Order(12).
         given()
                 .contentType("application/json")

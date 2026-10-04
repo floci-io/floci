@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.util;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -100,11 +101,11 @@ class ListUtilTest {
 
     @Test
     void sortList_withFieldName() {
-        var map1 = new java.util.HashMap<String, Object>();
+        HashMap<String, Object> map1 = new HashMap<>();
         map1.put("name", "Charlie");
-        var map2 = new java.util.HashMap<String, Object>();
+        HashMap<String, Object> map2 = new HashMap<>();
         map2.put("name", "Alice");
-        var map3 = new java.util.HashMap<String, Object>();
+        HashMap<String, Object> map3 = new HashMap<>();
         map3.put("name", "Bob");
         List<Object> input = List.of(map1, map2, map3);
         List<Object> result = listUtil.sortList(input, false, "name");

@@ -16,8 +16,8 @@ import javax.crypto.spec.SecretKeySpec;
  *
  * <p>Lifted out of {@code CognitoTotp}, which is now a thin view over it, because the same
  * arithmetic is needed wherever a service hands a secret to an authenticator app and then verifies
- * what the app produces. Cognito's software-token MFA is the only caller today; IAM's virtual MFA
- * devices are the reason it lives here rather than inside Cognito.
+ * what the app produces: Cognito's software-token MFA, and IAM's virtual MFA devices through
+ * {@code VirtualMfaCodes}.
  *
  * <p>The secret is real randomness and the codes are really derived from it, so a caller that does
  * not hold the secret cannot produce an accepted code. Secrets cross the wire as RFC 4648 base32,
@@ -93,7 +93,7 @@ public final class Totp {
     }
 
     /** Whether the value has the shape of a code at all, before any secret is touched. */
-    static boolean isSixDigits(String code) {
+    public static boolean isSixDigits(String code) {
         if (code == null || code.length() != DIGITS) {
             return false;
         }
@@ -106,7 +106,7 @@ public final class Totp {
     }
 
     /** Length-independent comparison, so a wrong code does not leak its prefix through timing. */
-    static boolean codeEquals(String expected, String actual) {
+    public static boolean codeEquals(String expected, String actual) {
         return MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII),
                 actual.getBytes(StandardCharsets.US_ASCII));
     }
@@ -131,7 +131,7 @@ public final class Totp {
         return encoded.toString();
     }
 
-    static byte[] base32Decode(String encoded) {
+    public static byte[] base32Decode(String encoded) {
         int buffer = 0;
         int bitsLeft = 0;
         byte[] decoded = new byte[encoded.length() * 5 / 8];

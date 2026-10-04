@@ -51,7 +51,7 @@ class S3VectorsTest {
                         .vectorBucketName(bucketName)
                         .build()
         );
-        assertThat(response.vectorBucketArn()).isNotBlank().contains("arn:aws:s3vectors:");
+        assertThat(response.vectorBucketArn()).isNotBlank().contains("arn:" + TestFixtures.partition() + ":s3vectors:");
     }
 
     @Test
@@ -88,7 +88,7 @@ class S3VectorsTest {
                         .dataType("float32")
                         .build()
         );
-        assertThat(response.indexArn()).isNotBlank().contains("arn:aws:s3vectors:");
+        assertThat(response.indexArn()).isNotBlank().contains("arn:" + TestFixtures.partition() + ":s3vectors:");
     }
 
     @Test

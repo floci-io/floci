@@ -755,7 +755,7 @@ public class VerifiedPermissionsService implements Resettable {
             node.fields().forEachRemaining(e -> sorted.put(e.getKey(), e.getValue()));
             StringBuilder b = new StringBuilder("{");
             boolean first = true;
-            for (var e : sorted.entrySet()) {
+            for (Map.Entry<String, JsonNode> e : sorted.entrySet()) {
                 if (!first) {
                     b.append(',');
                 }
@@ -1106,7 +1106,7 @@ public class VerifiedPermissionsService implements Resettable {
         if (tags.size() > MAX_TAGS) {
             throw validation("A resource can have at most 200 tags.");
         }
-        for (var tag : tags.entrySet()) {
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
             if (tag.getKey() == null || tag.getKey().isEmpty() || tag.getKey().length() > 128 || tag.getValue().length() > 256) {
                 throw validation("A tag doesn't satisfy the required length constraints.");
             }

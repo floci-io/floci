@@ -47,8 +47,12 @@ public class ContainerLogStreamer {
     private final DockerClient dockerClient;
     private final CloudWatchLogsService cloudWatchLogsService;
 
+    // Log-follow attaches hold their connection open for the whole container lifetime, so
+    // this class is the primary consumer of the streaming pool: sharing the control-plane
+    // pool is what starved short create/start/stop calls during an LZA Logging fan-out
+    // (see DockerClientProducer / StreamingDocker).
     @Inject
-    public ContainerLogStreamer(DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
+    public ContainerLogStreamer(@StreamingDocker DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
         this.dockerClient = dockerClient;
         this.cloudWatchLogsService = cloudWatchLogsService;
     }
@@ -112,7 +116,25 @@ public class ContainerLogStreamer {
                 forwardToCloudWatchLogs(accountId, logGroup, logStream, region, trimmed);
             }
         };
+        return follow(containerId, since, emitter);
+    }
 
+    /**
+     * Like {@link #attach}, but sends the output only to the console logger, not to CloudWatch Logs.
+     * Use it for a container whose output must stay visible locally but has no CloudWatch
+     * destination, such as an ECS container without an {@code awslogs} log configuration.
+     */
+    public Closeable attachConsoleOnly(String containerId, String logPrefix) {
+        Consumer<String> emitter = line -> {
+            String trimmed = line.stripTrailing();
+            if (!trimmed.isEmpty()) {
+                LOG.infov("[{0}] {1}", logPrefix, trimmed);
+            }
+        };
+        return follow(containerId, null, emitter);
+    }
+
+    private Closeable follow(String containerId, Instant since, Consumer<String> emitter) {
         try {
             LogReassemblyCallback callback = new LogReassemblyCallback(emitter);
             LogContainerCmd command = dockerClient.logContainerCmd(containerId)

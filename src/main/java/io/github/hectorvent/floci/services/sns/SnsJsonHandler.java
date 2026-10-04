@@ -113,7 +113,7 @@ public class SnsJsonHandler {
         Map<String, String> attrs = snsService.getTopicAttributes(topicArn, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode attrsNode = response.putObject("Attributes");
-        for (var entry : attrs.entrySet()) {
+        for (Map.Entry<String, String> entry : attrs.entrySet()) {
             attrsNode.put(entry.getKey(), entry.getValue());
         }
         return Response.ok(response).build();
@@ -240,7 +240,7 @@ public class SnsJsonHandler {
         Map<String, String> tags = snsService.listTagsForResource(resourceArn, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode tagsArray = response.putArray("Tags");
-        for (var entry : tags.entrySet()) {
+        for (Map.Entry<String, String> entry : tags.entrySet()) {
             ObjectNode tag = objectMapper.createObjectNode();
             tag.put("Key", entry.getKey());
             tag.put("Value", entry.getValue());
@@ -311,7 +311,7 @@ public class SnsJsonHandler {
         Map<String, String> attrs = snsService.getSubscriptionAttributes(subscriptionArn, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode attrsNode = response.putObject("Attributes");
-        for (var entry : attrs.entrySet()) {
+        for (Map.Entry<String, String> entry : attrs.entrySet()) {
             attrsNode.put(entry.getKey(), entry.getValue());
         }
         return Response.ok(response).build();
@@ -366,7 +366,7 @@ public class SnsJsonHandler {
         Map<String, String> attrs = snsService.getPlatformApplicationAttributes(arn, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode attrsNode = response.putObject("Attributes");
-        for (var entry : attrs.entrySet()) {
+        for (Map.Entry<String, String> entry : attrs.entrySet()) {
             attrsNode.put(entry.getKey(), entry.getValue());
         }
         return Response.ok(response).build();
@@ -387,7 +387,7 @@ public class SnsJsonHandler {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("PlatformApplicationArn", app.getArn());
             ObjectNode attrsNode = node.putObject("Attributes");
-            for (var entry : app.getAttributes().entrySet()) {
+            for (Map.Entry<String, String> entry : app.getAttributes().entrySet()) {
                 attrsNode.put(entry.getKey(), entry.getValue());
             }
             arr.add(node);
@@ -417,7 +417,7 @@ public class SnsJsonHandler {
         Map<String, String> attrs = snsService.getEndpointAttributes(arn, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode attrsNode = response.putObject("Attributes");
-        for (var entry : attrs.entrySet()) {
+        for (Map.Entry<String, String> entry : attrs.entrySet()) {
             attrsNode.put(entry.getKey(), entry.getValue());
         }
         return Response.ok(response).build();
@@ -439,7 +439,7 @@ public class SnsJsonHandler {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("EndpointArn", ep.getArn());
             ObjectNode attrsNode = node.putObject("Attributes");
-            for (var entry : ep.getAttributes().entrySet()) {
+            for (Map.Entry<String, String> entry : ep.getAttributes().entrySet()) {
                 attrsNode.put(entry.getKey(), entry.getValue());
             }
             arr.add(node);

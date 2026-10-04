@@ -304,10 +304,10 @@ class SesIntegrationTest {
 
     @Test
     @Order(15)
-    void getAccountSendingEnabled_acceptsSesv2CredentialScopeAlias() {
+    void getAccountSendingEnabled_acceptsTheSesCredentialScope() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", authorization("sesv2"))
+            .header("Authorization", authorization("ses"))
             .formParam("Action", "GetAccountSendingEnabled")
         .when()
             .post("/")

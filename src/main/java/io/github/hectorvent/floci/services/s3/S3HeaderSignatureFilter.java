@@ -28,7 +28,7 @@ import java.util.Optional;
 
 /**
  * Verifies the SigV4 signature carried in the {@code Authorization} header of an S3 request when
- * {@code floci.services.s3.enforce-auth} is enabled.
+ * {@code floci.services.s3.enforce-auth} or {@code floci.auth.validate-signatures} is enabled.
  *
  * <p>The presigned placements are already verified elsewhere ({@link PreSignedUrlFilter} for the
  * query string, {@link S3PostPolicySigner} for a browser POST). This filter closes the remaining
@@ -59,7 +59,12 @@ import java.util.Optional;
  *       {@link PreSignedUrlFilter} and {@link S3PostPolicySigner}.</li>
  * </ul>
  *
- * <p>Nothing here runs with the flag off: the filter returns before reading a single header, so
+ * <p>Signature verification is authentication only. Whether the verified caller, or an anonymous
+ * one, may perform the operation is authorization, which runs in {@link S3Service} under
+ * {@code enforce-auth} alone. {@code validate-signatures} therefore rejects a forged or unknown
+ * credential without evaluating bucket policies or ACLs, and lets unsigned requests through.
+ *
+ * <p>Nothing here runs with both flags off: the filter returns before reading a single header, so
  * the default configuration keeps accepting any well-formed {@code Authorization} header exactly
  * as before.
  */
@@ -77,6 +82,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
     private final S3Service s3Service;
+    private final PreSignedUrlGenerator presignGenerator;
     private final IamService iamService;
     private final CurrentVertxRequest currentVertxRequest;
 
@@ -84,16 +90,17 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     ResourceInfo resourceInfo;
 
     @Inject
-    public S3HeaderSignatureFilter(S3Service s3Service, IamService iamService,
-                                   CurrentVertxRequest currentVertxRequest) {
+    public S3HeaderSignatureFilter(S3Service s3Service, PreSignedUrlGenerator presignGenerator,
+                                   IamService iamService, CurrentVertxRequest currentVertxRequest) {
         this.s3Service = s3Service;
+        this.presignGenerator = presignGenerator;
         this.iamService = iamService;
         this.currentVertxRequest = currentVertxRequest;
     }
 
     @Override
     public void filter(ContainerRequestContext ctx) throws IOException {
-        if (!s3Service.isAuthEnforced() || !routedToS3()) {
+        if (!verifiesSignatures() || !routedToS3()) {
             return;
         }
         String authorization = ctx.getHeaderString("Authorization");
@@ -179,6 +186,10 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
             abort(ctx, 400, "XAmzContentSHA256Mismatch",
                     "The provided 'x-amz-content-sha256' header does not match what was computed.");
         }
+    }
+
+    private boolean verifiesSignatures() {
+        return s3Service.isAuthEnforced() || presignGenerator.shouldValidateSignatures();
     }
 
     private boolean routedToS3() {

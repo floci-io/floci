@@ -353,7 +353,7 @@ class CloudWatchLogsMetricFilterTest {
     private static List<Dimension> dimensions(JsonNode values, String account) {
         List<Dimension> dimensions = new ArrayList<>();
         values.fields().forEachRemaining(e -> dimensions.add(Dimension.builder().name(e.getKey()).value(
-                e.getKey().equals("@aws.region") ? "us-east-1"
+                e.getKey().equals("@aws.region") ? TestFixtures.region().id()
                         : e.getValue().asText().replace("<CALLER_ACCOUNT>", account)).build()));
         return dimensions;
     }

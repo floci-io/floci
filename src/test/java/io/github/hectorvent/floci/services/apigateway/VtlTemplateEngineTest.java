@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -111,28 +112,28 @@ class VtlTemplateEngineTest {
     @Test
     void utilEscapeJavaScript_controlChars() {
         // Test backspace, form feed
-        var util = new VtlTemplateEngine.UtilVariable(new ObjectMapper());
+        VtlTemplateEngine.UtilVariable util = new VtlTemplateEngine.UtilVariable(new ObjectMapper());
         String result = util.escapeJavaScript("a\bb\fc");
         assertEquals("a\\bb\\fc", result);
     }
 
     @Test
     void utilEscapeJavaScript_unicode() {
-        var util = new VtlTemplateEngine.UtilVariable(new ObjectMapper());
+        VtlTemplateEngine.UtilVariable util = new VtlTemplateEngine.UtilVariable(new ObjectMapper());
         String result = util.escapeJavaScript("café");
         assertEquals("caf\\u00e9", result);
     }
 
     @Test
     void utilEscapeJavaScript_backslash() {
-        var util = new VtlTemplateEngine.UtilVariable(new ObjectMapper());
+        VtlTemplateEngine.UtilVariable util = new VtlTemplateEngine.UtilVariable(new ObjectMapper());
         String result = util.escapeJavaScript("a\\b");
         assertEquals("a\\\\b", result);
     }
 
     @Test
     void utilEscapeJavaScript_newlineTabCr() {
-        var util = new VtlTemplateEngine.UtilVariable(new ObjectMapper());
+        VtlTemplateEngine.UtilVariable util = new VtlTemplateEngine.UtilVariable(new ObjectMapper());
         String result = util.escapeJavaScript("a\nb\tc\rd");
         assertEquals("a\\nb\\tc\\rd", result);
     }
@@ -291,7 +292,7 @@ class VtlTemplateEngineTest {
                 + "#end]}";
         String result = engine.evaluate(template, ctx(body)).body().trim();
         assertDoesNotThrow(() -> new ObjectMapper().readTree(result));
-        var node = assertDoesNotThrow(() -> new ObjectMapper().readTree(result));
+        JsonNode node = assertDoesNotThrow(() -> new ObjectMapper().readTree(result));
         assertEquals(2, node.path("results").size());
         assertEquals("1", node.path("results").get(0).path("key").asText());
     }
@@ -336,7 +337,7 @@ class VtlTemplateEngineTest {
                 {"QueueUrl": "http://localhost:4566/000000000000/my-queue", "MessageBody": "$util.escapeJavaScript($input.json('$'))"}""";
         String result = engine.evaluate(template, ctx(body)).body();
         assertDoesNotThrow(() -> new ObjectMapper().readTree(result));
-        var node = assertDoesNotThrow(() -> new ObjectMapper().readTree(result));
+        JsonNode node = assertDoesNotThrow(() -> new ObjectMapper().readTree(result));
         assertEquals("http://localhost:4566/000000000000/my-queue", node.path("QueueUrl").asText());
         // MessageBody should be the escaped JSON string
         assertTrue(node.path("MessageBody").asText().contains("orderId"));
@@ -345,14 +346,14 @@ class VtlTemplateEngineTest {
     @Test
     void realWorld_dynamoDbQueryWithParams() {
         // Pattern: use query string params in a DynamoDB query
-        var queryCtx = new VtlTemplateEngine.VtlContext(
+        VtlTemplateEngine.VtlContext queryCtx = new VtlTemplateEngine.VtlContext(
                 "{}", Map.of(), Map.of("userId", "user-42", "status", "active"),
                 Map.of(), "prod", "GET", "/items",
                 "req-456", "000000000000", Map.of("tableName", "orders"), Map.of());
         String template = """
                 {"TableName": "$stageVariables.tableName", "KeyConditionExpression": "pk = :pk", "ExpressionAttributeValues": {":pk": {"S": "$input.params().querystring.userId"}}}""";
         String result = engine.evaluate(template, queryCtx).body();
-        var node = assertDoesNotThrow(() -> new ObjectMapper().readTree(result));
+        JsonNode node = assertDoesNotThrow(() -> new ObjectMapper().readTree(result));
         assertEquals("orders", node.path("TableName").asText());
         assertEquals("user-42", node.path("ExpressionAttributeValues").path(":pk").path("S").asText());
     }

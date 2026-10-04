@@ -3,8 +3,11 @@ package com.floci.test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
+import software.amazon.awssdk.services.cloudwatchlogs.model.DescribeAccountPoliciesResponse;
 import software.amazon.awssdk.services.cloudwatchlogs.model.InvalidParameterException;
 import software.amazon.awssdk.services.cloudwatchlogs.model.LimitExceededException;
+import software.amazon.awssdk.services.cloudwatchlogs.model.PutAccountPolicyResponse;
+import software.amazon.awssdk.services.cloudwatchlogs.model.PutDestinationResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -21,20 +24,20 @@ class CloudWatchLogsCrossAccountPolicyTest {
         assumeFalse(TestFixtures.isRealAws(), "Uses emulator-only destination ARNs and persistent test resources");
 
         try (CloudWatchLogsClient logs = TestFixtures.cloudWatchLogsClient()) {
-            var putDestination = logs.putDestination(request -> request
+            PutDestinationResponse putDestination = logs.putDestination(request -> request
                     .destinationName(DESTINATION_NAME)
-                    .targetArn("arn:aws:kinesis:us-east-1:000000000000:stream/floci-sdk-logs")
-                    .roleArn("arn:aws:iam::000000000000:role/floci-sdk-logs"));
+                    .targetArn(TestFixtures.arn("kinesis", "000000000000", "stream/floci-sdk-logs"))
+                    .roleArn(TestFixtures.globalArn("iam", "000000000000", "role/floci-sdk-logs")));
 
             assertThat(putDestination.destination()).isNotNull();
             assertThat(putDestination.destination().destinationName()).isEqualTo(DESTINATION_NAME);
-            assertThat(putDestination.destination().arn()).contains(":logs:us-east-1:");
+            assertThat(putDestination.destination().arn()).contains(":logs:" + TestFixtures.region().id() + ":");
 
             logs.putDestinationPolicy(request -> request
                     .destinationName(DESTINATION_NAME)
                     .accessPolicy("{\"Version\":\"2012-10-17\",\"Statement\":[]}"));
 
-            var putPolicy = logs.putAccountPolicy(request -> request
+            PutAccountPolicyResponse putPolicy = logs.putAccountPolicy(request -> request
                     .policyName(POLICY_NAME)
                     .policyType("TRANSFORMER_POLICY")
                     .policyDocument("[{\"parseJSON\":{}}]")
@@ -45,7 +48,7 @@ class CloudWatchLogsCrossAccountPolicyTest {
             assertThat(putPolicy.accountPolicy().policyName()).isEqualTo(POLICY_NAME);
             assertThat(putPolicy.accountPolicy().policyTypeAsString()).isEqualTo("TRANSFORMER_POLICY");
 
-            var policies = logs.describeAccountPolicies(request -> request.policyType("TRANSFORMER_POLICY"));
+            DescribeAccountPoliciesResponse policies = logs.describeAccountPolicies(request -> request.policyType("TRANSFORMER_POLICY"));
             assertThat(policies.accountPolicies())
                     .anySatisfy(policy -> {
                         assertThat(policy.policyName()).isEqualTo(POLICY_NAME);
@@ -53,7 +56,7 @@ class CloudWatchLogsCrossAccountPolicyTest {
                                 .isEqualTo("LogGroupNamePrefix = \"/floci/sdk-cross-account/\"");
                     });
 
-            var fieldIndex = logs.putAccountPolicy(request -> request
+            PutAccountPolicyResponse fieldIndex = logs.putAccountPolicy(request -> request
                     .policyName("floci-sdk-field-index-quoted-value")
                     .policyType("FIELD_INDEX_POLICY")
                     .policyDocument("{\"Fields\":[\"requestId\"]}")

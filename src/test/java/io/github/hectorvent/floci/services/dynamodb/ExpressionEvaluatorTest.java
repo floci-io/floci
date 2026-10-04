@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -22,8 +23,8 @@ class ExpressionEvaluatorTest {
 
         @Test
         void standardExpression() {
-            var tokens = ExpressionEvaluator.tokenize("pk = :pk AND sk BETWEEN :a AND :b");
-            var types = tokens.stream().map(ExpressionEvaluator.Token::type).toList();
+            List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize("pk = :pk AND sk BETWEEN :a AND :b");
+            List<ExpressionEvaluator.TokenType> types = tokens.stream().map(ExpressionEvaluator.Token::type).toList();
             assertEquals(List.of(
                     ExpressionEvaluator.TokenType.IDENTIFIER,  // pk
                     ExpressionEvaluator.TokenType.EQ,          // =
@@ -40,8 +41,8 @@ class ExpressionEvaluatorTest {
 
         @Test
         void compactFormat() {
-            var tokens = ExpressionEvaluator.tokenize("(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)");
-            var types = tokens.stream().map(ExpressionEvaluator.Token::type).toList();
+            List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize("(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)");
+            List<ExpressionEvaluator.TokenType> types = tokens.stream().map(ExpressionEvaluator.Token::type).toList();
             assertEquals(List.of(
                     ExpressionEvaluator.TokenType.LPAREN,
                     ExpressionEvaluator.TokenType.NAME_REF,    // #f0
@@ -62,8 +63,8 @@ class ExpressionEvaluatorTest {
 
         @Test
         void allComparators() {
-            var tokens = ExpressionEvaluator.tokenize("a = b a <> b a < b a <= b a > b a >= b");
-            var comparators = tokens.stream()
+            List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize("a = b a <> b a < b a <= b a > b a >= b");
+            List<ExpressionEvaluator.TokenType> comparators = tokens.stream()
                     .map(ExpressionEvaluator.Token::type)
                     .filter(t -> t != ExpressionEvaluator.TokenType.IDENTIFIER && t != ExpressionEvaluator.TokenType.EOF)
                     .toList();
@@ -79,8 +80,8 @@ class ExpressionEvaluatorTest {
 
         @Test
         void functionTokens() {
-            var tokens = ExpressionEvaluator.tokenize("attribute_exists(a) AND begins_with(b, :v) AND contains(c, :w) AND size(d) > :x AND attribute_not_exists(e)");
-            var functions = tokens.stream()
+            List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize("attribute_exists(a) AND begins_with(b, :v) AND contains(c, :w) AND size(d) > :x AND attribute_not_exists(e)");
+            List<String> functions = tokens.stream()
                     .filter(t -> t.type() == ExpressionEvaluator.TokenType.FUNCTION)
                     .map(ExpressionEvaluator.Token::value)
                     .toList();
@@ -89,15 +90,15 @@ class ExpressionEvaluatorTest {
 
         @Test
         void inAndBetweenKeywords() {
-            var tokens = ExpressionEvaluator.tokenize("x IN (:a, :b) AND y BETWEEN :c AND :d");
+            List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize("x IN (:a, :b) AND y BETWEEN :c AND :d");
             assertTrue(tokens.stream().anyMatch(t -> t.type() == ExpressionEvaluator.TokenType.IN));
             assertTrue(tokens.stream().anyMatch(t -> t.type() == ExpressionEvaluator.TokenType.BETWEEN));
         }
 
         @Test
         void dottedPath() {
-            var tokens = ExpressionEvaluator.tokenize("info.nested = :v");
-            var types = tokens.stream().map(ExpressionEvaluator.Token::type).toList();
+            List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize("info.nested = :v");
+            List<ExpressionEvaluator.TokenType> types = tokens.stream().map(ExpressionEvaluator.Token::type).toList();
             assertEquals(List.of(
                     ExpressionEvaluator.TokenType.IDENTIFIER,  // info
                     ExpressionEvaluator.TokenType.DOT,
@@ -116,87 +117,87 @@ class ExpressionEvaluatorTest {
 
         @Test
         void simpleComparison() {
-            var expr = ExpressionEvaluator.parse("pk = :pk");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("pk = :pk");
             assertInstanceOf(ExpressionEvaluator.CompareExpr.class, expr);
         }
 
         @Test
         void andExpression() {
-            var expr = ExpressionEvaluator.parse("a = :a AND b = :b");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("a = :a AND b = :b");
             assertInstanceOf(ExpressionEvaluator.AndExpr.class, expr);
             assertEquals(2, ((ExpressionEvaluator.AndExpr) expr).operands().size());
         }
 
         @Test
         void orExpression() {
-            var expr = ExpressionEvaluator.parse("a = :a OR b = :b");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("a = :a OR b = :b");
             assertInstanceOf(ExpressionEvaluator.OrExpr.class, expr);
             assertEquals(2, ((ExpressionEvaluator.OrExpr) expr).operands().size());
         }
 
         @Test
         void notExpression() {
-            var expr = ExpressionEvaluator.parse("NOT a = :a");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("NOT a = :a");
             assertInstanceOf(ExpressionEvaluator.NotExpr.class, expr);
         }
 
         @Test
         void nestedParens() {
-            var expr = ExpressionEvaluator.parse("(a = :a OR b = :b) AND c = :c");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("(a = :a OR b = :b) AND c = :c");
             assertInstanceOf(ExpressionEvaluator.AndExpr.class, expr);
-            var and = (ExpressionEvaluator.AndExpr) expr;
+            ExpressionEvaluator.AndExpr and = (ExpressionEvaluator.AndExpr) expr;
             assertInstanceOf(ExpressionEvaluator.OrExpr.class, and.operands().get(0));
             assertInstanceOf(ExpressionEvaluator.CompareExpr.class, and.operands().get(1));
         }
 
         @Test
         void betweenAndNotConfusedWithLogicalAnd() {
-            var expr = ExpressionEvaluator.parse("sk BETWEEN :a AND :b");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("sk BETWEEN :a AND :b");
             assertInstanceOf(ExpressionEvaluator.BetweenExpr.class, expr);
         }
 
         @Test
         void betweenInsideAnd() {
-            var expr = ExpressionEvaluator.parse("pk = :pk AND sk BETWEEN :a AND :b");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("pk = :pk AND sk BETWEEN :a AND :b");
             assertInstanceOf(ExpressionEvaluator.AndExpr.class, expr);
-            var and = (ExpressionEvaluator.AndExpr) expr;
+            ExpressionEvaluator.AndExpr and = (ExpressionEvaluator.AndExpr) expr;
             assertInstanceOf(ExpressionEvaluator.CompareExpr.class, and.operands().get(0));
             assertInstanceOf(ExpressionEvaluator.BetweenExpr.class, and.operands().get(1));
         }
 
         @Test
         void inOperator() {
-            var expr = ExpressionEvaluator.parse("status IN (:a, :b, :c)");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("status IN (:a, :b, :c)");
             assertInstanceOf(ExpressionEvaluator.InExpr.class, expr);
             assertEquals(3, ((ExpressionEvaluator.InExpr) expr).candidates().size());
         }
 
         @Test
         void inOperatorSingleValue() {
-            var expr = ExpressionEvaluator.parse("status IN (:a)");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("status IN (:a)");
             assertInstanceOf(ExpressionEvaluator.InExpr.class, expr);
             assertEquals(1, ((ExpressionEvaluator.InExpr) expr).candidates().size());
         }
 
         @Test
         void functionCallCondition() {
-            var expr = ExpressionEvaluator.parse("attribute_exists(myAttr)");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("attribute_exists(myAttr)");
             assertInstanceOf(ExpressionEvaluator.FunctionCallExpr.class, expr);
         }
 
         @Test
         void sizeComparison() {
-            var expr = ExpressionEvaluator.parse("size(myList) > :val");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("size(myList) > :val");
             assertInstanceOf(ExpressionEvaluator.CompareExpr.class, expr);
-            var cmp = (ExpressionEvaluator.CompareExpr) expr;
+            ExpressionEvaluator.CompareExpr cmp = (ExpressionEvaluator.CompareExpr) expr;
             assertInstanceOf(ExpressionEvaluator.FunctionOperand.class, cmp.left());
         }
 
         @Test
         void compactFormatParsesCorrectly() {
-            var expr = ExpressionEvaluator.parse("(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)");
+            ExpressionEvaluator.Expr expr = ExpressionEvaluator.parse("(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)");
             assertInstanceOf(ExpressionEvaluator.AndExpr.class, expr);
-            var and = (ExpressionEvaluator.AndExpr) expr;
+            ExpressionEvaluator.AndExpr and = (ExpressionEvaluator.AndExpr) expr;
             assertInstanceOf(ExpressionEvaluator.CompareExpr.class, and.operands().get(0));
             assertInstanceOf(ExpressionEvaluator.BetweenExpr.class, and.operands().get(1));
         }
@@ -209,42 +210,42 @@ class ExpressionEvaluatorTest {
 
         @Test
         void pkAndSkEquals() {
-            var result = ExpressionEvaluator.splitKeyCondition("pk = :pk AND sk = :sk");
+            String[] result = ExpressionEvaluator.splitKeyCondition("pk = :pk AND sk = :sk");
             assertEquals("pk = :pk", result[0]);
             assertEquals("sk = :sk", result[1]);
         }
 
         @Test
         void pkAndSkBetweenParenthesized() {
-            var result = ExpressionEvaluator.splitKeyCondition("pk = :pk AND (sk BETWEEN :a AND :b)");
+            String[] result = ExpressionEvaluator.splitKeyCondition("pk = :pk AND (sk BETWEEN :a AND :b)");
             assertEquals("pk = :pk", result[0]);
             assertEquals("(sk BETWEEN :a AND :b)", result[1]);
         }
 
         @Test
         void compactFormat() {
-            var result = ExpressionEvaluator.splitKeyCondition("(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)");
+            String[] result = ExpressionEvaluator.splitKeyCondition("(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)");
             assertEquals("(#f0 = :v0)", result[0]);
             assertEquals("(#f1 BETWEEN :v1 AND :v2)", result[1]);
         }
 
         @Test
         void pkOnly() {
-            var result = ExpressionEvaluator.splitKeyCondition("pk = :pk");
+            String[] result = ExpressionEvaluator.splitKeyCondition("pk = :pk");
             assertEquals("pk = :pk", result[0]);
             assertNull(result[1]);
         }
 
         @Test
         void pkAndSkBeginsWith() {
-            var result = ExpressionEvaluator.splitKeyCondition("pk = :pk AND begins_with(sk, :prefix)");
+            String[] result = ExpressionEvaluator.splitKeyCondition("pk = :pk AND begins_with(sk, :prefix)");
             assertEquals("pk = :pk", result[0]);
             assertEquals("begins_with(sk, :prefix)", result[1]);
         }
 
         @Test
         void pkAndSkBetweenNoParen() {
-            var result = ExpressionEvaluator.splitKeyCondition("pk = :pk AND sk BETWEEN :a AND :b");
+            String[] result = ExpressionEvaluator.splitKeyCondition("pk = :pk AND sk BETWEEN :a AND :b");
             assertEquals("pk = :pk", result[0]);
             assertEquals("sk BETWEEN :a AND :b", result[1]);
         }
@@ -267,6 +268,66 @@ class ExpressionEvaluatorTest {
             return mapper.readTree(json);
         }
 
+        // DynamoDB's size() of a Binary is its length in bytes; "AQID" encodes the three bytes 1, 2, 3.
+        @Test
+        void sizeOfABinaryCountsItsBytes() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":three\": {\"N\": \"3\"}}");
+            assertTrue(ExpressionEvaluator.matches("size(b) = :three", i, null, v));
+        }
+
+        @Test
+        void aBinaryOfThreeBytesIsSmallerThanFour() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":four\": {\"N\": \"4\"}}");
+            assertTrue(ExpressionEvaluator.matches("size(b) < :four", i, null, v));
+        }
+
+        @Test
+        void sizeOfAnEmptyBinaryIsZero() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"\"}}");
+            JsonNode v = values("{\":zero\": {\"N\": \"0\"}}");
+            assertTrue(ExpressionEvaluator.matches("size(b) = :zero", i, null, v));
+        }
+
+        // A binary that is not base64 fails with a 400 SerializationException, as the binary
+        // comparisons below do, rather than being sized by its text.
+        @Test
+        void sizeOfABinaryThatIsNotBase64IsRejected() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"not base64!!\"}}");
+            JsonNode v = values("{\":three\": {\"N\": \"3\"}}");
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ExpressionEvaluator.matches("size(b) = :three", i, null, v));
+            assertEquals("SerializationException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+        }
+
+        // begins_with on a Binary compares bytes: "AQ==" (the byte 1) is a prefix of "AQID"
+        // (the bytes 1, 2, 3) even though its base64 text is not.
+        @Test
+        void beginsWithOnABinaryMatchesABytePrefix() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":prefix\": {\"B\": \"AQ==\"}}");
+            assertTrue(ExpressionEvaluator.matches("begins_with(b, :prefix)", i, null, v));
+        }
+
+        @Test
+        void beginsWithOnABinaryRejectsADifferentFirstByte() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":prefix\": {\"B\": \"Ag==\"}}");
+            assertFalse(ExpressionEvaluator.matches("begins_with(b, :prefix)", i, null, v));
+        }
+
+        @Test
+        void beginsWithOnABinaryThatIsNotBase64IsRejected() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"not base64!!\"}}");
+            JsonNode v = values("{\":prefix\": {\"B\": \"AQ==\"}}");
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ExpressionEvaluator.matches("begins_with(b, :prefix)", i, null, v));
+            assertEquals("SerializationException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+        }
+
         @Test
         void orderingAgainstAnotherTypeMatchesNothing() throws Exception {
             JsonNode i = item("{\"a\": {\"S\": \"5\"}}");
@@ -279,43 +340,43 @@ class ExpressionEvaluatorTest {
 
         @Test
         void andBothTrue() throws Exception {
-            var i = item("{\"a\": {\"S\": \"1\"}, \"b\": {\"S\": \"2\"}}");
-            var v = values("{\n\":a\": {\"S\": \"1\"},\n\":b\": {\"S\": \"2\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"1\"}, \"b\": {\"S\": \"2\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"1\"},\n\":b\": {\"S\": \"2\"}}");
             assertTrue(ExpressionEvaluator.matches("a = :a AND b = :b", i, null, v));
         }
 
         @Test
         void andOneFalse() throws Exception {
-            var i = item("{\"a\": {\"S\": \"1\"}, \"b\": {\"S\": \"3\"}}");
-            var v = values("{\n\":a\": {\"S\": \"1\"},\n\":b\": {\"S\": \"2\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"1\"}, \"b\": {\"S\": \"3\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"1\"},\n\":b\": {\"S\": \"2\"}}");
             assertFalse(ExpressionEvaluator.matches("a = :a AND b = :b", i, null, v));
         }
 
         @Test
         void orOneTrue() throws Exception {
-            var i = item("{\"a\": {\"S\": \"1\"}, \"b\": {\"S\": \"3\"}}");
-            var v = values("{\n\":a\": {\"S\": \"1\"},\n\":b\": {\"S\": \"2\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"1\"}, \"b\": {\"S\": \"3\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"1\"},\n\":b\": {\"S\": \"2\"}}");
             assertTrue(ExpressionEvaluator.matches("a = :a OR b = :b", i, null, v));
         }
 
         @Test
         void orBothFalse() throws Exception {
-            var i = item("{\"a\": {\"S\": \"X\"}, \"b\": {\"S\": \"Y\"}}");
-            var v = values("{\n\":a\": {\"S\": \"1\"},\n\":b\": {\"S\": \"2\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"X\"}, \"b\": {\"S\": \"Y\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"1\"},\n\":b\": {\"S\": \"2\"}}");
             assertFalse(ExpressionEvaluator.matches("a = :a OR b = :b", i, null, v));
         }
 
         @Test
         void notTrue() throws Exception {
-            var i = item("{\"a\": {\"S\": \"X\"}}");
-            var v = values("{\n\":a\": {\"S\": \"1\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"X\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"1\"}}");
             assertTrue(ExpressionEvaluator.matches("NOT a = :a", i, null, v));
         }
 
         @Test
         void notFalse() throws Exception {
-            var i = item("{\"a\": {\"S\": \"1\"}}");
-            var v = values("{\n\":a\": {\"S\": \"1\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"1\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"1\"}}");
             assertFalse(ExpressionEvaluator.matches("NOT a = :a", i, null, v));
         }
 
@@ -323,22 +384,22 @@ class ExpressionEvaluatorTest {
 
         @Test
         void stringEquals() throws Exception {
-            var i = item("{\"name\": {\"S\": \"Alice\"}}");
-            var v = values("{\n\":v\": {\"S\": \"Alice\"}}");
+            JsonNode i = item("{\"name\": {\"S\": \"Alice\"}}");
+            JsonNode v = values("{\n\":v\": {\"S\": \"Alice\"}}");
             assertTrue(ExpressionEvaluator.matches("name = :v", i, null, v));
         }
 
         @Test
         void stringNotEquals() throws Exception {
-            var i = item("{\"name\": {\"S\": \"Alice\"}}");
-            var v = values("{\n\":v\": {\"S\": \"Bob\"}}");
+            JsonNode i = item("{\"name\": {\"S\": \"Alice\"}}");
+            JsonNode v = values("{\n\":v\": {\"S\": \"Bob\"}}");
             assertTrue(ExpressionEvaluator.matches("name <> :v", i, null, v));
         }
 
         @Test
         void stringLessThan() throws Exception {
-            var i = item("{\"name\": {\"S\": \"Alice\"}}");
-            var v = values("{\n\":v\": {\"S\": \"Bob\"}}");
+            JsonNode i = item("{\"name\": {\"S\": \"Alice\"}}");
+            JsonNode v = values("{\n\":v\": {\"S\": \"Bob\"}}");
             assertTrue(ExpressionEvaluator.matches("name < :v", i, null, v));
         }
 
@@ -346,22 +407,22 @@ class ExpressionEvaluatorTest {
 
         @Test
         void numberEquals() throws Exception {
-            var i = item("{\"age\": {\"N\": \"25\"}}");
-            var v = values("{\n\":v\": {\"N\": \"25\"}}");
+            JsonNode i = item("{\"age\": {\"N\": \"25\"}}");
+            JsonNode v = values("{\n\":v\": {\"N\": \"25\"}}");
             assertTrue(ExpressionEvaluator.matches("age = :v", i, null, v));
         }
 
         @Test
         void numberGreaterThan() throws Exception {
-            var i = item("{\"age\": {\"N\": \"30\"}}");
-            var v = values("{\n\":v\": {\"N\": \"25\"}}");
+            JsonNode i = item("{\"age\": {\"N\": \"30\"}}");
+            JsonNode v = values("{\n\":v\": {\"N\": \"25\"}}");
             assertTrue(ExpressionEvaluator.matches("age > :v", i, null, v));
         }
 
         @Test
         void numberLessThanOrEqual() throws Exception {
-            var i = item("{\"age\": {\"N\": \"25\"}}");
-            var v = values("{\n\":v\": {\"N\": \"25\"}}");
+            JsonNode i = item("{\"age\": {\"N\": \"25\"}}");
+            JsonNode v = values("{\n\":v\": {\"N\": \"25\"}}");
             assertTrue(ExpressionEvaluator.matches("age <= :v", i, null, v));
         }
 
@@ -369,31 +430,31 @@ class ExpressionEvaluatorTest {
 
         @Test
         void boolNotEqualFalse() throws Exception {
-            var i = item("{\"active\": {\"BOOL\": \"false\"}}");
-            var v = values("{\n\":v\": {\"BOOL\": \"true\"}}");
+            JsonNode i = item("{\"active\": {\"BOOL\": \"false\"}}");
+            JsonNode v = values("{\n\":v\": {\"BOOL\": \"true\"}}");
             assertTrue(ExpressionEvaluator.matches("active <> :v", i, null, v));
         }
 
         @Test
         void boolNotEqualTrue() throws Exception {
-            var i = item("{\"active\": {\"BOOL\": \"true\"}}");
-            var v = values("{\n\":v\": {\"BOOL\": \"true\"}}");
+            JsonNode i = item("{\"active\": {\"BOOL\": \"true\"}}");
+            JsonNode v = values("{\n\":v\": {\"BOOL\": \"true\"}}");
             assertFalse(ExpressionEvaluator.matches("active <> :v", i, null, v));
         }
 
         @Test
         void missingAttributeNotEqual() throws Exception {
             // DynamoDB: missing <> val → true
-            var i = item("{\"other\": {\"S\": \"x\"}}");
-            var v = values("{\n\":v\": {\"BOOL\": \"true\"}}");
+            JsonNode i = item("{\"other\": {\"S\": \"x\"}}");
+            JsonNode v = values("{\n\":v\": {\"BOOL\": \"true\"}}");
             assertTrue(ExpressionEvaluator.matches("active <> :v", i, null, v));
         }
 
         @Test
         void missingAttributeEquals() throws Exception {
             // DynamoDB: missing = val → false
-            var i = item("{\"other\": {\"S\": \"x\"}}");
-            var v = values("{\n\":v\": {\"S\": \"hello\"}}");
+            JsonNode i = item("{\"other\": {\"S\": \"x\"}}");
+            JsonNode v = values("{\n\":v\": {\"S\": \"hello\"}}");
             assertFalse(ExpressionEvaluator.matches("name = :v", i, null, v));
         }
 
@@ -401,29 +462,29 @@ class ExpressionEvaluatorTest {
 
         @Test
         void inWithNumbers() throws Exception {
-            var i = item("{\"status\": {\"N\": \"2\"}}");
-            var v = values("{\n\":a\": {\"N\": \"1\"},\n\":b\": {\"N\": \"2\"},\n\":c\": {\"N\": \"3\"}}");
+            JsonNode i = item("{\"status\": {\"N\": \"2\"}}");
+            JsonNode v = values("{\n\":a\": {\"N\": \"1\"},\n\":b\": {\"N\": \"2\"},\n\":c\": {\"N\": \"3\"}}");
             assertTrue(ExpressionEvaluator.matches("status IN (:a, :b, :c)", i, null, v));
         }
 
         @Test
         void inWithStrings() throws Exception {
-            var i = item("{\"color\": {\"S\": \"red\"}}");
-            var v = values("{\n\":a\": {\"S\": \"red\"},\n\":b\": {\"S\": \"blue\"}}");
+            JsonNode i = item("{\"color\": {\"S\": \"red\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"red\"},\n\":b\": {\"S\": \"blue\"}}");
             assertTrue(ExpressionEvaluator.matches("color IN (:a, :b)", i, null, v));
         }
 
         @Test
         void inNotMatching() throws Exception {
-            var i = item("{\"color\": {\"S\": \"green\"}}");
-            var v = values("{\n\":a\": {\"S\": \"red\"},\n\":b\": {\"S\": \"blue\"}}");
+            JsonNode i = item("{\"color\": {\"S\": \"green\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"red\"},\n\":b\": {\"S\": \"blue\"}}");
             assertFalse(ExpressionEvaluator.matches("color IN (:a, :b)", i, null, v));
         }
 
         @Test
         void inSingleValue() throws Exception {
-            var i = item("{\"status\": {\"S\": \"active\"}}");
-            var v = values("{\n\":a\": {\"S\": \"active\"}}");
+            JsonNode i = item("{\"status\": {\"S\": \"active\"}}");
+            JsonNode v = values("{\n\":a\": {\"S\": \"active\"}}");
             assertTrue(ExpressionEvaluator.matches("status IN (:a)", i, null, v));
         }
 
@@ -431,15 +492,15 @@ class ExpressionEvaluatorTest {
 
         @Test
         void betweenStrings() throws Exception {
-            var i = item("{\"sk\": {\"S\": \"B\"}}");
-            var v = values("{\n\":low\": {\"S\": \"A\"},\n\":high\": {\"S\": \"C\"}}");
+            JsonNode i = item("{\"sk\": {\"S\": \"B\"}}");
+            JsonNode v = values("{\n\":low\": {\"S\": \"A\"},\n\":high\": {\"S\": \"C\"}}");
             assertTrue(ExpressionEvaluator.matches("sk BETWEEN :low AND :high", i, null, v));
         }
 
         @Test
         void betweenOutOfRange() throws Exception {
-            var i = item("{\"sk\": {\"S\": \"D\"}}");
-            var v = values("{\n\":low\": {\"S\": \"A\"},\n\":high\": {\"S\": \"C\"}}");
+            JsonNode i = item("{\"sk\": {\"S\": \"D\"}}");
+            JsonNode v = values("{\n\":low\": {\"S\": \"A\"},\n\":high\": {\"S\": \"C\"}}");
             assertFalse(ExpressionEvaluator.matches("sk BETWEEN :low AND :high", i, null, v));
         }
 
@@ -447,37 +508,37 @@ class ExpressionEvaluatorTest {
 
         @Test
         void attributeExistsPresent() throws Exception {
-            var i = item("{\"name\": {\"S\": \"Alice\"}}");
+            JsonNode i = item("{\"name\": {\"S\": \"Alice\"}}");
             assertTrue(ExpressionEvaluator.matches("attribute_exists(name)", i, null, null));
         }
 
         @Test
         void attributeExistsMissing() throws Exception {
-            var i = item("{\"other\": {\"S\": \"x\"}}");
+            JsonNode i = item("{\"other\": {\"S\": \"x\"}}");
             assertFalse(ExpressionEvaluator.matches("attribute_exists(name)", i, null, null));
         }
 
         @Test
         void attributeNotExistsPresent() throws Exception {
-            var i = item("{\"name\": {\"S\": \"Alice\"}}");
+            JsonNode i = item("{\"name\": {\"S\": \"Alice\"}}");
             assertFalse(ExpressionEvaluator.matches("attribute_not_exists(name)", i, null, null));
         }
 
         @Test
         void attributeNotExistsMissing() throws Exception {
-            var i = item("{\"other\": {\"S\": \"x\"}}");
+            JsonNode i = item("{\"other\": {\"S\": \"x\"}}");
             assertTrue(ExpressionEvaluator.matches("attribute_not_exists(name)", i, null, null));
         }
 
         @Test
         void attributeExistsNested() throws Exception {
-            var i = item("{\"info\": {\"M\": {\"email\": {\"S\": \"a@b.com\"}}}}");
+            JsonNode i = item("{\"info\": {\"M\": {\"email\": {\"S\": \"a@b.com\"}}}}");
             assertTrue(ExpressionEvaluator.matches("attribute_exists(info.email)", i, null, null));
         }
 
         @Test
         void attributeExistsNestedMissing() throws Exception {
-            var i = item("{\"info\": {\"M\": {\"name\": {\"S\": \"Alice\"}}}}");
+            JsonNode i = item("{\"info\": {\"M\": {\"name\": {\"S\": \"Alice\"}}}}");
             assertFalse(ExpressionEvaluator.matches("attribute_exists(info.email)", i, null, null));
         }
 
@@ -485,15 +546,15 @@ class ExpressionEvaluatorTest {
 
         @Test
         void beginsWithMatch() throws Exception {
-            var i = item("{\"sk\": {\"S\": \"USER#123\"}}");
-            var v = values("{\n\":prefix\": {\"S\": \"USER#\"}}");
+            JsonNode i = item("{\"sk\": {\"S\": \"USER#123\"}}");
+            JsonNode v = values("{\n\":prefix\": {\"S\": \"USER#\"}}");
             assertTrue(ExpressionEvaluator.matches("begins_with(sk, :prefix)", i, null, v));
         }
 
         @Test
         void beginsWithNoMatch() throws Exception {
-            var i = item("{\"sk\": {\"S\": \"ORDER#123\"}}");
-            var v = values("{\n\":prefix\": {\"S\": \"USER#\"}}");
+            JsonNode i = item("{\"sk\": {\"S\": \"ORDER#123\"}}");
+            JsonNode v = values("{\n\":prefix\": {\"S\": \"USER#\"}}");
             assertFalse(ExpressionEvaluator.matches("begins_with(sk, :prefix)", i, null, v));
         }
 
@@ -501,29 +562,29 @@ class ExpressionEvaluatorTest {
 
         @Test
         void containsString() throws Exception {
-            var i = item("{\"desc\": {\"S\": \"hello world\"}}");
-            var v = values("{\n\":sub\": {\"S\": \"world\"}}");
+            JsonNode i = item("{\"desc\": {\"S\": \"hello world\"}}");
+            JsonNode v = values("{\n\":sub\": {\"S\": \"world\"}}");
             assertTrue(ExpressionEvaluator.matches("contains(desc, :sub)", i, null, v));
         }
 
         @Test
         void containsList() throws Exception {
-            var i = item("{\"tags\": {\"L\": [{\"S\": \"a\"}, {\"S\": \"b\"}, {\"S\": \"c\"}]}}");
-            var v = values("{\n\":val\": {\"S\": \"b\"}}");
+            JsonNode i = item("{\"tags\": {\"L\": [{\"S\": \"a\"}, {\"S\": \"b\"}, {\"S\": \"c\"}]}}");
+            JsonNode v = values("{\n\":val\": {\"S\": \"b\"}}");
             assertTrue(ExpressionEvaluator.matches("contains(tags, :val)", i, null, v));
         }
 
         @Test
         void containsStringSet() throws Exception {
-            var i = item("{\"tags\": {\"SS\": [\"a\", \"b\", \"c\"]}}");
-            var v = values("{\n\":val\": {\"S\": \"b\"}}");
+            JsonNode i = item("{\"tags\": {\"SS\": [\"a\", \"b\", \"c\"]}}");
+            JsonNode v = values("{\n\":val\": {\"S\": \"b\"}}");
             assertTrue(ExpressionEvaluator.matches("contains(tags, :val)", i, null, v));
         }
 
         @Test
         void containsNumberSet() throws Exception {
-            var i = item("{\"nums\": {\"NS\": [\"1\", \"2\", \"3\"]}}");
-            var v = values("{\n\":val\": {\"N\": \"2\"}}");
+            JsonNode i = item("{\"nums\": {\"NS\": [\"1\", \"2\", \"3\"]}}");
+            JsonNode v = values("{\n\":val\": {\"N\": \"2\"}}");
             assertTrue(ExpressionEvaluator.matches("contains(nums, :val)", i, null, v));
         }
 
@@ -531,9 +592,9 @@ class ExpressionEvaluatorTest {
 
         @Test
         void expressionAttributeNames() throws Exception {
-            var i = item("{\"status\": {\"S\": \"active\"}}");
-            var v = values("{\n\":v\": {\"S\": \"active\"}}");
-            var n = names("{\"#s\": \"status\"}");
+            JsonNode i = item("{\"status\": {\"S\": \"active\"}}");
+            JsonNode v = values("{\n\":v\": {\"S\": \"active\"}}");
+            JsonNode n = names("{\"#s\": \"status\"}");
             assertTrue(ExpressionEvaluator.matches("#s = :v", i, n, v));
         }
 
@@ -542,8 +603,8 @@ class ExpressionEvaluatorTest {
         @Test
         void nestedParentheses() throws Exception {
             // ((a = :1 OR b = :2) AND c = :3) OR d = :4
-            var i = item("{\"a\": {\"S\": \"X\"}, \"b\": {\"S\": \"Y\"}, \"c\": {\"S\": \"3\"}, \"d\": {\"S\": \"4\"}}");
-            var v = values("{\n\":1\": {\"S\": \"1\"},\n\":2\": {\"S\": \"2\"},\n\":3\": {\"S\": \"3\"},\n\":4\": {\"S\": \"4\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"X\"}, \"b\": {\"S\": \"Y\"}, \"c\": {\"S\": \"3\"}, \"d\": {\"S\": \"4\"}}");
+            JsonNode v = values("{\n\":1\": {\"S\": \"1\"},\n\":2\": {\"S\": \"2\"},\n\":3\": {\"S\": \"3\"},\n\":4\": {\"S\": \"4\"}}");
             // a!=1, b!=2 so inner OR is false, AND c=3 doesn't matter (false AND true = false)
             // d=4 so outer OR is true
             assertTrue(ExpressionEvaluator.matches("((a = :1 OR b = :2) AND c = :3) OR d = :4", i, null, v));
@@ -551,8 +612,8 @@ class ExpressionEvaluatorTest {
 
         @Test
         void nestedParenthesesAllFalse() throws Exception {
-            var i = item("{\"a\": {\"S\": \"X\"}, \"b\": {\"S\": \"Y\"}, \"c\": {\"S\": \"3\"}, \"d\": {\"S\": \"Z\"}}");
-            var v = values("{\n\":1\": {\"S\": \"1\"},\n\":2\": {\"S\": \"2\"},\n\":3\": {\"S\": \"3\"},\n\":4\": {\"S\": \"4\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"X\"}, \"b\": {\"S\": \"Y\"}, \"c\": {\"S\": \"3\"}, \"d\": {\"S\": \"Z\"}}");
+            JsonNode v = values("{\n\":1\": {\"S\": \"1\"},\n\":2\": {\"S\": \"2\"},\n\":3\": {\"S\": \"3\"},\n\":4\": {\"S\": \"4\"}}");
             assertFalse(ExpressionEvaluator.matches("((a = :1 OR b = :2) AND c = :3) OR d = :4", i, null, v));
         }
 
@@ -560,9 +621,9 @@ class ExpressionEvaluatorTest {
 
         @Test
         void compactFormatEvaluation() throws Exception {
-            var i = item("{\"pk\": {\"S\": \"USER#1\"}, \"sk\": {\"S\": \"B\"}}");
-            var v = values("{\n\":v0\": {\"S\": \"USER#1\"},\n\":v1\": {\"S\": \"A\"},\n\":v2\": {\"S\": \"C\"}}");
-            var n = names("{\"#f0\": \"pk\", \"#f1\": \"sk\"}");
+            JsonNode i = item("{\"pk\": {\"S\": \"USER#1\"}, \"sk\": {\"S\": \"B\"}}");
+            JsonNode v = values("{\n\":v0\": {\"S\": \"USER#1\"},\n\":v1\": {\"S\": \"A\"},\n\":v2\": {\"S\": \"C\"}}");
+            JsonNode n = names("{\"#f0\": \"pk\", \"#f1\": \"sk\"}");
             assertTrue(ExpressionEvaluator.matches("(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)", i, n, v));
         }
 
@@ -570,13 +631,13 @@ class ExpressionEvaluatorTest {
 
         @Test
         void nullExpressionMatchesAll() throws Exception {
-            var i = item("{\"a\": {\"S\": \"1\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"1\"}}");
             assertTrue(ExpressionEvaluator.matches(null, i, null, null));
         }
 
         @Test
         void blankExpressionMatchesAll() throws Exception {
-            var i = item("{\"a\": {\"S\": \"1\"}}");
+            JsonNode i = item("{\"a\": {\"S\": \"1\"}}");
             assertTrue(ExpressionEvaluator.matches("  ", i, null, null));
         }
     }
@@ -605,12 +666,12 @@ class ExpressionEvaluatorTest {
 
         @Test
         void reversedBetweenBoundsAreRejectedAtParseTime() {
-            var mapper = new ObjectMapper();
-            var values = mapper.createObjectNode();
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode values = mapper.createObjectNode();
             values.set(":hi", mapper.createObjectNode().put("N", "10"));
             values.set(":lo", mapper.createObjectNode().put("N", "1"));
 
-            var e = assertThrows(AwsException.class, () ->
+            AwsException e = assertThrows(AwsException.class, () ->
                     ExpressionEvaluator.validateExpression("n BETWEEN :hi AND :lo",
                             "ConditionExpression", null, values));
             assertEquals("ValidationException", e.getErrorCode());
@@ -624,19 +685,19 @@ class ExpressionEvaluatorTest {
         // their UTF-8 bytes. Java's UTF-16 ordering puts them the other way round.
         @Test
         void stringBoundsAreOrderedByUtf8Bytes() {
-            var mapper = new ObjectMapper();
-            var values = mapper.createObjectNode();
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode values = mapper.createObjectNode();
             values.set(":lo", mapper.createObjectNode().put("S", "\uE000"));
             values.set(":hi", mapper.createObjectNode().put("S", "\uD800\uDC00"));
 
             assertDoesNotThrow(() -> ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
                     "ConditionExpression", null, values));
 
-            var reversed = mapper.createObjectNode();
+            ObjectNode reversed = mapper.createObjectNode();
             reversed.set(":lo", mapper.createObjectNode().put("S", "\uD800\uDC00"));
             reversed.set(":hi", mapper.createObjectNode().put("S", "\uE000"));
 
-            var e = assertThrows(AwsException.class, () ->
+            AwsException e = assertThrows(AwsException.class, () ->
                     ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
                             "ConditionExpression", null, reversed));
             assertEquals("ValidationException", e.getErrorCode());
@@ -647,21 +708,21 @@ class ExpressionEvaluatorTest {
         // SerializationException before any comparison happens.
         @Test
         void binaryBoundsCompareByBytesAndRejectMalformedBase64() {
-            var mapper = new ObjectMapper();
-            var reversed = mapper.createObjectNode();
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode reversed = mapper.createObjectNode();
             reversed.set(":lo", mapper.createObjectNode().put("B", "/w=="));
             reversed.set(":hi", mapper.createObjectNode().put("B", "AA=="));
 
-            var e = assertThrows(AwsException.class, () ->
+            AwsException e = assertThrows(AwsException.class, () ->
                     ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
                             "ConditionExpression", null, reversed));
             assertEquals("ValidationException", e.getErrorCode());
 
-            var malformed = mapper.createObjectNode();
+            ObjectNode malformed = mapper.createObjectNode();
             malformed.set(":lo", mapper.createObjectNode().put("B", "!!!not-base64!!!"));
             malformed.set(":hi", mapper.createObjectNode().put("B", "@@@@"));
 
-            var serialization = assertThrows(AwsException.class, () ->
+            AwsException serialization = assertThrows(AwsException.class, () ->
                     ExpressionEvaluator.validateExpression("n BETWEEN :lo AND :hi",
                             "ConditionExpression", null, malformed));
             assertEquals("SerializationException", serialization.getErrorCode());
@@ -673,10 +734,10 @@ class ExpressionEvaluatorTest {
         // SerializationException, so the comparison itself must never decode blindly.
         @Test
         void binaryComparisonRejectsMalformedBase64() {
-            var valid = mapper.createObjectNode().put("B", "AQID");
-            var malformed = mapper.createObjectNode().put("B", "not base64!!");
+            ObjectNode valid = mapper.createObjectNode().put("B", "AQID");
+            ObjectNode malformed = mapper.createObjectNode().put("B", "not base64!!");
 
-            var e = assertThrows(AwsException.class,
+            AwsException e = assertThrows(AwsException.class,
                     () -> ExpressionEvaluator.compareAttributeValues(valid, malformed));
             assertEquals("SerializationException", e.getErrorCode());
             assertEquals(400, e.getHttpStatus());
@@ -685,12 +746,12 @@ class ExpressionEvaluatorTest {
         // A FilterExpression carries the same text without the envelope on AWS.
         @Test
         void filterExpressionReportsTheReversedBoundsWithoutTheEnvelope() {
-            var mapper = new ObjectMapper();
-            var values = mapper.createObjectNode();
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode values = mapper.createObjectNode();
             values.set(":hi", mapper.createObjectNode().put("N", "10"));
             values.set(":lo", mapper.createObjectNode().put("N", "1"));
 
-            var e = assertThrows(AwsException.class, () ->
+            AwsException e = assertThrows(AwsException.class, () ->
                     ExpressionEvaluator.validateExpression("n BETWEEN :hi AND :lo",
                             "FilterExpression", null, values));
             assertEquals("Invalid FilterExpression: The BETWEEN operator requires upper bound to be "
@@ -700,8 +761,8 @@ class ExpressionEvaluatorTest {
 
         @Test
         void orderedBetweenBoundsAreAccepted() {
-            var mapper = new ObjectMapper();
-            var values = mapper.createObjectNode();
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode values = mapper.createObjectNode();
             values.set(":lo", mapper.createObjectNode().put("N", "1"));
             values.set(":hi", mapper.createObjectNode().put("N", "10"));
 

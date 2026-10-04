@@ -52,6 +52,7 @@ The following providers execute against local Floci services:
 | Category | Provider | Behavior |
 |---|---|---|
 | Source | S3 | Reads the configured object and publishes the output artifact |
+| Source | GitHub (ThirdParty, v1) | Downloads the configured branch archive from github.com and publishes it with the repo contents at the artifact root |
 | Build/Test | CodeBuild | Starts and monitors the configured local CodeBuild project |
 | Deploy | S3 | Writes the input artifact to the configured bucket and key |
 | Deploy | CodeDeploy | Starts and monitors a local CodeDeploy deployment |
@@ -70,6 +71,27 @@ and error responses. Floci validates the stage and action names, enforces `resul
 as `Approved` or `Rejected`, limits `result.summary` to 512 characters, returns
 `InvalidApprovalTokenException` for unknown tokens, and returns
 `ApprovalAlreadyCompletedException` if the same approval token is reused after completion.
+
+## V2 stage conditions
+
+V2 stage condition blocks (`beforeEntry` and `onSuccess`) are evaluated during execution. Two rule providers evaluate for real: **LambdaInvoke** (invokes the configured local Lambda function; the rule passes when the invocation succeeds) and **VariableCheck** (compares a `#{variables.name}` reference with `EQ`, `NE`, `CONTAINS`, or `MATCHES`; `MATCHES` rejects a pattern or value longer than 256 characters). `Commands`, `DeploymentWindow` and `CloudWatchAlarm` rules are accepted but pass permissively. A `VariableCheck` reference resolves against the start request's variables and the pipeline's declared defaults; a reference that cannot be resolved (including action output variables) fails the rule. Every rule run is recorded on the execution and returned by `ListRuleExecutions`; `ListRuleTypes` returns the AWS rule catalog.
+
+A failed `beforeEntry` or `onSuccess` condition applies its declared `result`: `FAIL` (the default) stops the execution, and `SKIP` skips the stage when it is on a `beforeEntry` condition. A failed `onSuccess` condition always fails the stage, because the stage has already run. `OverrideStageCondition` marks the condition overridden and, when the execution failed on exactly that condition, resumes it from the overridden stage. `onFailure` conditions and the `ROLLBACK` result are not acted on; a stage failure is recorded as a plain failure.
+
+## Events and notifications
+
+Executions publish the real `aws.codepipeline` state-change events to the **default
+EventBridge bus**: `CodePipeline Pipeline Execution State Change` (STARTED, SUCCEEDED,
+FAILED, STOPPING, STOPPED, RESUMED), `CodePipeline Stage Execution State Change`, and
+`CodePipeline Action Execution State Change`, with the pipeline ARN in `resources` and
+the documented detail fields. EventBridge rules matching `{"source":
+["aws.codepipeline"]}` deliver them to any configured target. Publishing is best-effort
+and never fails the execution.
+
+A Manual approval action whose configuration sets `NotificationArn` publishes the
+approval-needed message (subject `APPROVAL NEEDED: AWS CodePipeline ...`, JSON body with
+the approval token, `expires` as an ISO-8601 timestamp, `consoleLink`, `approvalReviewLink`,
+`CustomData` and `ExternalEntityLink`) to that SNS topic when it starts waiting. The subject is truncated to SNS's 100-character limit.
 
 ## Configuration
 

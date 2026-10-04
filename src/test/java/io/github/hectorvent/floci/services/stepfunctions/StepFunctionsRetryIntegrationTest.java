@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -61,7 +62,7 @@ class StepFunctionsRetryIntegrationTest {
     @Test
     @Order(1)
     void taskIsRetriedAndSucceedsOnSecondAttempt() throws Exception {
-        var smArn = createStateMachine("sfn-retry-succeed-test", """
+        String smArn = createStateMachine("sfn-retry-succeed-test", """
                 {
                   "StartAt": "Flaky",
                   "States": {
@@ -83,12 +84,12 @@ class StepFunctionsRetryIntegrationTest {
                   }
                 }
                 """);
-        var execArn = startExecution(smArn, "{}");
+        String execArn = startExecution(smArn, "{}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
 
-        var getItem = given()
+        Response getItem = given()
                 .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
                 .contentType(DDB_CONTENT_TYPE)
                 .body("""
@@ -103,7 +104,7 @@ class StepFunctionsRetryIntegrationTest {
     @Test
     @Order(2)
     void exhaustedRetriesFallThroughToCatch() throws Exception {
-        var smArn = createStateMachine("sfn-retry-catch-test", """
+        String smArn = createStateMachine("sfn-retry-catch-test", """
                 {
                   "StartAt": "Flaky",
                   "States": {
@@ -131,18 +132,18 @@ class StepFunctionsRetryIntegrationTest {
                   }
                 }
                 """.formatted(MISSING_TABLE));
-        var execArn = startExecution(smArn, "{}");
+        String execArn = startExecution(smArn, "{}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
-        var output = mapper.readTree(describe.jsonPath().getString("output"));
+        JsonNode output = mapper.readTree(describe.jsonPath().getString("output"));
         assertEquals("DynamoDB.ResourceNotFoundException", output.path("err").path("Error").asText());
     }
 
     @Test
     @Order(3)
     void unmatchedErrorFailsWithoutRetry() {
-        var smArn = createStateMachine("sfn-retry-unmatched-test", """
+        String smArn = createStateMachine("sfn-retry-unmatched-test", """
                 {
                   "StartAt": "Flaky",
                   "States": {
@@ -163,15 +164,15 @@ class StepFunctionsRetryIntegrationTest {
                   }
                 }
                 """.formatted(MISSING_TABLE));
-        var execArn = startExecution(smArn, "{}");
+        String execArn = startExecution(smArn, "{}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("DynamoDB.ResourceNotFoundException", describe.jsonPath().getString("error"));
     }
 
     private static String createStateMachine(String name, String definition) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -187,7 +188,7 @@ class StepFunctionsRetryIntegrationTest {
     }
 
     private static String startExecution(String smArn, String input) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -199,15 +200,15 @@ class StepFunctionsRetryIntegrationTest {
     }
 
     private static Response waitForTerminalState(String execArn) {
-        for (var i = 0; i < 100; i++) {
-            var resp = given()
+        for (int i = 0; i < 100; i++) {
+            Response resp = given()
                     .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
                     .contentType(SFN_CONTENT_TYPE)
                     .body("""
                             {"executionArn": "%s"}
                             """.formatted(execArn))
                     .when().post("/");
-            var status = resp.jsonPath().getString("status");
+            String status = resp.jsonPath().getString("status");
             if (!"RUNNING".equals(status)) {
                 return resp;
             }

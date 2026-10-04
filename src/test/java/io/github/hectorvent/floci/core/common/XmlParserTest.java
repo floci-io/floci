@@ -180,7 +180,7 @@ class XmlParserTest {
 
     @Test
     void extractElementTreePreservesNestedNamespaceQualifiedBlocks() {
-        var root = XmlParser.extractElementTree("""
+        XmlParser.XmlElement root = XmlParser.extractElementTree("""
                 <Envelope xmlns:cf="https://cloudfront.amazonaws.com/doc/2020-05-31/">
                   <cf:Config>
                     <cf:First><cf:Value>one</cf:Value></cf:First>
@@ -386,8 +386,8 @@ class XmlParserTest {
                 </Conf>
                 """;
 
-        var groups = XmlParser.extractGroupsMulti(xml, "QueueConfiguration");
-        var filters = XmlParser.extractPairsPerGroup(xml, "QueueConfiguration",
+        List<Map<String, List<String>>> groups = XmlParser.extractGroupsMulti(xml, "QueueConfiguration");
+        List<Map<String, String>> filters = XmlParser.extractPairsPerGroup(xml, "QueueConfiguration",
                 "FilterRule", "Name", "Value");
 
         assertEquals(2, groups.size());

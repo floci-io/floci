@@ -104,6 +104,21 @@ public final class CfnRollback {
     public static final String API_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociApiKeyUpdateSnapshot";
 
     /**
+     * Holds the name and tags an API Gateway V2 VPC link carried before an in-place update changed
+     * them, so a failed stack update can put them back. Written by {@code ApiGatewayV2CfnProvisioner}
+     * before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String VPC_LINK_UPDATE_SNAPSHOT_ATTR = "__FlociVpcLinkUpdateSnapshot";
+
+    /**
+     * Holds the connection type and id an API Gateway V2 integration carried before an update, and
+     * whether that update also changed another field, so a failed stack update can put the
+     * connection back. Written by {@code ApiGatewayV2CfnProvisioner} before its update call and
+     * spent by its {@code rollbackUpdate}.
+     */
+    public static final String INTEGRATION_CONNECTION_SNAPSHOT_ATTR = "__FlociIntegrationConnectionSnapshot";
+
+    /**
      * Holds the complete prior metric filter, identity, name mode and per-address mutation outcomes
      * and ownership states.
      * Written before either an in-place put or a delete-then-create replacement; retained across
@@ -129,6 +144,38 @@ public final class CfnRollback {
      * once the update has committed.
      */
     public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
+
+    /**
+     * Holds the attributes and tags a queue carried before an in-place update changed them,
+     * so a failed stack update can restore them.
+     */
+    public static final String SQS_UPDATE_SNAPSHOT_ATTR = "__FlociSqsUpdateSnapshot";
+
+    /**
+     * Holds the settings a Cognito user pool or user pool client had before an in-place update
+     * changed them, so a failed stack update can put them back. Written by
+     * {@code CognitoCfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String COGNITO_UPDATE_SNAPSHOT_ATTR = "__FlociCognitoUpdateSnapshot";
+
+    /**
+     * Holds the configuration an Auto Scaling group carried before an in-place update changed it,
+     * so a failed stack update can restore it.
+     */
+    public static final String ASG_UPDATE_SNAPSHOT_ATTR = "__FlociAsgUpdateSnapshot";
+
+    /**
+     * Holds the version a launch template created during an in-place update and the prior version,
+     * so a failed stack update can roll it back.
+     */
+    public static final String LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR = "__FlociLaunchTemplateUpdateSnapshot";
+
+    /**
+     * Holds the settings a Lambda MicroVMs network connector had before an in-place update changed
+     * them, so a failed stack update can put them back. Written by {@code LambdaMicrovmsCfnProvisioner}
+     * before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR = "__FlociNetworkConnectorUpdateSnapshot";
 
     private CfnRollback() {
     }

@@ -160,6 +160,155 @@ class EmrTest {
 
     @Test
     @Order(11)
+    void managedScalingPolicyRoundTrip() {
+        emr.putManagedScalingPolicy(r -> r.clusterId(clusterId)
+                .managedScalingPolicy(ManagedScalingPolicy.builder()
+                        .computeLimits(ComputeLimits.builder().unitType(ComputeLimitsUnitType.INSTANCES)
+                                .minimumCapacityUnits(1).maximumCapacityUnits(5).build())
+                        .build()));
+        ManagedScalingPolicy policy = emr.getManagedScalingPolicy(r -> r.clusterId(clusterId)).managedScalingPolicy();
+        assertThat(policy.computeLimits().unitType()).isEqualTo(ComputeLimitsUnitType.INSTANCES);
+        assertThat(policy.computeLimits().maximumCapacityUnits()).isEqualTo(5);
+
+        emr.removeManagedScalingPolicy(r -> r.clusterId(clusterId));
+        assertThat(emr.getManagedScalingPolicy(r -> r.clusterId(clusterId)).managedScalingPolicy()).isNull();
+    }
+
+    @Test
+    @Order(12)
+    void autoTerminationPolicyRoundTrip() {
+        emr.putAutoTerminationPolicy(r -> r.clusterId(clusterId)
+                .autoTerminationPolicy(AutoTerminationPolicy.builder().idleTimeout(3600L).build()));
+        assertThat(emr.getAutoTerminationPolicy(r -> r.clusterId(clusterId)).autoTerminationPolicy().idleTimeout())
+                .isEqualTo(3600L);
+
+        assertThatThrownBy(() -> emr.putAutoTerminationPolicy(r -> r.clusterId(clusterId)
+                .autoTerminationPolicy(AutoTerminationPolicy.builder().idleTimeout(30L).build())))
+                .isInstanceOf(InvalidRequestException.class);
+
+        emr.removeAutoTerminationPolicy(r -> r.clusterId(clusterId));
+        assertThat(emr.getAutoTerminationPolicy(r -> r.clusterId(clusterId)).autoTerminationPolicy()).isNull();
+    }
+
+    @Test
+    @Order(13)
+    void autoScalingPolicyOnCoreGroup() {
+        String coreGroupId = emr.listInstanceGroups(r -> r.clusterId(clusterId)).instanceGroups().stream()
+                .filter(g -> g.instanceGroupType() == InstanceGroupType.CORE)
+                .findFirst().orElseThrow().id();
+        PutAutoScalingPolicyResponse resp = emr.putAutoScalingPolicy(r -> r
+                .clusterId(clusterId)
+                .instanceGroupId(coreGroupId)
+                .autoScalingPolicy(AutoScalingPolicy.builder()
+                        .constraints(ScalingConstraints.builder().minCapacity(1).maxCapacity(4).build())
+                        .rules(ScalingRule.builder()
+                                .name("scale-out")
+                                .action(ScalingAction.builder()
+                                        .simpleScalingPolicyConfiguration(SimpleScalingPolicyConfiguration.builder()
+                                                .scalingAdjustment(1).build())
+                                        .build())
+                                .trigger(ScalingTrigger.builder()
+                                        .cloudWatchAlarmDefinition(CloudWatchAlarmDefinition.builder()
+                                                .comparisonOperator(ComparisonOperator.LESS_THAN)
+                                                .metricName("YARNMemoryAvailablePercentage")
+                                                .period(300).threshold(15.0).build())
+                                        .build())
+                                .build())
+                        .build()));
+        assertThat(resp.instanceGroupId()).isEqualTo(coreGroupId);
+        assertThat(resp.autoScalingPolicy().status().state()).isEqualTo(AutoScalingPolicyState.ATTACHED);
+
+        InstanceGroup core = emr.listInstanceGroups(r -> r.clusterId(clusterId)).instanceGroups().stream()
+                .filter(g -> g.id().equals(coreGroupId)).findFirst().orElseThrow();
+        assertThat(core.autoScalingPolicy().constraints().maxCapacity()).isEqualTo(4);
+        assertThat(core.autoScalingPolicy().rules()).hasSize(1);
+
+        emr.removeAutoScalingPolicy(r -> r.clusterId(clusterId).instanceGroupId(coreGroupId));
+        InstanceGroup cleared = emr.listInstanceGroups(r -> r.clusterId(clusterId)).instanceGroups().stream()
+                .filter(g -> g.id().equals(coreGroupId)).findFirst().orElseThrow();
+        assertThat(cleared.autoScalingPolicy()).isNull();
+    }
+
+    @Test
+    @Order(14)
+    void blockPublicAccessConfigurationRoundTrip() {
+        GetBlockPublicAccessConfigurationResponse before = emr.getBlockPublicAccessConfiguration(r -> {});
+        assertThat(before.blockPublicAccessConfigurationMetadata().createdByArn()).isNotNull();
+
+        emr.putBlockPublicAccessConfiguration(r -> r.blockPublicAccessConfiguration(
+                BlockPublicAccessConfiguration.builder()
+                        .blockPublicSecurityGroupRules(true)
+                        .permittedPublicSecurityGroupRuleRanges(
+                                PortRange.builder().minRange(22).maxRange(22).build(),
+                                PortRange.builder().minRange(8443).build())
+                        .build()));
+        BlockPublicAccessConfiguration after = emr.getBlockPublicAccessConfiguration(r -> {})
+                .blockPublicAccessConfiguration();
+        assertThat(after.blockPublicSecurityGroupRules()).isTrue();
+        assertThat(after.permittedPublicSecurityGroupRuleRanges()).hasSize(2);
+    }
+
+    @Test
+    @Order(15)
+    void modifyInstanceGroupsResizesCore() {
+        String coreGroupId = emr.listInstanceGroups(r -> r.clusterId(clusterId)).instanceGroups().stream()
+                .filter(g -> g.instanceGroupType() == InstanceGroupType.CORE)
+                .findFirst().orElseThrow().id();
+        emr.modifyInstanceGroups(r -> r.clusterId(clusterId)
+                .instanceGroups(InstanceGroupModifyConfig.builder().instanceGroupId(coreGroupId).instanceCount(4).build()));
+        InstanceGroup core = emr.listInstanceGroups(r -> r.clusterId(clusterId)).instanceGroups().stream()
+                .filter(g -> g.id().equals(coreGroupId)).findFirst().orElseThrow();
+        assertThat(core.requestedInstanceCount()).isEqualTo(4);
+        assertThat(core.runningInstanceCount()).isEqualTo(4);
+        assertThat(emr.listInstances(r -> r.clusterId(clusterId)).instances()).hasSize(5);  // 1 master + 4 core
+    }
+
+    @Test
+    @Order(16)
+    void bootstrapActionsAndFleetResize() {
+        String fleetClusterId = emr.runJobFlow(r -> r
+                .name("floci-emr-sdk-fleet")
+                .releaseLabel("emr-7.5.0")
+                .bootstrapActions(BootstrapActionConfig.builder()
+                        .name("install")
+                        .scriptBootstrapAction(ScriptBootstrapActionConfig.builder()
+                                .path("s3://bucket/install.sh").args("--fast").build())
+                        .build())
+                .instances(JobFlowInstancesConfig.builder()
+                        .keepJobFlowAliveWhenNoSteps(true)
+                        .instanceFleets(
+                                InstanceFleetConfig.builder().instanceFleetType(InstanceFleetType.MASTER)
+                                        .targetOnDemandCapacity(1)
+                                        .instanceTypeConfigs(InstanceTypeConfig.builder().instanceType("m5.xlarge").build())
+                                        .build(),
+                                InstanceFleetConfig.builder().instanceFleetType(InstanceFleetType.CORE)
+                                        .targetOnDemandCapacity(2)
+                                        .instanceTypeConfigs(InstanceTypeConfig.builder().instanceType("m5.xlarge").build())
+                                        .build())
+                        .build()))
+                .jobFlowId();
+        try {
+            List<Command> actions = emr.listBootstrapActions(r -> r.clusterId(fleetClusterId)).bootstrapActions();
+            assertThat(actions).hasSize(1);
+            assertThat(actions.get(0).scriptPath()).isEqualTo("s3://bucket/install.sh");
+            assertThat(actions.get(0).args()).containsExactly("--fast");
+
+            String coreFleetId = emr.listInstanceFleets(r -> r.clusterId(fleetClusterId)).instanceFleets().stream()
+                    .filter(f -> f.instanceFleetType() == InstanceFleetType.CORE)
+                    .findFirst().orElseThrow().id();
+            emr.modifyInstanceFleet(r -> r.clusterId(fleetClusterId).instanceFleet(InstanceFleetModifyConfig.builder()
+                    .instanceFleetId(coreFleetId).targetOnDemandCapacity(5).build()));
+            InstanceFleet core = emr.listInstanceFleets(r -> r.clusterId(fleetClusterId)).instanceFleets().stream()
+                    .filter(f -> f.id().equals(coreFleetId)).findFirst().orElseThrow();
+            assertThat(core.targetOnDemandCapacity()).isEqualTo(5);
+            assertThat(core.provisionedOnDemandCapacity()).isEqualTo(5);
+        } finally {
+            emr.terminateJobFlows(r -> r.jobFlowIds(fleetClusterId));
+        }
+    }
+
+    @Test
+    @Order(20)
     void terminate() {
         emr.terminateJobFlows(r -> r.jobFlowIds(clusterId));
         Cluster cluster = emr.describeCluster(r -> r.clusterId(clusterId)).cluster();
@@ -169,7 +318,7 @@ class EmrTest {
     }
 
     @Test
-    @Order(12)
+    @Order(21)
     void describeUnknownClusterThrowsInvalidRequest() {
         assertThatThrownBy(() -> emr.describeCluster(r -> r.clusterId("j-DOESNOTEXIST0")))
                 .isInstanceOf(InvalidRequestException.class);

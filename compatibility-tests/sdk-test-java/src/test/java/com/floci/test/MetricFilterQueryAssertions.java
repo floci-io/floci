@@ -9,7 +9,6 @@ import software.amazon.awssdk.auth.signer.Aws4Signer;
 import software.amazon.awssdk.auth.signer.params.Aws4SignerParams;
 import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.http.SdkHttpMethod;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudwatch.model.Dimension;
 
 import java.io.ByteArrayInputStream;
@@ -116,7 +115,7 @@ final class MetricFilterQueryAssertions {
                 .method(SdkHttpMethod.POST).putHeader("Content-Type", "application/x-www-form-urlencoded")
                 .contentStreamProvider(() -> new ByteArrayInputStream(bytes)).build(),
                 Aws4SignerParams.builder().awsCredentials(AwsBasicCredentials.create("test", "test"))
-                        .signingRegion(Region.US_EAST_1).signingName("monitoring").build());
+                        .signingRegion(TestFixtures.region()).signingName("monitoring").build());
         HttpRequest.Builder request = HttpRequest.newBuilder(TestFixtures.endpoint()).timeout(Duration.ofSeconds(10))
                 .POST(HttpRequest.BodyPublishers.ofByteArray(bytes));
         signed.headers().forEach((name, values) -> {

@@ -151,7 +151,7 @@ class DynamoDbConsumedCapacityIntegrationTest {
     @Test
     @Order(5)
     void scanWithFilterCostsWhatTheUnfilteredScanCosts() {
-        for (var i = 0; i < 6; i++) {
+        for (int i = 0; i < 6; i++) {
             putItem("""
                 {"pk": {"S": "cc-scan-%d"}, "keep": {"S": "no"}, "filler": {"S": "%s"}}
                 """.formatted(i, "x".repeat(1000)));

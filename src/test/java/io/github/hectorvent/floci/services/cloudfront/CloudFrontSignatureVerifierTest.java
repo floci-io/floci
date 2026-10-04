@@ -80,7 +80,7 @@ class CloudFrontSignatureVerifierTest {
                 "Signature", signCfBase64(policy, "SHA1withRSA"),
                 "Key-Pair-Id", KEY_ID);
 
-        var result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
         assertTrue(result.allowed(), result.reason());
     }
 
@@ -94,7 +94,7 @@ class CloudFrontSignatureVerifierTest {
                 "Signature", signCfBase64(policy, "SHA1withRSA"),
                 "Key-Pair-Id", KEY_ID);
 
-        var result = CloudFrontSignatureVerifier.verify(
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(
                 resource, query, Map.of(), null, trusted(), now);
         assertTrue(result.allowed(), result.reason());
     }
@@ -109,7 +109,7 @@ class CloudFrontSignatureVerifierTest {
                 "Signature", signCfBase64(policyJson, "SHA1withRSA"),
                 "Key-Pair-Id", KEY_ID);
 
-        var result = CloudFrontSignatureVerifier.verify(
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(
                 resource, query, Map.of(), null, trusted(), now);
         assertTrue(result.allowed(), result.reason());
     }
@@ -169,7 +169,7 @@ class CloudFrontSignatureVerifierTest {
                         signCfBase64(policy, "SHA1withRSA"),
                 "CloudFront-Key-Pair-Id", KEY_ID);
 
-        var result = CloudFrontSignatureVerifier.verify(
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(
                 RESOURCE,
                 Map.of("Expires", Long.toString(soon())),
                 cookies,
@@ -237,7 +237,7 @@ class CloudFrontSignatureVerifierTest {
                 "Signature", signCfBase64(policy, "SHA1withRSA"),
                 "Key-Pair-Id", KEY_ID);
 
-        var result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
         assertFalse(result.allowed());
         assertTrue(result.reason().contains("expired"), result.reason());
     }
@@ -251,7 +251,7 @@ class CloudFrontSignatureVerifierTest {
                 "Signature", signCfBase64(policy, "SHA1withRSA"),
                 "Key-Pair-Id", KEY_ID);
 
-        var result = CloudFrontSignatureVerifier.verify(
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(
                 "https://d123.cloudfront.net/private/OTHER.jpg", query, Map.of(), null, trusted(), now);
         assertFalse(result.allowed());
     }
@@ -264,14 +264,14 @@ class CloudFrontSignatureVerifierTest {
                 "Signature", signCfBase64(policy, "SHA1withRSA"),
                 "Key-Pair-Id", "SOME-OTHER-KEY");
 
-        var result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
         assertFalse(result.allowed());
         assertTrue(result.reason().contains("trusted signer"), result.reason());
     }
 
     @Test
     void missingSignatureIsRejected() {
-        var result = CloudFrontSignatureVerifier.verify(RESOURCE, Map.of(), Map.of(), null, trusted(), now);
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(RESOURCE, Map.of(), Map.of(), null, trusted(), now);
         assertFalse(result.allowed());
         assertEquals("Missing CloudFront signature", result.reason());
     }
@@ -285,7 +285,7 @@ class CloudFrontSignatureVerifierTest {
                 "Signature", "AAAA",
                 "Key-Pair-Id", KEY_ID);
 
-        var result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
+        CloudFrontSignatureVerifier.Result result = CloudFrontSignatureVerifier.verify(RESOURCE, query, Map.of(), null, trusted(), now);
         assertFalse(result.allowed());
         assertTrue(result.reason().contains("base64"), result.reason());
     }

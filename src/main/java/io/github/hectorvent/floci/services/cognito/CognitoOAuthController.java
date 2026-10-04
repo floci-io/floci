@@ -94,9 +94,10 @@ public class CognitoOAuthController {
                               @QueryParam("state") String relyingPartyState,
                               @QueryParam("code_challenge") String codeChallenge,
                               @QueryParam("code_challenge_method") String codeChallengeMethod,
+                              @QueryParam("login_hint") String loginHint,
                               @CookieParam(SESSION_COOKIE) String sessionId) {
         AuthorizationRequest request = new AuthorizationRequest(responseType, clientId, redirectUri, scope,
-                relyingPartyState, nonce, codeChallenge, codeChallengeMethod);
+                relyingPartyState, nonce, codeChallenge, codeChallengeMethod, loginHint);
         String provider = trimToNull(providerName);
         if (provider == null || COGNITO_PROVIDER.equals(provider)) {
             return authorizeWithManagedLogin(requestContext, request, sessionId);
@@ -106,10 +107,11 @@ public class CognitoOAuthController {
         if (check.error() != null) {
             return check.error();
         }
+        List<String> requestedScopes = splitScopes(scope);
         try {
             String location = federationService.beginAuthorization(check.client().getUserPoolId(), clientId,
-                    redirectUri, splitScopes(scope), trimToNull(nonce), providerName, relyingPartyState,
-                    trimToNull(codeChallenge));
+                    redirectUri, requestedScopes, CognitoService.grantedScopes(check.client(), requestedScopes),
+                    trimToNull(nonce), providerName, relyingPartyState, trimToNull(codeChallenge));
             return Response.status(Response.Status.FOUND).location(URI.create(location)).build();
         } catch (AwsException e) {
             return oauthError("invalid_request", e.getMessage());
@@ -146,19 +148,22 @@ public class CognitoOAuthController {
                               @QueryParam("nonce") String nonce,
                               @QueryParam("state") String state,
                               @QueryParam("code_challenge") String codeChallenge,
-                              @QueryParam("code_challenge_method") String codeChallengeMethod) {
+                              @QueryParam("code_challenge_method") String codeChallengeMethod,
+                              @QueryParam("login_hint") String loginHint) {
         AuthorizationRequest request = new AuthorizationRequest(responseType, clientId, redirectUri, scope, state,
-                nonce, codeChallenge, codeChallengeMethod);
+                nonce, codeChallenge, codeChallengeMethod, loginHint);
         AuthorizationCheck check = checkManagedLoginRequest(requestContext, request);
         if (check.error() != null) {
             return check.error();
         }
-        return signInPage(requestContext, request, Response.Status.OK, null);
+        return firstPage(requestContext, request, !managedLoginService.choiceBasedFactors(check.client()).isEmpty(),
+                Response.Status.OK, null, null);
     }
 
     /**
      * Signs the user in and redirects to the callback with a code. A failed sign-in shows the form
-     * again with the reason; a missing or wrong CSRF token shows it with a fresh token instead.
+     * again with the reason; a missing or wrong CSRF token shows it with a fresh token instead. With
+     * choice-based sign-in, a post without a password is one step of it instead.
      */
     @POST
     @Path("/cognito-idp/login")
@@ -175,27 +180,110 @@ public class CognitoOAuthController {
         if (check.error() != null) {
             return check.error();
         }
-        if (!csrfTokenMatches(csrfCookie, formParams.getFirst(CSRF_FIELD))) {
-            return signInPage(requestContext, request, Response.Status.FORBIDDEN,
-                    "Your sign-in page expired. Sign in again.");
-        }
+        List<String> choiceFactors = managedLoginService.choiceBasedFactors(check.client());
         String username = formParams.getFirst("username");
+        if (!csrfTokenMatches(csrfCookie, formParams.getFirst(CSRF_FIELD))) {
+            return firstPage(requestContext, request, !choiceFactors.isEmpty(), Response.Status.FORBIDDEN,
+                    "Your sign-in page expired. Sign in again.", username);
+        }
+        if (!choiceFactors.isEmpty() && !formParams.containsKey("password")) {
+            return continueChoiceBasedSignIn(requestContext, request, check.client(), choiceFactors, username,
+                    formParams);
+        }
         String password = formParams.getFirst("password");
         if (trimToNull(username) == null || password == null || password.isEmpty()) {
-            return signInPage(requestContext, request, Response.Status.BAD_REQUEST,
-                    "Enter your username and password.");
+            return passwordPage(requestContext, request, Response.Status.BAD_REQUEST,
+                    "Enter your username and password.", username);
+        }
+        if (!choiceFactors.isEmpty() && !choiceFactors.contains("PASSWORD")) {
+            return usernamePage(requestContext, request, Response.Status.BAD_REQUEST,
+                    "This user pool does not allow sign-in with a password.", username);
         }
 
         String sessionId;
         try {
             sessionId = managedLoginService.signIn(check.client(), username, password);
         } catch (AwsException e) {
-            return signInPage(requestContext, request, Response.Status.BAD_REQUEST, signInError(e));
+            return passwordPage(requestContext, request, Response.Status.BAD_REQUEST, signInError(e), username);
         }
-        Optional<String> code = issueAuthorizationCode(sessionId, check.client(), request);
+        return completeSignIn(requestContext, request, check.client(), !choiceFactors.isEmpty(), sessionId, username);
+    }
+
+    /**
+     * One step of choice-based sign-in, which takes the username, then the factor when the policy offers
+     * more than one, then the password or the emailed code. Every username gets the same steps, so they
+     * do not tell who has an account, which factors they have, or whether they can sign in. The username
+     * travels between the steps in a hidden field, and the code step's USER_AUTH session with it.
+     */
+    private Response continueChoiceBasedSignIn(ContainerRequestContext requestContext, AuthorizationRequest request,
+                                               UserPoolClient client, List<String> factors, String username,
+                                               MultivaluedMap<String, String> formParams) {
+        if (trimToNull(username) == null) {
+            return usernamePage(requestContext, request, Response.Status.BAD_REQUEST, "Enter your username.", null);
+        }
+        if (formParams.containsKey("code")) {
+            return signInWithEmailCode(requestContext, request, client, username, formParams.getFirst("session"),
+                    formParams.getFirst("code"));
+        }
+        String factor = formParams.getFirst("challenge");
+        if (factor == null && factors.size() == 1) {
+            factor = factors.get(0);
+        }
+        if (factor == null) {
+            return factorPage(requestContext, request, Response.Status.OK, null, username, factors);
+        }
+        if (!factors.contains(factor)) {
+            return factorPage(requestContext, request, Response.Status.BAD_REQUEST, "Choose how to sign in.",
+                    username, factors);
+        }
+        if ("PASSWORD".equals(factor)) {
+            return passwordPage(requestContext, request, Response.Status.OK, null, username);
+        }
+        String userAuthSession;
+        try {
+            userAuthSession = managedLoginService.sendEmailCode(client, username);
+        } catch (AwsException e) {
+            return usernamePage(requestContext, request, Response.Status.BAD_REQUEST, signInError(e), username);
+        }
+        return codePage(requestContext, request, Response.Status.OK, null, username, userAuthSession);
+    }
+
+    /**
+     * The code step of choice-based sign-in. A wrong or expired code shows the code form again with the
+     * same session. Any other failure sends the user back to the username: the session is gone or expired,
+     * or the code was right and has spent it, as when the user cannot sign in or PostAuthentication fails.
+     */
+    private Response signInWithEmailCode(ContainerRequestContext requestContext, AuthorizationRequest request,
+                                         UserPoolClient client, String username, String userAuthSession,
+                                         String code) {
+        if (trimToNull(userAuthSession) == null) {
+            return usernamePage(requestContext, request, Response.Status.BAD_REQUEST,
+                    "Your sign-in page expired. Sign in again.", username);
+        }
+        if (trimToNull(code) == null) {
+            return codePage(requestContext, request, Response.Status.BAD_REQUEST, "Enter the code from your email.",
+                    username, userAuthSession);
+        }
+        String sessionId;
+        try {
+            sessionId = managedLoginService.signInWithEmailCode(client, userAuthSession, code.trim());
+        } catch (AwsException e) {
+            if ("CodeMismatchException".equals(e.getErrorCode()) || "ExpiredCodeException".equals(e.getErrorCode())) {
+                return codePage(requestContext, request, Response.Status.BAD_REQUEST, e.getMessage(), username,
+                        userAuthSession);
+            }
+            return usernamePage(requestContext, request, Response.Status.BAD_REQUEST, signInError(e), username);
+        }
+        return completeSignIn(requestContext, request, client, true, sessionId, username);
+    }
+
+    /** Redirects a signed-in user to the callback with a code, and sets the session cookie that skips the form. */
+    private Response completeSignIn(ContainerRequestContext requestContext, AuthorizationRequest request,
+                                    UserPoolClient client, boolean choiceBased, String sessionId, String username) {
+        Optional<String> code = issueAuthorizationCode(sessionId, client, request);
         if (code.isEmpty()) {
-            return signInPage(requestContext, request, Response.Status.BAD_REQUEST,
-                    CognitoAuthFlowHandler.INCORRECT_CREDENTIALS);
+            return firstPage(requestContext, request, choiceBased, Response.Status.BAD_REQUEST,
+                    CognitoAuthFlowHandler.INCORRECT_CREDENTIALS, username);
         }
         return Response.fromResponse(redirectWithCode(request, code.get()))
                 .header(HttpHeaders.SET_COOKIE, cookie(SESSION_COOKIE, sessionId,
@@ -239,7 +327,7 @@ public class CognitoOAuthController {
             redirect = Response.status(Response.Status.FOUND).location(URI.create(logoutUri)).build();
         } else if (trimToNull(redirectUri) != null) {
             AuthorizationRequest request = new AuthorizationRequest(responseType, clientId, redirectUri, scope,
-                    state, nonce, codeChallenge, codeChallengeMethod);
+                    state, nonce, codeChallenge, codeChallengeMethod, null);
             AuthorizationCheck check = checkManagedLoginRequest(requestContext, request);
             if (check.error() != null) {
                 return check.error();
@@ -421,7 +509,10 @@ public class CognitoOAuthController {
                     nonceClaim(consumedCode.nonce()), consumedCode.scopes());
             ObjectNode body = objectMapper.createObjectNode();
             body.put("access_token", (String) authentication.get("AccessToken"));
-            body.put("id_token", (String) authentication.get("IdToken"));
+            // Minted only for a grant with openid; AWS leaves the field out otherwise.
+            if (authentication.get("IdToken") instanceof String idToken) {
+                body.put("id_token", idToken);
+            }
             body.put("refresh_token", (String) authentication.get("RefreshToken"));
             body.put("expires_in", ((Number) authentication.get("ExpiresIn")).longValue());
             body.put("token_type", (String) authentication.get("TokenType"));
@@ -459,16 +550,19 @@ public class CognitoOAuthController {
         return redirect(request.redirectUri(), parameters);
     }
 
+    /** Binds the code to the scopes the request is granted now; redemption never widens them. */
     private Optional<String> issueAuthorizationCode(String sessionId, UserPoolClient client,
                                                     AuthorizationRequest request) {
         return managedLoginService.issueAuthorizationCode(sessionId, client, request.redirectUri(),
-                splitScopes(request.scope()), trimToNull(request.nonce()), trimToNull(request.codeChallenge()));
+                CognitoService.grantedScopes(client, splitScopes(request.scope())), trimToNull(request.nonce()),
+                trimToNull(request.codeChallenge()));
     }
 
     /**
      * The checks every authorization request passes, for managed login and federation alike. Errors
-     * are 400 JSON, including those found after redirect_uri is known to be registered, where AWS
-     * redirects the error to it instead.
+     * are 400 JSON, including most of those found after redirect_uri is known to be registered, where
+     * AWS redirects the error to it instead. A scope the client is not allowed is redirected, as AWS
+     * does.
      */
     private AuthorizationCheck checkAuthorizationRequest(ContainerRequestContext requestContext,
                                                          AuthorizationRequest request) {
@@ -496,7 +590,26 @@ public class CognitoOAuthController {
         if (pkceError != null) {
             return AuthorizationCheck.rejected(oauthError("invalid_request", pkceError));
         }
+        if (!allowsEveryScope(client, splitScopes(request.scope()))) {
+            return AuthorizationCheck.rejected(invalidScopeRedirect(request));
+        }
         return check;
+    }
+
+    private static boolean allowsEveryScope(UserPoolClient client, List<String> scopes) {
+        List<String> allowed = client.getAllowedOAuthScopes();
+        return scopes.isEmpty() || (allowed != null && allowed.containsAll(scopes));
+    }
+
+    /** AWS's redirect for a scope the client is not allowed, parameters in the order AWS sends them. */
+    private Response invalidScopeRedirect(AuthorizationRequest request) {
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("error_description", "invalid_scope");
+        if (request.state() != null) {
+            parameters.put("state", request.state());
+        }
+        parameters.put("error", "invalid_request");
+        return redirect(request.redirectUri(), parameters);
     }
 
     /** An authorization request that managed login answers, at the authorize, login, and logout endpoints. */
@@ -589,16 +702,85 @@ public class CognitoOAuthController {
     }
 
     /**
-     * The sign-in form, deliberately plain: a username, a password, and the authorization request in
-     * hidden fields. Each rendering sets a fresh CSRF token cookie that the form echoes back.
+     * The first page of the sign-in: the username and password form, or, with choice-based sign-in,
+     * the username alone.
+     */
+    private Response firstPage(ContainerRequestContext requestContext, AuthorizationRequest request,
+                               boolean choiceBased, Response.Status status, String error, String username) {
+        return choiceBased
+                ? usernamePage(requestContext, request, status, error, username)
+                : passwordPage(requestContext, request, status, error, username);
+    }
+
+    private Response passwordPage(ContainerRequestContext requestContext, AuthorizationRequest request,
+                                  Response.Status status, String error, String username) {
+        return signInPage(requestContext, request, status, error, List.of(
+                "<label for=\"username\">Username</label>",
+                usernameInput(request, username),
+                "<label for=\"password\">Password</label>",
+                "<input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\""
+                        + " required>",
+                "<button type=\"submit\">Sign in</button>"));
+    }
+
+    private Response usernamePage(ContainerRequestContext requestContext, AuthorizationRequest request,
+                                  Response.Status status, String error, String username) {
+        return signInPage(requestContext, request, status, error, List.of(
+                "<label for=\"username\">Username</label>",
+                usernameInput(request, username),
+                "<button type=\"submit\">Next</button>"));
+    }
+
+    /** One button per factor, each posting its name as {@code challenge}. */
+    private Response factorPage(ContainerRequestContext requestContext, AuthorizationRequest request,
+                                Response.Status status, String error, String username, List<String> factors) {
+        List<String> fields = new ArrayList<>();
+        fields.add(hiddenField("username", username));
+        for (String factor : factors) {
+            String label = "PASSWORD".equals(factor) ? "Sign in with your password" : "Email me a sign-in code";
+            fields.add("<button type=\"submit\" name=\"challenge\" value=\"" + escapeHtml(factor) + "\">"
+                    + label + "</button>");
+        }
+        return signInPage(requestContext, request, status, error, fields);
+    }
+
+    private Response codePage(ContainerRequestContext requestContext, AuthorizationRequest request,
+                              Response.Status status, String error, String username, String userAuthSession) {
+        return signInPage(requestContext, request, status, error, List.of(
+                hiddenField("username", username),
+                hiddenField("session", userAuthSession),
+                "<p>Enter the code we sent to your email address.</p>",
+                "<label for=\"code\">Code</label>",
+                "<input id=\"code\" name=\"code\" type=\"text\" inputmode=\"numeric\""
+                        + " autocomplete=\"one-time-code\" required>",
+                "<button type=\"submit\">Sign in</button>"));
+    }
+
+    /** The username input, filled with the username given so far, or else with the request's {@code login_hint}. */
+    private static String usernameInput(AuthorizationRequest request, String username) {
+        String value = username != null ? username : request.loginHint();
+        return "<input id=\"username\" name=\"username\" type=\"text\" autocomplete=\"username\""
+                + " autocapitalize=\"none\"" + (value == null ? "" : " value=\"" + escapeHtml(value) + "\"")
+                + " required>";
+    }
+
+    private static String hiddenField(String name, String value) {
+        return "<input type=\"hidden\" name=\"" + escapeHtml(name) + "\" value=\"" + escapeHtml(value) + "\">";
+    }
+
+    /**
+     * A sign-in page, deliberately plain: {@code fields}, and the authorization request in hidden
+     * fields. Each rendering sets a fresh CSRF token cookie that the form echoes back.
      */
     private Response signInPage(ContainerRequestContext requestContext, AuthorizationRequest request,
-                                Response.Status status, String error) {
+                                Response.Status status, String error, List<String> fields) {
         String csrfToken = stateStore.generateOpaqueKey();
-        List<String> hiddenFields = new ArrayList<>();
+        List<String> formFields = new ArrayList<>();
         for (Map.Entry<String, String> parameter : request.parameters().entrySet()) {
-            hiddenFields.add("      <input type=\"hidden\" name=\"" + escapeHtml(parameter.getKey())
-                    + "\" value=\"" + escapeHtml(parameter.getValue()) + "\">");
+            formFields.add("      " + hiddenField(parameter.getKey(), parameter.getValue()));
+        }
+        for (String field : fields) {
+            formFields.add("      " + field);
         }
         String page = """
                 <!doctype html>
@@ -615,18 +797,13 @@ public class CognitoOAuthController {
                     <form method="post" action="%s">
                       <input type="hidden" name="%s" value="%s">
                 %s
-                      <label for="username">Username</label>
-                      <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" required>
-                      <label for="password">Password</label>
-                      <input id="password" name="password" type="password" autocomplete="current-password" required>
-                      <button type="submit">Sign in</button>
                     </form>
                   </main>
                 </body>
                 </html>
                 """.formatted(error == null ? "" : "    <p role=\"alert\">" + escapeHtml(error) + "</p>",
                 escapeHtml(loginPath(requestContext)), CSRF_FIELD, escapeHtml(csrfToken),
-                String.join("\n", hiddenFields));
+                String.join("\n", formFields));
         // No form-action directive: browsers apply it to the redirect after the form is submitted,
         // which goes to the client's callback on another origin.
         return Response.status(status)
@@ -765,13 +942,13 @@ public class CognitoOAuthController {
     /** The authorization request that managed login carries from the authorize endpoint to the sign-in form and back. */
     private record AuthorizationRequest(String responseType, String clientId, String redirectUri, String scope,
                                         String state, String nonce, String codeChallenge,
-                                        String codeChallengeMethod) {
+                                        String codeChallengeMethod, String loginHint) {
 
         static AuthorizationRequest from(MultivaluedMap<String, String> parameters) {
             return new AuthorizationRequest(parameters.getFirst("response_type"), parameters.getFirst("client_id"),
                     parameters.getFirst("redirect_uri"), parameters.getFirst("scope"), parameters.getFirst("state"),
                     parameters.getFirst("nonce"), parameters.getFirst("code_challenge"),
-                    parameters.getFirst("code_challenge_method"));
+                    parameters.getFirst("code_challenge_method"), parameters.getFirst("login_hint"));
         }
 
         /** The parameters the request carried, in the order of AWS's redirect to the login endpoint. */
@@ -785,6 +962,7 @@ public class CognitoOAuthController {
             putIfPresent(parameters, "nonce", nonce);
             putIfPresent(parameters, "code_challenge", codeChallenge);
             putIfPresent(parameters, "code_challenge_method", codeChallengeMethod);
+            putIfPresent(parameters, "login_hint", loginHint);
             return parameters;
         }
 

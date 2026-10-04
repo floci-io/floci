@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,6 +50,27 @@ class LambdaServicePersistenceTest {
         LambdaFunction third = reloaded.publishVersion(REGION, "versioned-fn", "three");
         assertEquals("3", third.getVersion());
         assertTrue(third.getFunctionArn().endsWith(":3"));
+    }
+
+    @Test
+    void durableConfigSurvivesRestartAndJsonRoundTrip() throws Exception {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        LambdaFunctionStore store = new LambdaFunctionStore(storage);
+
+        LambdaService first = serviceWithStorage(store, storage);
+        Map<String, Object> request = baseRequest("durable-fn");
+        request.put("DurableConfig", Map.of("ExecutionTimeout", 3600));
+        first.createFunction(REGION, request);
+
+        LambdaService reloaded = serviceWithStorage(store, storage);
+        LambdaFunction fn = reloaded.getFunction(REGION, "durable-fn");
+        ObjectMapper mapper = new ObjectMapper();
+        LambdaFunction copy = mapper.readValue(mapper.writeValueAsString(fn), LambdaFunction.class);
+        for (LambdaFunction function : List.of(fn, copy)) {
+            assertTrue(function.isDurable());
+            assertEquals(3600, function.getDurableExecutionTimeout());
+            assertEquals(14, function.getDurableRetentionPeriodInDays());
+        }
     }
 
     @Test

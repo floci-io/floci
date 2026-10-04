@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.securityadmin;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
@@ -55,8 +57,8 @@ public class SecurityAdminController {
         if ("guardduty".equals(service) || service.isBlank()) {
             GuardDutyService.Page<AdminAccount> page = guardDutyService.listOrganizationAdminAccounts(
                     regionResolver.resolveRegion(headers), maxResults, nextToken);
-            var response = mapper.createObjectNode();
-            var accounts = response.putArray("adminAccounts");
+            ObjectNode response = mapper.createObjectNode();
+            ArrayNode accounts = response.putArray("adminAccounts");
             for (AdminAccount account : page.items()) {
                 accounts.add(mapper.valueToTree(account));
             }

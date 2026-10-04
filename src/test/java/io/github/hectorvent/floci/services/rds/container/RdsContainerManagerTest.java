@@ -10,10 +10,14 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -30,6 +34,7 @@ import com.github.dockerjava.api.command.PauseContainerCmd;
 import com.github.dockerjava.api.command.UnpauseContainerCmd;
 import com.github.dockerjava.api.model.Bind;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -54,6 +59,12 @@ class RdsContainerManagerTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void quotePostgresIdentifierDoublesEmbeddedQuotes() {
+        assertEquals("\"appdb\"", RdsContainerManager.quotePostgresIdentifier("appdb"));
+        assertEquals("\"app\"\"db\"", RdsContainerManager.quotePostgresIdentifier("app\"db"));
+    }
 
     @Test
     void mysql84UsesSupportedNativePasswordOptions() {
@@ -254,17 +265,17 @@ class RdsContainerManagerTest {
         manager.start("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0", "admin", "password", "db");
 
         verify(copyCmd).withRemotePath("/docker-entrypoint-initdb.d");
-        var tarCaptor = org.mockito.ArgumentCaptor.forClass(java.io.InputStream.class);
+        ArgumentCaptor<InputStream> tarCaptor = ArgumentCaptor.forClass(InputStream.class);
         verify(copyCmd).withTarInputStream(tarCaptor.capture());
-        try (var tar = new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(tarCaptor.getValue())) {
-            var entry = tar.getNextEntry();
+        try (TarArchiveInputStream tar = new TarArchiveInputStream(tarCaptor.getValue())) {
+            TarArchiveEntry entry = tar.getNextEntry();
             assertEquals("floci-master-grants.sql", entry.getName());
             assertEquals(RdsContainerManager.mysqlMasterGrantSql("admin"),
                     new String(tar.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
         }
         // The script lands on the created container before it starts, so the entrypoint's
         // one-time init phase is the thing that runs it.
-        var order = org.mockito.Mockito.inOrder(dockerClient, lifecycleManager);
+        InOrder order = Mockito.inOrder(dockerClient, lifecycleManager);
         order.verify(dockerClient).copyArchiveToContainerCmd("container-id");
         order.verify(lifecycleManager).startCreated(org.mockito.ArgumentMatchers.eq("container-id"), any());
     }
@@ -320,7 +331,7 @@ class RdsContainerManagerTest {
         manager.start("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
 
         assertFalse(Files.exists(dbPath));
-        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         Bind bind = spec.getValue().binds().getFirst();
         assertEquals(dbPath.toString(), bind.getPath());
@@ -353,7 +364,7 @@ class RdsContainerManagerTest {
         manager.start(runtimeId, "db1", null,
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
 
-        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         assertEquals(dbPath.toString(), spec.getValue().binds().getFirst().getPath());
         assertEquals("floci-aws-rds-db1", spec.getValue().name());
@@ -382,7 +393,7 @@ class RdsContainerManagerTest {
         manager.start("arn:aws:rds:us-west-2:222222222222:db:db1", "db1", null,
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
 
-        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         assertEquals(
                 Map.of("io.floci", "aws",
@@ -412,7 +423,7 @@ class RdsContainerManagerTest {
 
         manager.start("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
 
-        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         assertEquals(
                 Map.of("io.floci", "aws",
@@ -1092,7 +1103,7 @@ class RdsContainerManagerTest {
 
         manager.start("db1", "volume-a", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
 
-        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).removeIfExistsStrict("floci-rds-volume-a");
         verify(lifecycleManager).create(spec.capture());
         assertEquals("floci-aws-rds-volume-a", spec.getValue().name());
@@ -1123,7 +1134,7 @@ class RdsContainerManagerTest {
         manager.start(null, "db1", "db1", "floci-rds-db1",
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
 
-        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         assertEquals("floci-aws-rds-db1", spec.getValue().name(),
                 "the container is renamed to the current prefix");
@@ -1158,7 +1169,7 @@ class RdsContainerManagerTest {
                 null, "db1", null, DatabaseEngine.MYSQL,
                 "mysql:8.0", "root", "password", "db");
 
-        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).removeIfExistsStrict("floci-rds-db1");
         verify(lifecycleManager).create(spec.capture());
         assertEquals("floci-aws-rds-db1", spec.getValue().name());

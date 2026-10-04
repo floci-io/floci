@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ec2.model.Ipam;
 import io.github.hectorvent.floci.services.ec2.model.IpamPool;
 import io.github.hectorvent.floci.services.ec2.model.IpamPoolAllocation;
+import io.github.hectorvent.floci.services.ec2.model.IpamPoolCidr;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -156,6 +157,20 @@ class Ec2IpamServiceTest {
     }
 
     @Test
+    void describeIpamScopesFindsTheDefaultScopesAndRejectsUnknownIds() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        assertEquals(2, service.describeIpamScopes(REGION, List.of()).size());
+        List<Ec2IpamService.ScopeOfIpam> one =
+                service.describeIpamScopes(REGION, List.of(ipam.getPublicDefaultScopeId()));
+        assertEquals(1, one.size());
+        assertEquals("public", one.get(0).scope().getScopeType());
+        assertEquals(ipam.getIpamId(), one.get(0).ipam().getIpamId());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.describeIpamScopes(REGION, List.of("ipam-scope-doesnotexist")));
+        assertEquals("InvalidIpamScopeId.NotFound", e.getErrorCode());
+    }
+
+    @Test
     void deleteIpamRemovesItAndUnknownIdsThrow() {
         Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
         service.deleteIpam(REGION, ipam.getIpamId());
@@ -224,7 +239,7 @@ class Ec2IpamServiceTest {
         assertTrue(pool.getIpamPoolId().startsWith("ipam-pool-"));
 
         service.provisionIpamPoolCidr(REGION, pool.getIpamPoolId(), "10.0.0.0/8");
-        var cidrs = service.getIpamPoolCidrs(REGION, pool.getIpamPoolId());
+        List<IpamPoolCidr> cidrs = service.getIpamPoolCidrs(REGION, pool.getIpamPoolId());
         assertEquals(1, cidrs.size());
         assertEquals("10.0.0.0/8", cidrs.get(0).getCidr());
         assertEquals("provisioned", cidrs.get(0).getState());

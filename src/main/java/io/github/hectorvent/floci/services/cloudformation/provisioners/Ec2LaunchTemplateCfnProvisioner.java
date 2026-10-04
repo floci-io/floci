@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
@@ -8,6 +10,7 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +22,9 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
+
+    private static final Logger LOG = Logger.getLogger(Ec2LaunchTemplateCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final Ec2Service ec2Service;
 
@@ -73,7 +79,17 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
         // AWS::EC2::LaunchTemplate behaves when only its LaunchTemplateData changes.
         LaunchTemplate lt;
         if (existing != null && name.equals(existing.getLaunchTemplateName())) {
+            String priorLatest = existing.getLatestVersionNumber();
+            String priorDefault = existing.getDefaultVersionNumber();
             lt = ec2Service.createLaunchTemplateVersion(ctx.region(), previousId, null, null, data);
+            LaunchTemplateSnapshot snapshot = new LaunchTemplateSnapshot(
+                    ctx.region(), lt.getLaunchTemplateId(), lt.getLatestVersionNumber(), priorLatest, priorDefault);
+            try {
+                r.getAttributes().put(CfnRollback.LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR, MAPPER.writeValueAsString(snapshot));
+            } catch (JsonProcessingException e) {
+                LOG.warnv("Could not serialize Launch Template update snapshot for {0}: {1}",
+                        r.getLogicalId(), e.getMessage());
+            }
         } else {
             lt = ec2Service.createLaunchTemplate(ctx.region(), name, data, null);
             // A changed name is a replacement: drop the template the previous execution created,
@@ -96,6 +112,40 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
     public void delete(String resourceType, String physicalId, String region) {
         ec2Service.deleteLaunchTemplate(region, physicalId, null);
     }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        String rawSnapshot = resource.getAttributes().remove(CfnRollback.LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR);
+        if (rawSnapshot != null) {
+            try {
+                LaunchTemplateSnapshot snapshot = MAPPER.readValue(rawSnapshot, LaunchTemplateSnapshot.class);
+                if (snapshot.createdVersion() != null) {
+                    ec2Service.deleteLaunchTemplateVersion(snapshot.region(), snapshot.launchTemplateId(), snapshot.createdVersion());
+                }
+                resource.getAttributes().put("LatestVersionNumber", snapshot.priorLatestVersion());
+                resource.getAttributes().put("DefaultVersionNumber", snapshot.priorDefaultVersion());
+                return true;
+            } catch (Exception e) {
+                LOG.errorv("Could not restore Launch Template update snapshot for {0}: {1}",
+                        resource.getLogicalId(), e.getMessage());
+                return false;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    public record LaunchTemplateSnapshot(
+            String region,
+            String launchTemplateId,
+            String createdVersion,
+            String priorLatestVersion,
+            String priorDefaultVersion
+    ) {}
 
     /** The template a previous execution created, or null when it is gone. */
     private LaunchTemplate findExisting(String region, String launchTemplateId) {

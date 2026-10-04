@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -45,7 +46,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void hostnameStyleManifestWriteUsesInternalRegistryNamespace() {
-        var request = EcrRegistryDataPlane.requestFor(
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566",
                 "/v2/platform/api/manifests/v1", null, "hostname").orElseThrow();
 
@@ -101,7 +102,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void digestManifestWriteDoesNotAcquireAnImmutableTagLock() {
-        var request = EcrRegistryDataPlane.requestFor(
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566",
                 "/v2/platform/api/manifests/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 null, "hostname").orElseThrow();
@@ -111,7 +112,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void pathStyleRequestRetainsItsExistingInternalNamespace() {
-        var request = EcrRegistryDataPlane.requestFor("localhost:4566",
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor("localhost:4566",
                 "/v2/000000000000/us-east-1/platform/api/blobs/uploads/", "mount=sha256:abc", "path").orElseThrow();
 
         assertEquals("platform/api", request.repositoryName());
@@ -121,7 +122,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void mirrorNamespaceRoutesAnInNetworkK3sPullThroughTheSameDataPlane() {
-        var request = EcrRegistryDataPlane.requestFor("floci:4566", "/v2/platform/api/manifests/v1",
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor("floci:4566", "/v2/platform/api/manifests/v1",
                 "ns=000000000000.dkr.ecr.us-east-1.localhost%3A4566", "hostname").orElseThrow();
 
         assertEquals("000000000000", request.accountId());
@@ -162,9 +163,9 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void registryPingDoesNotAcquireARepositoryNamespace() {
-        var hostnameRequest = EcrRegistryDataPlane.requestFor(
+        EcrRegistryDataPlane.RegistryRequest hostnameRequest = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566", "/v2/", null, "hostname").orElseThrow();
-        var pathRequest = EcrRegistryDataPlane.requestFor("localhost:4566", "/v2/", null, "path").orElseThrow();
+        EcrRegistryDataPlane.RegistryRequest pathRequest = EcrRegistryDataPlane.requestFor("localhost:4566", "/v2/", null, "path").orElseThrow();
 
         assertEquals("/v2/", hostnameRequest.backendUri());
         assertEquals("/v2/", pathRequest.backendUri());
@@ -172,7 +173,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void uploadContinuationRetainsTheClientRepositoryNamespace() {
-        var request = EcrRegistryDataPlane.requestFor(
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566",
                 "/v2/platform/api/blobs/uploads/", null, "hostname").orElseThrow();
 
@@ -305,6 +306,63 @@ class EcrRegistryDataPlaneTest {
             assertEquals(1, errors.size());
             JsonObject error = errors.getJsonObject(0);
             assertEquals("TAG_INVALID", error.getString("code"));
+        } finally {
+            if (dataPlane != null) {
+                dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void repeatedAcceptHeadersAllReachTheRegistry() throws Exception {
+        AtomicReference<List<String>> received = new AtomicReference<>();
+        HttpServer registry = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    received.set(request.headers().getAll("Accept"));
+                    request.response().setStatusCode(200).end();
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        HttpServer dataPlane = null;
+        try {
+            EcrRegistryManager registryManager = Mockito.mock(EcrRegistryManager.class);
+            EcrService ecrService = Mockito.mock(EcrService.class);
+            EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+            when(config.services().ecr().enabled()).thenReturn(true);
+            when(config.services().ecr().uriStyle()).thenReturn("hostname");
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+            when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
+                    .thenReturn("legacy/platform-api");
+
+            Router router = Router.router(vertx);
+            new EcrRegistryDataPlane(registryManager, ecrService, config, vertx).register(router);
+            dataPlane = vertx.createHttpServer().requestHandler(router)
+                    .listen(0, "127.0.0.1")
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+            List<String> sent = List.of(
+                    "application/vnd.docker.distribution.manifest.v2+json",
+                    "application/vnd.docker.distribution.manifest.list.v2+json",
+                    "application/vnd.oci.image.manifest.v1+json",
+                    "application/vnd.oci.image.index.v1+json");
+            int status = vertx.createHttpClient().request(new RequestOptions()
+                            .setHost("127.0.0.1")
+                            .setPort(dataPlane.actualPort())
+                            .setMethod(HttpMethod.GET)
+                            .setURI("/v2/platform/api/manifests/v1"))
+                    .compose(request -> {
+                        request.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566");
+                        sent.forEach(mediaType -> request.headers().add("Accept", mediaType));
+                        return request.send();
+                    })
+                    .map(response -> response.statusCode())
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+            assertEquals(200, status);
+            assertEquals(sent, received.get());
         } finally {
             if (dataPlane != null) {
                 dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);

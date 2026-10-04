@@ -17,6 +17,7 @@ import software.amazon.awssdk.services.kinesisanalyticsv2.model.DeleteApplicatio
 import software.amazon.awssdk.services.kinesisanalyticsv2.model.DescribeApplicationRequest;
 import software.amazon.awssdk.services.kinesisanalyticsv2.model.KinesisAnalyticsV2Exception;
 import software.amazon.awssdk.services.kinesisanalyticsv2.model.ListApplicationsRequest;
+import software.amazon.awssdk.services.kinesisanalyticsv2.model.ListApplicationsResponse;
 import software.amazon.awssdk.services.kinesisanalyticsv2.model.RuntimeEnvironment;
 import software.amazon.awssdk.services.kinesisanalyticsv2.model.StartApplicationRequest;
 import software.amazon.awssdk.services.kinesisanalyticsv2.model.StopApplicationRequest;
@@ -134,7 +135,7 @@ abstract class AbstractKinesisAnalyticsV2LifecycleTest {
     void listApplicationsIncludesCreated() {
         requireApp();
 
-        var response = kda.listApplications(ListApplicationsRequest.builder().build());
+        ListApplicationsResponse response = kda.listApplications(ListApplicationsRequest.builder().build());
         assertThat(response.applicationSummaries())
                 .anyMatch(s -> s.applicationName().equals(applicationName));
     }

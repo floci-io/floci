@@ -24,6 +24,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -205,6 +206,90 @@ public class SesIdentityService {
                         || identityType.equals(i.getIdentityType()))
                 .sorted(Comparator.comparing(Identity::getIdentity))
                 .toList();
+    }
+
+    /**
+     * ListEmailIdentities, probed 2026-10-03. The controller has already checked the filter's keys
+     * and values; SES then checks the page size, the name, the type and the status, and last the
+     * token. The name is trimmed and found anywhere in the identity without regard to case, the keys
+     * combine, and a token is bound to the filter it came from, though not to the name's case.
+     */
+    public PaginatedResult<Identity> listV2Identities(String region, Map<String, String> filter,
+                                                      Integer pageSize, String nextToken) {
+        SesListPaging paging = filter.isEmpty()
+                ? SesListPaging.V2_LIST_EMAIL_IDENTITIES
+                : SesListPaging.V2_LIST_EMAIL_IDENTITIES_FILTERED;
+        // Validated here as well as in page() so the size error wins over the filter's values.
+        paging.checkRequest(pageSize, nextToken);
+        String name = v2FilterName(filter.get("IDENTITY_NAME_CONTAINS"));
+        String type = v2FilterType(filter.get("IDENTITY_TYPE"));
+        String status = v2FilterStatus(filter.get("VERIFICATION_STATUS"));
+        List<Identity> matching = listIdentities(type, region).stream()
+                .filter(i -> name == null || i.getIdentity().toLowerCase(Locale.ROOT).contains(name))
+                .map(i -> status == null ? i : withCurrentStatus(i, region))
+                .filter(i -> status == null || status.equals(i.getVerificationStatus()))
+                .toList();
+        // The name goes last: the type and status values never hold the separator, so no name can
+        // pass for another filter.
+        String scope = filter.isEmpty() ? ""
+                : Objects.toString(type, "") + "/" + Objects.toString(status, "") + "/" + Objects.toString(name, "");
+        return paging.page(region, scope, matching, Identity::getIdentity, pageSize, nextToken);
+    }
+
+    /** Only a domain that is not yet verified can still change status, through its DKIM records. */
+    private Identity withCurrentStatus(Identity identity, String region) {
+        if ("Domain".equals(identity.getIdentityType()) && !"Success".equals(identity.getVerificationStatus())) {
+            Identity refreshed = refreshIdentityState(identity, region);
+            return refreshed == null ? identity : refreshed;
+        }
+        return identity;
+    }
+
+    private static String v2FilterName(String value) {
+        if (value == null) {
+            return null;
+        }
+        String name = value.trim();
+        int length = name.codePointCount(0, name.length());
+        if (length < 3) {
+            throw new AwsException("BadRequestException",
+                    "Filter IDENTITY_NAME_CONTAINS must be at least 3 characters.", 400);
+        }
+        if (length > 320) {
+            throw new AwsException("BadRequestException",
+                    "Filter IDENTITY_NAME_CONTAINS must be at most 320 characters.", 400);
+        }
+        return name.toLowerCase(Locale.ROOT);
+    }
+
+    /** MANAGED_DOMAIN is in the model's enum, but SES refuses it as a filter. */
+    private static String v2FilterType(String value) {
+        if (value == null) {
+            return null;
+        }
+        return switch (value) {
+            case "EMAIL_ADDRESS" -> "EmailAddress";
+            case "DOMAIN" -> "Domain";
+            default -> throw new AwsException("BadRequestException",
+                    "Invalid identity type <" + value + "> in filter.", 400);
+        };
+    }
+
+    /** SES maps NOT_STARTED to its own name before refusing it, and words that refusal differently. */
+    private static String v2FilterStatus(String value) {
+        if (value == null) {
+            return null;
+        }
+        return switch (value) {
+            case "PENDING" -> "Pending";
+            case "SUCCESS" -> "Success";
+            case "FAILED" -> "Failed";
+            case "TEMPORARY_FAILURE" -> "TemporaryFailure";
+            case "NOT_STARTED" -> throw new AwsException("BadRequestException",
+                    "Invalid verification status <NotStarted>.", 400);
+            default -> throw new AwsException("BadRequestException",
+                    "Invalid verification status <" + value + "> in filter.", 400);
+        };
     }
 
     public List<String> getVerifiedEmailAddresses(String region) {

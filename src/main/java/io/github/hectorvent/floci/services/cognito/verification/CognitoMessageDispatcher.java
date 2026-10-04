@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cognito.verification;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.ses.SesService;
@@ -28,15 +29,17 @@ public final class CognitoMessageDispatcher {
     private static final String DEFAULT_EMAIL_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_SMS_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_FROM = "no-reply@verificationemail.com";
-    private static final String DEFAULT_REGION = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
     private static final String CODE_PLACEHOLDER = "{####}";
 
     private final SesService ses;
     private final SnsService sns;
+    private final String defaultRegion;
 
-    public CognitoMessageDispatcher(SesService ses, SnsService sns) {
+    /** {@code defaultRegion} serves a pool whose ARN names no region; a pool otherwise sends from its own. */
+    public CognitoMessageDispatcher(SesService ses, SnsService sns, String defaultRegion) {
         this.ses = ses;
         this.sns = sns;
+        this.defaultRegion = defaultRegion;
     }
 
     public void dispatch(UserPool pool, CognitoUser user, VerificationCode.Purpose purpose,
@@ -61,6 +64,7 @@ public final class CognitoMessageDispatcher {
         String phone = user.getAttributes().get("phone_number");
 
         List<String> mediums = resolveDeliveryMediums(deliveryMediums, email, phone);
+        String region = AwsArnUtils.regionOrDefault(pool.getArn(), defaultRegion);
 
         for (String medium : mediums) {
             if ("EMAIL".equalsIgnoreCase(medium) && email != null) {
@@ -72,7 +76,7 @@ public final class CognitoMessageDispatcher {
                 ses.sendEmail(SendEmailRequest.builder()
                     .source(DEFAULT_FROM)
                     .toAddresses(List.of(email))
-                    .region(DEFAULT_REGION)
+                    .region(region)
                     .content(new EmailContent.Simple(subject, body, null, List.of()))
                     .build());
             } else if ("SMS".equalsIgnoreCase(medium) && phone != null) {
@@ -85,7 +89,7 @@ public final class CognitoMessageDispatcher {
                     body,
                     null,
                     null,
-                    DEFAULT_REGION
+                    region
                 );
             }
         }

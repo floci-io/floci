@@ -14,14 +14,18 @@ import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalMatchers.aryEq;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -242,6 +246,28 @@ class LambdaArnInvocationAccountTest {
         assertTrue(rawAliases.get(targetAccount + "/" + aliasKey).isEmpty());
     }
 
+    @Test
+    void deleteFunctionDropsPendingEventsBeforeDrainingAndAfterRemovingTheFunction() {
+        String defaultAccount = "000000000000";
+        String region = "ap-south-1";
+        String functionName = "deleted-function";
+        LambdaFunctionStore functionStore = new LambdaFunctionStore(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccount));
+        functionStore.save(region, function(functionName,
+                "arn:aws:lambda:" + region + ":" + defaultAccount + ":function:" + functionName, "$LATEST"));
+        LambdaExecutorService executor = mock(LambdaExecutorService.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService service = service(functionStore, null, executor, warmPool, region, defaultAccount);
+        List<String> steps = new ArrayList<>();
+        doAnswer(invocation -> steps.add(service.isLive(invocation.getArgument(0)) ? "drop stored" : "drop gone"))
+                .when(executor).dropPending(any());
+        doAnswer(invocation -> steps.add("drain")).when(warmPool).drainFunction(functionName);
+
+        service.deleteFunction(region, functionName);
+
+        assertEquals(List.of("drop stored", "drain", "drop gone"), steps);
+    }
+
     private static LambdaFunction function(String functionName, String functionArn, String version) {
         LambdaFunction function = new LambdaFunction();
         function.setFunctionName(functionName);
@@ -256,11 +282,21 @@ class LambdaArnInvocationAccountTest {
             LambdaExecutorService executor,
             String region,
             String defaultAccount) {
+        return service(functionStore, aliasStore, executor, new WarmPool(), region, defaultAccount);
+    }
+
+    private static LambdaService service(
+            LambdaFunctionStore functionStore,
+            LambdaAliasStore aliasStore,
+            LambdaExecutorService executor,
+            WarmPool warmPool,
+            String region,
+            String defaultAccount) {
         return new LambdaService(
                 functionStore,
                 executor,
                 new LambdaConcurrencyLimiter(),
-                new WarmPool(),
+                warmPool,
                 new CodeStore(Path.of("target/test-data/lambda-code")),
                 new ZipExtractor(),
                 null,

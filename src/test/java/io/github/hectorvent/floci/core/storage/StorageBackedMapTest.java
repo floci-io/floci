@@ -2,9 +2,11 @@ package io.github.hectorvent.floci.core.storage;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -77,8 +79,8 @@ class StorageBackedMapTest
         CountDownLatch releaseFirstMapping = new CountDownLatch(1);
         CountDownLatch secondCallStarted = new CountDownLatch(1);
 
-        try (var executor = Executors.newFixedThreadPool(2)) {
-            var first = executor.submit(() -> map.computeIfAbsent("us-west-2", key -> {
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<Map<String, String>> first = executor.submit(() -> map.computeIfAbsent("us-west-2", key -> {
                 calls.incrementAndGet();
                 firstMappingEntered.countDown();
                 await(releaseFirstMapping);
@@ -86,7 +88,7 @@ class StorageBackedMapTest
             }));
             await(firstMappingEntered);
 
-            var second = executor.submit(() -> {
+            Future<Map<String, String>> second = executor.submit(() -> {
                 secondCallStarted.countDown();
                 return map.computeIfAbsent("us-west-2", key -> {
                     calls.incrementAndGet();
@@ -127,7 +129,7 @@ class StorageBackedMapTest
         StorageBackedMap<String> map = new StorageBackedMap<>(storage);
         map.put("alpha", "one");
 
-        var entry = map.entrySet().iterator().next();
+        Map.Entry<String, String> entry = map.entrySet().iterator().next();
 
         assertEquals("one", entry.setValue("two"));
         assertEquals("two", storage.get("alpha").orElseThrow());
@@ -141,7 +143,7 @@ class StorageBackedMapTest
         StorageBackedMap<String> map = new StorageBackedMap<>(storage);
         map.put("alpha", "one");
 
-        var iterator = map.entrySet().iterator();
+        Iterator<Map.Entry<String, String>> iterator = map.entrySet().iterator();
         assertTrue(iterator.hasNext());
         iterator.next();
         iterator.remove();

@@ -99,7 +99,7 @@ class ApiGatewayRootResourceLookupTest {
         ObjectMapper objectMapper = new ObjectMapper();
         ApiGatewayController controller = new ApiGatewayController(mockedService,
                 mock(ApiGatewayV2Service.class), mock(ApiGatewayV2OpenApiImporter.class),
-                regionResolver, objectMapper);
+                regionResolver, objectMapper, null);
 
         Response response = controller.getRestApis(headers);
         JsonNode body = objectMapper.readTree((String) response.getEntity());

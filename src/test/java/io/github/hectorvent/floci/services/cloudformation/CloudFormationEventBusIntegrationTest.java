@@ -734,7 +734,7 @@ class CloudFormationEventBusIntegrationTest {
         callEventBridge("AWSEvents.CreateEventBus",
                 "{\"Name\":\"" + busName + "\",\"Description\":\"external\"}", 200);
 
-        updateStack(stackName, template);
+        updateStack(stackName, eventBusOnlyTemplate(busName, "updating"));
         assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
         callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200);
 

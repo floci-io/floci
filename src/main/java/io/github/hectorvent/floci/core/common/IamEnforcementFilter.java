@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicy
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.IamService.PresignedScope;
+import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
@@ -412,7 +413,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             targetContexts.add(targetContext);
         }
 
-        if (abortIfDenied(ctx, caller, action, credentialScope, resources, targetContexts,
+        RequestPrincipal principal = RequestPrincipal.caller(callerArns.orElse(null));
+        if (abortIfDenied(ctx, caller, principal, action, credentialScope, resources, targetContexts,
                 region, accountId, akid)) {
             return;
         }
@@ -424,7 +426,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // succeeds, and with no GetObject at all it is denied. If-None-Match needs no such
         // permission.
         if ("s3:PutObject".equals(action) && ctx.getHeaderString("If-Match") != null) {
-            abortIfDenied(ctx, caller, "s3:GetObject", credentialScope, resources,
+            abortIfDenied(ctx, caller, principal, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
         }
         // A DeleteObject conditioned on an ETag reveals whether the object still has it, and the
@@ -432,7 +434,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // needs just s3:DeleteObject. The read is checked the way the PutObject case above is.
         if ("s3:DeleteObject".equals(action) && isPlainDeleteObject(ctx)
                 && isETagCondition(ctx.getHeaderString("If-Match"))) {
-            abortIfDenied(ctx, caller, "s3:GetObject", credentialScope, resources,
+            abortIfDenied(ctx, caller, principal, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
         }
     }
@@ -520,8 +522,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * Evaluates one action against every resource and target context, aborting the request with
      * AccessDenied on the first DENY. Returns true when the request was aborted.
      */
-    private boolean abortIfDenied(ContainerRequestContext ctx, CallerContext caller, String action,
-                                  String credentialScope, List<String> resources,
+    private boolean abortIfDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
+                                  String action, String credentialScope, List<String> resources,
                                   List<Map<String, List<String>>> targetContexts,
                                   String region, String accountId, String akid) {
         for (String resource : resources) {
@@ -541,8 +543,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             for (Map<String, List<String>> targetContext : targetContexts) {
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                         targetContext, resource, region, accountId, resourceOwnerAccountId);
-                ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicy(
-                        effectiveResourcePolicies, caller.principalArn(), action, resource, effectiveContext);
+                ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicyFor(
+                        effectiveResourcePolicies, principal, action, resource, effectiveContext);
                 Decision decision = evaluator.evaluateResolvedResourcePolicy(
                         caller, resourcePolicyDecision, accountRelationship, action, resource, effectiveContext);
                 if (decision != Decision.DENY) {
@@ -761,9 +763,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                     conditionContext, resource, region, accountId, effectiveOwnerAccountId);
             if (effectiveDecision == null) {
-                effectiveDecision = evaluator.evaluateResourcePolicy(
+                effectiveDecision = evaluator.evaluateResourcePolicyFor(
                         policyDocs.isEmpty() ? null : policyDocs,
-                        caller.principalArn(), action, resource, effectiveContext);
+                        RequestPrincipal.caller(callerArns.orElse(null)), action, resource, effectiveContext);
             }
 
             ResourceAccountRelationship accountRelationship = effectiveOwnerAccountId == null

@@ -79,6 +79,8 @@ Catalog change sets use AWS states (`PREPARING`, `APPLYING`, `SUCCEEDED`, and `C
 
 Agreement request acceptance persists the resulting agreement and exposes it through subsequent read and search operations. State is isolated by AWS account through `StorageFactory`.
 
+The API is served in the regions AWS publishes an endpoint for: `us-east-1`, `us-iso-east-1`, `us-isob-east-1`, `us-isof-south-1` and `eusc-de-east-1`. Requests signed for any other region are rejected with a `ValidationException`.
+
 ### Known deviations
 
 - Accepted agreements use a local 365-day duration instead of deriving the end time from requested terms.
@@ -87,6 +89,8 @@ Agreement request acceptance persists the resulting agreement and exposes it thr
 ## Marketplace Entitlement
 
 AWS exposes this service as read-only: `GetEntitlements` is the only public operation. Floci therefore does not add a non-AWS mutation endpoint. Entitlement records are loaded from the shared `StorageFactory` backend (`marketplace-entitlements.json` in persistent mode), so tests and local environments can pre-seed AWS-shaped entitlement state while preserving account isolation.
+
+`GetEntitlements` is served in the regions AWS publishes an endpoint for: `us-east-1`, `cn-northwest-1` and `eusc-de-east-1`. Requests signed for any other region are rejected with an `InvalidParameterException`.
 
 
 ## Marketplace Deployment

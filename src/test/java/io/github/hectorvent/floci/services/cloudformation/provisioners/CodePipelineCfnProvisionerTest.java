@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.codepipeline.CodePipelineService;
 import org.junit.jupiter.api.Test;
@@ -30,7 +31,7 @@ class CodePipelineCfnProvisionerTest {
             new CodePipelineCfnProvisioner(service, mock(RegionResolver.class), mapper);
 
     private ProvisionContext ctx() {
-        var engine = mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine.class);
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         return new ProvisionContext(engine, "us-east-1", "000000000000", "cfn-stack");
     }
@@ -219,7 +220,7 @@ class CodePipelineCfnProvisionerTest {
         // raw props must never be consulted directly for this boolean.
         props.putObject("RegisterWithThirdParty").put("Fn::If", "SomeCondition");
         StackResource r = resource("AWS::CodePipeline::Webhook");
-        var engine = mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine.class);
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolveNode(any())).thenAnswer(inv -> {
             ObjectNode resolved = ((ObjectNode) inv.getArgument(0)).deepCopy();
             resolved.put("RegisterWithThirdParty", true);

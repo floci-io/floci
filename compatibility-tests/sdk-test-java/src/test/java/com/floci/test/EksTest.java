@@ -60,7 +60,7 @@ class EksTest {
     void createCluster() {
         CreateClusterResponse response = eks.createCluster(CreateClusterRequest.builder()
                 .name(clusterName)
-                .roleArn("arn:aws:iam::000000000000:role/eks-role")
+                .roleArn(TestFixtures.globalArn("iam", "000000000000", "role/eks-role"))
                 .resourcesVpcConfig(VpcConfigRequest.builder()
                         .subnetIds(List.of())
                         .securityGroupIds(List.of())
@@ -153,7 +153,7 @@ class EksTest {
     void createDuplicateClusterFails() {
         assertThatThrownBy(() -> eks.createCluster(CreateClusterRequest.builder()
                         .name(clusterName)
-                        .roleArn("arn:aws:iam::000000000000:role/eks-role")
+                        .roleArn(TestFixtures.globalArn("iam", "000000000000", "role/eks-role"))
                         .resourcesVpcConfig(VpcConfigRequest.builder().build())
                         .build()))
                 .isInstanceOf(ResourceInUseException.class);
@@ -170,7 +170,7 @@ class EksTest {
                 .clusterName(clusterName)
                 .nodegroupName(NODEGROUP)
                 .subnets("subnet-abc")
-                .nodeRole("arn:aws:iam::000000000000:role/eks-node-role")
+                .nodeRole(TestFixtures.globalArn("iam", "000000000000", "role/eks-node-role"))
                 .scalingConfig(NodegroupScalingConfig.builder()
                         .minSize(1).maxSize(3).desiredSize(2).build())
                 .build());
@@ -225,7 +225,7 @@ class EksTest {
         CreateNodegroupResponse createResponse = eks.createNodegroup(CreateNodegroupRequest.builder()
                 .clusterName(clusterName)
                 .nodegroupName(nodegroupName)
-                .nodeRole("arn:aws:iam::000000000000:role/eks-node-role")
+                .nodeRole(TestFixtures.globalArn("iam", "000000000000", "role/eks-node-role"))
                 .subnets("subnet-12345678", "subnet-87654321")
                 .scalingConfig(NodegroupScalingConfig.builder()
                         .minSize(1)
@@ -279,7 +279,7 @@ class EksTest {
         CreateFargateProfileResponse createResponse = eks.createFargateProfile(CreateFargateProfileRequest.builder()
                 .clusterName(clusterName)
                 .fargateProfileName(fargateProfileName)
-                .podExecutionRoleArn("arn:aws:iam::000000000000:role/eks-fargate-role")
+                .podExecutionRoleArn(TestFixtures.globalArn("iam", "000000000000", "role/eks-fargate-role"))
                 .subnets("subnet-12345678", "subnet-87654321")
                 .selectors(FargateProfileSelector.builder()
                         .namespace("default")
@@ -292,7 +292,8 @@ class EksTest {
         assertThat(createResponse.fargateProfile().clusterName()).isEqualTo(clusterName);
         assertThat(createResponse.fargateProfile().fargateProfileName()).isEqualTo(fargateProfileName);
         assertThat(createResponse.fargateProfile().fargateProfileArn())
-                .matches("arn:aws:eks:[^:]+:[0-9]+:fargateprofile/" + clusterName + "/" + fargateProfileName + "/.+");
+                .matches("arn:" + TestFixtures.partition() + ":eks:[^:]+:[0-9]+:fargateprofile/"
+                        + clusterName + "/" + fargateProfileName + "/.+");
         assertThat(createResponse.fargateProfile().status()).isEqualTo(FargateProfileStatus.ACTIVE);
         assertThat(createResponse.fargateProfile().selectors()).hasSize(1);
         assertThat(createResponse.fargateProfile().selectors().get(0).labels()).containsEntry("app", "api");

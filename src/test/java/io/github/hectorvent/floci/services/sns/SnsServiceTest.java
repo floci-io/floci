@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
@@ -791,6 +792,42 @@ class SnsServiceTest {
         assertFalse(snsService.topicExists(topic.getTopicArn(), "eu-west-1"));
         assertFalse(snsService.topicExists(
                 "arn:aws:sns:us-east-1:000000000000:ghost-topic", REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {ACCOUNT, "000000000002"})
+    void topicExists_migratesLegacyTopicToArnAccount(String accountId) {
+        String arn = "arn:aws:sns:us-east-1:" + accountId + ":legacy-topic";
+        String key = "topic::" + REGION + "::" + arn;
+        Topic topic = new Topic("legacy-topic", arn);
+        InMemoryStorage<String, Topic> raw = new InMemoryStorage<>();
+        raw.put(key, topic);
+        AccountAwareStorageBackend<Topic> store = new AccountAwareStorageBackend<>(raw, null, ACCOUNT);
+        SnsService service = new SnsService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), null, null);
+
+        assertTrue(service.topicExists(arn, REGION));
+        assertEquals(topic, raw.get(accountId + "/" + key).orElseThrow());
+        assertTrue(raw.get(key).isEmpty());
+        if (!ACCOUNT.equals(accountId)) {
+            assertTrue(raw.get(ACCOUNT + "/" + key).isEmpty());
+        }
+    }
+
+    @Test
+    void topicExists_doesNotClaimLegacyTopicWithDifferentArn() {
+        String arn = "arn:aws:sns:us-east-1:000000000002:legacy-topic";
+        String key = "topic::" + REGION + "::" + arn;
+        Topic otherTopic = new Topic("legacy-topic", "arn:aws:sns:us-east-1:000000000003:legacy-topic");
+        InMemoryStorage<String, Topic> raw = new InMemoryStorage<>();
+        raw.put(key, otherTopic);
+        AccountAwareStorageBackend<Topic> store = new AccountAwareStorageBackend<>(raw, null, ACCOUNT);
+        SnsService service = new SnsService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), null, null);
+
+        assertFalse(service.topicExists(arn, REGION));
+        assertEquals(otherTopic, raw.get(key).orElseThrow());
+        assertTrue(raw.get("000000000002/" + key).isEmpty());
     }
 
     private static Map<String, MessageAttributeValue> attr(String name, String value, String dataType) {

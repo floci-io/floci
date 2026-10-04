@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -17,14 +18,14 @@ final class DynamoDbUpdatedAttributes {
     private DynamoDbUpdatedAttributes() {}
 
     static ObjectNode collect(List<DynamoDbService.TouchedPath> touched, boolean newValues) {
-        var root = new Node();
-        for (var path : touched) {
-            var value = newValues ? path.newValue() : path.oldValue();
+        Node root = new Node();
+        for (DynamoDbService.TouchedPath path : touched) {
+            JsonNode value = newValues ? path.newValue() : path.oldValue();
             if (value != null) {
                 root.insert(path.tokens(), 0, value);
             }
         }
-        var out = JsonNodeFactory.instance.objectNode();
+        ObjectNode out = JsonNodeFactory.instance.objectNode();
         root.mapChildren.forEach((name, child) -> out.set(name, child.render()));
         return out;
     }
@@ -44,7 +45,7 @@ final class DynamoDbUpdatedAttributes {
                 listChildren.clear();
                 return;
             }
-            var child = tokens.get(i) instanceof Long index
+            Node child = tokens.get(i) instanceof Long index
                     ? listChildren.computeIfAbsent(index, ignored -> new Node())
                     : mapChildren.computeIfAbsent((String) tokens.get(i), ignored -> new Node());
             child.insert(tokens, i + 1, value);
@@ -54,12 +55,12 @@ final class DynamoDbUpdatedAttributes {
             if (whole != null) {
                 return whole;
             }
-            var out = JsonNodeFactory.instance.objectNode();
+            ObjectNode out = JsonNodeFactory.instance.objectNode();
             if (!listChildren.isEmpty()) {
-                var list = out.putArray("L");
+                ArrayNode list = out.putArray("L");
                 listChildren.values().forEach(child -> list.add(child.render()));
             } else {
-                var map = out.putObject("M");
+                ObjectNode map = out.putObject("M");
                 mapChildren.forEach((name, child) -> map.set(name, child.render()));
             }
             return out;

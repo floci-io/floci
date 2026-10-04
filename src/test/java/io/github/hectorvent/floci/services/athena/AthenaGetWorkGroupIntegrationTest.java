@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.athena;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -92,7 +93,7 @@ class AthenaGetWorkGroupIntegrationTest {
                 .then()
                 .statusCode(200);
 
-        var response = given()
+        ValidatableResponse response = given()
                 .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
                 .contentType(CONTENT_TYPE)
                 .body("{ \"WorkGroup\": \"timestamp-format-bug-wg\" }")

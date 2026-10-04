@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.CertificateMetadata;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -152,8 +153,8 @@ public class RdsProxyTlsCertificates {
             restrictToOwnerOnly(keyFile, "rw-------");
             writeMetadata(tlsDir.resolve(METADATA_NAME), sanList);
 
-            X509Certificate certificate = certificateGenerator.parseCertificate(generated.certificatePem());
-            PrivateKey privateKey = certificateGenerator.parsePrivateKey(generated.privateKeyPem());
+            X509Certificate certificate = Pem.parseCertificate(generated.certificatePem());
+            PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
             this.sslContext = buildSslContext(certificate, privateKey);
             this.currentSans = Set.copyOf(sans);
             this.currentKeyPair = new KeyPair(certificate.getPublicKey(), privateKey);
@@ -166,8 +167,8 @@ public class RdsProxyTlsCertificates {
     }
 
     private void loadExisting(Path certFile, Path keyFile, List<String> sans) throws Exception {
-        X509Certificate certificate = certificateGenerator.parseCertificate(Files.readString(certFile));
-        PrivateKey privateKey = certificateGenerator.parsePrivateKey(Files.readString(keyFile));
+        X509Certificate certificate = Pem.parseCertificate(Files.readString(certFile));
+        PrivateKey privateKey = Pem.parsePrivateKey(Files.readString(keyFile));
         this.sslContext = buildSslContext(certificate, privateKey);
         this.currentSans = new LinkedHashSet<>(sans);
         this.currentKeyPair = new KeyPair(certificate.getPublicKey(), privateKey);

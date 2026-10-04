@@ -31,8 +31,9 @@ aws apigateway create-rest-api \
 ```
 
 The override key is consumed rather than stored, so it never appears in the tags the API returns. Any
-other tags in the same request are kept. Because an ID cannot change after creation, supplying either
-override key to `TagResource` is rejected with `BadRequestException`.
+other tags in the same request are kept. Because an ID cannot change after creation, an override that
+differs from the API's ID is rejected with `BadRequestException`. Resending the current ID is accepted,
+so CloudFormation and Terraform updates keep working.
 
 Values must be non-blank and must not contain whitespace, control characters, or `/`, `?`, `#`, since
 those would break the endpoint URL. An invalid value is rejected with `BadRequestException`.
@@ -86,7 +87,7 @@ includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
 | **Integrations** | PutIntegration, GetIntegration, UpdateIntegration, DeleteIntegration |
 | **Integration Responses** | PutIntegrationResponse, GetIntegrationResponse, UpdateIntegrationResponse, DeleteIntegrationResponse |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
-| **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
+| **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, FlushStageAuthorizersCache |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **API Keys** | CreateApiKey, ImportApiKeys, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
 | **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan, GetUsage |
@@ -151,6 +152,34 @@ immediately.
 > Floci does not implement the `apiKeyRequired` gate on methods, so a request carrying an unknown,
 > disabled, or deleted key is still executed — it simply arrives with a null `identity.apiKey` rather
 > than being rejected with `403`.
+
+### REST Lambda Authorizers
+
+TOKEN and REQUEST authorizers must return a nonempty `principalId` and an IAM policy. Floci
+checks all statements against `execute-api:Invoke` and the current method ARN, including
+wildcards, conditions and explicit deny precedence. A policy that does not grant the method
+returns `403`. Invalid policies or non-scalar context values return `500`. Scalar context keys,
+including keys such as `tenant-id`, are retained in Lambda proxy events.
+The alphanumeric and underscore restriction in the mapping reference applies to properties
+referenced through `$context.authorizer.property`, not to the returned context map.
+
+A missing TOKEN identity header returns `401` without invoking Lambda. For a REQUEST
+authorizer with caching enabled, every configured identity source must be present and nonempty.
+Creating or updating a cached REQUEST authorizer without an identity source returns `400`.
+The default TTL is 300 seconds, so omitting the TTL still requires an identity source.
+With caching disabled, REQUEST authorizers receive the request even when identity sources
+are missing. A Lambda `Unauthorized` error returns `401`; other function errors return `500`.
+
+`authorizerResultTtlInSeconds` caches the validated policy, principal and context together.
+A zero TTL disables caching. Cache entries are scoped to the account, region, API, stage,
+deployment, authorizer configuration and ordered identity values. Each cache hit evaluates
+the policy for the current method again. `FlushStageAuthorizersCache` clears a stage's entries
+through `DELETE /restapis/{apiId}/stages/{stageName}/cache/authorizers` and returns `202`.
+A flush also invalidates pending invocations, so a result started before the flush cannot
+repopulate that stage's cache afterward.
+
+See the AWS [Lambda authorizer workflow](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-use-lambda-authorizer.html)
+and [response contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-lambda-authorizer-output.html).
 
 ### Custom Domain Names
 
@@ -286,6 +315,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`)
 is implemented separately and is not counted as management-plane operations. A deployed REST
 API is also available at `http://{apiId}.execute-api.localhost.floci.io:4566/{stage}/{path}`
+(or with the region label, `{apiId}.execute-api.{region}.localhost.floci.io`)
 and `/execute-api/{apiId}/{stage}/{path}`. All three forms use the same method authorization
 and mappings. It supports these integration types; others return an error:
 
@@ -300,6 +330,45 @@ and mappings. It supports these integration types; others return an error:
 A `MOCK` integration renders its request template and uses the `statusCode` it produces to pick the integration response, exactly as AWS does: the first response whose `selectionPattern` matches wins, otherwise the response without a pattern (the default) answers. This is what makes CORS preflights declared with a `204` response (CDK's `addCorsPreflight`) carry their `Access-Control-*` headers.
 
 `HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`.
+
+A greedy resource captures only the path segments after its parent. For example,
+`/api/v1/auth/signup/{proxy+}` captures `checkpoint/status` from
+`/api/v1/auth/signup/checkpoint/status`, so an integration URI ending in
+`/api/v1/auth/signup/{proxy}` forwards the prefix once. Greedy parameter names other
+than `proxy` are supported, including in `integration.request.path.*` mappings.
+
+REST `HTTP_PROXY` and `HTTP` integrations also accept `context.*` sources in header, query
+and path parameter mappings. Supported request fields are `accountId`, `apiId`, `deploymentId`,
+`httpMethod`, `path` (including the stage), `protocol`, `requestId`, `resourceId`, `resourcePath`,
+`stage`, `domainName`, `domainPrefix`, `extendedRequestId`, `requestTime` and `requestTimeEpoch`.
+Identity fields include the immediate TCP peer's `sourceIp`, `userAgent`, a resolved API key's
+`apiKey` and `apiKeyId`, and the verified IAM caller's `accessKey`, `accountId`, `caller`, `user`
+and `userArn`. `context.requestId` uses the same ID as the authorizer and integration templates.
+A valid UUID in `x-amzn-RequestId` overrides that ID; `extendedRequestId` is generated independently. `context.authorizer.principalId` and
+`context.authorizer.<property>` come from the successful authorizer result; authenticated Cognito
+claims are available as `context.authorizer.claims.<property>`. String, number and boolean values
+are forwarded as strings. Missing values and objects are not mapped. An explicit header mapping
+replaces all inbound values of that header, regardless of casing.
+
+For a header mapped from `context.*`, inbound values are also removed when the context value is
+missing or is not a scalar. The backend therefore cannot receive a client-supplied value in place
+of an absent authorizer claim. An unresolved `method.request.*` mapping retains the existing
+HTTP proxy passthrough behavior.
+
+`method.request.*` sources always read the original inbound headers, query parameters and path
+parameters. Mapped destinations do not change another mapping's source, regardless of mapping order.
+Scalar `method.request.header.*` and `method.request.querystring.*` sources select the first
+inbound value.
+`method.request.multivalueheader.*` and `method.request.multivaluequerystring.*` preserve repeated
+values in either HTTP integration type. `stageVariables.*`, the raw `method.request.body` and
+`method.request.body.<JSONPath>` are supported too.
+
+Use alphanumeric or underscore authorizer context keys, as required by the
+[AWS mapping contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-mapping-template-reference.html).
+For example, return `userClaims` in the authorizer context and map
+`integration.request.header.X-User-Claims` from `context.authorizer.userClaims`. The HTTP header
+name can contain hyphens. REST Lambda authorizer policy evaluation, response validation and
+result caching are handled separately from these integration mappings.
 
 A backend response body larger than the 10 MB API Gateway payload quota yields `413` with `{"message":"Request Entity Too Large"}`. The same limit applies to HTTP API `HTTP_PROXY` integrations.
 
@@ -319,6 +388,7 @@ Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` r
 | `requestParameters` / `requestTemplates` | Applied at invoke time and returned on read-back |
 | `passthroughBehavior` | `NEVER` and `WHEN_NO_TEMPLATES` reject an unmatched Content-Type with `415` |
 | `timeoutInMillis` | Honoured; defaults to AWS's 29,000 ms. Values below 50 are rejected. The 29s ceiling is an edge-optimized limit, so Regional APIs may exceed it |
+| `responseTransferMode` | Defaults to `BUFFERED`. `STREAM` is accepted only for `HTTP_PROXY` and `AWS_PROXY` integrations and is stored and returned by the management API, but execution responses are still buffered; response streaming is not yet implemented |
 | `tlsConfig.insecureSkipVerification` | Honoured, with AWS's semantics: it stops requiring the backend certificate to be issued by a trusted CA, so a private-CA or self-signed backend is reachable, but expiration, hostname and the presence of a root certificate authority are still checked |
 | `contentHandling` | `CONVERT_TO_TEXT` base64-encodes a binary request for mapping templates; `CONVERT_TO_BINARY` base64-decodes a text request before sending it |
 | `connectionType` / `connectionId` | `VPC_LINK` requires `connectionId` to name an existing, available VPC link; an unknown link yields `502` |
@@ -482,6 +552,13 @@ When an API has a `$default` stage, callers may omit the stage segment:
 curl http://{apiId}.execute-api.localhost.floci.io:4566/{path}
 ```
 
+The region-bearing form a client derives from a stage's invoke URL is accepted on the
+same domain, as it is on `localhost` and the configured `FLOCI_HOSTNAME`:
+
+```bash
+curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{path}
+```
+
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
@@ -504,8 +581,12 @@ Routes carrying `authorizationType: AWS_IAM`: including those an OpenAPI import 
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
 | **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, DeleteApiMapping |
-| **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, DeleteVpcLink |
+| **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink, DeleteVpcLink |
 | **Tags** | TagResource, UntagResource, GetTags |
+
+`TagResource`, `UntagResource` and `GetTags` accept API, stage and VPC link ARNs
+(`arn:<partition>:apigateway:<region>::/vpclinks/<vpcLinkId>`). `UpdateVpcLink` changes only the
+name, as in the API model.
 
 ### WebSocket Data-Plane {#websocket-data-plane}
 
@@ -567,7 +648,6 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 ### Not Implemented
 
 - `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
-- `UpdateVpcLink` — the other four VPC Link operations are implemented; see the table above
 
 ### Examples
 

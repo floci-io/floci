@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.services.emr.model.EmrBlockPublicAccess;
 import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrInstanceFleet;
 import io.github.hectorvent.floci.services.emr.model.EmrInstanceGroup;
@@ -70,6 +71,19 @@ public class EmrHandler {
                 case "ListSecurityConfigurations" -> handleListSecurityConfigurations();
                 case "AddTags" -> handleAddTags(request);
                 case "RemoveTags" -> handleRemoveTags(request);
+                case "ModifyInstanceGroups" -> handleModifyInstanceGroups(request, region);
+                case "ModifyInstanceFleet" -> handleModifyInstanceFleet(request);
+                case "ListBootstrapActions" -> handleListBootstrapActions(request);
+                case "PutManagedScalingPolicy" -> handlePutManagedScalingPolicy(request);
+                case "GetManagedScalingPolicy" -> handleGetManagedScalingPolicy(request);
+                case "RemoveManagedScalingPolicy" -> handleRemoveManagedScalingPolicy(request);
+                case "PutAutoTerminationPolicy" -> handlePutAutoTerminationPolicy(request);
+                case "GetAutoTerminationPolicy" -> handleGetAutoTerminationPolicy(request);
+                case "RemoveAutoTerminationPolicy" -> handleRemoveAutoTerminationPolicy(request);
+                case "PutAutoScalingPolicy" -> handlePutAutoScalingPolicy(request);
+                case "RemoveAutoScalingPolicy" -> handleRemoveAutoScalingPolicy(request);
+                case "GetBlockPublicAccessConfiguration" -> handleGetBlockPublicAccessConfiguration(region);
+                case "PutBlockPublicAccessConfiguration" -> handlePutBlockPublicAccessConfiguration(request, region);
                 default -> Response.status(400)
                         .entity(new AwsErrorResponse("InvalidRequestException",
                                 "Operation " + action + " is not supported."))
@@ -106,6 +120,21 @@ public class EmrHandler {
         cluster.setApplications(rawArray(request.path("Applications")));
         cluster.setConfigurations(rawArray(request.path("Configurations")));
         cluster.setTags(parseTags(request.path("Tags")));
+        JsonNode bootstrapActions = request.path("BootstrapActions");
+        if (!bootstrapActions.isMissingNode() && !bootstrapActions.isNull()) {
+            EmrService.validateBootstrapActions(bootstrapActions);
+            cluster.setBootstrapActions(rawArray(bootstrapActions));
+        }
+        JsonNode managedScaling = request.path("ManagedScalingPolicy");
+        if (!managedScaling.isMissingNode() && !managedScaling.isNull()) {
+            EmrService.validateManagedScalingPolicy(managedScaling);
+            cluster.setManagedScalingPolicy(managedScaling.toString());
+        }
+        JsonNode autoTermination = request.path("AutoTerminationPolicy");
+        if (!autoTermination.isMissingNode() && !autoTermination.isNull()) {
+            EmrService.validateAutoTerminationPolicy(autoTermination);
+            cluster.setAutoTerminationPolicy(autoTermination.toString());
+        }
 
         JsonNode instances = request.path("Instances");
         cluster.setKeepJobFlowAliveWhenNoSteps(instances.path("KeepJobFlowAliveWhenNoSteps").asBoolean(false));
@@ -267,7 +296,7 @@ public class EmrHandler {
         ArrayNode arr = response.putArray("Instances");
         int n = 1;
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
-            for (int i = 0; i < Math.max(1, group.getRunningInstanceCount()); i++) {
+            for (int i = 0; i < group.getRunningInstanceCount(); i++) {
                 arr.add(syntheticInstanceNode(cluster, group, n++));
             }
         }
@@ -324,6 +353,117 @@ public class EmrHandler {
     }
 
     // ──────────────────────────── Builders ────────────────────────────
+
+    private Response handleModifyInstanceGroups(JsonNode request, String region) {
+        List<EmrService.InstanceGroupModification> modifications = new ArrayList<>();
+        for (JsonNode g : request.path("InstanceGroups")) {
+            JsonNode count = g.path("InstanceCount");
+            JsonNode configurations = g.path("Configurations");
+            modifications.add(new EmrService.InstanceGroupModification(
+                    g.path("InstanceGroupId").asText(null),
+                    count.isMissingNode() || count.isNull() ? null : count.asInt(),
+                    configurations.isArray() ? configurations.toString() : null));
+        }
+        service.modifyInstanceGroups(text(request, "ClusterId"), region, modifications);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleModifyInstanceFleet(JsonNode request) {
+        JsonNode fleet = request.path("InstanceFleet");
+        JsonNode onDemand = fleet.path("TargetOnDemandCapacity");
+        JsonNode spot = fleet.path("TargetSpotCapacity");
+        service.modifyInstanceFleet(text(request, "ClusterId"), fleet.path("InstanceFleetId").asText(null),
+                onDemand.isMissingNode() || onDemand.isNull() ? null : onDemand.asInt(),
+                spot.isMissingNode() || spot.isNull() ? null : spot.asInt());
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** Each BootstrapActionConfig given to RunJobFlow, as the Command shape: Name, ScriptPath and Args. */
+    private Response handleListBootstrapActions(JsonNode request) {
+        String raw = service.listBootstrapActions(text(request, "ClusterId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("BootstrapActions");
+        if (raw == null) {
+            return Response.ok(response).build();
+        }
+        try {
+            for (JsonNode action : objectMapper.readTree(raw)) {
+                ObjectNode command = arr.addObject();
+                command.put("Name", action.path("Name").asText());
+                JsonNode script = action.path("ScriptBootstrapAction");
+                command.put("ScriptPath", script.path("Path").asText());
+                ArrayNode args = command.putArray("Args");
+                script.path("Args").forEach(args::add);
+            }
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse stored BootstrapActions JSON; list left empty. Value: {0}", raw);
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutManagedScalingPolicy(JsonNode request) {
+        service.putManagedScalingPolicy(text(request, "ClusterId"), request.get("ManagedScalingPolicy"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetManagedScalingPolicy(JsonNode request) {
+        ObjectNode response = objectMapper.createObjectNode();
+        setRawJson(response, "ManagedScalingPolicy", service.getManagedScalingPolicy(text(request, "ClusterId")));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRemoveManagedScalingPolicy(JsonNode request) {
+        service.removeManagedScalingPolicy(text(request, "ClusterId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutAutoTerminationPolicy(JsonNode request) {
+        service.putAutoTerminationPolicy(text(request, "ClusterId"), request.path("AutoTerminationPolicy"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetAutoTerminationPolicy(JsonNode request) {
+        ObjectNode response = objectMapper.createObjectNode();
+        setRawJson(response, "AutoTerminationPolicy", service.getAutoTerminationPolicy(text(request, "ClusterId")));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRemoveAutoTerminationPolicy(JsonNode request) {
+        service.removeAutoTerminationPolicy(text(request, "ClusterId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutAutoScalingPolicy(JsonNode request) {
+        String clusterId = text(request, "ClusterId");
+        EmrInstanceGroup group = service.putAutoScalingPolicy(clusterId, text(request, "InstanceGroupId"),
+                request.get("AutoScalingPolicy"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ClusterId", clusterId);
+        response.put("InstanceGroupId", group.getId());
+        response.set("AutoScalingPolicy", autoScalingPolicyNode(group.getAutoScalingPolicy()));
+        response.put("ClusterArn", service.describeCluster(clusterId).getClusterArn());
+        return Response.ok(response).build();
+    }
+
+    private Response handleRemoveAutoScalingPolicy(JsonNode request) {
+        service.removeAutoScalingPolicy(text(request, "ClusterId"), text(request, "InstanceGroupId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetBlockPublicAccessConfiguration(String region) {
+        EmrBlockPublicAccess setting = service.getBlockPublicAccess(region);
+        ObjectNode response = objectMapper.createObjectNode();
+        setRawJson(response, "BlockPublicAccessConfiguration", setting.getConfiguration());
+        ObjectNode metadata = response.putObject("BlockPublicAccessConfigurationMetadata");
+        putEpoch(metadata, "CreationDateTime", setting.getCreationDateTime());
+        metadata.put("CreatedByArn", setting.getCreatedByArn());
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutBlockPublicAccessConfiguration(JsonNode request, String region) {
+        service.putBlockPublicAccess(region, request.get("BlockPublicAccessConfiguration"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
 
     private ObjectNode clusterNode(EmrCluster c) {
         ObjectNode node = objectMapper.createObjectNode();
@@ -441,6 +581,30 @@ public class EmrHandler {
         node.put("RequestedInstanceCount", g.getRequestedInstanceCount());
         node.put("RunningInstanceCount", g.getRunningInstanceCount());
         node.putObject("Status").put("State", g.getState());
+        if (g.getAutoScalingPolicy() != null) {
+            node.set("AutoScalingPolicy", autoScalingPolicyNode(g.getAutoScalingPolicy()));
+        }
+        if (g.getConfigurations() != null) {
+            // Floci applies a reconfiguration at once, so the applied configuration is the requested one.
+            setRawJson(node, "Configurations", g.getConfigurations());
+            node.put("ConfigurationsVersion", g.getConfigurationsVersion());
+            setRawJson(node, "LastSuccessfullyAppliedConfigurations", g.getConfigurations());
+            node.put("LastSuccessfullyAppliedConfigurationsVersion", g.getConfigurationsVersion());
+        }
+        return node;
+    }
+
+    /** An AutoScalingPolicyDescription: the stored Constraints and Rules with an ATTACHED status. */
+    private ObjectNode autoScalingPolicyNode(String rawPolicy) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.putObject("Status").put("State", "ATTACHED");
+        try {
+            JsonNode policy = objectMapper.readTree(rawPolicy);
+            node.set("Constraints", policy.path("Constraints"));
+            node.set("Rules", policy.path("Rules"));
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse stored AutoScalingPolicy JSON; policy omitted. Value: {0}", rawPolicy);
+        }
         return node;
     }
 
@@ -526,6 +690,14 @@ public class EmrHandler {
             group.setMarket(g.path("Market").asText(null));
             group.setBidPrice(g.path("BidPrice").asText(null));
             group.setRequestedInstanceCount(g.path("InstanceCount").asInt(0));
+            // Kept as given, an empty list included, so creation reads back like ModifyInstanceGroups.
+            JsonNode configurations = g.path("Configurations");
+            group.setConfigurations(configurations.isArray() ? configurations.toString() : null);
+            JsonNode autoScaling = g.path("AutoScalingPolicy");
+            if (!autoScaling.isMissingNode() && !autoScaling.isNull()) {
+                EmrService.validateAutoScalingPolicy(autoScaling, group.getInstanceGroupType());
+                group.setAutoScalingPolicy(autoScaling.toString());
+            }
             groups.add(group);
         }
         return groups;

@@ -154,9 +154,9 @@ class StepFunctionsExecutionHistoryIntegrationTest {
 
     @Test
     void getExecutionHistory_emitsTaskScheduledStartedSucceededWithChainedPreviousEventId() throws Exception {
-        var queueUrl = createQueue("execution-history-sqs-queue");
+        String queueUrl = createQueue("execution-history-sqs-queue");
         try {
-            var definition = """
+            String definition = """
                     {
                       "StartAt": "Send",
                       "States": {
@@ -173,11 +173,11 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                     }
                     """.formatted(queueUrl);
 
-            var stateMachineArn = createStateMachine("execution-history-task-events-test", definition);
-            var executionArn = startExecution(stateMachineArn);
+            String stateMachineArn = createStateMachine("execution-history-task-events-test", definition);
+            String executionArn = startExecution(stateMachineArn);
             waitForExecution(executionArn);
 
-            var response = given()
+            Response response = given()
                     .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
                     .contentType(SFN_CONTENT_TYPE)
                     .body(String.format("""
@@ -190,40 +190,40 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                     .post("/");
             response.then().statusCode(200);
 
-            var events = MAPPER.readTree(response.body().asString()).path("events");
-            var types = new ArrayList<String>();
+            JsonNode events = MAPPER.readTree(response.body().asString()).path("events");
+            ArrayList<String> types = new ArrayList<>();
             events.forEach(event -> types.add(event.path("type").asText()));
             assertEquals(List.of("ExecutionStarted", "TaskStateEntered", "TaskScheduled", "TaskStarted",
                     "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types);
 
-            var expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L);
-            for (var i = 0; i < events.size(); i++) {
-                var event = events.get(i);
+            List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L);
+            for (int i = 0; i < events.size(); i++) {
+                JsonNode event = events.get(i);
                 assertEquals(i + 1L, event.path("id").asLong());
                 assertEquals(expectedPreviousEventIds.get(i), event.path("previousEventId").asLong());
             }
 
-            var scheduled = events.get(2).path("taskScheduledEventDetails");
+            JsonNode scheduled = events.get(2).path("taskScheduledEventDetails");
             assertFalse(scheduled.has("inputDetails"));
             assertEquals("sqs", scheduled.path("resourceType").asText());
             assertEquals("sendMessage", scheduled.path("resource").asText());
             assertEquals(stateMachineArn.split(":")[3], scheduled.path("region").asText());
-            var parameters = MAPPER.readTree(scheduled.path("parameters").asText());
+            JsonNode parameters = MAPPER.readTree(scheduled.path("parameters").asText());
             assertEquals(queueUrl, parameters.path("QueueUrl").asText());
             assertEquals("hello", parameters.path("MessageBody").asText());
 
-            var started = events.get(3).path("taskStartedEventDetails");
+            JsonNode started = events.get(3).path("taskStartedEventDetails");
             assertEquals("sqs", started.path("resourceType").asText());
             assertEquals("sendMessage", started.path("resource").asText());
 
-            var succeeded = events.get(4).path("taskSucceededEventDetails");
-            var succeededOutputDetails = succeeded.path("outputDetails");
+            JsonNode succeeded = events.get(4).path("taskSucceededEventDetails");
+            JsonNode succeededOutputDetails = succeeded.path("outputDetails");
             assertTrue(succeededOutputDetails.isObject());
             assertFalse(succeededOutputDetails.path("truncated").asBoolean(true));
             assertTrue(succeeded.path("output").asText().contains("MessageId"));
 
-            var entered = events.get(1).path("stateEnteredEventDetails");
-            var enteredInputDetails = entered.path("inputDetails");
+            JsonNode entered = events.get(1).path("stateEnteredEventDetails");
+            JsonNode enteredInputDetails = entered.path("inputDetails");
             assertTrue(enteredInputDetails.isObject());
             assertFalse(enteredInputDetails.path("truncated").asBoolean(true));
         } finally {
@@ -268,8 +268,8 @@ class StepFunctionsExecutionHistoryIntegrationTest {
         String executionArn = startExecution(stateMachineArn, "{\"items\": [1, 2]}");
         waitForExecution(executionArn);
 
-        var events = MAPPER.readTree(getExecutionHistory(executionArn).body().asString()).path("events");
-        var types = new ArrayList<String>();
+        JsonNode events = MAPPER.readTree(getExecutionHistory(executionArn).body().asString()).path("events");
+        ArrayList<String> types = new ArrayList<>();
         events.forEach(event -> types.add(event.path("type").asText()));
         assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted",
                 "PassStateEntered", "PassStateExited", "ParallelStateSucceeded", "ParallelStateExited",
@@ -277,9 +277,9 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                 "MapIterationStarted", "PassStateEntered", "PassStateExited", "MapIterationSucceeded",
                 "MapIterationStarted", "PassStateEntered", "PassStateExited", "MapIterationSucceeded",
                 "MapStateSucceeded", "MapStateExited", "ExecutionSucceeded"), types);
-        var expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 5L, 7L, 8L, 9L, 10L, 11L, 12L,
+        List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 5L, 7L, 8L, 9L, 10L, 11L, 12L,
                 9L, 14L, 15L, 16L, 17L, 17L, 19L);
-        for (var i = 0; i < events.size(); i++) {
+        for (int i = 0; i < events.size(); i++) {
             assertEquals(i + 1L, events.get(i).path("id").asLong());
             assertEquals(expectedPreviousEventIds.get(i), events.get(i).path("previousEventId").asLong(),
                     "previousEventId of event " + (i + 1) + " in " + events);
@@ -313,17 +313,17 @@ class StepFunctionsExecutionHistoryIntegrationTest {
 
         String stateMachineArn = createStateMachine("execution-history-branch-failure-test", definition);
         String executionArn = startExecution(stateMachineArn, "{\"x\": \"a\"}");
-        var cause = "An error occurred while executing the state 'Fast' (entered at the event id #4). "
+        String cause = "An error occurred while executing the state 'Fast' (entered at the event id #4). "
                 + "The JSONPath '$.nope' specified for the field 'm.$' could not be found in the input '{\"x\":\"a\"}'";
         await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(100)).untilAsserted(() -> {
-            var described = describeExecution(executionArn);
+            Response described = describeExecution(executionArn);
             assertEquals("FAILED", described.jsonPath().getString("status"), described.body().asString());
             assertEquals("States.Runtime", described.jsonPath().getString("error"));
             assertEquals(cause, described.jsonPath().getString("cause"));
         });
 
-        var events = MAPPER.readTree(getExecutionHistory(executionArn).body().asString()).path("events");
-        var types = new ArrayList<String>();
+        JsonNode events = MAPPER.readTree(getExecutionHistory(executionArn).body().asString()).path("events");
+        ArrayList<String> types = new ArrayList<>();
         events.forEach(event -> types.add(event.path("type").asText()));
         assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted",
                 "PassStateEntered", "ExecutionFailed"), types);
@@ -362,7 +362,7 @@ class StepFunctionsExecutionHistoryIntegrationTest {
     }
 
     private static String createQueue(String queueName) {
-        var response = given()
+        Response response = given()
                 .header("X-Amz-Target", "AmazonSQS.CreateQueue")
                 .contentType(SQS_CONTENT_TYPE)
                 .body("""

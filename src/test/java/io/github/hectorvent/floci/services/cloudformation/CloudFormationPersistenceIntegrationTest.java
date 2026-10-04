@@ -72,7 +72,7 @@ class CloudFormationPersistenceIntegrationTest {
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 
         // Read the on-disk file the way a fresh Floci process would on the next boot.
-        var store = new PersistentStorage<String, Stack>(
+        PersistentStorage<String, Stack> store = new PersistentStorage<>(
                 STACKS_FILE, new TypeReference<Map<String, Stack>>() {});
         store.load();
 

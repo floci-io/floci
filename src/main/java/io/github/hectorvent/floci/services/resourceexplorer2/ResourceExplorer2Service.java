@@ -1027,7 +1027,7 @@ public class ResourceExplorer2Service {
         if (includeTags && r.tags() != null && !r.tags().isEmpty()) {
             ObjectNode tagProp = objectMapper.createObjectNode();
             ArrayNode tagData = objectMapper.createArrayNode();
-            for (var entry : r.tags().entrySet()) {
+            for (Map.Entry<String, String> entry : r.tags().entrySet()) {
                 ObjectNode tagEntry = objectMapper.createObjectNode();
                 tagEntry.put("Key", entry.getKey());
                 tagEntry.put("Value", entry.getValue());

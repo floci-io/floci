@@ -108,6 +108,10 @@ class S3PresignedPostIntegrationTest {
             .then()
                 .statusCode(200);
 
+            consumeValidationEvent(postQueueUrl);
+            consumeValidationEvent(putQueueUrl);
+            consumeValidationEvent(wildcardQueueUrl);
+
             given()
                 .multiPart("key", "uploads/notified.txt")
                 .multiPart("file", "notified.txt", "notified".getBytes(StandardCharsets.UTF_8), "text/plain")
@@ -167,6 +171,34 @@ class S3PresignedPostIntegrationTest {
             .statusCode(200)
             .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
                 containsString("\"eventName\":\"ObjectCreated:Post\""));
+    }
+
+    private void consumeValidationEvent(String queueUrl) {
+        String receiptHandle = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
+                containsString("\"Event\":\"s3:TestEvent\""))
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
+                containsString("\"Bucket\":\"" + BUCKET + "\""))
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", not(containsString("\"Records\"")))
+            .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.ReceiptHandle");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("ReceiptHandle", receiptHandle)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     private void deleteQueue(String queueUrl) {

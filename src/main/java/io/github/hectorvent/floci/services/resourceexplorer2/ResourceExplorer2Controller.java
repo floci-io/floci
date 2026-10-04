@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.resourceexplorer2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.resourceexplorer2.model.*;
@@ -94,7 +95,7 @@ public class ResourceExplorer2Controller {
         String region = regionResolver.resolveRegion(headers);
         Map<String, String> tags = parseTags(req);
         Index index = service.createIndex(region, tags);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.put("Arn", index.arn());
         result.put("CreatedAt", index.createdAt().toString());
         // Real AWS returns CREATING immediately; we store ACTIVE synchronously but the
@@ -108,7 +109,7 @@ public class ResourceExplorer2Controller {
     public Response getIndex(@Context HttpHeaders headers) {
         String region = regionResolver.resolveRegion(headers);
         Index index = service.getIndex(region);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.put("Arn", index.arn());
         result.put("CreatedAt", index.createdAt().toString());
         result.put("LastUpdatedAt", index.lastUpdatedAt().toString());
@@ -129,7 +130,7 @@ public class ResourceExplorer2Controller {
             throw new AwsException("ValidationException", "Arn is required", 400);
         }
         Index deleted = service.deleteIndex(indexArn);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.put("Arn", deleted.arn());
         result.put("LastUpdatedAt", deleted.lastUpdatedAt().toString());
         result.put("State", deleted.state().name());
@@ -165,7 +166,7 @@ public class ResourceExplorer2Controller {
             throw new AwsException("ValidationException", "Invalid index type: " + req.get("Type").asText(), 400);
         }
         Index index = service.updateIndexType(arn, type);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.put("Arn", index.arn());
         result.put("LastUpdatedAt", index.lastUpdatedAt().toString());
         result.put("State", index.state().name());
@@ -184,7 +185,7 @@ public class ResourceExplorer2Controller {
         List<IncludedProperty> includedProperties = parseIncludedProperties(req);
         Map<String, String> tags = parseTags(req);
         View view = service.createView(region, viewName, scope, filters, includedProperties, tags);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.set("View", service.buildViewNode(view));
         return Response.ok(result).build();
     }
@@ -198,7 +199,7 @@ public class ResourceExplorer2Controller {
             throw new AwsException("ValidationException", "ViewArn is required", 400);
         }
         View view = service.getView(viewArn);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.set("View", service.buildViewNode(view));
         result.set("Tags", objectMapper.valueToTree(
                 view.tags() != null ? view.tags() : Map.of()));
@@ -214,7 +215,7 @@ public class ResourceExplorer2Controller {
             throw new AwsException("ValidationException", "ViewArn is required", 400);
         }
         service.deleteView(viewArn);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.put("ViewArn", viewArn);
         return Response.ok(result).build();
     }
@@ -230,7 +231,7 @@ public class ResourceExplorer2Controller {
         SearchFilter filters = parseFilters(req);
         List<IncludedProperty> includedProperties = parseIncludedProperties(req);
         View view = service.updateView(viewArn, filters, includedProperties);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.set("View", service.buildViewNode(view));
         return Response.ok(result).build();
     }
@@ -261,7 +262,7 @@ public class ResourceExplorer2Controller {
             throw new AwsException("ValidationException", "ViewArn is required", 400);
         }
         service.associateDefaultView(regionResolver.resolveRegion(headers), viewArn);
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.put("ViewArn", viewArn);
         return Response.ok(result).build();
     }
@@ -277,7 +278,7 @@ public class ResourceExplorer2Controller {
     @Path("/GetDefaultView")
     public Response getDefaultView(@Context HttpHeaders headers) {
         String viewArn = service.getDefaultView(regionResolver.resolveRegion(headers));
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         if (viewArn != null) {
             result.put("ViewArn", viewArn);
         }
@@ -377,7 +378,7 @@ public class ResourceExplorer2Controller {
                 stringArray(req, "RegionList"),
                 optString(req, "ViewName"),
                 stringArray(req, "AggregatorRegions"));
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.put("TaskId", taskId);
         return Response.ok(result).build();
     }
@@ -390,7 +391,7 @@ public class ResourceExplorer2Controller {
                 ? req.get("DeleteInAllRegions").asBoolean() : null;
         String taskId = service.deleteResourceExplorerSetup(
                 deleteInAllRegions, stringArray(req, "RegionList"));
-        var result = objectMapper.createObjectNode();
+        ObjectNode result = objectMapper.createObjectNode();
         result.put("TaskId", taskId);
         return Response.ok(result).build();
     }
@@ -442,7 +443,7 @@ public class ResourceExplorer2Controller {
     private List<IncludedProperty> parseIncludedProperties(JsonNode req) {
         List<IncludedProperty> includedProperties = new ArrayList<>();
         if (req.has("IncludedProperties") && req.get("IncludedProperties").isArray()) {
-            for (var p : req.get("IncludedProperties")) {
+            for (JsonNode p : req.get("IncludedProperties")) {
                 includedProperties.add(new IncludedProperty(p.has("Name") ? p.get("Name").asText() : ""));
             }
         }

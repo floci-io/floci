@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -13,6 +14,10 @@ public class Part {
     private long size;
     private S3Checksum checksum;
     private Instant lastModified;
+    // Names this part's bytes while its upload is open: a file in the upload's directory, or a key
+    // in memory. A re-upload stores under a new name, so the bytes under a name never change.
+    @JsonIgnore
+    private String storageId;
 
     public Part() {
         this.checksum = new S3Checksum();
@@ -40,4 +45,7 @@ public class Part {
 
     public Instant getLastModified() { return lastModified; }
     public void setLastModified(Instant lastModified) { this.lastModified = lastModified; }
+
+    public String getStorageId() { return storageId; }
+    public void setStorageId(String storageId) { this.storageId = storageId; }
 }

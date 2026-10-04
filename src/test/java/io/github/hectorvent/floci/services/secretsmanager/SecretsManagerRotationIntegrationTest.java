@@ -6,12 +6,19 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.InjectMock;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -27,9 +34,25 @@ public class SecretsManagerRotationIntegrationTest {
     @InjectMock
     LambdaService lambdaService;
 
+    private final List<String> secretsToDelete = new ArrayList<>();
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @AfterEach
+    void deleteCreatedSecrets() {
+        for (String secretId : secretsToDelete) {
+            given()
+                .header("X-Amz-Target", "secretsmanager.DeleteSecret")
+                .contentType(SM_CONTENT_TYPE)
+                .body("{\"SecretId\": \"" + secretId + "\", \"ForceDeleteWithoutRecovery\": true}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
     }
 
     @Test
@@ -55,6 +78,7 @@ public class SecretsManagerRotationIntegrationTest {
         .then()
             .statusCode(200)
             .extract().asString();
+        secretsToDelete.add(secretName);
 
         // extract ARN if needed, but we can just refer by Name
 
@@ -97,5 +121,41 @@ public class SecretsManagerRotationIntegrationTest {
         assertTrue(hasSet, "Should invoke setSecret");
         assertTrue(hasTest, "Should invoke testSecret");
         assertTrue(hasFinish, "Should invoke finishSecret");
+
+        // Let the rotation finish before cleanup deletes the secret, which it would otherwise go on
+        // trying to update.
+        await().atMost(Duration.ofSeconds(5)).until(() -> given()
+                .header("X-Amz-Target", "secretsmanager.DescribeSecret")
+                .contentType(SM_CONTENT_TYPE)
+                .body("{\"SecretId\": \"" + secretName + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().path("LastRotatedDate") != null);
+    }
+
+    @Test
+    void rotationFunctionReferenceLambdaCannotReadIsAnInvalidParameter() {
+        String secretName = "rotation-invalid-reference-secret";
+        given()
+            .header("X-Amz-Target", "secretsmanager.CreateSecret")
+            .contentType(SM_CONTENT_TYPE)
+            .body("{\"Name\": \"" + secretName + "\", \"SecretString\": \"initial-value\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        secretsToDelete.add(secretName);
+
+        given()
+            .header("X-Amz-Target", "secretsmanager.RotateSecret")
+            .contentType(SM_CONTENT_TYPE)
+            .body("{\"SecretId\": \"" + secretName + "\", \"RotationLambdaARN\": \"rotator!\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
     }
 }

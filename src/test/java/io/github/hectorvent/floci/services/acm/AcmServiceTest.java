@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
@@ -291,20 +292,20 @@ class AcmServiceTest {
      * the leaf, and every metadata field equals what the certificate itself says.
      */
     private X509Certificate assertChainsToTheCa(Certificate cert) throws Exception {
-        X509Certificate leaf = generator.parseCertificate(cert.getCertificateBody());
+        X509Certificate leaf = Pem.parseCertificate(cert.getCertificateBody());
         assertEquals(ca.caPem(), cert.getCertificateChain(), "CertificateChain is the CA PEM");
         assertEquals(ca.certificate().getSubjectX500Principal(), leaf.getIssuerX500Principal());
         assertTrue(ca.isIssuedByUs(leaf), "signed by the CA key");
         assertEquals(-1, leaf.getBasicConstraints(), "a leaf, not a CA");
         assertEquals(SERVER_AND_CLIENT_AUTH, leaf.getExtendedKeyUsage());
 
-        X509Certificate anchor = generator.parseCertificate(cert.getCertificateChain());
+        X509Certificate anchor = Pem.parseCertificate(cert.getCertificateChain());
         PKIXParameters params = new PKIXParameters(Set.of(new TrustAnchor(anchor, null)));
         params.setRevocationEnabled(false);
         CertPathValidator.getInstance("PKIX").validate(
                 CertificateFactory.getInstance("X.509").generateCertPath(List.of(leaf)), params);
 
-        assertTrue(CertificateGenerator.isPair(generator.parsePrivateKey(cert.getPrivateKey()), leaf.getPublicKey()),
+        assertTrue(Pem.isPair(Pem.parsePrivateKey(cert.getPrivateKey()), leaf.getPublicKey()),
                 "the stored private key matches the certificate");
         assertEquals(leaf.getSubjectX500Principal().getName(), cert.getSubject());
         assertEquals(ca.certificate().getSubjectX500Principal().getName(), cert.getIssuer());

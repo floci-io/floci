@@ -51,7 +51,7 @@ class DmsTest {
                 assertFalse(group.subnets().isEmpty());
                 assertTrue(group.subnets().stream()
                         .allMatch(subnet -> "Active".equals(subnet.subnetStatus())));
-                String arn = "arn:aws:dms:us-east-1:" + callerAccountId() + ":subgrp:" + GROUP_ID;
+                String arn = TestFixtures.arn("dms", callerAccountId(), "subgrp:" + GROUP_ID);
                 assertEquals(Map.of("env", "test"), tagsOf(dms, arn));
 
                 dms.addTagsToResource(request -> request.resourceArn(arn)

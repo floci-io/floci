@@ -199,6 +199,104 @@ class ApiGatewayExecuteApiHostFilterTest {
         assertEquals("ap-northeast-2", routeContext.httpApiRegion());
     }
 
+    /**
+     * The regionless built-in suffix is a convenience form; the region-bearing one is what a
+     * client derives from a stage's invoke URL. Unclaimed, the request fell through to S3's path
+     * routes and answered NoSuchBucket for the stage segment.
+     */
+    @Test
+    void routesRegionBearingBuiltInSuffixHost() {
+        FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
+        lookup.addApi("ap-northeast-2", API_ID, "HTTP");
+        lookup.addStage("ap-northeast-2", API_ID, "$default");
+        RecordingRequest request = new RecordingRequest(
+                "abc123.execute-api.ap-northeast-2.localhost.floci.io:4566",
+                URI.create("http://abc123.execute-api.ap-northeast-2.localhost.floci.io:4566/accounts"));
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
+
+        new ApiGatewayExecuteApiHostFilter(
+                lookup, new RegionResolver(REGION, "000000000000"), routeContext)
+                .filter(request.context());
+
+        assertEquals("/execute-api/abc123/$default/accounts", request.routedUri().getRawPath());
+        assertEquals("ap-northeast-2", routeContext.httpApiRegion());
+    }
+
+    @Test
+    void routesRestApiOnRegionBearingBuiltInSuffixHost() {
+        FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
+        RecordingRequest request = new RecordingRequest(
+                "abc123.execute-api.us-east-1.localhost.floci.io:4566",
+                URI.create("http://abc123.execute-api.us-east-1.localhost.floci.io:4566/prod/users"));
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
+
+        new ApiGatewayExecuteApiHostFilter(
+                lookup, new RegionResolver(REGION, "000000000000"), routeContext)
+                .filter(request.context());
+
+        assertEquals("/execute-api/abc123/prod/users", request.routedUri().getRawPath());
+        assertNull(routeContext.httpApiRegion());
+    }
+
+    @Test
+    void extractsApiIdFromRegionBearingBuiltInSuffixHosts() {
+        assertEquals("abc123", ApiGatewayExecuteApiHostFilter.extractApiId(
+                "abc123.execute-api.us-east-1.localhost.floci.io:4566", null));
+        assertEquals("abc123", ApiGatewayExecuteApiHostFilter.extractApiId(
+                "abc123.execute-api.us-east-1.localhost.localstack.cloud", null));
+        assertNull(ApiGatewayExecuteApiHostFilter.extractApiId(
+                "abc123.execute-api.us-east-1.example.test", null));
+    }
+
+    /**
+     * A region label is any region a partition recognizes, not a two-letter geo prefix: the EUSC
+     * partition's {@code eusc-de-east-1} was rejected before the suffix was even looked at, on
+     * every tail.
+     */
+    @Test
+    void extractsApiIdFromEuscRegionHosts() {
+        assertEquals("abc123", ApiGatewayExecuteApiHostFilter.extractApiId(
+                "abc123.execute-api.eusc-de-east-1.localhost.floci.io:4566", null));
+        assertEquals("abc123", ApiGatewayExecuteApiHostFilter.extractApiId(
+                "abc123.execute-api.eusc-de-east-1.localhost:4566", null));
+        assertEquals("abc123", ApiGatewayExecuteApiHostFilter.extractApiId(
+                "abc123.execute-api.eusc-de-east-1.amazonaws.eu", null));
+    }
+
+    /**
+     * A region launched after the vendored partition data was generated matches its partition's
+     * region regex without being in the published list; signed requests already accept it.
+     */
+    @Test
+    void extractsApiIdFromRegionNotYetInTheCatalog() {
+        assertEquals("abc123", ApiGatewayExecuteApiHostFilter.extractApiId(
+                "abc123.execute-api.eu-south-9.localhost.floci.io", null));
+    }
+
+    @Test
+    void ignoresRegionShapedLabelThatIsNotAKnownRegion() {
+        assertNull(ApiGatewayExecuteApiHostFilter.extractApiId(
+                "abc123.execute-api.zz-nowhere-9.localhost.floci.io", null));
+    }
+
+    @Test
+    void routesHttpApiOnEuscRegionBuiltInSuffixHost() {
+        FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
+        lookup.addApi("eusc-de-east-1", API_ID, "HTTP");
+        lookup.addStage("eusc-de-east-1", API_ID, "$default");
+        RecordingRequest request = new RecordingRequest(
+                "abc123.execute-api.eusc-de-east-1.localhost.floci.io:4566",
+                URI.create("http://abc123.execute-api.eusc-de-east-1.localhost.floci.io:4566/accounts"));
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
+
+        new ApiGatewayExecuteApiHostFilter(
+                lookup, new RegionResolver(REGION, "000000000000"), routeContext)
+                .filter(request.context());
+
+        assertEquals("/execute-api/abc123/$default/accounts", request.routedUri().getRawPath());
+        assertEquals("eusc-de-east-1", routeContext.httpApiRegion());
+    }
+
     @Test
     void routesRegionBearingConfiguredHost() {
         FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();

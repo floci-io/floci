@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -42,7 +43,7 @@ class BedrockAgentCorePaginationIntegrationTest {
         String token = null;
         int pages = 0;
         do {
-            var req = given().contentType("application/json").queryParam("maxResults", 2);
+            RequestSpecification req = given().contentType("application/json").queryParam("maxResults", 2);
             if (token != null) {
                 req = req.queryParam("nextToken", token);
             }

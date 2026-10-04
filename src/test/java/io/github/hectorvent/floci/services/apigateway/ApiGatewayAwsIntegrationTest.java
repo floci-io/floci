@@ -2,9 +2,11 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.*;
 
 import java.util.Map;
@@ -141,11 +143,11 @@ class ApiGatewayAwsIntegrationTest {
         // PUT integration — AWS type targeting SFN StartExecution
         // Build the integration body programmatically to avoid escaping hell.
         // The VTL template wraps the input with DynamoDB typed attributes.
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", "arn:aws:apigateway:us-east-1:states:action/StartExecution");
-        var reqTemplates = mapper.createObjectNode();
+        ObjectNode reqTemplates = mapper.createObjectNode();
         // VTL template that builds the SFN StartExecution request.
         // Passes the incoming body as the SFN execution input.
         String vtl = "{\"stateMachineArn\": \"" + stateMachineArn + "\", "
@@ -709,7 +711,7 @@ class ApiGatewayAwsIntegrationTest {
 
         redeploy();
 
-        var response = given()
+        Response response = given()
                 .contentType(ContentType.JSON)
                 .body("{}")
                 .when().post("/execute-api/" + apiId + "/test/header-static")
@@ -747,7 +749,7 @@ class ApiGatewayAwsIntegrationTest {
 
         redeploy();
 
-        var response = given()
+        Response response = given()
                 .contentType(ContentType.JSON)
                 .body("""
                         {
@@ -783,11 +785,11 @@ class ApiGatewayAwsIntegrationTest {
                 .then().statusCode(201);
 
         // Two templates: application/json writes "json-item", application/xml writes "xml-item"
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", "arn:aws:apigateway:us-east-1:dynamodb:action/PutItem");
-        var rt = mapper.createObjectNode();
+        ObjectNode rt = mapper.createObjectNode();
         rt.put("application/json",
                 "{\"TableName\": \"" + TABLE_NAME + "\", \"Item\": {\"id\": {\"S\": \"ct-json\"}, \"source\": {\"S\": \"json-template\"}}}");
         rt.put("application/xml",
@@ -848,7 +850,7 @@ class ApiGatewayAwsIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + resId + "/methods/POST")
                 .then().statusCode(201);
 
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", "arn:aws:apigateway:us-east-1:dynamodb:action/ListTables");
@@ -892,12 +894,12 @@ class ApiGatewayAwsIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + resId + "/methods/POST")
                 .then().statusCode(201);
 
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", "arn:aws:apigateway:us-east-1:dynamodb:action/ListTables");
         integrationNode.put("passthroughBehavior", "WHEN_NO_TEMPLATES");
-        var rt = mapper.createObjectNode();
+        ObjectNode rt = mapper.createObjectNode();
         rt.put("text/plain", "{}");
         integrationNode.set("requestTemplates", rt);
 
@@ -941,12 +943,12 @@ class ApiGatewayAwsIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + resId + "/methods/POST")
                 .then().statusCode(201);
 
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", "arn:aws:apigateway:us-east-1:dynamodb:action/ListTables");
         integrationNode.put("passthroughBehavior", "WHEN_NO_MATCH");
-        var rt = mapper.createObjectNode();
+        ObjectNode rt = mapper.createObjectNode();
         rt.put("text/plain", "{\"bad\":true}");
         integrationNode.set("requestTemplates", rt);
 
@@ -994,16 +996,18 @@ class ApiGatewayAwsIntegrationTest {
 
         // Map method.request.querystring.itemId → integration.request.querystring.itemId
         // and use it in the template
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", "arn:aws:apigateway:us-east-1:dynamodb:action/PutItem");
-        var reqParams = mapper.createObjectNode();
+        ObjectNode reqParams = mapper.createObjectNode();
         reqParams.put("integration.request.querystring.itemId", "method.request.querystring.itemId");
+        reqParams.put("integration.request.header.X-Mapped", "method.request.header.X-Source");
         integrationNode.set("requestParameters", reqParams);
-        var rt = mapper.createObjectNode();
+        ObjectNode rt = mapper.createObjectNode();
         rt.put("application/json",
-                "{\"TableName\": \"" + TABLE_NAME + "\", \"Item\": {\"id\": {\"S\": \"$input.params('itemId')\"}, \"source\": {\"S\": \"req-param-mapped\"}}}");
+                "{\"TableName\": \"" + TABLE_NAME + "\", \"Item\": {\"id\": {\"S\": \"$input.params('itemId')\"}, "
+                        + "\"source\": {\"S\": \"req-param-mapped\"}, \"header\": {\"S\": \"$input.params('X-Mapped')\"}}}");
         integrationNode.set("requestTemplates", rt);
 
         given()
@@ -1025,7 +1029,8 @@ class ApiGatewayAwsIntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("{}")
-                .queryParam("itemId", "param-123")
+                .queryParam("itemId", "param-123", "second-id")
+                .header("X-Source", "first-header", "second-header")
                 .when().post("/execute-api/" + apiId + "/test/req-param")
                 .then().statusCode(200);
 
@@ -1042,6 +1047,7 @@ class ApiGatewayAwsIntegrationTest {
         assertTrue(result.has("Item"), "Item should exist with param-mapped key");
         assertEquals("param-123", result.path("Item").path("id").path("S").asText());
         assertEquals("req-param-mapped", result.path("Item").path("source").path("S").asText());
+        assertEquals("first-header", result.path("Item").path("header").path("S").asText());
     }
 
     // ──────────────── Test: Response body JSONPath (deep) ────────────────
@@ -1072,7 +1078,7 @@ class ApiGatewayAwsIntegrationTest {
 
         redeploy();
 
-        var response = given()
+        Response response = given()
                 .contentType(ContentType.JSON)
                 .body("""
                         {
@@ -1109,12 +1115,12 @@ class ApiGatewayAwsIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST")
                 .then().statusCode(201);
 
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", uri);
         if (requestTemplate != null) {
-            var rt = mapper.createObjectNode();
+            ObjectNode rt = mapper.createObjectNode();
             rt.put("application/json", requestTemplate);
             integrationNode.set("requestTemplates", rt);
         }
@@ -1125,17 +1131,17 @@ class ApiGatewayAwsIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST/integration")
                 .then().statusCode(201);
 
-        for (var entry : responses.entrySet()) {
-            var irNode = mapper.createObjectNode();
+        for (Map.Entry<String, IntegrationResponseConfig> entry : responses.entrySet()) {
+            ObjectNode irNode = mapper.createObjectNode();
             irNode.put("selectionPattern", entry.getValue().selectionPattern());
-            var respTemplates = mapper.createObjectNode();
+            ObjectNode respTemplates = mapper.createObjectNode();
             respTemplates.put("application/json", entry.getValue().responseTemplate());
             irNode.set("responseTemplates", respTemplates);
 
             // Add response parameters if provided
             Map<String, String> params = responseParams != null ? responseParams.get(entry.getKey()) : null;
             if (params != null && !params.isEmpty()) {
-                var paramsNode = mapper.createObjectNode();
+                ObjectNode paramsNode = mapper.createObjectNode();
                 params.forEach(paramsNode::put);
                 irNode.set("responseParameters", paramsNode);
             }
@@ -1167,12 +1173,12 @@ class ApiGatewayAwsIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST")
                 .then().statusCode(201);
 
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", uri);
         if (requestTemplate != null) {
-            var rt = mapper.createObjectNode();
+            ObjectNode rt = mapper.createObjectNode();
             rt.put("application/json", requestTemplate);
             integrationNode.set("requestTemplates", rt);
         }
@@ -1183,10 +1189,10 @@ class ApiGatewayAwsIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST/integration")
                 .then().statusCode(201);
 
-        for (var entry : responses.entrySet()) {
-            var irNode = mapper.createObjectNode();
+        for (Map.Entry<String, IntegrationResponseConfig> entry : responses.entrySet()) {
+            ObjectNode irNode = mapper.createObjectNode();
             irNode.put("selectionPattern", entry.getValue().selectionPattern());
-            var respTemplates = mapper.createObjectNode();
+            ObjectNode respTemplates = mapper.createObjectNode();
             respTemplates.put("application/json", entry.getValue().responseTemplate());
             irNode.set("responseTemplates", respTemplates);
 

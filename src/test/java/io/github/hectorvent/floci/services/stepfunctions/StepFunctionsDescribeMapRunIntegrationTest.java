@@ -48,11 +48,11 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Order(0)
     void setup_runsADistributedMapOverThreeItems() throws Exception {
         createBucket("describe-map-run");
-        var smArn = createStateMachine("describe-map-run-three", distributedMap(
+        String smArn = createStateMachine("describe-map-run-three", distributedMap(
                 "[{\"n\": 1}, {\"n\": 2}, {\"n\": 3}]", "describe-map-run", null));
 
         threeItemExecutionArn = startExecution(smArn, "{}");
-        var describe = waitForTerminalState(threeItemExecutionArn);
+        Response describe = waitForTerminalState(threeItemExecutionArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),
                 "cause: " + describe.jsonPath().getString("cause"));
         threeItemMapRunArn = mapper.readTree(describe.jsonPath().getString("output"))
@@ -66,7 +66,7 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Test
     @Order(1)
     void describeMapRunReportsTheRunItsParentExecutionAndItsWindow() {
-        var response = describeMapRun(threeItemMapRunArn);
+        Response response = describeMapRun(threeItemMapRunArn);
         response.then().statusCode(200);
 
         assertEquals(threeItemMapRunArn, response.jsonPath().getString("mapRunArn"));
@@ -86,14 +86,14 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Test
     @Order(2)
     void describeMapRunReportsAnUnboundedMapAsIntegerMaxValue() {
-        var response = describeMapRun(threeItemMapRunArn);
+        Response response = describeMapRun(threeItemMapRunArn);
         assertEquals(UNBOUNDED_CONCURRENCY, response.jsonPath().getInt("maxConcurrency"));
     }
 
     @Test
     @Order(3)
     void describeMapRunReportsZeroToleratedFailuresAndNoRedrive() {
-        var response = describeMapRun(threeItemMapRunArn);
+        Response response = describeMapRun(threeItemMapRunArn);
         assertEquals(0.0, response.jsonPath().getDouble("toleratedFailurePercentage"));
         assertEquals(0, response.jsonPath().getInt("toleratedFailureCount"));
         assertEquals(0, response.jsonPath().getInt("redriveCount"));
@@ -104,14 +104,14 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Test
     @Order(4)
     void describeMapRunCountsEveryItemAsSucceededAndWritten() {
-        var response = describeMapRun(threeItemMapRunArn);
+        Response response = describeMapRun(threeItemMapRunArn);
         assertCounters(response, "itemCounts", 3);
     }
 
     @Test
     @Order(5)
     void describeMapRunReportsOneChildExecutionPerItem() {
-        var response = describeMapRun(threeItemMapRunArn);
+        Response response = describeMapRun(threeItemMapRunArn);
         assertCounters(response, "executionCounts", 3);
     }
 
@@ -119,17 +119,17 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Order(6)
     void describeMapRunCountsTheItemsOfThatRunRatherThanAFixedNumber() throws Exception {
         createBucket("describe-map-run-five");
-        var smArn = createStateMachine("describe-map-run-five", distributedMap(
+        String smArn = createStateMachine("describe-map-run-five", distributedMap(
                 "[{\"n\": 1}, {\"n\": 2}, {\"n\": 3}, {\"n\": 4}, {\"n\": 5}]",
                 "describe-map-run-five", 2));
 
-        var describe = waitForTerminalState(startExecution(smArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),
                 "cause: " + describe.jsonPath().getString("cause"));
-        var mapRunArn = mapper.readTree(describe.jsonPath().getString("output"))
+        String mapRunArn = mapper.readTree(describe.jsonPath().getString("output"))
                 .path("MapRunArn").asText();
 
-        var response = describeMapRun(mapRunArn);
+        Response response = describeMapRun(mapRunArn);
         response.then().statusCode(200);
         assertCounters(response, "itemCounts", 5);
         assertCounters(response, "executionCounts", 5);
@@ -140,9 +140,9 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Test
     @Order(7)
     void describeMapRunOnAnUnknownArnReturnsResourceNotFound() {
-        var unknown = "arn:aws:states:us-east-1:000000000000:mapRun:describe-map-run-three/"
+        String unknown = "arn:aws:states:us-east-1:000000000000:mapRun:describe-map-run-three/"
                 + "00000000-0000-0000-0000-000000000000:11111111-1111-1111-1111-111111111111";
-        var response = describeMapRun(unknown);
+        Response response = describeMapRun(unknown);
 
         response.then().statusCode(400);
         assertEquals("ResourceNotFound", response.jsonPath().getString("__type"));
@@ -155,7 +155,7 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Test
     @Order(8)
     void describeMapRunTaskReturnsThePascalCaseResponseWithIsoDates() throws Exception {
-        var smArn = createStateMachine("describe-map-run-task", """
+        String smArn = createStateMachine("describe-map-run-task", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Describe",
@@ -170,10 +170,10 @@ class StepFunctionsDescribeMapRunIntegrationTest {
                 }
                 """.replace("MAP_RUN_ARN", threeItemMapRunArn));
 
-        var describe = waitForTerminalState(startExecution(smArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),
                 "cause: " + describe.jsonPath().getString("cause"));
-        var result = mapper.readTree(describe.jsonPath().getString("output"));
+        JsonNode result = mapper.readTree(describe.jsonPath().getString("output"));
 
         assertEquals(threeItemMapRunArn, result.path("MapRunArn").asText());
         assertEquals(threeItemExecutionArn, result.path("ExecutionArn").asText());
@@ -197,9 +197,9 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Test
     @Order(9)
     void describeMapRunTaskOnAnUnknownArnFailsWithTheSdkExceptionName() {
-        var unknown = "arn:aws:states:us-east-1:000000000000:mapRun:describe-map-run-three/"
+        String unknown = "arn:aws:states:us-east-1:000000000000:mapRun:describe-map-run-three/"
                 + "00000000-0000-0000-0000-000000000000:22222222-2222-2222-2222-222222222222";
-        var smArn = createStateMachine("describe-map-run-task-unknown", """
+        String smArn = createStateMachine("describe-map-run-task-unknown", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Describe",
@@ -214,7 +214,7 @@ class StepFunctionsDescribeMapRunIntegrationTest {
                 }
                 """.replace("MAP_RUN_ARN", unknown));
 
-        var describe = waitForTerminalState(startExecution(smArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("Sfn.ResourceNotFoundException", describe.jsonPath().getString("error"));
         assertEquals("Resource not found: '" + unknown + "'",
@@ -243,15 +243,15 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Test
     @Order(10)
     void describeMapRunResolvesTheArnOfAMapWithoutResultWriter() throws Exception {
-        var smArn = createStateMachine("describe-map-run-no-writer", distributedMapWithoutWriter(
+        String smArn = createStateMachine("describe-map-run-no-writer", distributedMapWithoutWriter(
                 "[1, 2]", "Keep", "{\"Keep\": {\"Type\": \"Pass\", \"End\": true}}"));
-        var execArn = startExecution(smArn, "{}");
-        var describe = waitForTerminalState(execArn);
+        String execArn = startExecution(smArn, "{}");
+        Response describe = waitForTerminalState(execArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),
                 "cause: " + describe.jsonPath().getString("cause"));
 
-        var mapRunArn = mapRunArnFromHistory(execArn);
-        var response = describeMapRun(mapRunArn);
+        String mapRunArn = mapRunArnFromHistory(execArn);
+        Response response = describeMapRun(mapRunArn);
         response.then().statusCode(200);
         assertEquals(mapRunArn, response.jsonPath().getString("mapRunArn"));
         assertEquals(execArn, response.jsonPath().getString("executionArn"));
@@ -263,12 +263,12 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     @Test
     @Order(11)
     void describeMapRunReportsARunWhoseItemFailed() throws Exception {
-        var smArn = createStateMachine("describe-map-run-failed", distributedMapWithoutWriter(
+        String smArn = createStateMachine("describe-map-run-failed", distributedMapWithoutWriter(
                 "[1]", "Boom", "{\"Boom\": {\"Type\": \"Fail\", \"Error\": \"Boom\", \"Cause\": \"item failed\"}}"));
-        var execArn = startExecution(smArn, "{}");
+        String execArn = startExecution(smArn, "{}");
         assertEquals("FAILED", waitForTerminalState(execArn).jsonPath().getString("status"));
 
-        var response = describeMapRun(mapRunArnFromHistory(execArn));
+        Response response = describeMapRun(mapRunArnFromHistory(execArn));
         response.then().statusCode(200);
         assertEquals("FAILED", response.jsonPath().getString("status"));
         assertEquals(0, response.jsonPath().getInt("itemCounts.succeeded"));
@@ -423,7 +423,7 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     }
 
     private static String mapRunArnFromHistory(String execArn) throws Exception {
-        var history = given()
+        Response history = given()
                 .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -454,7 +454,7 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     }
 
     private static String createStateMachine(String name, String definition) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -466,7 +466,7 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     }
 
     private static String startExecution(String smArn, String input) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -488,8 +488,8 @@ class StepFunctionsDescribeMapRunIntegrationTest {
     }
 
     private static Response waitForTerminalState(String execArn) {
-        for (var i = 0; i < 150; i++) {
-            var resp = describeExecution(execArn);
+        for (int i = 0; i < 150; i++) {
+            Response resp = describeExecution(execArn);
             if (!"RUNNING".equals(resp.jsonPath().getString("status"))) {
                 return resp;
             }

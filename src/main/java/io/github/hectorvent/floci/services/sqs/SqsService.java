@@ -702,6 +702,10 @@ public class SqsService implements Resettable, ResourceProvider {
         return queueUrl;
     }
 
+    public boolean queueExists(String queueUrl, String region) {
+        return getQueueByUrl(regionKey(region, queueUrl), queueUrl).isPresent();
+    }
+
     public Map<String, String> getQueueAttributes(String queueUrl, List<String> attributeNames, String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = queueStore.get(storageKey)

@@ -130,13 +130,11 @@ class SesV2JsonTest {
     }
 
     @Test
-    void coerceBoolean_matchesAwsJacksonCoercion() {
+    void coerceBoolean_matchesAwsCoercion() {
         JsonNode node = json(
-                "{\"t\":true,\"f\":false,\"s\":\"no\",\"z\":null,\"n\":0,\"a\":[],\"o\":{}}");
+                "{\"t\":true,\"f\":false,\"z\":null,\"n\":0,\"a\":[],\"o\":{}}");
         assertTrue(SesV2Json.coerceBoolean(node.path("t")));
         assertFalse(SesV2Json.coerceBoolean(node.path("f")));
-        // A JSON string coerces to true regardless of its text (probe-confirmed).
-        assertTrue(SesV2Json.coerceBoolean(node.path("s")));
         assertNull(assertAws("SerializationException", 400,
                 () -> SesV2Json.coerceBoolean(node.path("z"))).getMessage());
         assertEquals("NUMBER_VALUE can not be converted to a Boolean",
@@ -148,6 +146,54 @@ class SesV2JsonTest {
         assertEquals("Start of structure or map found where not expected.",
                 assertAws("SerializationException", 400,
                         () -> SesV2Json.coerceBoolean(node.path("o"))).getMessage());
+    }
+
+    @Test
+    void coerceBoolean_coercesOnlyStringsThatNameABoolean() {
+        // Probe-confirmed: the match is case-insensitive and exact, so padding is not trimmed.
+        for (String text : List.of("true", "TRUE", "Yes", "y", "T", "1")) {
+            assertTrue(SesV2Json.coerceBoolean(json("\"" + text + "\"")), text);
+        }
+        for (String text : List.of("false", "FALSE", "No", "n", "F", "0")) {
+            assertFalse(SesV2Json.coerceBoolean(json("\"" + text + "\"")), text);
+        }
+        for (String text : List.of("abc", "", "on", "off", " true", "2")) {
+            assertEquals("STRING_VALUE can not be converted to an Boolean",
+                    assertAws("SerializationException", 400,
+                            () -> SesV2Json.coerceBoolean(json("\"" + text + "\""))).getMessage(), text);
+        }
+    }
+
+    @Test
+    void structureMemberOrAbsent_rejectsANonObjectTheWayAwsDoes() {
+        JsonNode node = json("{\"o\":{},\"n\":null,\"a\":[],\"s\":\"x\",\"i\":1}");
+        assertTrue(SesV2Json.structureMemberOrAbsent(node, "o").isObject());
+        assertTrue(SesV2Json.structureMemberOrAbsent(node, "n").isNull());
+        assertTrue(SesV2Json.structureMemberOrAbsent(node, "missing").isMissingNode());
+        assertEquals("Start of list found where not expected", assertAws("SerializationException", 400,
+                () -> SesV2Json.structureMemberOrAbsent(node, "a")).getMessage());
+        assertEquals("Expected null", assertAws("SerializationException", 400,
+                () -> SesV2Json.structureMemberOrAbsent(node, "s")).getMessage());
+        assertEquals("Expected null", assertAws("SerializationException", 400,
+                () -> SesV2Json.structureMemberOrAbsent(node, "i")).getMessage());
+    }
+
+    @Test
+    void typedStringMemberOrAbsent_namesTheWrongType() {
+        JsonNode node = json("{\"s\":\"x\",\"n\":null,\"i\":1,\"t\":true,\"f\":false,\"o\":{},\"a\":[]}");
+        assertEquals("x", SesV2Json.typedStringMemberOrAbsent(node, "s"));
+        assertNull(SesV2Json.typedStringMemberOrAbsent(node, "n"));
+        assertNull(SesV2Json.typedStringMemberOrAbsent(node, "missing"));
+        assertEquals("NUMBER_VALUE can not be converted to a String", assertAws("SerializationException", 400,
+                () -> SesV2Json.typedStringMemberOrAbsent(node, "i")).getMessage());
+        assertEquals("TRUE_VALUE can not be converted to a String", assertAws("SerializationException", 400,
+                () -> SesV2Json.typedStringMemberOrAbsent(node, "t")).getMessage());
+        assertEquals("FALSE_VALUE can not be converted to a String", assertAws("SerializationException", 400,
+                () -> SesV2Json.typedStringMemberOrAbsent(node, "f")).getMessage());
+        assertEquals("Start of structure or map found where not expected.", assertAws("SerializationException",
+                400, () -> SesV2Json.typedStringMemberOrAbsent(node, "o")).getMessage());
+        assertEquals("Start of list found where not expected", assertAws("SerializationException", 400,
+                () -> SesV2Json.typedStringMemberOrAbsent(node, "a")).getMessage());
     }
 
     @Test
@@ -225,12 +271,13 @@ class SesV2JsonTest {
     }
 
     @Test
-    void parseSendingEnabled_missingIsFalse_otherwiseCoerces() {
-        assertFalse(SesV2Json.parseSendingEnabled(json("{}").path("SendingEnabled")));
-        assertTrue(SesV2Json.parseSendingEnabled(json("true")));
-        assertTrue(SesV2Json.parseSendingEnabled(json("\"yes\"")));
-        assertAws("SerializationException", 400, () -> SesV2Json.parseSendingEnabled(json("null")));
-        assertAws("SerializationException", 400, () -> SesV2Json.parseSendingEnabled(json("0")));
+    void coerceBooleanOrFalse_missingIsFalse_otherwiseCoerces() {
+        assertFalse(SesV2Json.coerceBooleanOrFalse(json("{}").path("SendingEnabled")));
+        assertTrue(SesV2Json.coerceBooleanOrFalse(json("true")));
+        assertTrue(SesV2Json.coerceBooleanOrFalse(json("\"yes\"")));
+        assertFalse(SesV2Json.coerceBooleanOrFalse(json("\"no\"")));
+        assertAws("SerializationException", 400, () -> SesV2Json.coerceBooleanOrFalse(json("null")));
+        assertAws("SerializationException", 400, () -> SesV2Json.coerceBooleanOrFalse(json("0")));
     }
 
     @Test

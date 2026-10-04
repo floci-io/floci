@@ -358,11 +358,11 @@ class DynamoDbAccessPathValidatorTest {
 
     @Test
     void rejectsANestedPathOnAKeyAttribute() {
-        var names = mapper.createObjectNode();
+        ObjectNode names = mapper.createObjectNode();
         names.put("#sk", "sk");
-        var values = expressionValues(":pk", ":v");
+        ObjectNode values = expressionValues(":pk", ":v");
 
-        var error = assertThrows(AwsException.class,
+        AwsException error = assertThrows(AwsException.class,
                 () -> DynamoDbAccessPathValidator.validateQuery(
                         table, tablePath, null, "pk = :pk AND #sk.foo = :v",
                         null, null, names, values));
@@ -373,7 +373,7 @@ class DynamoDbAccessPathValidatorTest {
 
     @Test
     void reportsTheMissingKeySchemaElementForANonKeyAttribute() {
-        var error = assertThrows(AwsException.class,
+        AwsException error = assertThrows(AwsException.class,
                 () -> validateExpression(tablePath, "attr1 = :v"));
 
         assertEquals("Query condition missed key schema element: pk", error.getMessage());
@@ -381,7 +381,7 @@ class DynamoDbAccessPathValidatorTest {
 
     @Test
     void stillRejectsANonKeyAttributeAlongsideTheFullKey() {
-        var error = assertThrows(AwsException.class,
+        AwsException error = assertThrows(AwsException.class,
                 () -> validateExpression(tablePath, "pk = :pk AND attr1 = :v"));
 
         assertEquals("Query key condition not supported", error.getMessage());

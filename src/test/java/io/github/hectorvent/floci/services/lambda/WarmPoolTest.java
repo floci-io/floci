@@ -11,6 +11,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,14 +41,60 @@ class WarmPoolTest {
     @Mock LambdaRuntimeLauncher containerLauncher;
     @Mock EmulatorConfig config;
 
+    private final MutableClock clock = new MutableClock(Instant.parse("2026-09-29T12:00:00Z"));
+
     private WarmPool buildPool() {
+        return buildPool(Optional.empty(), 0);
+    }
+
+    private WarmPool buildPool(Optional<Integer> maxPerFunction, int maxTotal) {
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
         when(lambda.ephemeral()).thenReturn(false);
         when(lambda.containerIdleTimeoutSeconds()).thenReturn(0);
-        return new WarmPool(containerLauncher, config);
+        when(lambda.warmPoolMaxPerFunction()).thenReturn(maxPerFunction);
+        when(lambda.warmPoolMaxTotal()).thenReturn(maxTotal);
+        return new WarmPool(containerLauncher, config, clock);
+    }
+
+    private static LambdaFunction function(String name) {
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn(name);
+        return fn;
+    }
+
+    /** LRU order is by the release timestamp, so consecutive releases must land on distinct ticks. */
+    private void nextMillisecond() {
+        clock.advance(Duration.ofMillis(1));
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant now;
+
+        private MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void advance(Duration duration) {
+            now = now.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
     }
 
     @Test
@@ -450,5 +502,199 @@ class WarmPoolTest {
             executor.shutdownNow();
             pool.shutdown();
         }
+    }
+
+    /**
+     * A drain detaches the deque from its pool and stops the contents itself. An eviction that
+     * snapshotted the same deque before the drain must not remove from the orphaned object and
+     * stop the container a second time. The LRU sort reads {@code getLastUsedMs()} between the
+     * snapshot and the removal, which is the only hook into that window without a sleep.
+     */
+    @Test
+    void totalCap_doesNotStopContainerAlreadyClaimedByDrain() {
+        WarmPool pool = buildPool(Optional.empty(), 2);
+        pool.init();
+
+        LambdaFunction fnA = function("fn-a");
+        LambdaFunction fnB = function("fn-b");
+        LambdaFunction fnC = function("fn-c");
+        CountDownLatch drainOnce = new CountDownLatch(1);
+        ContainerHandle a1 = new ContainerHandle("cid-a1", "fn-a", null, ContainerState.WARM) {
+            @Override
+            public long getLastUsedMs() {
+                if (drainOnce.getCount() > 0) {
+                    drainOnce.countDown();
+                    pool.drainFunction("fn-a");
+                }
+                return super.getLastUsedMs();
+            }
+        };
+        ContainerHandle b1 = new ContainerHandle("cid-b1", "fn-b", null, ContainerState.WARM);
+        ContainerHandle c1 = new ContainerHandle("cid-c1", "fn-c", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(a1, b1, c1);
+
+        ContainerHandle leasedA1 = pool.acquire(fnA);
+        ContainerHandle leasedB1 = pool.acquire(fnB);
+        ContainerHandle leasedC1 = pool.acquire(fnC);
+        pool.release(leasedA1);
+        nextMillisecond();
+        pool.release(leasedB1);
+        nextMillisecond();
+        // Two idle entries are snapshotted, so the LRU sort compares them and the hook drains
+        // fn-a before the removal step. a1 is the LRU; it must be stopped by the drain only.
+        pool.release(leasedC1);
+
+        assertEquals(0, drainOnce.getCount());
+        verify(containerLauncher, times(1)).stop(a1);
+        verify(containerLauncher, never()).stop(b1);
+        verify(containerLauncher, never()).stop(c1);
+
+        pool.shutdown();
+    }
+
+    @Test
+    void totalCap_evictsLeastRecentlyUsedAcrossFunctions() {
+        WarmPool pool = buildPool(Optional.empty(), 2);
+        pool.init();
+
+        LambdaFunction fnA = function("fn-a");
+        LambdaFunction fnB = function("fn-b");
+        ContainerHandle a1 = new ContainerHandle("cid-a1", "fn-a", null, ContainerState.WARM);
+        ContainerHandle b1 = new ContainerHandle("cid-b1", "fn-b", null, ContainerState.WARM);
+        ContainerHandle a2 = new ContainerHandle("cid-a2", "fn-a", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(a1, b1, a2);
+
+        // Lease all three at once so none is reused, then release oldest-first.
+        ContainerHandle leasedA1 = pool.acquire(fnA);
+        ContainerHandle leasedB1 = pool.acquire(fnB);
+        ContainerHandle leasedA2 = pool.acquire(fnA);
+        pool.release(leasedA1);
+        nextMillisecond();
+        pool.release(leasedB1);
+        nextMillisecond();
+        pool.release(leasedA2);
+
+        // Third idle container exceeds the cap of 2: a1 is the global LRU and goes, even though
+        // it belongs to the function that just released. b1 (older than a2) survives.
+        verify(containerLauncher).stop(a1);
+        verify(containerLauncher, never()).stop(b1);
+        verify(containerLauncher, never()).stop(a2);
+
+        when(containerLauncher.isAlive(any())).thenReturn(true);
+        assertSame(a2, pool.acquire(fnA));
+        assertSame(b1, pool.acquire(fnB));
+        verify(containerLauncher, times(3)).launch(any());
+
+        pool.shutdown();
+    }
+
+    @Test
+    void totalCap_evictsOwnOldestContainerWhenSameFunction() {
+        WarmPool pool = buildPool(Optional.empty(), 1);
+        pool.init();
+
+        LambdaFunction fn = function("fn-single");
+        ContainerHandle h1 = new ContainerHandle("cid-1", "fn-single", null, ContainerState.WARM);
+        ContainerHandle h2 = new ContainerHandle("cid-2", "fn-single", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(h1, h2);
+
+        ContainerHandle leased1 = pool.acquire(fn);
+        ContainerHandle leased2 = pool.acquire(fn);
+        pool.release(leased1);
+        nextMillisecond();
+        pool.release(leased2);
+
+        verify(containerLauncher).stop(h1);
+        verify(containerLauncher, never()).stop(h2);
+
+        when(containerLauncher.isAlive(h2)).thenReturn(true);
+        assertSame(h2, pool.acquire(fn));
+
+        pool.shutdown();
+    }
+
+    @Test
+    void perFunctionCap_rejectsExcessWithoutEvictingOtherFunctions() {
+        WarmPool pool = buildPool(Optional.of(1), 10);
+        pool.init();
+
+        LambdaFunction fnA = function("fn-a");
+        LambdaFunction fnB = function("fn-b");
+        ContainerHandle b1 = new ContainerHandle("cid-b1", "fn-b", null, ContainerState.WARM);
+        ContainerHandle a1 = new ContainerHandle("cid-a1", "fn-a", null, ContainerState.WARM);
+        ContainerHandle a2 = new ContainerHandle("cid-a2", "fn-a", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(b1, a1, a2);
+
+        ContainerHandle leasedB1 = pool.acquire(fnB);
+        ContainerHandle leasedA1 = pool.acquire(fnA);
+        ContainerHandle leasedA2 = pool.acquire(fnA);
+        pool.release(leasedB1);
+        nextMillisecond();
+        pool.release(leasedA1);
+        nextMillisecond();
+        pool.release(leasedA2);
+
+        // fn-a already holds its one idle container, so a2 is the excess and is stopped. The
+        // global LRU (b1) is untouched: the total cap only evicts to admit a container that the
+        // per-function cap has accepted.
+        verify(containerLauncher).stop(a2);
+        verify(containerLauncher, never()).stop(a1);
+        verify(containerLauncher, never()).stop(b1);
+
+        pool.shutdown();
+    }
+
+    @Test
+    void totalCapZero_keepsEveryIdleContainer() {
+        WarmPool pool = buildPool(Optional.empty(), 0);
+        pool.init();
+
+        ContainerHandle a1 = new ContainerHandle("cid-a1", "fn-a", null, ContainerState.WARM);
+        ContainerHandle b1 = new ContainerHandle("cid-b1", "fn-b", null, ContainerState.WARM);
+        ContainerHandle c1 = new ContainerHandle("cid-c1", "fn-c", null, ContainerState.WARM);
+        when(containerLauncher.launch(any())).thenReturn(a1, b1, c1);
+
+        pool.release(pool.acquire(function("fn-a")));
+        pool.release(pool.acquire(function("fn-b")));
+        pool.release(pool.acquire(function("fn-c")));
+
+        verify(containerLauncher, never()).stop(any());
+
+        pool.shutdown();
+    }
+
+    @Test
+    void resolveMaxPerFunction_fallsBackToDerivedDefaultBelowOne() {
+        int derived = Math.max(4, Runtime.getRuntime().availableProcessors());
+
+        assertEquals(7, WarmPool.resolveMaxPerFunction(buildConfig(Optional.of(7))));
+        assertEquals(derived, WarmPool.resolveMaxPerFunction(buildConfig(Optional.of(0))));
+        assertEquals(derived, WarmPool.resolveMaxPerFunction(buildConfig(Optional.empty())));
+    }
+
+    /**
+     * {@code 0} is the documented opt-out, so a negative value must not quietly become it:
+     * the fallback is still unbounded, but it is logged rather than mistaken for a cap.
+     */
+    @Test
+    void resolveMaxTotal_treatsNegativeAsUnboundedWithWarning() {
+        assertEquals(24, WarmPool.resolveMaxTotal(buildConfig(Optional.empty(), 24)));
+        assertEquals(0, WarmPool.resolveMaxTotal(buildConfig(Optional.empty(), 0)));
+        assertEquals(0, WarmPool.resolveMaxTotal(buildConfig(Optional.empty(), -1)));
+    }
+
+    private static EmulatorConfig buildConfig(Optional<Integer> maxPerFunction) {
+        return buildConfig(maxPerFunction, 0);
+    }
+
+    private static EmulatorConfig buildConfig(Optional<Integer> maxPerFunction, int maxTotal) {
+        EmulatorConfig emulatorConfig = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
+        when(emulatorConfig.services()).thenReturn(services);
+        when(services.lambda()).thenReturn(lambda);
+        lenient().when(lambda.warmPoolMaxPerFunction()).thenReturn(maxPerFunction);
+        lenient().when(lambda.warmPoolMaxTotal()).thenReturn(maxTotal);
+        return emulatorConfig;
     }
 }

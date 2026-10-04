@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.memorydb;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -26,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -526,7 +528,7 @@ public class MemoryDbService {
             throw new AwsException("InvalidParameterValueException", "ResourceArn is required.", 400);
         }
         try {
-            var arn = io.github.hectorvent.floci.core.common.AwsArnUtils.parse(resourceArn);
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
             if (!"memorydb".equals(arn.service()) || !currentRegion().equals(arn.region())
                     || !regionResolver.getAccountId().equals(arn.accountId())) {
                 throw new IllegalArgumentException("ARN owner mismatch");
@@ -647,11 +649,11 @@ public class MemoryDbService {
     }
 
     private <V> java.util.Optional<V> resourceGet(StorageBackend<String, V> store, String name, String region) {
-        var result = store.get(key(region, name));
+        Optional<V> result = store.get(key(region, name));
         if (result.isPresent()) {
             return result;
         }
-        var legacy = legacyGet(store, name, region);
+        Optional<V> legacy = legacyGet(store, name, region);
         if (legacy.isPresent()) {
             setOwner(legacy.get(), region);
             store.put(key(region, name), legacy.get());

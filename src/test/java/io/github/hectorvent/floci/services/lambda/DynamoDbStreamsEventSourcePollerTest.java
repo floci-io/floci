@@ -895,6 +895,9 @@ class DynamoDbStreamsEventSourcePollerTest {
         EmulatorConfig.S3ServiceConfig s3Config = mock(EmulatorConfig.S3ServiceConfig.class);
         when(s3Config.globalBucketNamespace()).thenReturn(globalBucketNamespace);
         when(config.services().s3()).thenReturn(s3Config);
+        EmulatorConfig.IamServiceConfig iamConfig = mock(EmulatorConfig.IamServiceConfig.class);
+        when(iamConfig.enforcementEnabled()).thenReturn(false);
+        when(config.services().iam()).thenReturn(iamConfig);
 
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenAnswer(

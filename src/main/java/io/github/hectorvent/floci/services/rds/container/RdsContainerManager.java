@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -433,11 +434,15 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         }
     }
 
-    /** Returns whether a backing RDS container still exists and is running. */
-    public boolean isContainerRunning(String containerId) {
-        return containerId != null
-                && !containerId.isBlank()
-                && lifecycleManager.isContainerRunning(containerId);
+    /**
+     * Probes a backing RDS container. UNKNOWN means the Docker probe failed and the container's
+     * state is not known, which is not the same as the container being gone.
+     */
+    public ContainerLiveness probeContainer(String containerId) {
+        if (containerId == null || containerId.isBlank()) {
+            return ContainerLiveness.NOT_RUNNING;
+        }
+        return lifecycleManager.probeContainer(containerId);
     }
 
     /** Returns the retained runtime handle used to persist cleanup identity after a failed start. */
@@ -945,6 +950,34 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         } catch (Exception e) {
             throw new RuntimeException("Failed to restore postgres snapshot", e);
         }
+    }
+
+    /**
+     * Gives a restored database the name a point in time restore asked for. {@code from} is the
+     * database the source's dump brought over: its DBName, or the master user's name when it had
+     * none, which is how the image names its default database. The rename runs connected to
+     * template1, so it also works when {@code from} is {@code postgres}.
+     */
+    public void renamePostgresDatabase(String containerId, String masterUsername, String from, String to) {
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        String sql = "ALTER DATABASE " + quotePostgresIdentifier(from) + " RENAME TO " + quotePostgresIdentifier(to);
+        String[] cmd = {"psql", "-v", "ON_ERROR_STOP=1", "-U", effectiveUser, "-d", "template1", "-c", sql};
+        try (Lease _ = holdContainer(containerId)) {
+            ContainerExec.Result result = execInContainer(containerId, cmd, 60);
+            if (result.exitCode() != 0) {
+                throw new RuntimeException("Renaming database " + from + " to " + to + " failed with exit code "
+                        + result.exitCode() + ": " + result.stderr());
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to rename database " + from + " to " + to, e);
+        }
+    }
+
+    /** A PostgreSQL quoted identifier: wrapped in double quotes, with each embedded one doubled. */
+    static String quotePostgresIdentifier(String name) {
+        return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
     static String postgresRestoreScript() {

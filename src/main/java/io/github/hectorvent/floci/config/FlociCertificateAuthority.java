@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
@@ -86,14 +87,14 @@ public final class FlociCertificateAuthority {
                 FlociCertificateAuthority existing = null;
                 try {
                     String pem = Files.readString(certFile);
-                    X509Certificate cert = generator.parseCertificate(pem);
-                    PrivateKey key = generator.parsePrivateKey(Files.readString(keyFile));
+                    X509Certificate cert = Pem.parseCertificate(pem);
+                    PrivateKey key = Pem.parsePrivateKey(Files.readString(keyFile));
                     if (cert.getBasicConstraints() < 0) {
                         throw new IllegalStateException("not a CA certificate (BasicConstraints cA=false)");
                     }
                     cert.verify(cert.getPublicKey());
                     cert.checkValidity();
-                    if (!CertificateGenerator.isPair(key, cert.getPublicKey())) {
+                    if (!Pem.isPair(key, cert.getPublicKey())) {
                         throw new IllegalStateException("private key does not match the certificate");
                     }
                     restrictToOwnerOnly(tlsDir, "rwx------");
@@ -116,8 +117,8 @@ public final class FlociCertificateAuthority {
             Files.writeString(certFile, generated.certificatePem());
             writePrivateKey(keyFile, generated.privateKeyPem());
             FlociCertificateAuthority ca = new FlociCertificateAuthority(certFile,
-                    generator.parseCertificate(generated.certificatePem()),
-                    generator.parsePrivateKey(generated.privateKeyPem()),
+                    Pem.parseCertificate(generated.certificatePem()),
+                    Pem.parsePrivateKey(generated.privateKeyPem()),
                     generated.certificatePem(), generator);
             LOG.infov("TLS: generated local CA {0}, SHA256 fingerprint {1}. Trust it once: GET /_floci/ca.pem",
                     certFile, ca.fingerprint());

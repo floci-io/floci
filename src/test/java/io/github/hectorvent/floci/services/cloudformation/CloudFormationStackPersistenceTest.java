@@ -64,12 +64,12 @@ class CloudFormationStackPersistenceTest {
         changeSet.setStatus("CREATE_COMPLETE");
         stack.getChangeSets().put("initial-create", changeSet);
 
-        var writer = new PersistentStorage<String, Stack>(
+        PersistentStorage<String, Stack> writer = new PersistentStorage<>(
                 filePath, new TypeReference<Map<String, Stack>>() {});
         writer.put(KEY, stack);
 
         // Fresh instance + load() simulates a Floci restart reading the same file
-        var reader = new PersistentStorage<String, Stack>(
+        PersistentStorage<String, Stack> reader = new PersistentStorage<>(
                 filePath, new TypeReference<Map<String, Stack>>() {});
         reader.load();
 
@@ -117,7 +117,7 @@ class CloudFormationStackPersistenceTest {
                 """.formatted(KEY);
         Files.writeString(filePath, legacyJson);
 
-        var store = new PersistentStorage<String, Stack>(
+        PersistentStorage<String, Stack> store = new PersistentStorage<>(
                 filePath, new TypeReference<Map<String, Stack>>() {});
         store.load();
 

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -20,8 +21,10 @@ import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
+import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -136,6 +139,20 @@ class IamServiceTest {
         assertEquals("arn:aws:sts::123456789012:assumed-role/TestRole/my-custom-session-name",
                 service.resolveCallerArn(accessKeyId).orElseThrow());
         assertEquals(restored.getAssumedRoleId(), service.resolveCallerUserId(accessKeyId).orElseThrow());
+    }
+
+    @Test
+    void resolveCallerArnPreservesPartitionFromRoleArn() {
+        String accessKeyId = "ASIACHINASESSION";
+        InMemoryStorage<String, SessionCredential> sessions = new InMemoryStorage<>();
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+        service.registerSession(accessKeyId, "secret", "token",
+                "arn:aws-cn:iam::123456789012:role/ChinaRole", Instant.now().plusSeconds(3600),
+                null, "123456789012", "china-session",
+                "AROAEXAMPLE:china-session");
+
+        assertEquals("arn:aws-cn:sts::123456789012:assumed-role/ChinaRole/china-session",
+                service.resolveCallerArn(accessKeyId).orElseThrow());
     }
 
     @Test
@@ -1288,6 +1305,70 @@ class IamServiceTest {
         assertTrue(service.resolveAccountId(accessKey.getAccessKeyId()).isEmpty());
     }
 
+    @Test
+    void findSecretKeyDoesNotResolveAnotherAccountsKey() {
+        // The ElastiCache, MemoryDB and RDS IAM-auth proxies verify through findSecretKey and do
+        // not compare the key's account with the cluster's, so another account's key must stay unknown.
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERACCOUNTKEY", "other-secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.findSecretKey(accessKey.getAccessKeyId()).isEmpty());
+        assertTrue(service.findSecretKey(accessKey.getAccessKeyId(), null).isEmpty());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountResolvesLongTermKeyFromAnotherAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERACCOUNTKEY", "other-secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals("other-secret", service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountOfTheRequestAccountDoesNotScanOtherAccounts() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        AccessKey accessKey = new AccessKey("AKIAOWNACCOUNTKEY", "own-secret", "dev");
+        accessKeys.putForAccount("000000000000", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals("own-secret", service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow());
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountOfATemporaryKeyDoesNotScanLongTermKeys() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        service.findSecretKeyInAnyAccount("ASIATEMPORARYKEY1234", "session-token");
+
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountIgnoresInactiveKeyInAnotherAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERINACTIVE", "other-secret", "worker");
+        accessKey.setStatus("Inactive");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).isEmpty());
+    }
+
     private static final class CountingAccountAwareSessionStorage
             extends AccountAwareStorageBackend<SessionCredential> {
 
@@ -2209,7 +2290,41 @@ class IamServiceTest {
 
         assertEquals("TRUE", fields[3], "password_enabled");
         assertEquals("TRUE", fields[8], "access_key_1_active");
-        assertEquals("FALSE", fields[7], "mfa_active is never modeled");
+        assertEquals("FALSE", fields[7], "mfa_active, with no device enabled for this user");
+    }
+
+    /**
+     * The {@code mfa_active} column is backed by real device state rather than a constant, so a
+     * user holding an enabled device reports TRUE while the untouched user beside them stays FALSE.
+     */
+    @Test
+    void credentialReportMarksUsersHoldingAnMfaDeviceAsMfaActive() {
+        iamService.createUser("mfa-report-with", "/");
+        iamService.createUser("mfa-report-without", "/");
+        VirtualMfaDevice device = iamService.createVirtualMfaDevice("mfa-report-device", "/", Map.of());
+        String[] codes = consecutiveCodes(device.getBase32Seed());
+        iamService.enableMfaDevice("mfa-report-with", device.getSerialNumber(), codes[0], codes[1]);
+        iamService.generateCredentialReport();
+
+        String csv = new String(Base64.getDecoder().decode(iamService.getCredentialReport().base64Content()));
+        assertEquals("TRUE", mfaActiveColumn(csv, "mfa-report-with"));
+        assertEquals("FALSE", mfaActiveColumn(csv, "mfa-report-without"));
+    }
+
+    private static String mfaActiveColumn(String csv, String userName) {
+        return csv.lines().filter(line -> line.startsWith(userName + ","))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no row for " + userName + " in: " + csv))
+                .split(",", -1)[7];
+    }
+
+    /** The pair an authenticator would show now, which is what EnableMFADevice asks for. */
+    private static String[] consecutiveCodes(String base32Seed) {
+        long step = Totp.stepAt(Instant.now());
+        return new String[] {
+                Totp.codeAt(base32Seed, step - 1),
+                Totp.codeAt(base32Seed, step)
+        };
     }
 
     /**
@@ -2253,7 +2368,9 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), credentialReports,
+                new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
@@ -2270,7 +2387,9 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), credentialReports,
+                new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         IamService.CredentialReportGeneration generation = withExpiredReport.generateCredentialReport();

@@ -6,8 +6,10 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.swf.SwfClient;
 import software.amazon.awssdk.services.swf.model.ActivityType;
+import software.amazon.awssdk.services.swf.model.ActivityTypeInfo;
 import software.amazon.awssdk.services.swf.model.ChildPolicy;
 import software.amazon.awssdk.services.swf.model.DescribeDomainRequest;
+import software.amazon.awssdk.services.swf.model.DescribeDomainResponse;
 import software.amazon.awssdk.services.swf.model.DescribeWorkflowExecutionRequest;
 import software.amazon.awssdk.services.swf.model.DescribeWorkflowTypeRequest;
 import software.amazon.awssdk.services.swf.model.DomainAlreadyExistsException;
@@ -93,8 +95,8 @@ class SwfRegionPaginationTest {
         west.registerDomain(RegisterDomainRequest.builder()
                 .name(DOMAIN).description("west").workflowExecutionRetentionPeriodInDays("2").build());
 
-        var eastDomain = east.describeDomain(DescribeDomainRequest.builder().name(DOMAIN).build());
-        var westDomain = west.describeDomain(DescribeDomainRequest.builder().name(DOMAIN).build());
+        DescribeDomainResponse eastDomain = east.describeDomain(DescribeDomainRequest.builder().name(DOMAIN).build());
+        DescribeDomainResponse westDomain = west.describeDomain(DescribeDomainRequest.builder().name(DOMAIN).build());
 
         assertEquals("east", eastDomain.domainInfo().description());
         assertEquals("west", westDomain.domainInfo().description());
@@ -229,7 +231,7 @@ class SwfRegionPaginationTest {
                 .maximumPageSize(3).nextPageToken(firstActivities.nextPageToken()).build());
         List<String> firstNames = firstActivities.typeInfos().stream()
                 .map(i -> i.activityType().name()).toList();
-        for (var info : secondActivities.typeInfos()) {
+        for (ActivityTypeInfo info : secondActivities.typeInfos()) {
             assertFalse(firstNames.contains(info.activityType().name()),
                     "page 2 repeated " + info.activityType().name());
         }
