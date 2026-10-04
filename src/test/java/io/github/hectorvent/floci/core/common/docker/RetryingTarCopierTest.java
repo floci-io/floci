@@ -11,10 +11,14 @@ import org.mockito.ArgumentCaptor;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -161,16 +165,32 @@ class RetryingTarCopierTest {
         AtomicInteger calls = new AtomicInteger();
         failingOnce(docker, calls);
         AtomicInteger writes = new AtomicInteger();
+        List<String> events = Collections.synchronizedList(new ArrayList<>());
 
         RetryingTarCopier.copyStreamed(docker, "c-1", "/var/task", "fn-code",
                 out -> {
-                    writes.incrementAndGet();
-                    out.write("x".getBytes(StandardCharsets.UTF_8));
+                    int attempt = writes.incrementAndGet();
+                    events.add("start " + attempt);
+                    try {
+                        if (attempt == 1) {
+                            try {
+                                Thread.sleep(200);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                throw new InterruptedIOException("writer pause interrupted");
+                            }
+                        }
+                        out.write("x".getBytes(StandardCharsets.UTF_8));
+                    } finally {
+                        events.add("end " + attempt);
+                    }
                 },
                 MAX_ATTEMPTS, 0L);
 
         assertEquals(2, calls.get());
-        assertEquals(2, writes.get(), "the tar content must be regenerated for every attempt");
+        assertEquals(List.of("start 1", "end 1", "start 2", "end 2"), events,
+                "the tar content is regenerated for every attempt, and a failed attempt's writer"
+                        + " finishes before the retry starts");
     }
 
     @Test

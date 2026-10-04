@@ -124,16 +124,24 @@ public final class RetryingTarCopier {
                     }
                 }, "tar-streamer-" + label);
                 streamer.start();
-                docker.copyArchiveToContainerCmd(containerId)
-                        .withRemotePath(remotePath)
-                        .withTarInputStream(pis)
-                        .exec();
-                // Joined before the try-with-resources closes pos/pis on the way out: a real
-                // exec() only returns after consuming the tar to EOF, which the streamer causes
-                // by closing pos once it's done, so this never blocks in production, but closing
-                // pos out from under a still-writing streamer (as a mocked/short-circuited exec()
-                // would) turns its own write into a spurious "Pipe closed" failure.
-                streamer.join();
+                try {
+                    docker.copyArchiveToContainerCmd(containerId)
+                            .withRemotePath(remotePath)
+                            .withTarInputStream(pis)
+                            .exec();
+                } catch (Exception e) {
+                    // A failed exec() stops reading, so closing the read end is what makes a
+                    // writer blocked on a full pipe fail instead of waiting forever.
+                    pis.close();
+                    throw e;
+                } finally {
+                    // On success, joined before the try-with-resources closes pos/pis: a real
+                    // exec() returns only after reading to EOF, so this never blocks, while
+                    // closing pos under a still-writing streamer (a mocked exec()) would cause a
+                    // spurious "Pipe closed". On failure, joined so a failed attempt's writer
+                    // never runs alongside the retry's writer or outlives the call.
+                    streamer.join();
+                }
             }
             Throwable failure = writerFailure.get();
             if (failure != null) {
