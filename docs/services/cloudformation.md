@@ -389,6 +389,9 @@ Lambda. floci supports two shapes:
   ResponseURL callback fires. The wait is bounded by an async custom-resource timeout (3 minutes by
   default); a resource that never completes fails the stack rather than hanging.
 
+The handler's `Data` keys resolve through `Fn::GetAtt`, except keys that begin with `__Floci`. Floci
+reserves that prefix for its own resource state, which no template can read.
+
 ## Deleted Stacks
 
 A deleted stack is kept for a short window afterwards rather than being forgotten at
