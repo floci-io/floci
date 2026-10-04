@@ -246,6 +246,23 @@ class S3MultipartDiskAssemblyTest {
     }
 
     @Test
+    void uploadPartCopyReadsTheRequestedRangeFromTheSourceFile() {
+        byte[] source = new byte[200_000];
+        for (int i = 0; i < source.length; i++) {
+            source[i] = (byte) (i % 251);
+        }
+        s3Service.putObject("test-bucket", "source.bin", source, "application/octet-stream", Map.of());
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "copy.bin", null);
+
+        s3Service.uploadPartCopy("test-bucket", "copy.bin", upload.getUploadId(), 1,
+                "test-bucket", "source.bin", null, "bytes=150000-150099");
+        s3Service.completeMultipartUpload("test-bucket", "copy.bin", upload.getUploadId(), List.of(1), null, null);
+
+        assertArrayEquals(Arrays.copyOfRange(source, 150_000, 150_100),
+                s3Service.getObject("test-bucket", "copy.bin").getData());
+    }
+
+    @Test
     void restartRemovesTheFilesOfUploadsThatWereInProgress() throws Exception {
         s3Service.putObject("test-bucket", "kept.bin", "kept".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "interrupted.bin", null);

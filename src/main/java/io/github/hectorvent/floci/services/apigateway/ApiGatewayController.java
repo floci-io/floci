@@ -73,16 +73,29 @@ public class ApiGatewayController {
     private final ApiGatewayV2OpenApiImporter v2OpenApiImporter;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final RestLambdaAuthorizer restLambdaAuthorizer;
 
     @Inject
     public ApiGatewayController(ApiGatewayService service, ApiGatewayV2Service v2Service,
                                 ApiGatewayV2OpenApiImporter v2OpenApiImporter,
-                                RegionResolver regionResolver, ObjectMapper objectMapper) {
+                                RegionResolver regionResolver, ObjectMapper objectMapper,
+                                RestLambdaAuthorizer restLambdaAuthorizer) {
         this.service = service;
         this.v2Service = v2Service;
         this.v2OpenApiImporter = v2OpenApiImporter;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.restLambdaAuthorizer = restLambdaAuthorizer;
+    }
+
+    @DELETE
+    @Path("restapis/{apiId}/stages/{stageName}/cache/authorizers")
+    public Response flushStageAuthorizersCache(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                               @PathParam("stageName") String stageName) {
+        String region = regionResolver.resolveRegion(headers);
+        service.getStage(region, apiId, stageName);
+        restLambdaAuthorizer.flush(new RestLambdaAuthorizer.Scope(regionResolver.getAccountId(), region, apiId, stageName));
+        return Response.accepted().build();
     }
 
     private static final TypeReference<List<Map<String, String>>> PATCH_OPERATIONS =
@@ -1544,6 +1557,22 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         return Response.ok(toV2VpcLinkNode(v2Service.getVpcLink(region, vpcLinkId)).toString())
                 .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @PATCH
+    @Path("/v2/vpclinks/{vpcLinkId}")
+    public Response updateVpcLink(@Context HttpHeaders headers,
+                                  @PathParam("vpcLinkId") String vpcLinkId,
+                                  String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            VpcLink link = v2Service.updateVpcLink(region, vpcLinkId, request);
+            return Response.ok(toV2VpcLinkNode(link).toString()).type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
     }
 
     @DELETE

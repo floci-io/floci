@@ -40,7 +40,7 @@ class MacieOrganizationAdministrationTest {
                     .account(account -> account.accountId(MEMBER_ACCOUNT).email("member@example.com"))
                     .tags(java.util.Map.of("team", "security")));
             assertThat(member.arn())
-                    .isEqualTo("arn:aws:macie2:us-east-1:" + ADMIN_ACCOUNT + ":member/" + MEMBER_ACCOUNT);
+                    .isEqualTo(TestFixtures.arn("macie2", ADMIN_ACCOUNT, "member/" + MEMBER_ACCOUNT));
             assertThat(administrator.listMembers(request -> request.onlyAssociated("true")).members())
                     .anySatisfy(account -> {
                         assertThat(account.accountId()).isEqualTo(MEMBER_ACCOUNT);

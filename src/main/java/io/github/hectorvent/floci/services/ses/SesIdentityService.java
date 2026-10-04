@@ -220,7 +220,7 @@ public class SesIdentityService {
                 ? SesListPaging.V2_LIST_EMAIL_IDENTITIES
                 : SesListPaging.V2_LIST_EMAIL_IDENTITIES_FILTERED;
         // Validated here as well as in page() so the size error wins over the filter's values.
-        paging.pageSize(pageSize);
+        paging.checkRequest(pageSize, nextToken);
         String name = v2FilterName(filter.get("IDENTITY_NAME_CONTAINS"));
         String type = v2FilterType(filter.get("IDENTITY_TYPE"));
         String status = v2FilterStatus(filter.get("VERIFICATION_STATUS"));

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import software.amazon.awssdk.regions.RegionMetadata;
 import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.apigatewayv2.model.ApiGatewayV2Exception;
 import software.amazon.awssdk.services.apigatewayv2.model.AuthorizerType;
@@ -74,6 +75,7 @@ class ApiGatewayV2ManagementTest {
     private static String routeId;
     private static String deploymentId;
     private static final String stageName = "test";
+    private static final String HANDLER_ARN = TestFixtures.arn("lambda", "000000000000", "function:phase2-handler");
     private static boolean stageCreated;
 
     @BeforeAll
@@ -126,7 +128,10 @@ class ApiGatewayV2ManagementTest {
         assertThat(apiId).isNotBlank();
         assertThat(response.name()).startsWith("http-api-");
         assertThat(response.protocolType()).isEqualTo(ProtocolType.HTTP);
-        assertThat(response.apiEndpoint()).contains(apiId + ".execute-api.us-east-1.amazonaws.com");
+        RegionMetadata metadata = TestFixtures.region().metadata();
+        String dnsSuffix = metadata == null ? "amazonaws.com" : metadata.partition().dnsSuffix();
+        assertThat(response.apiEndpoint())
+                .contains(apiId + ".execute-api." + TestFixtures.region().id() + "." + dnsSuffix);
         assertThat(response.createdDate()).isNotNull();
     }
 
@@ -204,7 +209,7 @@ class ApiGatewayV2ManagementTest {
         CreateIntegrationResponse response = apigwv2.createIntegration(CreateIntegrationRequest.builder()
                 .apiId(apiId)
                 .integrationType(IntegrationType.AWS_PROXY)
-                .integrationUri("arn:aws:lambda:us-east-1:000000000000:function:phase2-handler")
+                .integrationUri(HANDLER_ARN)
                 .payloadFormatVersion("2.0")
                 .build());
 
@@ -212,7 +217,7 @@ class ApiGatewayV2ManagementTest {
 
         assertThat(integrationId).isNotBlank();
         assertThat(response.integrationType()).isEqualTo(IntegrationType.AWS_PROXY);
-        assertThat(response.integrationUri()).isEqualTo("arn:aws:lambda:us-east-1:000000000000:function:phase2-handler");
+        assertThat(response.integrationUri()).isEqualTo(HANDLER_ARN);
         assertThat(response.payloadFormatVersion()).isEqualTo("2.0");
     }
 

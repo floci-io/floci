@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class ResourceExplorer2Test {
 
     private static ResourceExplorer2Client client;
-    // The emulator auto-provisions an index only in the default region (us-east-1). CreateIndex
+    // The emulator auto-provisions an index only in the default region (the fixture region). CreateIndex
     // there is a no-op/conflict, so index create+delete is exercised against a second region
     // that starts with no index, matching AWS's one-index-per-region rule.
     private static ResourceExplorer2Client altRegionClient;
@@ -273,7 +273,8 @@ class ResourceExplorer2Test {
     @Order(22)
     void batchGetViewReturnsViewsAndErrorsForMissing() {
         assumeFalse(TestFixtures.isRealAws(), "Depends on created view");
-        String bogusArn = "arn:aws:resource-explorer-2:us-east-1:000000000000:view/does-not-exist/00000000-0000-0000-0000-000000000000";
+        String bogusArn = TestFixtures.arn("resource-explorer-2", "000000000000",
+                "view/does-not-exist/00000000-0000-0000-0000-000000000000");
 
         BatchGetViewResponse response = client.batchGetView(BatchGetViewRequest.builder()
                 .viewArns(createdViewArn, bogusArn)
@@ -408,7 +409,8 @@ class ResourceExplorer2Test {
         // Real AWS: 401 UnauthorizedException (auth checked before existence for wrong-account ARN)
         // Floci: 404 ResourceNotFoundException
         assertThatThrownBy(() -> client.getView(GetViewRequest.builder()
-                .viewArn("arn:aws:resource-explorer-2:us-east-1:000000000000:view/nope/00000000-0000-0000-0000-000000000000")
+                .viewArn(TestFixtures.arn("resource-explorer-2", "000000000000",
+                        "view/nope/00000000-0000-0000-0000-000000000000"))
                 .build()))
                 .isInstanceOf(ResourceExplorer2Exception.class);
     }
@@ -419,7 +421,7 @@ class ResourceExplorer2Test {
         // Real AWS: 403 AccessDeniedException (auth checked before existence for wrong-account ARN)
         // Floci: 404 ResourceNotFoundException
         assertThatThrownBy(() -> client.deleteIndex(DeleteIndexRequest.builder()
-                .arn("arn:aws:resource-explorer-2:us-east-1:000000000000:index/nonexistent")
+                .arn(TestFixtures.arn("resource-explorer-2", "000000000000", "index/nonexistent"))
                 .build()))
                 .isInstanceOf(ResourceExplorer2Exception.class);
     }
@@ -456,7 +458,7 @@ class ResourceExplorer2Test {
                 .as("IncludedProperty.Name").isEqualTo("tags");
 
         // Drill into scope
-        assertThat(view.scope()).as("View.Scope").contains("arn:aws:iam:");
+        assertThat(view.scope()).as("View.Scope").contains("arn:" + TestFixtures.partition() + ":iam:");
 
         // Cleanup
         client.deleteView(DeleteViewRequest.builder().viewArn(arn).build());
@@ -528,7 +530,8 @@ class ResourceExplorer2Test {
     @Order(55)
     void batchGetViewErrorFieldsDeserialize() {
         assumeFalse(TestFixtures.isRealAws(), "Uses floci-specific bogus ARN format");
-        String bogus = "arn:aws:resource-explorer-2:us-east-1:000000000000:view/x/00000000-0000-0000-0000-000000000000";
+        String bogus = TestFixtures.arn("resource-explorer-2", "000000000000",
+                "view/x/00000000-0000-0000-0000-000000000000");
 
         BatchGetViewResponse response = client.batchGetView(BatchGetViewRequest.builder()
                 .viewArns(bogus)
@@ -576,7 +579,7 @@ class ResourceExplorer2Test {
 
         UpdateViewResponse updated = client.updateView(UpdateViewRequest.builder()
                 .viewArn(arn)
-                .filters(SearchFilter.builder().filterString("region:us-east-1").build())
+                .filters(SearchFilter.builder().filterString("region:" + TestFixtures.region().id()).build())
                 .includedProperties(IncludedProperty.builder().name("tags").build())
                 .build());
 
@@ -584,7 +587,7 @@ class ResourceExplorer2Test {
         assertThat(view.viewArn()).isEqualTo(arn);
         assertThat(view.filters()).as("Updated Filters").isNotNull();
         assertThat(view.filters().filterString())
-                .as("Updated FilterString").isEqualTo("region:us-east-1");
+                .as("Updated FilterString").isEqualTo("region:" + TestFixtures.region().id());
         assertThat(view.includedProperties()).hasSize(1);
         assertThat(view.includedProperties().get(0).name()).isEqualTo("tags");
 

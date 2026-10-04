@@ -65,7 +65,8 @@ class S3TablesTest {
                         .storageClassConfiguration(StorageClassConfiguration.builder().storageClass(StorageClass.STANDARD).build())
                         .build());
         bucketArn = created.arn();
-        assertThat(bucketArn).contains("arn:aws:s3tables:").endsWith("bucket/" + bucketName);
+        assertThat(bucketArn).contains("arn:" + TestFixtures.partition() + ":s3tables:")
+                .endsWith("bucket/" + bucketName);
 
         GetTableBucketResponse fetched = client.getTableBucket(
                 GetTableBucketRequest.builder().tableBucketARN(bucketArn).build());

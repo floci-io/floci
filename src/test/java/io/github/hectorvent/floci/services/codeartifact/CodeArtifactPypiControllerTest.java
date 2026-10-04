@@ -133,6 +133,67 @@ class CodeArtifactPypiControllerTest {
         assertEquals(404, response.getStatus());
     }
 
+    /**
+     * The fix for a real finding: building the request URI with a plain string concatenation
+     * would let a {@code #} in a caller-supplied filename get interpreted as a URI fragment and
+     * silently dropped from the actual wire request, fetching a different, shorter real filename
+     * instead of the one actually requested. Checks the raw path the backend actually receives,
+     * not just the response, via a root fallback context rather than registering the context at
+     * the encoded literal path: {@code com.sun.net.httpserver.HttpServer} matches contexts on the
+     * decoded path, so registering one at the raw percent-encoded string wouldn't reliably match.
+     */
+    @Test
+    void downloadFileTreatsAHashInTheFilenameAsLiteralNotAUriFragment() {
+        AtomicReference<String> observedRawPath = new AtomicReference<>();
+        backend.createContext("/", exchange -> {
+            observedRawPath.set(exchange.getRequestURI().getRawPath());
+            respond(exchange, 404, "text/plain", "");
+        });
+
+        Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY, "pkg-1.0.jar#forged");
+
+        assertEquals(404, response.getStatus());
+        assertEquals("/packages/pkg-1.0.jar%23forged", observedRawPath.get());
+    }
+
+    /**
+     * Same finding, the path-separator half of it: a {@code /} in a caller-supplied filename
+     * would be indistinguishable from a real path separator and could splice in extra path
+     * segments.
+     */
+    @Test
+    void downloadFileTreatsASlashInTheFilenameAsLiteralNotAStructuralSeparator() {
+        AtomicReference<String> observedRawPath = new AtomicReference<>();
+        backend.createContext("/", exchange -> {
+            observedRawPath.set(exchange.getRequestURI().getRawPath());
+            respond(exchange, 404, "text/plain", "");
+        });
+
+        Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY, "../secret.tar.gz");
+
+        assertEquals(404, response.getStatus());
+        assertEquals("/packages/..%2Fsecret.tar.gz", observedRawPath.get());
+    }
+
+    /**
+     * Same finding again, via the other wire-protocol route that shares the same {@code proxyGet}
+     * helper: the package name in {@code GET /simple/{package}/} is just as caller-supplied as
+     * the filename in {@code GET /packages/{filename}}.
+     */
+    @Test
+    void packageIndexTreatsASlashInThePackageNameAsLiteralNotAStructuralSeparator() {
+        AtomicReference<String> observedRawPath = new AtomicReference<>();
+        backend.createContext("/", exchange -> {
+            observedRawPath.set(exchange.getRequestURI().getRawPath());
+            respond(exchange, 404, "text/plain", "");
+        });
+
+        Response response = controller.packageIndex(headers("Bearer good"), DOMAIN, REPOSITORY, "../other-pkg");
+
+        assertEquals(404, response.getStatus());
+        assertEquals("/simple/..%2Fother-pkg/", observedRawPath.get());
+    }
+
     @Test
     void uploadRejectsABodyWithNoDeterminableBoundary() {
         Response response = controller.upload(headers("Bearer good", "application/octet-stream"), DOMAIN, REPOSITORY,
@@ -169,6 +230,85 @@ class CodeArtifactPypiControllerTest {
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
+    }
+
+    /**
+     * The fix for a real finding: a plain substring search on the whole index response body
+     * would wrongly treat the uploaded filename as already published if it happened to be a
+     * substring of a different, longer real entry, e.g. a detached {@code .asc} signature file
+     * whose own name contains the base file's name as a prefix.
+     */
+    @Test
+    void uploadDoesNotTreatAShorterFilenameAsAlreadyListedWhenItIsOnlyASubstringOfALongerOne() {
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 200, "text/html",
+                "<a href=\"my_pkg-1.0.0.tar.gz.asc\">my_pkg-1.0.0.tar.gz.asc</a>"));
+        AtomicReference<Boolean> uploadReceived = new AtomicReference<>(false);
+        backend.createContext("/", exchange -> {
+            if ("POST".equals(exchange.getRequestMethod())) {
+                uploadReceived.set(true);
+            }
+            respond(exchange, 200, "text/plain", "");
+        });
+        byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.0.tar.gz", "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(200, response.getStatus());
+        assertEquals(true, uploadReceived.get());
+    }
+
+    /**
+     * The fix for a real finding: the upload preflight's own index-check request (as opposed to
+     * {@code packageIndex}'s, already covered above) built its path the same unsafe way, and
+     * nothing exercised it with a reserved character.
+     */
+    @Test
+    void uploadExistenceCheckTreatsAHashInThePackageNameAsLiteralNotAUriFragment() {
+        AtomicReference<String> observedRawPath = new AtomicReference<>();
+        backend.createContext("/", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                observedRawPath.set(exchange.getRequestURI().getRawPath());
+                respond(exchange, 404, "text/plain", "");
+            } else {
+                respond(exchange, 200, "text/plain", "");
+            }
+        });
+        byte[] body = multipartWithFile("boundary123", "my#pkg", "my_pkg-1.0.0.tar.gz", "content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(200, response.getStatus());
+        assertEquals("/simple/my%23pkg/", observedRawPath.get());
+    }
+
+    /**
+     * Same finding, the preflight's other request: once the simple index confirms a match, it
+     * fetches the existing file's bytes for the content comparison, at a path built from the
+     * same caller-supplied filename. Uses {@code ?}, not {@code #} or {@code /}: both of those
+     * are already meaningful to the index's own href parsing (a root-relative directory prefix
+     * and a hash-fragment suffix, both stripped the way a real pypiserver response uses them),
+     * so a filename containing either could never round-trip through the exact-match check at
+     * all, real bug or not; {@code ?} isn't special to that parsing, only to building the URI.
+     */
+    @Test
+    void uploadExistenceCheckTreatsAQuestionMarkInTheFilenameAsLiteralNotAUriQueryStringWhenFetchingTheExistingFile() {
+        String filename = "my_pkg-1.0.0?sig.tar.gz";
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 200, "text/html",
+                "<a href=\"" + filename + "\">" + filename + "</a>"));
+        AtomicReference<String> observedRawPath = new AtomicReference<>();
+        backend.createContext("/", exchange -> {
+            observedRawPath.set(exchange.getRequestURI().getRawPath());
+            respond(exchange, 200, "application/octet-stream", "different content");
+        });
+        byte[] body = multipartWithFile("boundary123", "my-pkg", filename, "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(409, response.getStatus());
+        assertEquals("/packages/my_pkg-1.0.0%3Fsig.tar.gz", observedRawPath.get());
     }
 
     @Test

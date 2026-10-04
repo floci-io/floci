@@ -1002,10 +1002,12 @@ class ApiGatewayAwsIntegrationTest {
         integrationNode.put("uri", "arn:aws:apigateway:us-east-1:dynamodb:action/PutItem");
         ObjectNode reqParams = mapper.createObjectNode();
         reqParams.put("integration.request.querystring.itemId", "method.request.querystring.itemId");
+        reqParams.put("integration.request.header.X-Mapped", "method.request.header.X-Source");
         integrationNode.set("requestParameters", reqParams);
         ObjectNode rt = mapper.createObjectNode();
         rt.put("application/json",
-                "{\"TableName\": \"" + TABLE_NAME + "\", \"Item\": {\"id\": {\"S\": \"$input.params('itemId')\"}, \"source\": {\"S\": \"req-param-mapped\"}}}");
+                "{\"TableName\": \"" + TABLE_NAME + "\", \"Item\": {\"id\": {\"S\": \"$input.params('itemId')\"}, "
+                        + "\"source\": {\"S\": \"req-param-mapped\"}, \"header\": {\"S\": \"$input.params('X-Mapped')\"}}}");
         integrationNode.set("requestTemplates", rt);
 
         given()
@@ -1027,7 +1029,8 @@ class ApiGatewayAwsIntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("{}")
-                .queryParam("itemId", "param-123")
+                .queryParam("itemId", "param-123", "second-id")
+                .header("X-Source", "first-header", "second-header")
                 .when().post("/execute-api/" + apiId + "/test/req-param")
                 .then().statusCode(200);
 
@@ -1044,6 +1047,7 @@ class ApiGatewayAwsIntegrationTest {
         assertTrue(result.has("Item"), "Item should exist with param-mapped key");
         assertEquals("param-123", result.path("Item").path("id").path("S").asText());
         assertEquals("req-param-mapped", result.path("Item").path("source").path("S").asText());
+        assertEquals("first-header", result.path("Item").path("header").path("S").asText());
     }
 
     // ──────────────── Test: Response body JSONPath (deep) ────────────────

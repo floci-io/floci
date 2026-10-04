@@ -508,16 +508,16 @@ final class ExpressionEvaluator {
                     high.get("S").asText().getBytes(StandardCharsets.UTF_8));
         }
         if (low.has("B") && high.has("B")) {
-            return Arrays.compareUnsigned(decodeBinaryBound(low), decodeBinaryBound(high));
+            return Arrays.compareUnsigned(decodeBinary(low), decodeBinary(high));
         }
         return compareAttributeValues(low, high);
     }
 
-    // A binary value that is not valid base64 never reaches a comparison on AWS: the request
-    // fails to deserialize first, with a 400 SerializationException.
-    private static byte[] decodeBinaryBound(JsonNode bound) {
+    // A binary value that is not valid base64 never reaches a comparison, begins_with or size()
+    // on AWS: the request fails to deserialize first, with a 400 SerializationException.
+    private static byte[] decodeBinary(JsonNode value) {
         try {
-            return Base64.getDecoder().decode(bound.get("B").asText());
+            return Base64.getDecoder().decode(value.get("B").asText());
         } catch (IllegalArgumentException e) {
             throw new AwsException("SerializationException",
                     "Unexpected value type in payload", 400);
@@ -791,8 +791,8 @@ final class ExpressionEvaluator {
                 JsonNode prefixNode = resolveAttributeValue(func.args().get(1), item, exprAttrNames, exprAttrValues);
                 if (attrNode == null || prefixNode == null) yield false;
                 if (attrNode.has("B") && prefixNode.has("B")) {
-                    byte[] attrBytes = java.util.Base64.getDecoder().decode(attrNode.get("B").asText());
-                    byte[] prefixBytes = java.util.Base64.getDecoder().decode(prefixNode.get("B").asText());
+                    byte[] attrBytes = decodeBinary(attrNode);
+                    byte[] prefixBytes = decodeBinary(prefixNode);
                     if (prefixBytes.length > attrBytes.length) yield false;
                     for (int bi = 0; bi < prefixBytes.length; bi++) {
                         if (attrBytes[bi] != prefixBytes[bi]) yield false;
@@ -1120,8 +1120,8 @@ final class ExpressionEvaluator {
             }
         }
         if (a.has("B") && b.has("B")) {
-            byte[] aBytes = decodeBinaryBound(a);
-            byte[] bBytes = decodeBinaryBound(b);
+            byte[] aBytes = decodeBinary(a);
+            byte[] bBytes = decodeBinary(b);
             int minLen = Math.min(aBytes.length, bBytes.length);
             for (int i = 0; i < minLen; i++) {
                 int diff = (aBytes[i] & 0xFF) - (bBytes[i] & 0xFF);
@@ -1138,7 +1138,7 @@ final class ExpressionEvaluator {
 
     private static int computeSize(JsonNode attrNode) {
         if (attrNode.has("S")) return attrNode.get("S").asText().length();
-        if (attrNode.has("B")) return attrNode.get("B").asText().length(); // base64 length
+        if (attrNode.has("B")) return decodeBinary(attrNode).length;
         if (attrNode.has("L")) return attrNode.get("L").size();
         if (attrNode.has("M")) return attrNode.get("M").size();
         if (attrNode.has("SS")) return attrNode.get("SS").size();

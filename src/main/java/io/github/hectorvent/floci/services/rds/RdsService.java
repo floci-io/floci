@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -2685,7 +2686,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 || instance.getContainerId().isBlank()) {
             return instance;
         }
-        if (containerManager.isContainerRunning(instance.getContainerId())) {
+        ContainerLiveness liveness = containerManager.probeContainer(instance.getContainerId());
+        if (liveness != ContainerLiveness.NOT_RUNNING) {
             return instance;
         }
 

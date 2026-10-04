@@ -961,7 +961,7 @@ public class EksService implements TagHandler, ResourceProvider {
     }
 
     public FargateProfile createFargateProfile(String clusterName, CreateFargateProfileRequest request) {
-        describeCluster(clusterName);
+        Cluster cluster = describeCluster(clusterName);
 
         String fargateProfileName = request.getFargateProfileName();
         if (fargateProfileName == null || fargateProfileName.isBlank()) {
@@ -977,7 +977,7 @@ public class EksService implements TagHandler, ResourceProvider {
                     "Fargate profile already exists: " + fargateProfileName, 409);
         }
 
-        String region = config.defaultRegion();
+        String region = resolveClusterRegion(cluster);
         String accountId = regionResolver.getAccountId();
         String id = UUID.randomUUID().toString();
         String arn = AwsArnUtils.Arn.of("eks", region, accountId,

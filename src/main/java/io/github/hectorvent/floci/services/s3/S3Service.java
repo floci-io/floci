@@ -99,6 +99,11 @@ public class S3Service implements Resettable, ResourceProvider {
         return "000000000000";
     }
     static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
+    public static final String INTERNAL_BUCKET_PREFIX = "floci-internal-";
+    public static final String REDSHIFT_SPECTRUM_SCRATCH_BUCKET =
+            INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
+    public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
+    public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
@@ -510,7 +515,19 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public List<Bucket> listBuckets() {
-        return bucketStore.scan(key -> true);
+        return bucketStore.scan(key -> true).stream()
+                .filter(bucket -> !isSpectrumScratchBucket(bucket))
+                .toList();
+    }
+
+    /**
+     * The Spectrum scratch bucket is told apart from a user bucket of the same name by the tag the
+     * materializer puts on it, so a user's own bucket is never hidden or treated as scratch space.
+     */
+    private static boolean isSpectrumScratchBucket(Bucket bucket) {
+        return REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())
+                && bucket.getTags() != null
+                && REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE.equals(bucket.getTags().get(INTERNAL_BUCKET_TAG_KEY));
     }
 
     public String getBucketOwnerAccountId(String bucketName) {
@@ -3640,28 +3657,100 @@ public class S3Service implements Resettable, ResourceProvider {
                                   SseCustomerHeaders copySourceSseCustomerHeaders,
                                   SseCustomerHeaders sseCustomerHeaders,
                                   CopySourceConditions copySourceConditions) {
-        S3Object source = getObject(sourceBucket, sourceKey, sourceVersionId);
-        checkCopySourcePreconditions(source, copySourceConditions);
-        validateSseCustomerAccess(source,
-                copySourceSseCustomerHeaders.algorithm(),
-                copySourceSseCustomerHeaders.key(),
-                copySourceSseCustomerHeaders.keyMd5());
-        byte[] data = source.getData();
-
-        if (copySourceRange != null && !copySourceRange.isBlank()) {
-            // format: "bytes=START-END" (inclusive on both ends)
-            String range = copySourceRange.startsWith("bytes=") ? copySourceRange.substring(6) : copySourceRange;
-            int dash = range.indexOf('-');
-            if (dash < 0) {
-                throw new AwsException("InvalidArgument", "Invalid x-amz-copy-source-range: " + copySourceRange, 400);
+        byte[] data;
+        // The source is streamed the way GetObject serves it and only the copied range is read, so
+        // the source can be any size.
+        try (ObjectRead read = openObject(sourceBucket, sourceKey, sourceVersionId)) {
+            S3Object source = read.object();
+            checkCopySourcePreconditions(source, copySourceConditions);
+            validateSseCustomerAccess(source,
+                    copySourceSseCustomerHeaders.algorithm(),
+                    copySourceSseCustomerHeaders.key(),
+                    copySourceSseCustomerHeaders.keyMd5());
+            CopySourceRange range = CopySourceRange.parse(copySourceRange, source.getSize());
+            if (range.length() > MAX_IN_MEMORY_OBJECT_SIZE) {
+                LOG.warnv("UploadPartCopy of {0} bytes into upload {1} is over the {2} bytes one part can hold in Floci; copy the source in smaller ranges",
+                        range.length(), uploadId, MAX_IN_MEMORY_OBJECT_SIZE);
+                throw new AwsException("EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size.", 400);
             }
-            int start = Integer.parseInt(range.substring(0, dash).trim());
-            int end = Integer.parseInt(range.substring(dash + 1).trim());
-            data = Arrays.copyOfRange(data, start, end + 1);
+            data = readRange(read.body(), range);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the copy source", e);
         }
 
         return uploadPart(destBucket, destKey, uploadId, partNumber, data,
                 sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5());
+    }
+
+    /** An inclusive byte range of a copy source. Offsets are longs, since a source can pass 2 GiB. */
+    record CopySourceRange(long first, long last) {
+
+        private static final String HEADER = "x-amz-copy-source-range";
+        private static final Pattern FORM = Pattern.compile("bytes=(\\d+)-(\\d+)");
+
+        long length() {
+            return last - first + 1;
+        }
+
+        /**
+         * The range an x-amz-copy-source-range header names, or the whole source when there is no
+         * header. The errors are the ones S3 returns, as recorded in LocalStack's AWS-validated
+         * snapshot for UploadPartCopy: anything but one {@code bytes=first-last} range with
+         * {@code first <= last}, a range that ends past the source, and a range that starts past it.
+         */
+        static CopySourceRange parse(String header, long sourceSize) {
+            if (header == null || header.isBlank()) {
+                return new CopySourceRange(0, sourceSize - 1);
+            }
+            Matcher matcher = FORM.matcher(header);
+            if (!matcher.matches()) {
+                throw malformed(header);
+            }
+            long first;
+            long last;
+            try {
+                first = Long.parseLong(matcher.group(1));
+                last = Long.parseLong(matcher.group(2));
+            } catch (NumberFormatException e) {
+                throw malformed(header);
+            }
+            if (first > last) {
+                throw malformed(header);
+            }
+            // A range whose first byte does not exist starts past the source, the case S3 answers
+            // with InvalidRequest; one that only runs over the end names the source size instead.
+            if (first >= sourceSize) {
+                throw new AwsException("InvalidRequest",
+                        "The specified copy range is invalid for the source object size", 400);
+            }
+            if (last >= sourceSize) {
+                throw new AwsException("InvalidArgument",
+                        "Range specified is not valid for source object of size: " + sourceSize, 400,
+                        argument(header));
+            }
+            return new CopySourceRange(first, last);
+        }
+
+        private static AwsException malformed(String header) {
+            return new AwsException("InvalidArgument", "The x-amz-copy-source-range value must be of the form"
+                    + " bytes=first-last where first and last are the zero-based offsets of the first and last"
+                    + " bytes to copy", 400, argument(header));
+        }
+
+        private static Map<String, Object> argument(String header) {
+            return Map.of("ArgumentName", HEADER, "ArgumentValue", header);
+        }
+    }
+
+    /** Reads exactly the bytes of {@code range} from {@code body}, skipping the bytes before it. */
+    static byte[] readRange(InputStream body, CopySourceRange range) throws IOException {
+        body.skipNBytes(range.first());
+        byte[] data = body.readNBytes((int) range.length());
+        if (data.length != range.length()) {
+            throw new IOException("Copy source ended " + (range.length() - data.length)
+                    + " bytes before the end of the requested range");
+        }
+        return data;
     }
 
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,

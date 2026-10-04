@@ -38,7 +38,7 @@ class RdsJdbcCompatTest {
 
     private static final StaticCredentialsProvider CREDENTIALS =
             StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-    private static final Region REGION = Region.US_EAST_1;
+    private static final Region REGION = TestFixtures.region();
     private static final String USERNAME = "admin";
     private static final String PASSWORD = "secret123";
     private static final String DATABASE = "app";

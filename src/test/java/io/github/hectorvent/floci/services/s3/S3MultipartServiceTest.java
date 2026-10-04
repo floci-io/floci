@@ -607,6 +607,33 @@ class S3MultipartServiceTest {
         assertThrows(AwsException.class, () -> s3Service.getObject("test-bucket", "raced.bin"));
     }
 
+    @Test
+    void uploadPartCopyCopiesOnlyTheRequestedRange() {
+        s3Service.putObject("test-bucket", "source.bin", "ABCDEFGHIJ".getBytes(StandardCharsets.UTF_8),
+                "application/octet-stream", Map.of());
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "copy.bin", null);
+
+        s3Service.uploadPartCopy("test-bucket", "copy.bin", upload.getUploadId(), 1,
+                "test-bucket", "source.bin", null, "bytes=2-5");
+        s3Service.completeMultipartUpload("test-bucket", "copy.bin", upload.getUploadId(), List.of(1), null, null);
+
+        assertArrayEquals("CDEF".getBytes(StandardCharsets.UTF_8), s3Service.getObject("test-bucket", "copy.bin").getData());
+    }
+
+    @Test
+    void uploadPartCopyRejectsARangePastTheEndOfTheSource() {
+        s3Service.putObject("test-bucket", "source.bin", "ABCDEFGHIJ".getBytes(StandardCharsets.UTF_8),
+                "application/octet-stream", Map.of());
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "copy.bin", null);
+
+        AwsException error = assertThrows(AwsException.class, () -> s3Service.uploadPartCopy("test-bucket", "copy.bin",
+                upload.getUploadId(), 1, "test-bucket", "source.bin", null, "bytes=5-10"));
+
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals("Range specified is not valid for source object of size: 10", error.getMessage());
+        assertNull(upload.getParts().get(1), "no part is recorded for a rejected range");
+    }
+
     private static Map<Integer, S3Checksum> partChecksums(ChecksumAlgorithm algorithm, byte[]... parts) {
         Map<Integer, S3Checksum> checksums = new HashMap<>();
         for (int i = 0; i < parts.length; i++) {

@@ -1,13 +1,17 @@
 package io.github.hectorvent.floci.services.glue;
 
 import io.github.hectorvent.floci.services.glue.model.Column;
+import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Resolves a Glue {@link Table} into the pieces of a DuckDB read plan: which {@code read_*}
@@ -27,7 +31,150 @@ public final class GlueTableResolver {
 
     private static final String ICEBERG_TABLE_TYPE = "ICEBERG";
 
+    /** Hive table property naming how many header lines a delimited file carries. */
+    private static final String PARAM_SKIP_HEADER = "skip.header.line.count";
+
     private GlueTableResolver() {
+    }
+
+    public record ReadPlan(String fromClause, boolean iceberg, List<Column> columns) {
+    }
+
+    public static ReadPlan readPlan(Table table) {
+        if (table == null || table.getStorageDescriptor() == null
+                || table.getStorageDescriptor().getLocation() == null
+                || table.getStorageDescriptor().getLocation().isBlank()) {
+            throw new IllegalArgumentException("Glue table has no storage location");
+        }
+        List<Column> columns = declaredColumns(table);
+        String metadata = isIcebergTable(table) ? icebergMetadataLocation(table) : null;
+        if (metadata != null && !metadata.isBlank()) {
+            return new ReadPlan(icebergReadExpression(metadata), true, columns);
+        }
+        String location = table.getStorageDescriptor().getLocation();
+        String normalized = location.endsWith("/") ? location.substring(0, location.length() - 1) : location;
+        String readFunction = inferReadFunction(table);
+        String path = readPath(table, normalized);
+        if ("read_csv_auto".equals(readFunction) && hasCsvOptions(table)) {
+            return new ReadPlan(csvReadExpression(table, path), false, columns);
+        }
+        return new ReadPlan(readExpression(readFunction, path), false, columns);
+    }
+
+    /**
+     * Read plan constrained to the exact objects that the caller listed and authorized. This is
+     * used by Redshift Spectrum, where a location-derived glob could match keys outside the
+     * literal S3 prefix that was checked against the bound role.
+     */
+    public static ReadPlan readPlan(Table table, List<String> objectUris) {
+        if (isIcebergTable(table)) {
+            return readPlan(table);
+        }
+        if (objectUris == null || objectUris.isEmpty()) {
+            throw new IllegalArgumentException("An exact-object read plan requires at least one object");
+        }
+        List<Column> columns = declaredColumns(table);
+        String fileList = "[" + objectUris.stream().map(GlueTableResolver::sqlLiteral)
+                .collect(Collectors.joining(", ")) + "]";
+        String readFunction = inferReadFunction(table);
+        String fromClause;
+        if ("read_csv_auto".equals(readFunction) && hasCsvOptions(table)) {
+            fromClause = csvReadExpressionForInput(table, fileList);
+        } else if ("read_parquet".equals(readFunction)) {
+            fromClause = "read_parquet(" + fileList + ", union_by_name = true)";
+        } else {
+            fromClause = readFunction + "(" + fileList + ")";
+        }
+        return new ReadPlan(fromClause, false, columns);
+    }
+
+    /**
+     * A table that declares CSV options (header lines to skip, a delimiter) is read with exactly
+     * those options and its declared columns rather than sniffed: a headerless file otherwise gets
+     * its first row taken as the header and the declared column names bind to nothing.
+     */
+    static boolean hasCsvOptions(Table table) {
+        Map<String, String> options = csvParameters(table);
+        return options.containsKey(PARAM_SKIP_HEADER) || options.containsKey("field.delim")
+                || options.containsKey("separatorChar");
+    }
+
+    static String csvReadExpression(Table table, String readPath) {
+        return csvReadExpressionForInput(table, "'" + escape(readPath) + "/**'");
+    }
+
+    private static String csvReadExpressionForInput(Table table, String inputExpression) {
+        Map<String, String> options = csvParameters(table);
+        int skip = skipCount(options.get(PARAM_SKIP_HEADER));
+        StringBuilder sql = new StringBuilder("read_csv(").append(inputExpression);
+        sql.append(", header = ").append(skip == 1);
+        if (skip > 1) {
+            sql.append(", skip = ").append(skip);
+        }
+        String delimiter = options.containsKey("field.delim") ? options.get("field.delim") : options.get("separatorChar");
+        sql.append(", delim = '").append(escape(delimiter == null || delimiter.isEmpty() ? "," : delimiter)).append("'");
+        appendOption(sql, "quote", options.get("quoteChar"));
+        appendOption(sql, "escape", options.get("escapeChar"));
+        appendOption(sql, "nullstr", options.get("serialization.null.format"));
+        List<Column> dataColumns = table.getStorageDescriptor().getColumns();
+        if (dataColumns != null && !dataColumns.isEmpty()) {
+            // Every column is read as VARCHAR: DuckDB's own type sniffing would disagree with the Glue types,
+            // and the caller casts each column to its declared type afterwards.
+            sql.append(", columns = {");
+            for (int i = 0; i < dataColumns.size(); i++) {
+                if (i > 0) {
+                    sql.append(", ");
+                }
+                sql.append('\'').append(escape(dataColumns.get(i).getName())).append("': 'VARCHAR'");
+            }
+            sql.append('}');
+        }
+        return sql.append(')').toString();
+    }
+
+    private static void appendOption(StringBuilder sql, String name, String value) {
+        if (value != null && !value.isEmpty()) {
+            sql.append(", ").append(name).append(" = '").append(escape(value)).append('\'');
+        }
+    }
+
+    private static int skipCount(String value) {
+        if (value == null) {
+            return 0;
+        }
+        try {
+            return Math.max(0, Integer.parseInt(value.trim()));
+        } catch (NumberFormatException expected) {
+            // an unparsable skip count is treated as absent, the same as a table that declares none
+            return 0;
+        }
+    }
+
+    /** Table, storage and SerDe parameters merged; the narrower scope wins. */
+    private static Map<String, String> csvParameters(Table table) {
+        Map<String, String> merged = new LinkedHashMap<>();
+        if (table.getParameters() != null) {
+            merged.putAll(table.getParameters());
+        }
+        StorageDescriptor descriptor = table.getStorageDescriptor();
+        if (descriptor != null) {
+            if (descriptor.getParameters() != null) {
+                merged.putAll(descriptor.getParameters());
+            }
+            if (descriptor.getSerdeInfo() != null && descriptor.getSerdeInfo().getParameters() != null) {
+                merged.putAll(descriptor.getSerdeInfo().getParameters());
+            }
+        }
+        return merged;
+    }
+
+    private static String escape(String value) {
+        return value.replace("'", "''");
+    }
+
+    private static String sqlLiteral(String value) {
+        String globLiteral = value.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]");
+        return "'" + globLiteral.replace("'", "''") + "'";
     }
 
     /**
@@ -45,16 +192,7 @@ public final class GlueTableResolver {
      * in charge.
      */
     public static String buildProjection(Table table) {
-        List<Column> declared = new ArrayList<>();
-        if (table != null) {
-            if (table.getStorageDescriptor() != null && table.getStorageDescriptor().getColumns() != null) {
-                declared.addAll(table.getStorageDescriptor().getColumns());
-            }
-            if (table.getPartitionKeys() != null) {
-                declared.addAll(table.getPartitionKeys());
-            }
-        }
-
+        List<Column> declared = declaredColumns(table);
         List<String> names = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Column c : declared) {
@@ -80,6 +218,27 @@ public final class GlueTableResolver {
             sb.append(quote(names.get(i))).append(" AS ").append(quote(names.get(i)));
         }
         return sb.toString();
+    }
+
+    private static List<Column> declaredColumns(Table table) {
+        List<Column> declared = new ArrayList<>();
+        if (table != null) {
+            if (table.getStorageDescriptor() != null && table.getStorageDescriptor().getColumns() != null) {
+                declared.addAll(table.getStorageDescriptor().getColumns());
+            }
+            if (table.getPartitionKeys() != null) {
+                declared.addAll(table.getPartitionKeys());
+            }
+        }
+        List<Column> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Column column : declared) {
+            if (column != null && column.getName() != null && !column.getName().isBlank()
+                    && seen.add(column.getName().toLowerCase(Locale.ROOT))) {
+                result.add(column);
+            }
+        }
+        return result;
     }
 
     public static String inferReadFunction(Table table) {
