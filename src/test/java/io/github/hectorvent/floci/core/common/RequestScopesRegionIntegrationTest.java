@@ -64,14 +64,27 @@ class RequestScopesRegionIntegrationTest {
         assertNotEquals("ap-southeast-2", regionResolver.getDefaultRegion());
     }
 
-    /** Background workers run on threads with no active request scope; reproduce that. */
+    /**
+     * Background workers run on threads with no active request scope; reproduce that. Anything the
+     * worker throws, including while a scope is restored after the body, fails the test.
+     */
     private static void runOffRequestThread(Runnable body) {
-        Thread thread = Thread.ofVirtual().start(body);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread thread = Thread.ofVirtual().start(() -> {
+            try {
+                body.run();
+            } catch (Throwable t) {
+                failure.set(t);
+            }
+        });
         try {
             thread.join();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(e);
+        }
+        if (failure.get() != null) {
+            throw new AssertionError("background worker failed", failure.get());
         }
     }
 }
