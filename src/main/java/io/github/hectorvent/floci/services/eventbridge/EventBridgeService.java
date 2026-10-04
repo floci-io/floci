@@ -1185,6 +1185,7 @@ public class EventBridgeService implements ResourceProvider {
 
     public Archive createArchive(String archiveName, String eventSourceArn, String description,
                                  String eventPattern, int retentionDays, String region) {
+        requireArchiveFields(description, eventPattern, retentionDays);
         if (archiveName == null || archiveName.isBlank()) {
             throw new AwsException("ValidationException", "ArchiveName is required.", 400);
         }
@@ -1209,6 +1210,32 @@ public class EventBridgeService implements ResourceProvider {
         archiveStore.put(key, archive);
         LOG.infov("Created archive: {0} for source {1}", archiveName, eventSourceArn);
         return archive;
+    }
+
+    /**
+     * The request constraints CreateArchive and UpdateArchive enforce before any other check, all
+     * violations reported together in AWS's order. A null argument is absent and not checked.
+     */
+    private void requireArchiveFields(String description, String eventPattern, Integer retentionDays) {
+        List<String> violations = new ArrayList<>();
+        if (retentionDays != null && retentionDays < 0) {
+            violations.add("Value '" + retentionDays + "' at 'retentionDays' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 0");
+        }
+        if (description != null && description.length() > 512) {
+            violations.add("Value '" + description + "' at 'description' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 512");
+        }
+        if (eventPattern != null && eventPattern.length() > 4096) {
+            violations.add("Value '" + eventPattern + "' at 'eventPattern' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 4096");
+        }
+        if (!violations.isEmpty()) {
+            String header = violations.size() == 1
+                    ? "1 validation error detected: "
+                    : violations.size() + " validation errors detected: ";
+            throw new AwsException("ValidationException", header + String.join("; ", violations), 400);
+        }
     }
 
     /**
@@ -1249,6 +1276,7 @@ public class EventBridgeService implements ResourceProvider {
      */
     public Archive updateArchive(String archiveName, String description,
                                  String eventPattern, Integer retentionDays, String region) {
+        requireArchiveFields(description, eventPattern, retentionDays);
         String key = archiveKey(region, archiveName);
         Archive archive = archiveStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",

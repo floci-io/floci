@@ -14,6 +14,7 @@ import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.eventbridge.model.ArchiveState;
 import software.amazon.awssdk.services.eventbridge.model.DescribeArchiveResponse;
+import software.amazon.awssdk.services.eventbridge.model.EventBridgeException;
 import software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundException;
 
 import java.util.ArrayList;
@@ -169,6 +170,38 @@ class CloudFormationEventsArchiveTest {
         assertThatThrownBy(() -> eventBridge.describeArchive(r -> r.archiveName(broken)))
                 .as("the archive on a missing bus is never created")
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void createArchiveAndUpdateArchiveRejectOutOfRangeFieldsBeforeAnyOtherCheck() {
+        String missingBus = eventBridge.describeEventBus(r -> r.name("default")).arn()
+                .replace("event-bus/default", "event-bus/" + TestFixtures.uniqueName("compat-archive-missing"));
+        String name = TestFixtures.uniqueName("compat-archive-invalid");
+        String description = "d".repeat(513);
+        String pattern = "{\"source\":[\"" + "a".repeat(4082) + "\"]}";
+
+        assertThatThrownBy(() -> eventBridge.createArchive(r -> r.archiveName(name).eventSourceArn(missingBus)
+                .description(description).eventPattern(pattern).retentionDays(-1)))
+                .as("validation runs before the source check")
+                .isInstanceOfSatisfying(EventBridgeException.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .startsWith("3 validation errors detected: Value '-1' at 'retentionDays'")
+                            .contains("at 'description' failed to satisfy constraint: "
+                                            + "Member must have length less than or equal to 512",
+                                    "at 'eventPattern' failed to satisfy constraint: "
+                                            + "Member must have length less than or equal to 4096");
+                });
+        assertThatThrownBy(() -> eventBridge.updateArchive(r -> r.archiveName(name).retentionDays(-1)))
+                .as("validation runs before the archive is looked up")
+                .isInstanceOfSatisfying(EventBridgeException.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+                    assertThat(error.awsErrorDetails().errorMessage()).isEqualTo("1 validation error detected: "
+                            + "Value '-1' at 'retentionDays' failed to satisfy constraint: "
+                            + "Member must have value greater than or equal to 0");
+                });
     }
 
     /**

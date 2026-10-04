@@ -206,7 +206,9 @@ existing event bus in the stack's account and region, as `CreateArchive` require
 optional; when omitted, CloudFormation generates a name and keeps it across updates. `Ref` returns
 the archive name and `Fn::GetAtt Arn` the archive ARN. A missing `RetentionDays` stores 0, and an
 `EventPattern` object reads back from `DescribeArchive` as a compact JSON string.
-`KmsKeyIdentifier` is ignored.
+`KmsKeyIdentifier` is ignored. A `Description` over 512 characters, an `EventPattern` over 4096, or a
+negative `RetentionDays` fails the resource with the `CreateArchive` or `UpdateArchive` validation
+message, as on AWS.
 
 Changing `Description`, `EventPattern`, or `RetentionDays` updates the archive in place. A property
 removed from the template is not sent, so the archive keeps its previous value, as on AWS. Changing

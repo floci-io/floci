@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -31,8 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * from the template keeps its value, and a later resource failing rolls the change back; a source
  * change replaces the archive, and is refused for an explicitly named one, as is declaring a
  * generated name explicitly; an update of a stack whose archive was stubbed creates a real one;
- * and the stack delete removes it. Custom source buses are created through the EventBridge API so
- * the stacks hold only archives.
+ * a description EventBridge rejects fails the create with its validation message; and the stack
+ * delete removes it. Custom source buses are created through the EventBridge API so the stacks
+ * hold only archives.
  */
 @QuarkusTest
 class CloudFormationEventsArchiveIntegrationTest {
@@ -253,6 +255,19 @@ class CloudFormationEventsArchiveIntegrationTest {
     }
 
     @Test
+    void anOverlongDescriptionFailsTheCreateWithTheEventBridgeValidationMessage() throws Exception {
+        String name = "orders-" + suffix();
+        Map<String, Object> properties = archiveProperties(name, createBus());
+        properties.put("Description", "d".repeat(513));
+
+        String stack = createStack(template(properties), "ROLLBACK_COMPLETE");
+
+        assertArchiveEvent(stack, "CREATE_FAILED", reason -> reason.contains("at 'description' failed to satisfy "
+                + "constraint: Member must have length less than or equal to 512"));
+        assertArchiveGone(name);
+    }
+
+    @Test
     void deleteStackRemovesTheArchive() throws Exception {
         String name = "orders-" + suffix();
         String stack = createStack(template(archiveProperties(name, createBus())), "CREATE_COMPLETE");
@@ -347,12 +362,17 @@ class CloudFormationEventsArchiveIntegrationTest {
     private static void assertRefusedAsCustomNamedReplacement(String stack, String name) {
         String expectedReason = "CloudFormation cannot update a stack when a custom-named resource requires "
                 + "replacing. Rename " + name + " and update the stack again.";
+        assertArchiveEvent(stack, "UPDATE_FAILED", expectedReason::equals);
+    }
+
+    private static void assertArchiveEvent(String stack, String status, Predicate<String> reason) {
         List<Map<String, String>> stackEvents = XmlParser.extractGroups(cfn(stack, "DescribeStackEvents", null)
                 .then().statusCode(200).extract().asString(), "member");
         assertTrue(stackEvents.stream().anyMatch(event -> "Archive".equals(event.get("LogicalResourceId"))
-                        && "UPDATE_FAILED".equals(event.get("ResourceStatus"))
-                        && expectedReason.equals(event.get("ResourceStatusReason"))),
-                "no UPDATE_FAILED event with the custom-named reason in " + stackEvents);
+                        && status.equals(event.get("ResourceStatus"))
+                        && event.get("ResourceStatusReason") != null
+                        && reason.test(event.get("ResourceStatusReason"))),
+                "no " + status + " event with the expected reason in " + stackEvents);
     }
 
     private static Map<String, Object> archiveProperties(String name, Object sourceArn) {
