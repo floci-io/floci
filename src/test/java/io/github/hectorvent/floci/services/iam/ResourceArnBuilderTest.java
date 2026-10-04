@@ -595,4 +595,12 @@ class ResourceArnBuilderTest {
         String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function", arn);
     }
+
+    @Test
+    void lambdaDurableExecutionRoutesNameTheOwningFunction() {
+        when(uriInfo.getPath()).thenReturn("/2025-12-01/durable-executions/arn:aws:lambda:us-east-1:000000000000:"
+                + "function:my-function:$LATEST/durable-execution/run-1/0b1c/stop");
+        String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function", arn);
+    }
 }

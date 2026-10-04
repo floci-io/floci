@@ -223,11 +223,30 @@ public class ResourceArnBuilder {
     private String buildLambdaArn(String path, String region, String accountId) {
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
+        if (name == null) {
+            name = durableExecutionFunctionName(path);
+        }
         if (name == null) return "*";
         // strip qualifier if present
         int colon = name.indexOf(':');
         if (colon > 0) name = name.substring(0, colon);
         return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
+    }
+
+    /** Durable execution actions are authorized against the function that owns the execution ARN. */
+    private static String durableExecutionFunctionName(String path) {
+        int executions = path.indexOf("/durable-executions/");
+        if (executions < 0) {
+            return null;
+        }
+        String marker = ":function:";
+        int function = path.indexOf(marker, executions);
+        if (function < 0) {
+            return null;
+        }
+        int start = function + marker.length();
+        int end = path.indexOf(':', start);
+        return end > start ? path.substring(start, end) : null;
     }
 
     // ── SQS ─────────────────────────────────────────────────────────────────────
