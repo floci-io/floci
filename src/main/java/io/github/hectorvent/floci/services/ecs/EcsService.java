@@ -5284,11 +5284,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Stores a task definition under its region's key. A definition persisted before the key
-     * carried the region is re-filed on its next write, so it never appears twice.
+     * carried the region is re-filed on its next write, so it never appears twice. The old key
+     * named no region, so it is dropped only when it holds this same definition: the same
+     * family and revision in another region is a different definition.
      */
     private void storeTaskDefinition(TaskDefinition td) {
         String legacyKey = td.getFamily() + ":" + td.getRevision();
-        if (taskDefinitions.containsKey(legacyKey)) {
+        TaskDefinition legacy = taskDefinitions.get(legacyKey);
+        if (legacy != null && td.getTaskDefinitionArn().equals(legacy.getTaskDefinitionArn())) {
             taskDefinitions.remove(legacyKey);
         }
         taskDefinitions.put(taskDefinitionKey(regionOf(td), td.getFamily(), td.getRevision()), td);
