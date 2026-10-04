@@ -198,6 +198,7 @@ final class DurableCheckpointApplier {
             if (update.action() != DurableOperationAction.SUCCEED && update.action() != DurableOperationAction.FAIL) {
                 throw invalid("Invalid EXECUTION action.");
             }
+            requireMatchingResult(update);
             requireErrorSize(update);
             if (utf8Length(update.payload()) > execution.getMaxResultBytes()) {
                 throw invalid("Execution output payload size must be less than or equal to "
@@ -266,12 +267,7 @@ final class DurableCheckpointApplier {
 
         private void closeStep(DurableOperationUpdate update, DurableOperation existing) {
             DurableOperationAction action = update.action();
-            if (action == DurableOperationAction.SUCCEED && update.error() != null) {
-                throw invalid("Cannot provide an Error for SUCCEED action.");
-            }
-            if (action == DurableOperationAction.FAIL && update.payload() != null) {
-                throw invalid("Cannot provide a Payload for FAIL action.");
-            }
+            requireMatchingResult(update);
             if (action == DurableOperationAction.RETRY && update.payload() != null && update.error() != null) {
                 throw invalid("Cannot provide both error and payload to RETRY a STEP.");
             }
@@ -341,6 +337,15 @@ final class DurableCheckpointApplier {
                     event(existing, "WaitCancelled", new LinkedHashMap<>());
                 }
                 default -> throw invalid("Invalid action for the given operation type.");
+            }
+        }
+
+        private static void requireMatchingResult(DurableOperationUpdate update) {
+            if (update.action() == DurableOperationAction.SUCCEED && update.error() != null) {
+                throw invalid("Cannot provide an Error for SUCCEED action.");
+            }
+            if (update.action() == DurableOperationAction.FAIL && update.payload() != null) {
+                throw invalid("Cannot provide a Payload for FAIL action.");
             }
         }
 

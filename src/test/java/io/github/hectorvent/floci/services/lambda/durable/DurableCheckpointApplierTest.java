@@ -28,6 +28,17 @@ class DurableCheckpointApplierTest {
     }
 
     @Test
+    void anExecutionCloseCarriesOnlyItsOwnResultKind() {
+        DurableErrorObject error = DurableErrorObject.of("m", "T");
+        assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
+                DurableOperationAction.SUCCEED, "\"p\"", error, null, null, null)),
+                "Cannot provide an Error for SUCCEED action.");
+        assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
+                DurableOperationAction.FAIL, "\"p\"", error, null, null, null)),
+                "Cannot provide a Payload for FAIL action.");
+    }
+
+    @Test
     void anExecutionErrorHasTheSameSizeLimitAsAnOperationError() {
         DurableErrorObject large = DurableErrorObject.of("x".repeat(DurableCheckpointApplier.MAX_ERROR_BYTES), "T");
         assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
