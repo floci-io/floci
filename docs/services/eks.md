@@ -510,6 +510,14 @@ Floci derives the availability zone from the cluster region (for example, `<regi
 
 The node name, the instance ID in `spec.providerID`, and the synthetic EC2 instance (`InstanceId` and `PrivateDnsName`) all describe the same instance. This enables controllers that reconcile nodes against EC2 (such as CSI drivers) to look up the node instance via `DescribeInstances`.
 
+#### Storage classes
+
+A real EKS cluster starts with no StorageClass and no default storage provisioner installed. Floci matches this behavior: freshly created clusters do not include k3s's bundled `local-path` provisioner or a default StorageClass. A PersistentVolumeClaim without a `storageClassName` remains `Pending` until a storage class or CSI driver is installed, preventing unqualified claims from silently binding to the node filesystem.
+
+Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass.
+
+For local testing workflows that rely on automatic volume binding without a CSI driver, set `floci.services.eks.default-storage-class: true` (or `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS=true`) to retain k3s's bundled `local-path` provisioner and default StorageClass.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -528,6 +536,8 @@ The node name, the instance ID in `spec.providerID`, and the synthetic EC2 insta
 | `FLOCI_SERVICES_EKS_ENDPOINT_MODE` | `host` | `describe-cluster` endpoint: `host` (`localhost:<hostPort>`) or `network` (container DNS) |
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
+| `FLOCI_SERVICES_EKS_DISABLE_CNI` | `false` | Start k3s without bundled flannel, network policy, and kube-proxy so an external CNI can take over |
+| `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS` | `false` | Retain k3s bundled local-path provisioner and default StorageClass (default false matches EKS with no default class) |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
 | `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `true` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true` |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |

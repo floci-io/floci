@@ -235,6 +235,7 @@ class EksClusterManagerTest {
         List<String> args = EksClusterManager.buildServerArgs(false);
 
         assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
         assertFalse(args.contains("--flannel-backend=none"));
         assertFalse(args.contains("--disable-network-policy"));
         assertFalse(args.contains("--disable-kube-proxy"));
@@ -247,8 +248,27 @@ class EksClusterManagerTest {
         assertTrue(args.contains("--flannel-backend=none"));
         assertTrue(args.contains("--disable-network-policy"));
         assertTrue(args.contains("--disable-kube-proxy"));
-        // Base args must still be present — disableCni only adds flags, never replaces them.
+        // Base args must still be present: disableCni only adds flags, never replaces them.
         assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
+        assertTrue(args.contains("--tls-san=localhost"));
+    }
+
+    @Test
+    void serverArgsRetainLocalStorageWhenDefaultStorageClassEnabled() {
+        List<String> args = EksClusterManager.buildServerArgs(false, true, null, null);
+
+        assertTrue(args.contains("--disable=traefik"));
+        assertFalse(args.contains("--disable=local-storage"));
+        assertTrue(args.contains("--tls-san=localhost"));
+    }
+
+    @Test
+    void serverArgsDisableLocalStorageWhenDefaultStorageClassDisabled() {
+        List<String> args = EksClusterManager.buildServerArgs(false, false, null, null);
+
+        assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
         assertTrue(args.contains("--tls-san=localhost"));
     }
 
@@ -361,6 +381,43 @@ class EksClusterManagerTest {
             verify(builder).withEmbeddedDns();
         } else {
             verify(builder, never()).withEmbeddedDns();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void startClusterDefaultStorageClassFlag(boolean defaultStorageClass) {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().eks().defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+        when(config.services().eks().defaultStorageClass()).thenReturn(defaultStorageClass);
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class, Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.create(any())).thenReturn("container-id");
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                config, new RegionResolver("us-east-1", "000000000000"));
+
+        Cluster cluster = new Cluster();
+        cluster.setName("my-cluster");
+
+        manager.startCluster(cluster);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withCmd(cmdCaptor.capture());
+        List<String> cmd = cmdCaptor.getValue();
+
+        if (defaultStorageClass) {
+            assertFalse(cmd.contains("--disable=local-storage"));
+        } else {
+            assertTrue(cmd.contains("--disable=local-storage"));
         }
     }
 
@@ -2542,6 +2599,7 @@ class EksClusterManagerTest {
             List<String> args = EksClusterManager.buildServerArgs(false, "172.20.0.0/16", "10.44.0.0/16");
             assertTrue(args.contains("--service-cidr=172.20.0.0/16"));
             assertTrue(args.contains("--cluster-cidr=10.44.0.0/16"));
+            assertTrue(args.contains("--disable=local-storage"));
             assertFalse(args.contains("--flannel-backend=none"));
         }
 
@@ -2551,6 +2609,7 @@ class EksClusterManagerTest {
             assertTrue(args.contains("--flannel-backend=none"));
             assertTrue(args.contains("--disable-network-policy"));
             assertTrue(args.contains("--disable-kube-proxy"));
+            assertTrue(args.contains("--disable=local-storage"));
             assertTrue(args.contains("--service-cidr=10.100.0.0/16"));
             assertTrue(args.contains("--cluster-cidr=10.42.0.0/16"));
         }

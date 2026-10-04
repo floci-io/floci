@@ -338,6 +338,7 @@ floci:
       max-memory-mib: 0
       max-vcpus: 0
       ecr-registry-mirror: true
+      default-storage-class: false
       imds: false
       irsa-signing-key: true
       embedded-dns: true

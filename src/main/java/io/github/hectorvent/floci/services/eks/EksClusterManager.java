@@ -490,7 +490,11 @@ public class EksClusterManager
                 ? cluster.getPodCidr()
                 : DEFAULT_POD_CIDR;
 
-        List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
+        List<String> serverArgs = buildServerArgs(
+                config.services().eks().disableCni(),
+                config.services().eks().defaultStorageClass(),
+                serviceCidr,
+                clusterCidr);
 
         EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
         if (nodeLimits != null) {
@@ -1319,14 +1323,20 @@ public class EksClusterManager
     }
 
     /**
-     * Builds the k3s {@code server} command-line args. When {@code disableCni} is true, flannel,
-     * k3s's default network policy controller, and kube-proxy are all disabled up front: see the
-     * {@code disableCni} config javadoc for why this must happen at startup, not after the fact.
+     * Builds the k3s {@code server} command-line args. When {@code defaultStorageClass} is false,
+     * k3s's bundled local-path provisioner is disabled so clusters match AWS EKS by starting with
+     * no default StorageClass. When {@code disableCni} is true, flannel, k3s's default network
+     * policy controller, and kube-proxy are all disabled up front: see the {@code disableCni}
+     * config javadoc for why this must happen at startup, not after the fact.
      */
-    static List<String> buildServerArgs(boolean disableCni, String serviceCidr, String clusterCidr) {
+    static List<String> buildServerArgs(boolean disableCni, boolean defaultStorageClass,
+            String serviceCidr, String clusterCidr) {
         List<String> serverArgs = new ArrayList<>(List.of("server",
                 "--disable=traefik",
                 "--tls-san=localhost"));
+        if (!defaultStorageClass) {
+            serverArgs.add("--disable=local-storage");
+        }
         if (disableCni) {
             serverArgs.add("--flannel-backend=none");
             serverArgs.add("--disable-network-policy");
@@ -1341,8 +1351,12 @@ public class EksClusterManager
         return serverArgs;
     }
 
+    static List<String> buildServerArgs(boolean disableCni, String serviceCidr, String clusterCidr) {
+        return buildServerArgs(disableCni, false, serviceCidr, clusterCidr);
+    }
+
     static List<String> buildServerArgs(boolean disableCni) {
-        return buildServerArgs(disableCni, null, null);
+        return buildServerArgs(disableCni, false, null, null);
     }
 
     /**

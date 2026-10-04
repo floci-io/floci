@@ -3273,12 +3273,24 @@ public interface EmulatorConfig {
          * --disable-kube-proxy} instead of its bundled networking stack. k3s's default flannel CNI
          * and kube-proxy run embedded in the k3s server process itself (not separate, killable
          * DaemonSets), so a real CNI (e.g. Cilium) can only cleanly take over if k3s never starts
-         * its own in the first place — there is no way to evict them after the fact. CoreDNS,
+         * its own in the first place: there is no way to evict them after the fact. CoreDNS,
          * local-path-provisioner, and metrics-server are unaffected; they don't depend on which CNI
          * is in place.
          */
         @WithDefault("false")
         boolean disableCni();
+
+        /**
+         * When false (default), starts k3s with {@code --disable=local-storage} so clusters match
+         * AWS EKS by starting with no default StorageClass and no host-path provisioner. When true,
+         * retains k3s's bundled local-path provisioner and default StorageClass for local workloads
+         * that rely on automatic volume binding without installing a CSI driver.
+         *
+         * <p>Like {@link #disableCni()}, k3s's local-path-provisioner runs embedded in the k3s server
+         * process itself, so this flag must be set at startup rather than applied afterwards.
+         */
+        @WithDefault("false")
+        boolean defaultStorageClass();
 
         /**
          * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
