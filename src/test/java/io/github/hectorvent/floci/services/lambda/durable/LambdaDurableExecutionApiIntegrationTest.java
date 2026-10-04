@@ -207,7 +207,8 @@ class LambdaDurableExecutionApiIntegrationTest {
             .get(DURABLE + "/functions/api-durable-fn/durable-executions?MaxItems=x")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"));
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("'x' can not be converted to Integer"));
 
         given()
         .when()

@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
-import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -206,7 +205,14 @@ public class DurableExecutionController {
     }
 
     private static Integer parseMaxItems(String maxItems) {
-        return Pagination.parseMaxResults(maxItems, "InvalidParameterValueException");
+        if (maxItems == null || maxItems.isEmpty()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(maxItems);
+        } catch (NumberFormatException e) {
+            throw new AwsException("SerializationException", "'" + maxItems + "' can not be converted to Integer", 400);
+        }
     }
 
     private static Set<DurableExecutionStatus> parseStatuses(List<String> statuses) {
