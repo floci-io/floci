@@ -49,10 +49,12 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Covers the two REST integration transport settings AWS documents that Floci previously accepted
@@ -61,6 +63,9 @@ import static org.hamcrest.Matchers.notNullValue;
  * <p>The TLS case matters because {@code HttpProxyInvoker} uses a default {@code HttpClient}: an
  * HTTPS backend presenting a self-signed certificate was unreachable with no way to opt out, which
  * is the common shape for an internal service behind a private CA.
+ *
+ * <p>The VPC link cases cover link validation and TLS settings on the integration URI.
+ * Floci forwards to that URI directly; these fixtures do not test routing through a link target.
  */
 @QuarkusTest
 class ApiGatewayIntegrationTransportOptionsTest {
@@ -85,6 +90,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
     private static int nameConstrainedRootTlsPort;
     private static int nameConstrainedIntermediateTlsPort;
     private static int permissiveIntermediateTlsPort;
+    private static final AtomicInteger tlsBackendHits = new AtomicInteger();
 
     private final List<String> createdApis = new ArrayList<>();
     private final List<String> createdLinks = new ArrayList<>();
@@ -98,7 +104,10 @@ class ApiGatewayIntegrationTransportOptionsTest {
 
         tlsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         tlsServer.setHttpsConfigurator(new HttpsConfigurator(selfSignedContext()));
-        tlsServer.createContext("/", exchange -> respond(exchange, 200, "{\"tls\":\"ok\"}"));
+        tlsServer.createContext("/", exchange -> {
+            tlsBackendHits.incrementAndGet();
+            respond(exchange, 200, "{\"tls\":\"ok\"}");
+        });
         tlsServer.start();
         tlsPort = tlsServer.getAddress().getPort();
 
@@ -416,8 +425,8 @@ class ApiGatewayIntegrationTransportOptionsTest {
             "permissiveIntermediate, true, 200",
             "constrainedRoot, true, 502"
     })
-    void privateHttpsIntegrationPreservesCertificateValidation(String certificateCase,
-                                                              boolean skipIssuanceCheck, int expectedStatus) {
+    void httpsCertificateValidationWithAvailableVpcLink(String certificateCase,
+                                                        boolean skipIssuanceCheck, int expectedStatus) {
         int port = switch (certificateCase) {
             case "selfSigned" -> tlsPort;
             case "privateCa" -> privateCaTlsPort;
@@ -431,15 +440,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
             default -> throw new IllegalArgumentException("Unknown certificate case: " + certificateCase);
         };
         String suffix = UUID.randomUUID().toString().substring(0, 8);
-        String linkId = given().contentType(ContentType.JSON)
-                .body("""
-                        {"name":"tls-link-%s","targetArns":[
-                          "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/net/test/abc"
-                        ]}
-                        """.formatted(suffix))
-                .when().post("/vpclinks")
-                .then().statusCode(202).extract().path("id");
-        createdLinks.add(linkId);
+        String linkId = createVpcLink("tls-link-" + suffix);
         String extras = ",\"connectionType\":\"VPC_LINK\",\"connectionId\":\"" + linkId + "\"";
         if (skipIssuanceCheck) {
             extras += ",\"tlsConfig\":{\"insecureSkipVerification\":true}";
@@ -452,6 +453,41 @@ class ApiGatewayIntegrationTransportOptionsTest {
         if (expectedStatus == 200) {
             response.body("tls", equalTo("ok"));
         }
+    }
+
+    @Test
+    void httpsBackendIsNotCalledAfterVpcLinkIsDeleted() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String linkId = createVpcLink("tls-deleted-link-" + suffix);
+        String apiId = createApi("tls-deleted-link-" + suffix,
+                "https://localhost:" + tlsPort + "/{proxy}",
+                ",\"connectionType\":\"VPC_LINK\",\"connectionId\":\"" + linkId
+                        + "\",\"tlsConfig\":{\"insecureSkipVerification\":true}");
+
+        given().when().get("/execute-api/" + apiId + "/test/thing")
+                .then().statusCode(200).body("tls", equalTo("ok"));
+        int hitsBeforeDeletion = tlsBackendHits.get();
+        given().when().delete("/vpclinks/" + linkId).then().statusCode(202);
+        createdLinks.remove(linkId);
+
+        given().when().get("/execute-api/" + apiId + "/test/thing")
+                .then().statusCode(502)
+                .body("message", equalTo("Invalid VPC link identifier specified: " + linkId));
+        assertEquals(hitsBeforeDeletion, tlsBackendHits.get(),
+                "A deleted VPC link must prevent the HTTPS backend call");
+    }
+
+    private String createVpcLink(String name) {
+        String linkId = given().contentType(ContentType.JSON)
+                .body("""
+                        {"name":"%s","targetArns":[
+                          "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/net/test/abc"
+                        ]}
+                        """.formatted(name))
+                .when().post("/vpclinks")
+                .then().statusCode(202).extract().path("id");
+        createdLinks.add(linkId);
+        return linkId;
     }
 
     @Test
