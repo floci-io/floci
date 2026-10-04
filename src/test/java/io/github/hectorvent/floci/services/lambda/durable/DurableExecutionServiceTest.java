@@ -211,6 +211,10 @@ class DurableExecutionServiceTest {
         assertEquals("DurableExecutionAlreadyStartedException", conflict.getErrorCode());
         assertEquals("Execution already started: " + first.getExecutionArn(), conflict.getMessage());
         assertEquals(409, conflict.getHttpStatus());
+
+        AwsException otherVersion = assertThrows(AwsException.class, () -> service.start(
+                new StartRequest(ACCOUNT, REGION, FUNCTION, "2", "same", "{\"a\":1}", true)));
+        assertEquals("Execution already started: " + first.getExecutionArn(), otherVersion.getMessage());
     }
 
     @Test
@@ -568,8 +572,9 @@ class DurableExecutionServiceTest {
 
         @Override
         public ResolvedDurableTarget resolve(String accountId, String region, String functionName, String qualifier) {
+            String version = qualifier == null ? "1" : qualifier;
             return new ResolvedDurableTarget(accountId, region, this.functionName,
-                    "arn:aws:lambda:us-east-1:000000000000:function:" + this.functionName + ":1", "1", true,
+                    "arn:aws:lambda:us-east-1:000000000000:function:" + this.functionName + ":" + version, version, true,
                     executionTimeoutSeconds, retentionPeriodInDays);
         }
 

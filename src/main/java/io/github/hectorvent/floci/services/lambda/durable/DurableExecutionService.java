@@ -144,7 +144,9 @@ public class DurableExecutionService implements Resettable {
                             && target.functionName().equals(candidate.getFunctionName()))
                     .findFirst();
             if (existing.isPresent()) {
-                if (!Objects.equals(existing.get().getInputPayload(), request.inputPayload())) {
+                // Names are unique per function across versions. Only the same version and payload re-attaches.
+                if (!existing.get().getVersion().equals(target.version())
+                        || !Objects.equals(existing.get().getInputPayload(), request.inputPayload())) {
                     throw new AwsException("DurableExecutionAlreadyStartedException",
                             "Execution already started: " + existing.get().getExecutionArn(), 409);
                 }
