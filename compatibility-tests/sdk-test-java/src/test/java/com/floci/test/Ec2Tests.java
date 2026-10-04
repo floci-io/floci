@@ -1,12 +1,15 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.regions.RegionMetadata;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.*;
 import software.amazon.awssdk.services.ec2.model.Tag;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -947,24 +950,46 @@ class Ec2Tests {
         DescribeVpcEndpointServicesResponse resp = ec2.describeVpcEndpointServices(
                 DescribeVpcEndpointServicesRequest.builder().build());
 
-        assertThat(resp.serviceNames()).contains("com.amazonaws.us-east-1.s3");
+        // The S3 gateway keeps com.amazonaws everywhere. Outside the commercial partition and GovCloud,
+        // AWS names some interface services under the partition's DNS suffix reversed (cn.com.amazonaws,
+        // eu.amazonaws, gov.ic.c2s, ...): ecr.api in every China, EUSC and ISO region, S3 only in China,
+        // where the two S3 offerings therefore split.
+        String region = TestFixtures.region().id();
+        String reversedSuffix = reversedDnsSuffix();
+        String s3Gateway = "com.amazonaws." + region + ".s3";
+        String s3Interface = ("aws-cn".equals(TestFixtures.partition()) ? reversedSuffix : "com.amazonaws")
+                + "." + region + ".s3";
+        assertThat(resp.serviceNames()).contains(s3Gateway, s3Interface);
         assertThat(resp.serviceDetails()).isNotEmpty();
 
-        ServiceDetail s3 = resp.serviceDetails().stream()
-                .filter(d -> d.serviceName().equals("com.amazonaws.us-east-1.s3"))
-                .findFirst()
-                .orElseThrow();
-        // S3 is the one service offering both endpoint types.
-        assertThat(s3.serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList())
-                .containsExactlyInAnyOrder("Gateway", "Interface");
-        assertThat(s3.availabilityZones()).isNotEmpty();
+        if (s3Interface.equals(s3Gateway)) {
+            // S3 is the one service offering both endpoint types.
+            assertThat(serviceTypes(resp, s3Gateway)).containsExactlyInAnyOrder("Gateway", "Interface");
+        } else {
+            assertThat(serviceTypes(resp, s3Gateway)).containsExactly("Gateway");
+            assertThat(serviceTypes(resp, s3Interface)).containsExactly("Interface");
+        }
+        assertThat(serviceDetail(resp, s3Gateway).availabilityZones()).isNotEmpty();
+        assertThat(serviceTypes(resp, reversedSuffix + "." + region + ".ecr.api")).containsExactly("Interface");
+    }
 
-        ServiceDetail ecr = resp.serviceDetails().stream()
-                .filter(d -> d.serviceName().equals("com.amazonaws.us-east-1.ecr.api"))
+    private static String reversedDnsSuffix() {
+        RegionMetadata metadata = TestFixtures.region().metadata();
+        List<String> labels = new ArrayList<>(List.of(
+                (metadata == null ? "amazonaws.com" : metadata.partition().dnsSuffix()).split("\\.")));
+        Collections.reverse(labels);
+        return String.join(".", labels);
+    }
+
+    private static ServiceDetail serviceDetail(DescribeVpcEndpointServicesResponse resp, String name) {
+        return resp.serviceDetails().stream()
+                .filter(d -> d.serviceName().equals(name))
                 .findFirst()
                 .orElseThrow();
-        assertThat(ecr.serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList())
-                .containsExactly("Interface");
+    }
+
+    private static List<String> serviceTypes(DescribeVpcEndpointServicesResponse resp, String name) {
+        return serviceDetail(resp, name).serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList();
     }
 
     @Test

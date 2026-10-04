@@ -8,9 +8,11 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.BadRequestException;
@@ -25,6 +27,9 @@ import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetEventDesti
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetEventDestinationsResponse;
 import software.amazon.awssdk.services.sesv2.model.SnsDestination;
 import software.amazon.awssdk.services.sesv2.model.UpdateConfigurationSetEventDestinationRequest;
+
+import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -45,10 +50,10 @@ class SesConfigurationSetEventDestinationTest {
     private static String v1CsName;
     private static String v2CsName;
     private static final String ED_NAME = "ed-sns";
-    private static final String TOPIC_ARN = "arn:aws:sns:us-east-1:000000000000:ses-events";
-    private static final String TOPIC_ARN_2 = "arn:aws:sns:us-east-1:000000000000:ses-events-2";
-    private static final String DEFAULT_BUS_ARN = "arn:aws:events:us-east-1:000000000000:event-bus/default";
-    private static final String CUSTOM_BUS_ARN = "arn:aws:events:us-east-1:000000000000:event-bus/custom";
+    private static final String TOPIC_ARN = TestFixtures.arn("sns", "000000000000", "ses-events");
+    private static final String TOPIC_ARN_2 = TestFixtures.arn("sns", "000000000000", "ses-events-2");
+    private static final String DEFAULT_BUS_ARN = TestFixtures.arn("events", "000000000000", "event-bus/default");
+    private static final String CUSTOM_BUS_ARN = TestFixtures.arn("events", "000000000000", "event-bus/custom");
 
     @BeforeAll
     static void setup() {
@@ -230,12 +235,28 @@ class SesConfigurationSetEventDestinationTest {
                 .isEqualTo(404);
     }
 
+    /**
+     * Event buses SES v2 must refuse: a custom bus, or the default bus of another account or region.
+     * The other-region case needs a second region in the fixture partition, which a single-region
+     * partition (aws-eusc, aws-iso-e) does not have, so it is the only case left out there.
+     */
+    static Stream<Arguments> rejectedEventBuses() {
+        Optional<String> otherRegion = Region.regions().stream()
+                .filter(region -> !region.isGlobalRegion() && !region.equals(TestFixtures.region()))
+                .filter(region -> region.metadata() != null
+                        && region.metadata().partition().id().equals(TestFixtures.partition()))
+                .map(Region::id)
+                .sorted()
+                .findFirst();
+        Stream<Arguments> always = Stream.of(
+                Arguments.of("custom", CUSTOM_BUS_ARN),
+                Arguments.of("mismatched-account", TestFixtures.arn("events", "111111111111", "event-bus/default")));
+        return Stream.concat(always, otherRegion.stream().map(region -> Arguments.of("mismatched-region",
+                TestFixtures.arn("events", region, "000000000000", "event-bus/default"))));
+    }
+
     @ParameterizedTest(name = "{0}")
-    @CsvSource({
-            "custom," + CUSTOM_BUS_ARN,
-            "mismatched-account,arn:aws:events:us-east-1:111111111111:event-bus/default",
-            "mismatched-region,arn:aws:events:us-west-2:000000000000:event-bus/default"
-    })
+    @MethodSource("rejectedEventBuses")
     @Order(9)
     void v2_eventBridgeDefaultBusAcceptedAndInvalidBusRejected(String caseName, String rejectedBusArn) {
         String destinationName = "ed-eventbridge-" + caseName;

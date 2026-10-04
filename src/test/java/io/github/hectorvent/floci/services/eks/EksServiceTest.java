@@ -62,6 +62,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -519,6 +520,50 @@ class EksServiceTest {
 
         verify(clusterManager).stopCluster(cluster);
         verify(clusterManager, never()).detachCluster(any(Cluster.class));
+    }
+
+    @Test
+    void aDeleteOverlappingOneStillInProgressIsRejectedAndCannotReviveTheCluster() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, false);
+        AwsException[] overlapping = new AwsException[1];
+        doAnswer(firstDelete -> {
+            overlapping[0] = assertThrows(AwsException.class, () -> service.deleteCluster("running-cluster"));
+            return null;
+        }).when(clusterManager).stopCluster(cluster);
+
+        service.deleteCluster("running-cluster");
+
+        assertEquals("ResourceInUseException", overlapping[0].getErrorCode());
+        assertThrows(AwsException.class, () -> service.describeCluster("running-cluster"));
+    }
+
+    @Test
+    void aClusterLeftDeletingCanBeDeletedAgainOnceTheEarlierDeleteFinished() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, false);
+        doThrow(new IllegalStateException("Failed to remove container"))
+                .doNothing()
+                .when(clusterManager).stopCluster(cluster);
+        assertThrows(IllegalStateException.class, () -> service.deleteCluster("running-cluster"));
+
+        service.deleteCluster("running-cluster");
+
+        assertThrows(AwsException.class, () -> service.describeCluster("running-cluster"));
+    }
+
+    @Test
+    void aDeleteThatCouldNotRemoveTheClusterContainerLeavesTheClusterActive() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, false);
+        doThrow(new IllegalStateException("Failed to remove container")).when(clusterManager).stopCluster(cluster);
+
+        assertThrows(IllegalStateException.class, () -> service.deleteCluster("running-cluster"));
+
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("running-cluster").getStatus());
     }
 
     private static Cluster activeCluster() {

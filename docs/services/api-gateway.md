@@ -303,6 +303,37 @@ A `MOCK` integration renders its request template and uses the `statusCode` it p
 
 `HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`.
 
+A greedy resource captures only the path segments after its parent. For example,
+`/api/v1/auth/signup/{proxy+}` captures `checkpoint/status` from
+`/api/v1/auth/signup/checkpoint/status`, so an integration URI ending in
+`/api/v1/auth/signup/{proxy}` forwards the prefix once. Greedy parameter names other
+than `proxy` are supported, including in `integration.request.path.*` mappings.
+
+REST `HTTP_PROXY` and `HTTP` integrations also accept `context.*` sources in header, query
+and path parameter mappings. Supported request fields are `accountId`, `apiId`, `deploymentId`,
+`httpMethod`, `path` (including the stage), `protocol`, `requestId`, `resourceId`, `resourcePath`,
+`stage`, `identity.sourceIp` and `identity.userAgent`. `context.requestId` uses the same ID as
+the HTTP integration's VTL templates. `context.authorizer.principalId` and
+`context.authorizer.<property>` come from the successful authorizer result; authenticated Cognito
+claims are available as `context.authorizer.claims.<property>`. String, number and boolean values
+are forwarded as strings. Missing values and objects are not mapped. An explicit header mapping
+replaces all inbound values of that header, regardless of casing.
+
+For a header mapped from `context.*`, inbound values are also removed when the context value is
+missing or is not a scalar. The backend therefore cannot receive a client-supplied value in place
+of an absent authorizer claim. An unresolved `method.request.*` mapping retains the existing
+HTTP proxy passthrough behavior.
+
+`method.request.*` sources always read the original inbound headers, query parameters and path
+parameters. Mapped destinations do not change another mapping's source, regardless of mapping order.
+
+Use alphanumeric or underscore authorizer context keys, as required by the
+[AWS mapping contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-mapping-template-reference.html).
+For example, return `userClaims` in the authorizer context and map
+`integration.request.header.X-User-Claims` from `context.authorizer.userClaims`. The HTTP header
+name can contain hyphens. REST Lambda authorizer result caching is not implemented; setting
+`authorizerResultTtlInSeconds` does not currently suppress repeat Lambda invocations.
+
 A backend response body larger than the 10 MB API Gateway payload quota yields `413` with `{"message":"Request Entity Too Large"}`. The same limit applies to HTTP API `HTTP_PROXY` integrations.
 
 Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` reaches the backend as two `tag` parameters rather than one `tag=a,b`, a header sent twice arrives twice, and a backend that returns two `Set-Cookie` headers relays two to the caller. Comma-joining them would not be reversible, since a cookie's `Expires` attribute contains a comma of its own. An explicit `integration.request.header.X` or `integration.request.querystring.X` mapping overwrites, so it replaces any repeated inbound values with the single mapped one.
@@ -321,6 +352,7 @@ Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` r
 | `requestParameters` / `requestTemplates` | Applied at invoke time and returned on read-back |
 | `passthroughBehavior` | `NEVER` and `WHEN_NO_TEMPLATES` reject an unmatched Content-Type with `415` |
 | `timeoutInMillis` | Honoured; defaults to AWS's 29,000 ms. Values below 50 are rejected. The 29s ceiling is an edge-optimized limit, so Regional APIs may exceed it |
+| `responseTransferMode` | Defaults to `BUFFERED`. `STREAM` is accepted only for `HTTP_PROXY` and `AWS_PROXY` integrations and is stored and returned by the management API, but execution responses are still buffered; response streaming is not yet implemented |
 | `tlsConfig.insecureSkipVerification` | Honoured, with AWS's semantics: it stops requiring the backend certificate to be issued by a trusted CA, so a private-CA or self-signed backend is reachable, but expiration, hostname and the presence of a root certificate authority are still checked |
 | `contentHandling` | `CONVERT_TO_TEXT` base64-encodes a binary request for mapping templates; `CONVERT_TO_BINARY` base64-decodes a text request before sending it |
 | `connectionType` / `connectionId` | `VPC_LINK` requires `connectionId` to name an existing, available VPC link; an unknown link yields `502` |

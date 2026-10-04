@@ -178,6 +178,25 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void syncInvoke_clientContext_isPlacedOnTheEnqueuedInvocation() {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-ctx", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        AtomicReference<String> seen = new AtomicReference<>();
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            seen.set(pi.getClientContext());
+            pi.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, "req-ctx"));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        String clientContext = "{\"custom\":{\"traceparent\":\"00-abc-def-01\"}}";
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, null, clientContext);
+
+        assertEquals(clientContext, seen.get());
+    }
+
+    @Test
     void successfulInvocation_releasesHandle_doesNotDestroy() {
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-2", "test-fn", rtas, ContainerState.WARM);

@@ -19,6 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class Ec2DescribeSpotPriceHistoryTest {
 
+    private static final String ZONE_A = TestFixtures.region().id() + "a";
+    private static final String ZONE_B = TestFixtures.region().id() + "b";
+
     @Test
     void describeSpotPriceHistoryReturnsEntriesForKnownInstanceTypesWithoutFilters() {
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
@@ -42,14 +45,14 @@ class Ec2DescribeSpotPriceHistoryTest {
                     DescribeSpotPriceHistoryRequest.builder()
                             .instanceTypes(InstanceType.M5_LARGE)
                             .productDescriptions("Linux/UNIX")
-                            .availabilityZone("us-east-1a")
+                            .availabilityZone(ZONE_A)
                             .build());
 
             assertThat(response.spotPriceHistory()).hasSize(1);
             SpotPrice entry = response.spotPriceHistory().get(0);
             assertThat(entry.instanceType()).isEqualTo(InstanceType.M5_LARGE);
             assertThat(entry.productDescriptionAsString()).isEqualTo("Linux/UNIX");
-            assertThat(entry.availabilityZone()).isEqualTo("us-east-1a");
+            assertThat(entry.availabilityZone()).isEqualTo(ZONE_A);
             assertThat(Double.parseDouble(entry.spotPrice())).isPositive();
         }
     }
@@ -61,7 +64,7 @@ class Ec2DescribeSpotPriceHistoryTest {
                     DescribeSpotPriceHistoryRequest.builder()
                             .filters(
                                     Filter.builder().name("instance-type").values("t3.micro").build(),
-                                    Filter.builder().name("availability-zone").values("us-east-1b").build(),
+                                    Filter.builder().name("availability-zone").values(ZONE_B).build(),
                                     Filter.builder().name("product-description").values("Linux/UNIX*").build()
                             )
                             .build());
@@ -69,7 +72,7 @@ class Ec2DescribeSpotPriceHistoryTest {
             assertThat(response.spotPriceHistory()).isNotEmpty();
             for (SpotPrice entry : response.spotPriceHistory()) {
                 assertThat(entry.instanceTypeAsString()).isEqualTo("t3.micro");
-                assertThat(entry.availabilityZone()).isEqualTo("us-east-1b");
+                assertThat(entry.availabilityZone()).isEqualTo(ZONE_B);
                 assertThat(entry.productDescriptionAsString()).startsWith("Linux/UNIX");
             }
         }
@@ -94,7 +97,7 @@ class Ec2DescribeSpotPriceHistoryTest {
             DescribeSpotPriceHistoryRequest request = DescribeSpotPriceHistoryRequest.builder()
                     .instanceTypes(InstanceType.M5_LARGE)
                     .productDescriptions("Linux/UNIX")
-                    .availabilityZone("us-east-1a")
+                    .availabilityZone(ZONE_A)
                     .build();
 
             DescribeSpotPriceHistoryResponse firstResponse = ec2.describeSpotPriceHistory(request);
@@ -114,7 +117,7 @@ class Ec2DescribeSpotPriceHistoryTest {
                     DescribeSpotPriceHistoryRequest.builder()
                             .instanceTypes(InstanceType.T3_MICRO, InstanceType.T3_SMALL, InstanceType.M5_LARGE)
                             .productDescriptions("Linux/UNIX")
-                            .availabilityZone("us-east-1a")
+                            .availabilityZone(ZONE_A)
                             .build());
 
             List<SpotPrice> items = response.spotPriceHistory();
@@ -195,14 +198,14 @@ class Ec2DescribeSpotPriceHistoryTest {
                     DescribeSpotPriceHistoryRequest.builder()
                             .instanceTypes(InstanceType.M5_LARGE)
                             .productDescriptions("Windows")
-                            .availabilityZone("us-east-1a")
+                            .availabilityZone(ZONE_A)
                             .build());
 
             assertThat(response.spotPriceHistory()).hasSize(1);
             SpotPrice entry = response.spotPriceHistory().get(0);
             assertThat(entry.instanceType()).isEqualTo(InstanceType.M5_LARGE);
             assertThat(entry.productDescriptionAsString()).isEqualTo("Windows");
-            assertThat(entry.availabilityZone()).isEqualTo("us-east-1a");
+            assertThat(entry.availabilityZone()).isEqualTo(ZONE_A);
             assertThat(Double.parseDouble(entry.spotPrice())).isPositive();
         }
     }

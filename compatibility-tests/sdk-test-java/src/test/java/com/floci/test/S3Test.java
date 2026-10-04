@@ -54,7 +54,11 @@ class S3Test {
 
     private static S3Client s3;
     private static final String BUCKET = "sdk-test-bucket";
-    private static final String EU_BUCKET = "sdk-test-bucket-eu";
+    private static final String LOCATED_BUCKET = "sdk-test-bucket-located";
+    // Only the us-east-1 endpoint creates a bucket in another region; any other endpoint takes its own.
+    private static final BucketLocationConstraint LOCATION = TestFixtures.region().id().equals("us-east-1")
+            ? BucketLocationConstraint.EU_CENTRAL_1
+            : BucketLocationConstraint.fromValue(TestFixtures.region().id());
     private static final String KEY = "test-file.txt";
     private static final String CONTENT = "Hello from AWS SDK v2!";
 
@@ -73,7 +77,7 @@ class S3Test {
                 s3.deleteBucket(DeleteBucketRequest.builder().bucket(BUCKET).build());
             } catch (Exception ignored) {}
             try {
-                s3.deleteBucket(DeleteBucketRequest.builder().bucket(EU_BUCKET).build());
+                s3.deleteBucket(DeleteBucketRequest.builder().bucket(LOCATED_BUCKET).build());
             } catch (Exception ignored) {}
             s3.close();
         }
@@ -89,20 +93,20 @@ class S3Test {
     @Order(2)
     void createBucketWithLocationConstraint() {
         s3.createBucket(CreateBucketRequest.builder()
-                .bucket(EU_BUCKET)
+                .bucket(LOCATED_BUCKET)
                 .createBucketConfiguration(CreateBucketConfiguration.builder()
-                        .locationConstraint(BucketLocationConstraint.EU_CENTRAL_1)
+                        .locationConstraint(LOCATION)
                         .build())
                 .build());
     }
 
     @Test
     @Order(3)
-    void getBucketLocationEuCentral1() {
+    void getBucketLocationReturnsTheConstraint() {
         GetBucketLocationResponse response = s3.getBucketLocation(
-                GetBucketLocationRequest.builder().bucket(EU_BUCKET).build());
+                GetBucketLocationRequest.builder().bucket(LOCATED_BUCKET).build());
 
-        assertThat(response.locationConstraint()).isEqualTo(BucketLocationConstraint.EU_CENTRAL_1);
+        assertThat(response.locationConstraint()).isEqualTo(LOCATION);
     }
 
     @Test
@@ -385,8 +389,8 @@ class S3Test {
 
     @Test
     @Order(24)
-    void deleteEuBucket() {
-        s3.deleteBucket(DeleteBucketRequest.builder().bucket(EU_BUCKET).build());
+    void deleteLocatedBucket() {
+        s3.deleteBucket(DeleteBucketRequest.builder().bucket(LOCATED_BUCKET).build());
     }
 
     @Test

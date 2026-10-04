@@ -15,6 +15,7 @@ import software.amazon.awssdk.services.lightsail.model.StaticIp;
 import software.amazon.awssdk.services.lightsail.model.Tag;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class LightsailTest {
 
@@ -29,6 +30,8 @@ class LightsailTest {
 
     @Test
     void sdkCanCreateAndManageCoreLightsailResources() {
+        assumeTrue("aws".equals(TestFixtures.partition()),
+                "Lightsail has no region outside the commercial partition");
         String instanceName = suffix + "-web";
         String diskName = suffix + "-data";
         String staticIpName = suffix + "-ip";

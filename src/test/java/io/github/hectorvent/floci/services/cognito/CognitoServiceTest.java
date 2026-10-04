@@ -172,6 +172,43 @@ class CognitoServiceTest {
     }
 
     @Test
+    void restoreUserPoolSettingsPutsBackWhatAnUpdateChangedAndKeepsTheSigningKeys() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "before"), "us-east-1");
+        String signingKeyId = service.describeUserPool(pool.getId()).getSigningKeyId();
+        UserPool settings = service.userPoolSettings(pool.getId());
+        assertNull(settings.getSigningPrivateKey(), "the settings copy carries no signing material");
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId(), "PoolName", "after",
+                "AutoVerifiedAttributes", List.of("email"), "MfaConfiguration", "OPTIONAL"), "us-east-1");
+        service.restoreUserPoolSettings(settings);
+
+        UserPool restored = service.describeUserPool(pool.getId());
+        assertEquals("before", restored.getName());
+        assertEquals(List.of(), restored.getAutoVerifiedAttributes(), "a setting the update added is cleared");
+        assertEquals("OFF", restored.getMfaConfiguration());
+        assertEquals(signingKeyId, restored.getSigningKeyId(), "the pool keeps the keys it signs with");
+    }
+
+    @Test
+    void restoreUserPoolClientSettingsPutsBackWhatAnUpdateChanged() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "pool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "web", false, false, List.of(), List.of());
+        UserPoolClient settings = service.userPoolClientSettings(pool.getId(), client.getClientId());
+        // The stored client is updated in place, so the expectation is copied before the update.
+        List<String> flowsBefore = List.copyOf(client.getExplicitAuthFlows());
+
+        service.updateUserPoolClient(pool.getId(), client.getClientId(), "web-v2", null, null, null, null,
+                null, null, List.of("ALLOW_USER_PASSWORD_AUTH"), null, null, null, null, null, null, null,
+                null, null, null, null);
+        service.restoreUserPoolClientSettings(settings);
+
+        UserPoolClient restored = service.describeUserPoolClient(pool.getId(), client.getClientId());
+        assertEquals("web", restored.getClientName());
+        assertEquals(flowsBefore, restored.getExplicitAuthFlows());
+        assertEquals(client.getClientId(), restored.getClientId());
+    }
+
+    @Test
     void initiateAuthRejectsUnrecognizedAuthFlowWithoutIssuingTokens() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = service.createUserPoolClient(

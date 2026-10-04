@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.CertificateMaterialException;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
@@ -28,6 +30,8 @@ import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -39,10 +43,14 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.PrivateKey;
 import java.security.SecureRandom;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.Optional;
@@ -134,6 +142,26 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int IAM_PATH_MAX_LENGTH = 512;
     private static final int MAX_TAGS_PER_RESOURCE = 50;
     /**
+     * The IAM User Guide's quota table gives "Server certificates per account" as 20, with 20 as
+     * the maximum it can be raised to, so this is a real ceiling rather than a default.
+     */
+    private static final int MAX_SERVER_CERTIFICATES = 20;
+    /** IAM User Guide quota table, and GetAccountSummary's SigningCertificatesPerUserQuota. */
+    private static final int MAX_SIGNING_CERTIFICATES_PER_USER = 2;
+    /** certificateIdType is 24 to 128 of [\w]+, so a 32-character id sits inside that. */
+    private static final int SIGNING_CERTIFICATE_ID_LENGTH = 32;
+    private static final String SIGNING_CERTIFICATE_ACTIVE = "Active";
+    /**
+     * UpdateSigningCertificate's Status, whose documented valid values are Active, Inactive and
+     * Expired. The prose explains only the first two, so the third is easy to reject by mistake.
+     */
+    private static final Set<String> SIGNING_CERTIFICATE_STATUSES =
+            Set.of(SIGNING_CERTIFICATE_ACTIVE, "Inactive", "Expired");
+    /** {@code certificateBodyType} and {@code privateKeyType} are both 1 to 16384 characters. */
+    private static final int MAX_CERTIFICATE_BODY_LENGTH = 16384;
+    /** {@code certificateChainType} is far larger, at 1 to 2097152. */
+    private static final int MAX_CERTIFICATE_CHAIN_LENGTH = 2097152;
+    /**
      * "You can register up to eight MFA devices of any combination of the currently supported MFA
      * types" (IAM User Guide). Floci models only virtual devices, so this bounds those alone.
      */
@@ -201,6 +229,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, CredentialReport> credentialReports;
     /** Virtual MFA devices, keyed by serial number, which for a virtual device is its own ARN. */
     private final StorageBackend<String, VirtualMfaDevice> virtualMfaDevices;
+    /** Server certificates, keyed by name, which is unique within the account. */
+    private final StorageBackend<String, ServerCertificate> serverCertificates;
+    private final StorageBackend<String, SigningCertificate> signingCertificates;
+    /**
+     * Guards the check-then-write on a server certificate. Upload checks the name is free before
+     * storing, and UpdateServerCertificate checks a new name is free before moving to it, so two
+     * requests racing the same name would otherwise both pass the check.
+     */
+    private final Object serverCertificateLock = new Object();
+    private final Object signingCertificateLock = new Object();
     /**
      * Guards every check-then-write on an MFA device. Assignment is the reason it has to exist:
      * EnableMFADevice reads the device to confirm it is unassigned and reads the user's device
@@ -241,6 +279,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-org-root-features.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-credential-reports.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-virtual-mfa-devices.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-server-certificates.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-signing-certificates.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -270,8 +310,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
-                seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                regionResolver, seedDeployerPrincipal, null);
     }
 
     // 8-backend constructor (no org-root-features): kept for existing callers/tests;
@@ -293,7 +334,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 accountAliases, passwordPolicies, new InMemoryStorage<>(), oidcProviders,
                 serviceLinkedRoleDeletions, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, seededAccountAlias);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                regionResolver, seedDeployerPrincipal, seededAccountAlias);
     }
 
     // 9-backend constructor (no alias/OIDC/SLR backends): kept for existing callers/tests;
@@ -312,8 +354,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), passwordPolicies, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
-                seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                regionResolver, seedDeployerPrincipal, null);
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -331,6 +374,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
                StorageBackend<String, CredentialReport> credentialReports,
                StorageBackend<String, VirtualMfaDevice> virtualMfaDevices,
+               StorageBackend<String, ServerCertificate> serverCertificates,
+               StorageBackend<String, SigningCertificate> signingCertificates,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -349,6 +394,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.orgRootFeatures = orgRootFeatures;
         this.credentialReports = credentialReports;
         this.virtualMfaDevices = virtualMfaDevices;
+        this.serverCertificates = serverCertificates;
+        this.signingCertificates = signingCertificates;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -523,14 +570,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("DeleteConflict",
                     "Cannot delete entity, must delete access keys first.", 409);
         }
-        // Held across the delete, not just the check: EnableMFADevice confirms the user under this
-        // same lock, so the two cannot interleave into a device assigned to a deleted user.
-        synchronized (mfaDeviceLock) {
-            if (!mfaDevicesForUser(userName).isEmpty()) {
+        // Both locks are held across the delete rather than just the checks: UploadSigningCertificate
+        // and EnableMFADevice confirm the user under their own lock, so neither can interleave into
+        // a credential owned by a deleted user. Taken in this order, and nowhere else in both, so
+        // the nesting cannot deadlock.
+        synchronized (signingCertificateLock) {
+            if (!userSigningCertificates(userName).isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must deactivate MFA device first.", 409);
+                        "Cannot delete entity, must delete signing certificates first.", 409);
             }
-            users.delete(userName);
+            synchronized (mfaDeviceLock) {
+                if (!mfaDevicesForUser(userName).isEmpty()) {
+                    throw new AwsException("DeleteConflict",
+                            "Cannot delete entity, must deactivate MFA device first.", 409);
+                }
+                users.delete(userName);
+            }
         }
         LOG.infov("Deleted IAM user: {0}", userName);
     }
@@ -568,22 +623,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                             "User with name " + newUserName + " already exists.", 409);
                 }
                 List<AccessKey> keysToMove = userAccessKeys(userName);
-                // The rename publishes the user under its new name and moves its MFA devices to
-                // match. Both happen under the MFA lock, because DeleteUser checks for devices and
-                // removes the user under that same lock: split across it, a DeleteUser for the new
-                // name could land after the user is published but before the devices follow, see
-                // none, and delete a user whose device is about to be reassigned to it.
-                synchronized (mfaDeviceLock) {
-                    users.delete(userName);
-                    user.setUserName(newUserName);
-                    if (newPath != null) {
-                        user.setPath(normalizePath(newPath));
+                // The rename publishes the user under its new name and moves the credentials that
+                // DeleteUser refuses to delete a user over: its MFA devices and its signing
+                // certificates. Each moves under the lock DeleteUser checks it with, because split
+                // across that lock a DeleteUser for the new name could land after the user is
+                // published but before the credential follows, see none, and delete a user whose
+                // credential is about to be reassigned to it. The two locks are taken in the same
+                // order DeleteUser takes them, so the nesting cannot deadlock.
+                synchronized (signingCertificateLock) {
+                    List<SigningCertificate> certificatesToMove = userSigningCertificates(userName);
+                    synchronized (mfaDeviceLock) {
+                        users.delete(userName);
+                        user.setUserName(newUserName);
+                        if (newPath != null) {
+                            user.setPath(normalizePath(newPath));
+                        }
+                        user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
+                        users.put(newUserName, user);
+                        for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
+                            device.setUserName(newUserName);
+                            virtualMfaDevices.put(device.getSerialNumber(), device);
+                        }
                     }
-                    user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
-                    users.put(newUserName, user);
-                    for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
-                        device.setUserName(newUserName);
-                        virtualMfaDevices.put(device.getSerialNumber(), device);
+                    for (SigningCertificate certificate : certificatesToMove) {
+                        certificate.setUserName(newUserName);
+                        signingCertificates.put(certificate.getCertificateId(), certificate);
                     }
                 }
                 loginProfiles.get(userName).ifPresent(profile -> {
@@ -1213,9 +1277,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * keys; quota values are cross-checked against AWS's published IAM service quotas
      * (docs.aws.amazon.com/general/latest/gr/iam-service.html), though floci itself enforces
      * only the 5-versions-per-policy cap in {@link #createPolicyVersion}. Resources floci does
-     * not track at all (server certificates, account password - stub-empty elsewhere in this
-     * handler) are reported as zero rather than omitted, so callers indexing into the full AWS
-     * field set don't hit a missing-key error.
+     * not track at all (the account password) are reported as zero rather than omitted, so
+     * callers indexing into the full AWS field set don't hit a missing-key error.
      */
     public Map<String, Long> getAccountSummary() {
         long localPolicyCount = 0;
@@ -1253,7 +1316,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("RolePolicySizeQuota", 10240L);
         summary.put("AccessKeysPerUserQuota", 2L);
         summary.put("SigningCertificatesPerUserQuota", 2L);
-        summary.put("ServerCertificates", 0L);
+        summary.put("ServerCertificates", (long) serverCertificates.scan(k -> true).size());
         summary.put("ServerCertificatesQuota", 20L);
         summary.put("Providers", (long) oidcProviders.scan(k -> true).size());
         List<VirtualMfaDevice> mfaDevices = virtualMfaDevices.scan(k -> true);
@@ -2036,6 +2099,362 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    // Server certificates
+    // =========================================================================
+
+    /**
+     * Stores an uploaded server certificate. The PEM material is really parsed and the key really
+     * checked against the certificate, so a caller cannot store something unusable: AWS models
+     * MalformedCertificate and KeyPairMismatch on this operation, and neither can be answered
+     * without reading the material. {@code Expiration} is read off the certificate rather than
+     * stored separately, so it cannot drift from what it describes.
+     */
+    public ServerCertificate uploadServerCertificate(String name, String path, String certificateBody,
+                                                     String privateKeyPem, String certificateChain,
+                                                     Map<String, String> tags) {
+        validateIamResourceName(name, "ServerCertificateName");
+        validateIamPath(path, "Path");
+        if (certificateBody == null || certificateBody.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter CertificateBody.", 400);
+        }
+        if (privateKeyPem == null || privateKeyPem.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter PrivateKey.", 400);
+        }
+        // Length before parsing: an over-long body is a request-shape error, and rejecting it here
+        // keeps a multi-megabyte string from reaching the PEM reader at all.
+        checkMaterialLength(certificateBody, "CertificateBody", MAX_CERTIFICATE_BODY_LENGTH);
+        checkMaterialLength(privateKeyPem, "PrivateKey", MAX_CERTIFICATE_BODY_LENGTH);
+        checkMaterialLength(certificateChain, "CertificateChain", MAX_CERTIFICATE_CHAIN_LENGTH);
+        if (tags != null && tags.size() > MAX_TAGS_PER_RESOURCE) {
+            throw new AwsException("LimitExceeded",
+                    "Cannot exceed quota for TagsPerServerCertificate: " + MAX_TAGS_PER_RESOURCE, 409);
+        }
+        X509Certificate certificate = parseUploadedCertificate(certificateBody, "CertificateBody");
+        if (certificateChain != null) {
+            // An omitted chain is fine, an empty one is not: certificateChainType has a minimum
+            // of 1, so a present-but-empty value breaks the request shape. Anything longer is
+            // parsed, which is what makes a whitespace-only chain a malformed certificate rather
+            // than silently storing no chain at all.
+            if (certificateChain.isEmpty()) {
+                throw new AwsException("ValidationError",
+                        "1 validation error detected: Value at 'CertificateChain' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1", 400);
+            }
+            parseUploadedChain(certificateChain);
+        }
+        PrivateKey privateKey;
+        try {
+            privateKey = Pem.parsePrivateKey(privateKeyPem);
+        } catch (CertificateMaterialException e) {
+            // The key itself is unreadable, which AWS reports as a malformed certificate too:
+            // MalformedCertificate covers the uploaded material, not only the certificate body.
+            throw new AwsException("MalformedCertificate",
+                    "The private key is not a valid PEM private key.", 400);
+        }
+        boolean matches;
+        try {
+            matches = Pem.isPair(privateKey, certificate.getPublicKey());
+        } catch (Exception e) {
+            // A key and certificate of different algorithms cannot be compared by signing, which
+            // is itself a mismatch rather than a server-side failure.
+            LOG.debugv("Server certificate key pair could not be verified: {0}", e.getMessage());
+            matches = false;
+        }
+        if (!matches) {
+            throw new AwsException("KeyPairMismatch",
+                    "The public key certificate and the private key do not match.", 400);
+        }
+
+        String normalizedPath = normalizePath(path);
+        ServerCertificate stored = new ServerCertificate();
+        stored.setServerCertificateName(name);
+        stored.setServerCertificateId("ASCA" + randomId(16));
+        stored.setPath(normalizedPath);
+        stored.setArn(iamArn("server-certificate", normalizedPath, name));
+        stored.setCertificateBody(certificateBody);
+        stored.setPrivateKey(privateKeyPem);
+        stored.setCertificateChain(certificateChain);
+        stored.setExpiration(certificate.getNotAfter().toInstant());
+        stored.setTags(tags);
+        synchronized (serverCertificateLock) {
+            if (containsNameIgnoreCase(serverCertificates, ServerCertificate::getServerCertificateName, name)) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The Server Certificate with name " + name + " already exists.", 409);
+            }
+            // Counted under the same lock as the write, so concurrent uploads cannot both see
+            // room for one more and together exceed the quota.
+            if (serverCertificates.scan(k -> true).size() >= MAX_SERVER_CERTIFICATES) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for ServerCertificatesPerAccount: "
+                                + MAX_SERVER_CERTIFICATES, 409);
+            }
+            serverCertificates.put(name, stored);
+        }
+        LOG.infov("Uploaded IAM server certificate: {0}", name);
+        return stored;
+    }
+
+    private void checkMaterialLength(String value, String paramName, int limit) {
+        if (value != null && value.length() > limit) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at '" + paramName
+                            + "' failed to satisfy constraint: Member must have length less than "
+                            + "or equal to " + limit, 400);
+        }
+    }
+
+    /**
+     * Every certificate in an uploaded chain, not just the first. A PEM reader stops at the first
+     * block, so checking the chain with one call would store a chain whose later certificates are
+     * unreadable and only surface them when something tried to use it.
+     */
+    private void parseUploadedChain(String chainPem) {
+        int blocks = 0;
+        for (String block : chainPem.split("(?<=-----END CERTIFICATE-----)")) {
+            if (block.isBlank()) {
+                continue;
+            }
+            parseUploadedCertificate(block, "CertificateChain");
+            blocks++;
+        }
+        if (blocks == 0) {
+            throw new AwsException("MalformedCertificate",
+                    "CertificateChain is not a valid PEM certificate.", 400);
+        }
+    }
+
+    /** Parses uploaded PEM, reporting AWS's MalformedCertificate rather than a parse exception. */
+    private X509Certificate parseUploadedCertificate(String pem, String paramName) {
+        try {
+            return Pem.parseCertificate(pem);
+        } catch (CertificateMaterialException e) {
+            LOG.debugv("Rejected unparseable {0}: {1}", paramName, e.getMessage());
+            throw new AwsException("MalformedCertificate",
+                    paramName + " is not a valid PEM certificate.", 400);
+        }
+    }
+
+    /** The certificate, when one is stored under that name, for callers that must not throw. */
+    public Optional<ServerCertificate> findServerCertificate(String name) {
+        return name == null ? Optional.empty() : serverCertificates.get(name);
+    }
+
+    public ServerCertificate getServerCertificate(String name) {
+        validateIamResourceName(name, "ServerCertificateName");
+        return serverCertificates.get(name)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The Server Certificate with name " + name + " cannot be found.", 404));
+    }
+
+    public List<ServerCertificate> listServerCertificates(String pathPrefix) {
+        String prefix = pathPrefix != null && !pathPrefix.isEmpty() ? pathPrefix : "/";
+        return serverCertificates.scan(k -> true).stream()
+                .filter(c -> c.getPath().startsWith(prefix))
+                .sorted(Comparator.comparing(ServerCertificate::getServerCertificateName))
+                .toList();
+    }
+
+    /**
+     * Renames or moves a server certificate. The stored material is untouched, so the certificate
+     * keeps its id and expiry; only the name, path and the ARN built from them change.
+     */
+    public ServerCertificate updateServerCertificate(String name, String newName, String newPath) {
+        validateIamResourceName(name, "ServerCertificateName");
+        if (newName != null) {
+            validateIamResourceName(newName, "NewServerCertificateName");
+        }
+        validateIamPath(newPath, "NewPath");
+        synchronized (serverCertificateLock) {
+            ServerCertificate existing = getServerCertificate(name);
+            String targetName = newName != null ? newName : name;
+            // Excluded by id, not by name: a rename that only changes case would otherwise match
+            // the certificate against itself, the same reason updateUser compares user ids here.
+            boolean taken = resourcesInCurrentAccount(serverCertificates)
+                    .filter(other -> !other.getServerCertificateId().equals(existing.getServerCertificateId()))
+                    .anyMatch(other -> other.getServerCertificateName().equalsIgnoreCase(targetName));
+            if (taken) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The Server Certificate with name " + targetName + " already exists.", 409);
+            }
+            if (newPath != null) {
+                existing.setPath(normalizePath(newPath));
+            }
+            existing.setServerCertificateName(targetName);
+            existing.setArn(iamArnBeside(existing.getArn(), "server-certificate",
+                    existing.getPath(), targetName));
+            if (!targetName.equals(name)) {
+                serverCertificates.delete(name);
+            }
+            serverCertificates.put(targetName, existing);
+            return existing;
+        }
+    }
+
+    public void deleteServerCertificate(String name) {
+        validateIamResourceName(name, "ServerCertificateName");
+        synchronized (serverCertificateLock) {
+            getServerCertificate(name);
+            serverCertificates.delete(name);
+        }
+        LOG.infov("Deleted IAM server certificate: {0}", name);
+    }
+
+    public void tagServerCertificate(String name, Map<String, String> newTags) {
+        validateIamResourceName(name, "ServerCertificateName");
+        synchronized (serverCertificateLock) {
+            ServerCertificate certificate = getServerCertificate(name);
+            certificate.setTags(mergeTagsWithinQuota(certificate.getTags(), newTags,
+                    "TagsPerServerCertificate", false));
+            serverCertificates.put(certificate.getServerCertificateName(), certificate);
+        }
+    }
+
+    public void untagServerCertificate(String name, List<String> tagKeys) {
+        validateIamResourceName(name, "ServerCertificateName");
+        synchronized (serverCertificateLock) {
+            ServerCertificate certificate = getServerCertificate(name);
+            Map<String, String> remaining = new LinkedHashMap<>(certificate.getTags());
+            if (tagKeys != null) {
+                tagKeys.forEach(remaining::remove);
+            }
+            certificate.setTags(remaining);
+            serverCertificates.put(certificate.getServerCertificateName(), certificate);
+        }
+    }
+
+    public Map<String, String> listServerCertificateTags(String name) {
+        return getServerCertificate(name).getTags();
+    }
+
+    // Signing certificates
+    // =========================================================================
+
+    /**
+     * Stores an uploaded X.509 signing certificate against a user. The body is really parsed, so a
+     * caller cannot store something unusable: the model defines MalformedCertificate on this
+     * operation and it cannot be answered without reading the material.
+     *
+     * <p>Unlike a server certificate there is no private key and no name. The generated
+     * {@code CertificateId} is the handle, and its status starts as {@code Active}.
+     */
+    public SigningCertificate uploadSigningCertificate(String userName, String certificateBody) {
+        if (certificateBody == null || certificateBody.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter CertificateBody.", 400);
+        }
+        checkMaterialLength(certificateBody, "CertificateBody", MAX_CERTIFICATE_BODY_LENGTH);
+        X509Certificate parsed = parseUploadedCertificate(certificateBody, "CertificateBody");
+        synchronized (signingCertificateLock) {
+            // Confirmed under the lock, not before it: DeleteUser checks for certificates holding
+            // the same lock, so the two cannot interleave into a certificate owned by a user that
+            // no longer exists.
+            getUser(userName);
+            // Counted inside the lock with the write, so two concurrent uploads cannot both see
+            // room for one more.
+            if (userSigningCertificates(userName).size() >= MAX_SIGNING_CERTIFICATES_PER_USER) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for SigningCertificatesPerUser: "
+                                + MAX_SIGNING_CERTIFICATES_PER_USER, 409);
+            }
+            // The model's DuplicateCertificate is account-wide, not per user: "the same
+            // certificate is associated with an IAM user in the account".
+            if (storedSigningCertificateMatching(parsed)) {
+                throw new AwsException("DuplicateCertificate",
+                        "The same certificate is associated with an IAM user in the account.", 409);
+            }
+            SigningCertificate stored = new SigningCertificate();
+            stored.setUserName(userName);
+            stored.setCertificateId(randomId(SIGNING_CERTIFICATE_ID_LENGTH));
+            stored.setCertificateBody(certificateBody);
+            stored.setStatus(SIGNING_CERTIFICATE_ACTIVE);
+            stored.setUploadDate(Instant.now());
+            signingCertificates.put(stored.getCertificateId(), stored);
+            LOG.infov("Uploaded signing certificate {0} for user {1}",
+                    stored.getCertificateId(), userName);
+            return stored;
+        }
+    }
+
+    public List<SigningCertificate> listSigningCertificates(String userName) {
+        getUser(userName); // validates existence
+        return userSigningCertificates(userName);
+    }
+
+    public void updateSigningCertificate(String userName, String certificateId, String status) {
+        if (status == null || !SIGNING_CERTIFICATE_STATUSES.contains(status)) {
+            throw new AwsException("ValidationError",
+                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
+                            + "satisfy enum value set: [" + String.join(", ",
+                            SIGNING_CERTIFICATE_STATUSES) + "]", 400);
+        }
+        synchronized (signingCertificateLock) {
+            SigningCertificate certificate = userSigningCertificate(userName, certificateId);
+            certificate.setStatus(status);
+            signingCertificates.put(certificate.getCertificateId(), certificate);
+        }
+    }
+
+    public void deleteSigningCertificate(String userName, String certificateId) {
+        synchronized (signingCertificateLock) {
+            SigningCertificate certificate = userSigningCertificate(userName, certificateId);
+            signingCertificates.delete(certificate.getCertificateId());
+        }
+    }
+
+    /**
+     * The user's certificate of that id. A certificate belonging to another user is reported as
+     * missing rather than as a permission problem, the way an access key of another user is.
+     */
+    private SigningCertificate userSigningCertificate(String userName, String certificateId) {
+        getUser(userName); // validates existence
+        SigningCertificate certificate = signingCertificates.get(certificateId)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The Signing Certificate with id " + certificateId
+                                + " cannot be found.", 404));
+        if (!userName.equals(certificate.getUserName())) {
+            throw new AwsException("NoSuchEntity",
+                    "The Signing Certificate with id " + certificateId
+                            + " cannot be found.", 404);
+        }
+        return certificate;
+    }
+
+    private List<SigningCertificate> userSigningCertificates(String userName) {
+        return signingCertificates.scan(key -> true).stream()
+                .filter(certificate -> userName.equals(certificate.getUserName()))
+                .sorted(Comparator.comparing(SigningCertificate::getCertificateId))
+                .toList();
+    }
+
+    /**
+     * Whether an equivalent certificate is already stored in this account, compared on the encoded
+     * form rather than the PEM text so that the same certificate re-wrapped or re-indented still
+     * counts as the same one.
+     */
+    private boolean storedSigningCertificateMatching(X509Certificate candidate) {
+        byte[] encoded;
+        try {
+            encoded = candidate.getEncoded();
+        } catch (CertificateEncodingException e) {
+            // A certificate that just parsed should always re-encode. Treating it as unique is the
+            // safe direction: it refuses nothing the model accepts.
+            LOG.debugv("Could not re-encode an uploaded signing certificate: {0}", e.getMessage());
+            return false;
+        }
+        return signingCertificates.scan(key -> true).stream().anyMatch(stored -> {
+            try {
+                return Arrays.equals(encoded,
+                        Pem.parseCertificate(stored.getCertificateBody()).getEncoded());
+            } catch (CertificateMaterialException | CertificateEncodingException e) {
+                LOG.debugv("Skipping unreadable stored signing certificate {0}: {1}",
+                        stored.getCertificateId(), e.getMessage());
+                return false;
+            }
+        });
+    }
+
     // Virtual MFA devices
     // =========================================================================
 
@@ -2528,6 +2947,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(accessKeyId);
     }
 
+    /**
+     * Like {@link #findSecretKey(String, String)}, but finds a long-term key whichever account owns
+     * it. Only for callers with no account in scope that check the owner themselves, such as the
+     * EKS token webhook: everywhere else a key from another account must stay unknown.
+     */
+    public Optional<String> findSecretKeyInAnyAccount(String accessKeyId, String sessionToken) {
+        return findSecretKey(accessKeyId, sessionToken)
+                .or(() -> activeAccessKeyInAnyAccount(accessKeyId).map(entry -> entry.value().getSecretAccessKey()));
+    }
+
+    /** The active long-term key with this ID, from whichever account owns it. */
+    private Optional<AccountAwareStorageBackend.AccountEntry<AccessKey>> activeAccessKeyInAnyAccount(
+            String accessKeyId) {
+        if (accessKeyId == null || isTemporaryAccessKey(accessKeyId)
+                || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
+            return Optional.empty();
+        }
+        return aware.scanAllAccountEntries(accessKeyId::equals).stream()
+                .filter(entry -> "Active".equals(entry.value().getStatus()))
+                .findFirst();
+    }
+
     private Optional<String> activeAccessKeySecret(String accessKeyId) {
         return accessKeys.get(accessKeyId)
                 .filter(accessKey -> "Active".equals(accessKey.getStatus()))
@@ -2839,13 +3280,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
         if (!isTemporaryAccessKey(accessKeyId)) {
-            if (accessKeyId == null || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
-                return Optional.empty();
-            }
-            return aware.scanAllAccountEntries(accessKeyId::equals).stream()
-                    .filter(entry -> "Active".equals(entry.value().getStatus()))
-                    .map(AccountAwareStorageBackend.AccountEntry::accountId)
-                    .findFirst();
+            return activeAccessKeyInAnyAccount(accessKeyId).map(AccountAwareStorageBackend.AccountEntry::accountId);
         }
         Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
         if (sessionOpt.isEmpty()) {
@@ -3547,6 +3982,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         List<AccessKey> keys = userAccessKeys(user.getUserName());
         AccessKey key1 = keys.size() > 0 ? keys.get(0) : null;
         AccessKey key2 = keys.size() > 1 ? keys.get(1) : null;
+        List<SigningCertificate> certificates = userSigningCertificates(user.getUserName());
+        SigningCertificate cert1 = certificates.size() > 0 ? certificates.get(0) : null;
+        SigningCertificate cert2 = certificates.size() > 1 ? certificates.get(1) : null;
         Optional<LoginProfile> loginProfile = loginProfiles.get(user.getUserName());
         boolean passwordEnabled = loginProfile.isPresent();
 
@@ -3561,7 +3999,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 mfaDevicesForUser(user.getUserName()).isEmpty() ? "FALSE" : "TRUE",
                 accessKeyActiveField(key1), accessKeyRotatedField(key1), "N/A", "N/A", "N/A",
                 accessKeyActiveField(key2), accessKeyRotatedField(key2), "N/A", "N/A", "N/A",
-                "FALSE", "N/A", "FALSE", "N/A",
+                signingCertificateActiveField(cert1), signingCertificateRotatedField(cert1),
+                signingCertificateActiveField(cert2), signingCertificateRotatedField(cert2),
                 additionalCredentialsInfoField(keys));
     }
 
@@ -3597,6 +4036,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** Falls back to createDate for a profile persisted before passwordLastChanged existed. */
     private Instant passwordLastChanged(LoginProfile profile) {
         return profile.getPasswordLastChanged() != null ? profile.getPasswordLastChanged() : profile.getCreateDate();
+    }
+
+    private String signingCertificateActiveField(SigningCertificate certificate) {
+        return certificate != null && SIGNING_CERTIFICATE_ACTIVE.equals(certificate.getStatus())
+                ? "TRUE" : "FALSE";
+    }
+
+    /**
+     * The upload date, and {@code N/A} unless the certificate is Active. The User Guide is
+     * explicit that this column is N/A when the user "does not have an active signing
+     * certificate", so an Inactive certificate reports no date even though one is stored.
+     *
+     * <p>It describes the date the certificate "was created or last changed". Floci records only
+     * the upload, which is the one of those two it can know: a status change rewrites no material.
+     */
+    private String signingCertificateRotatedField(SigningCertificate certificate) {
+        return certificate != null
+                && SIGNING_CERTIFICATE_ACTIVE.equals(certificate.getStatus())
+                ? isoDate(certificate.getUploadDate()) : "N/A";
     }
 
     private String accessKeyActiveField(AccessKey key) {

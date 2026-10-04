@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -356,6 +357,44 @@ class CodeArtifactMavenDockerIntegrationTest {
         // entry, specifically, is what disappeared from the real shared instance's own settings
         // list, not just that Floci stopped tracking the CodeArtifact-side metadata.
         assertEquals(repositoryCountBeforeDelete - 1, reposiliteSettingsRepositoryCount());
+    }
+
+    /**
+     * The real-world gap this closes: {@code GetPackageVersionAsset} used to 404 for every
+     * Maven-deployed artifact since Floci's generic-format package-version store never had a
+     * record for it (Maven publishing goes straight to Reposilite, bypassing it entirely). Proves
+     * the JSON API now bridges to the same artifact {@link #deployThenFetchRoundTripsTheExactBytes}
+     * already confirmed is really there, through the real sidecar, not a mock.
+     */
+    @Test
+    @Order(12)
+    void getPackageVersionAssetBridgesToTheRealReposiliteSidecar() {
+        byte[] fetched = given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike&version=1.0.0&asset=spike-1.0.0.jar")
+                .then().statusCode(200)
+                .header("X-AssetName", equalTo("spike-1.0.0.jar"))
+                .header("X-PackageVersion", equalTo("1.0.0"))
+                .extract().asByteArray();
+        assertEquals("real-jar-bytes", new String(fetched, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @Order(12)
+    void getPackageVersionAssetRequiresANamespaceForMaven() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&package=spike&version=1.0.0&asset=spike-1.0.0.jar")
+                .then().statusCode(400);
+    }
+
+    @Test
+    @Order(12)
+    void getPackageVersionAssetReturns404ForAMavenAssetThatWasNeverDeployed() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike&version=1.0.0&asset=does-not-exist.jar")
+                .then().statusCode(404);
     }
 
     /**

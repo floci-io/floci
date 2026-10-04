@@ -7,10 +7,10 @@
 Floci supports the CodeArtifact control plane: domains, repositories, resource policies, tags,
 and public upstream (external) connections. Package publish/fetch through the CodeArtifact API
 itself is implemented for the `generic` format only, matching AWS's own restriction that
-`PublishPackageVersion` accepts only `generic`. The `maven` and `npm` formats are each served
-through their own real package-manager-protocol proxy (`mvn`/Gradle and `npm`/`yarn`/`pnpm`
-publish and resolve all work against the URL `GetRepositoryEndpoint` returns); the remaining
-formats (PyPI, NuGet, etc.) have no real proxy behind them yet.
+`PublishPackageVersion` accepts only `generic`. The `maven`, `npm`, and `pypi` formats are each
+served through their own real package-manager-protocol proxy (`mvn`/Gradle, `npm`/`yarn`/`pnpm`,
+and `pip`/`twine` publish and resolve all work against the URL `GetRepositoryEndpoint` returns);
+the remaining formats (NuGet, etc.) have no real proxy behind them yet.
 
 ## Supported Actions
 
@@ -141,6 +141,45 @@ client-unreachable address; without this, `npm install` would try to fetch the t
 from an address it cannot reach. One config knob, `FLOCI_SERVICES_CODEARTIFACT_NPM_IMAGE`, pins
 the image version.
 
+## The pypi repository endpoint
+
+`GetRepositoryEndpoint` for `format=pypi` returns `http://localhost:4566/codeartifact/pypi/<domain>/<repository>/`.
+Real pip and twine can install from and publish to that URL directly; it speaks the real PyPI
+simple-repository protocol (simple index, package download, twine's multipart upload), proxied
+straight through to a real [pypiserver](https://pypi.org/project/pypiserver/) instance rather than
+reimplemented. Every request needs a token from `GetAuthorizationToken` scoped to the domain being
+accessed, sent as HTTP Basic with the token as the password (any username) - AWS documents `pip`'s
+index URL embedding `aws:$CODEARTIFACT_AUTH_TOKEN@` and twine's `.pypirc`/environment variables as
+`username=aws, password=<token>`
+([configure pip](https://docs.aws.amazon.com/codeartifact/latest/ug/python-configure-pip.html),
+[configure twine](https://docs.aws.amazon.com/codeartifact/latest/ug/python-configure-twine.html)),
+the same Basic convention Maven's HTTP wagon uses, not npm's Bearer-only `_authToken`; a Bearer
+token is also accepted, matching npm, since accepting both costs nothing. A missing, invalid,
+expired, or wrong-domain token gets a 401 challenging `Basic`.
+
+Like Verdaccio, pypiserver has no native concept of multiple named indexes inside one instance, so
+each CodeArtifact repository gets its own pypiserver container instead of sharing one, started
+lazily on first use and identified internally by a fresh id generated at `CreateRepository` time,
+so a repository deleted and recreated under the same name never inherits the previous one's
+packages. `DeleteRepository` stops and removes that repository's container immediately, the same
+as npm. Unlike Verdaccio, no public-URL environment variable is needed: pypiserver's simple-index
+responses link to package files with a root-relative path (`/packages/<file>`), which pip and
+twine resolve against whatever host they actually connected to, not an address the container
+returns itself.
+
+Unlike Reposilite (`redeployment: false`) and Verdaccio (which rejects a duplicate publish
+natively, matching real npm), pypiserver has no overwrite protection of its own: publishing the
+same package name, version, and filename twice with different content silently replaces the file
+(confirmed by hand against a live instance with both twine and a raw multipart upload). Floci's
+proxy closes this gap itself, matching AWS's own documented behavior for every format
+("Overwriting package assets" in CodeArtifact's packages overview): before forwarding an upload, it
+checks the target repository's own simple index for the exact filename being uploaded; if the
+filename doesn't exist yet, the upload proceeds, if it exists with byte-identical content the
+upload succeeds without touching pypiserver again (idempotent, so a client's retry after a dropped
+response is never a spurious conflict), and only a name collision with genuinely different content
+gets rejected with 409. One config knob, `FLOCI_SERVICES_CODEARTIFACT_PYPI_IMAGE`, pins the image
+version.
+
 ## AWS-compatible failures
 
 Domain and repository names, tags, pagination, duplicate names, missing upstreams, policy-revision
@@ -175,34 +214,69 @@ state.
   `DisposePackageVersions`, and `UpdatePackageVersionsStatus` don't exist yet; the only way to
   move a version from `Unfinished` to `Published` today is a follow-up `PublishPackageVersion`
   call that omits the `unfinished` flag.
-- **The 5 GB asset size quota is nominal.** `PublishPackageVersion` and the Maven repository
-  endpoint both receive the request body as a single byte array before Floci ever checks its
-  length, so a request already large enough to exhaust available heap fails before the quota check
-  runs. The rejection (`ServiceQuotaExceededException` from `PublishPackageVersion`, HTTP 413 from
-  the Maven endpoint) is correct for anything that does fit in memory; it is not itself a streaming
-  size limit.
-- **Maven artifacts and npm packages do not survive a Floci restart, even under persistent
-  storage.** The Reposilite instance and every per-repository Verdaccio container have no volume
-  attached and are removed on shutdown along with everything published to them. CodeArtifact
-  repository/domain metadata (including each format's stored sidecar container id) survives a
-  restart the same way any other Floci state does under persistent storage mode; the artifacts and
-  packages themselves do not, so the first request after a restart re-provisions empty storage and
-  returns 404 for anything published before the restart.
+- **The 5 GB asset size quota is nominal.** `PublishPackageVersion` and the Maven and pypi
+  repository endpoints all receive the request body as a single byte array before Floci ever
+  checks its length, so a request already large enough to exhaust available heap fails before the
+  quota check runs. The rejection (`ServiceQuotaExceededException` from `PublishPackageVersion`,
+  HTTP 413 from the Maven and pypi endpoints) is correct for anything that does fit in memory; it
+  is not itself a streaming size limit.
+- **Maven artifacts, npm packages, and pypi packages do not survive a Floci restart, even under
+  persistent storage.** The Reposilite instance and every per-repository Verdaccio and pypiserver
+  container have no volume attached and are removed on shutdown along with everything published to
+  them. CodeArtifact repository/domain metadata (including each format's stored sidecar container
+  id) survives a restart the same way any other Floci state does under persistent storage mode; the
+  artifacts and packages themselves do not, so the first request after a restart re-provisions
+  empty storage and returns 404 for anything published before the restart.
 - **`GetAuthorizationToken` tokens are not revocable and are not tied to any IAM identity.** Real
   CodeArtifact tokens are scoped to the calling principal's permissions; Floci's are scoped only to
   the domain named in the request; anyone who obtains one keeps the same domain-scoped access for
   its full lifetime.
-- **Neither the Maven nor the npm repository endpoint resolves through upstream repositories or
+- **The Maven, npm, and pypi sidecar containers have no authentication of their own, and anything
+  else sharing their Docker network can reach them directly on their container port.** Real
+  CodeArtifact's token check happens once, at Floci's own proxy layer (`CodeArtifactMavenController`/
+  the npm data plane/`CodeArtifactPypiController`), before a request ever reaches Reposilite,
+  Verdaccio, or pypiserver; those containers' own auth is deliberately disabled since the proxy is
+  meant to be the only path in. Binding the published host port to loopback only keeps an outside
+  host off that port; it does not stop another container already on the same configured Docker
+  network (for example a Lambda, Batch, or ECS workload container) from reaching the sidecar on its
+  container-internal address, bypassing the proxy's token check entirely. Closing this for real
+  would mean isolating each sidecar on its own Docker network reachable only from Floci's own
+  process, a change that would need to apply uniformly across all three sidecar-backed formats, not
+  a one-off fix to any single proxy.
+- **Neither the Maven, npm, nor pypi repository endpoint resolves through upstream repositories or
   external connections.** On real CodeArtifact, a repository with another repository configured as
   an upstream (`UpdateRepository`'s `upstreams`) or with an `AssociateExternalConnection` to a
-  public repository (`public:maven-central`, `public:npmjs`, etc.) serves packages from those
-  sources too, not just its own. Floci's proxies only ever look up the repository's own backing
-  storage: a package that exists solely in an upstream, or only through an external connection,
-  returns 404 through a repository that has it configured as one.
+  public repository (`public:maven-central`, `public:npmjs`, `public:pypi`, etc.) serves packages
+  from those sources too, not just its own. Floci's proxies only ever look up the repository's own
+  backing storage: a package that exists solely in an upstream, or only through an external
+  connection, returns 404 through a repository that has it configured as one; the pypi proxy's
+  pypiserver container is also started with `--disable-fallback` specifically so it never silently
+  redirects a missing package to the real, public PyPI.
 - **The npm repository endpoint does not enforce the 5 GB asset size quota.** Unlike
   `PublishPackageVersion` and the Maven endpoint, it streams the request straight through to the
   backing Verdaccio container rather than buffering it first, so there is nowhere in the request
   path to check a byte count against the quota before forwarding it.
+- **The pypi repository endpoint only serves the HTML Simple Repository API, not the PEP 691/700
+  JSON variant.** AWS documents both: pip/uv can request
+  `application/vnd.pypi.simple.v1+json` from `/simple/<project>/` and get a JSON index with
+  per-file hashes, `requires-python`, and `upload-time`. Floci's proxy only ever forwards
+  pypiserver's native HTML response regardless of the client's `Accept` header, since pypiserver
+  itself has no JSON index support to pass through. Low practical risk in itself, since PEP 691
+  requires clients to accept HTML as a fallback and pip/uv both do, but it is a real gap against
+  AWS's documented surface, not just a quirk of the sidecar.
+- **`DescribePackageVersion` can't see Maven-, npm-, or pypi-uploaded package versions.** Those
+  three formats' repository endpoints are deliberately metadata-free passthroughs straight to
+  their sidecar container (Reposilite/Verdaccio/pypiserver) and never create the generic-format
+  package-version record this action depends on (`CodeArtifactService.describePackageVersion`
+  only ever looks up `packageVersions.getForAccount`, the record only the `generic` format's
+  `PublishPackageVersion` flow creates). `GetPackageVersionAsset` no longer has this gap: it
+  bridges to each format's own sidecar (via a new `RepositorySidecarManager.fetchPackageVersionAsset`
+  method each sidecar client implements) when there's no generic-format record, so it now works
+  uniformly across formats the way real CodeArtifact's does. `DescribePackageVersion` is a harder
+  problem for the same bridge: it describes every asset and the status of a whole version, not one
+  named file, and none of these sidecars expose that shape cheaply (Reposilite has no per-GAV
+  metadata beyond file listings; Verdaccio's own registry API could answer it for npm but Maven and
+  pypi have nothing equivalent), so it remains unbridged and still 404s for these three formats.
 
 See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/latest/APIReference/Welcome.html).
 
@@ -215,3 +289,4 @@ See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/la
 | `FLOCI_SERVICES_CODEARTIFACT_MAVEN_URL` | unset | When set, use this URL and skip Reposilite container management |
 | `FLOCI_SERVICES_CODEARTIFACT_MAVEN_TOKEN` | unset | `name:secret` access token for a pre-configured `MAVEN_URL` |
 | `FLOCI_SERVICES_CODEARTIFACT_NPM_IMAGE` | `verdaccio/verdaccio:6.10.4` | Verdaccio image used to serve the `npm` format |
+| `FLOCI_SERVICES_CODEARTIFACT_PYPI_IMAGE` | `pypiserver/pypiserver:v2.4.2` | pypiserver image used to serve the `pypi` format |

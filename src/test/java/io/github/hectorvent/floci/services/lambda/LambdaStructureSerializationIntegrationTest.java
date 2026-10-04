@@ -18,7 +18,7 @@ class LambdaStructureSerializationIntegrationTest {
     private static final String QUEUE_ARN = "arn:aws:sqs:us-east-1:000000000000:structure-queue";
     private static final List<String> FUNCTION_STRUCTURE_MEMBERS = List.of(
             "Environment", "EphemeralStorage", "TracingConfig", "DeadLetterConfig",
-            "VpcConfig", "SnapStart", "LoggingConfig", "ImageConfig");
+            "VpcConfig", "SnapStart", "LoggingConfig", "ImageConfig", "DurableConfig");
 
     @Test
     void createFunctionRejectsScalarStructureMembers() {

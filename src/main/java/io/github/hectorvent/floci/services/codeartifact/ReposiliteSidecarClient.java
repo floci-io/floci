@@ -11,6 +11,7 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
@@ -78,6 +79,46 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     @Override
     public void release(String repositoryContainerId) {
         releaseRepository(repositoryContainerId);
+    }
+
+    /**
+     * {@code namespace} is the Maven groupId; the caller is responsible for requiring it, since
+     * every real Maven coordinate has one. Builds the standard Maven repository layout path
+     * (groupId with dots as slashes, then artifactId, version, and the asset's own filename).
+     *
+     * <p>Unlike {@link #fetchArtifact(String, String)}, which the real wire-protocol GET route
+     * uses with a single caller-supplied path that is legitimately allowed to contain {@code /}
+     * (it's the whole relative GAV path), every one of this method's four coordinates is its own
+     * independent, untrusted value that is only supposed to be one path segment. Concatenating
+     * them with {@code +} the way the wire-protocol route concatenates its one path would let a
+     * {@code /} inside, say, {@code assetName} splice in extra path segments, or a value of
+     * exactly {@code ..} walk back out of the version directory it's supposed to be confined to.
+     * Each coordinate is therefore percent-encoded on its own via
+     * {@link SidecarUriUtils#encodeSegment(String)}, which escapes both of those, before being
+     * joined with the real {@code /} separators this method supplies itself.
+     */
+    @Override
+    public Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName) {
+        ensureRepository(repositoryContainerId);
+        String baseUrl = manager.ensureReady();
+        StringBuilder path = new StringBuilder("/").append(SidecarUriUtils.encodeSegment(repositoryContainerId));
+        for (String namespacePart : namespace.split("\\.", -1)) {
+            path.append('/').append(SidecarUriUtils.encodeSegment(namespacePart));
+        }
+        path.append('/').append(SidecarUriUtils.encodeSegment(packageName))
+                .append('/').append(SidecarUriUtils.encodeSegment(version))
+                .append('/').append(SidecarUriUtils.encodeSegment(assetName));
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path.toString()))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<byte[]> response = send(request, BodyHandlers.ofByteArray());
+        if (response.statusCode() != 200) {
+            return Optional.empty();
+        }
+        return Optional.of(response.body());
     }
 
     /** Ensures a Reposilite repository named {@code repoId} exists, creating it if not. */
@@ -365,11 +406,40 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         }
     }
 
+    /**
+     * {@code gav} isn't necessarily a trusted constant: a caller-supplied asset name can reach
+     * here (via {@link #fetchPackageVersionAsset}'s bridge from {@code GetPackageVersionAsset}, or
+     * the raw wire-protocol GAV path segment itself), so building the URI with a plain string
+     * concatenation would let a {@code #} truncate the path at a URI fragment, or a {@code ?}
+     * reinterpret the rest as a query string, silently fetching a different, unintended path
+     * instead of the one actually requested. The three-argument {@link URI} constructor percent-
+     * encodes whatever isn't already valid inside a path while leaving the real {@code /}
+     * separators alone, unlike {@link URI#create}.
+     */
     private HttpRequest.Builder authenticated(String baseUrl, String repoId, String gav) {
         return HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/" + repoId + "/" + gav))
+                .uri(requestUri(baseUrl, "/" + repoId + "/" + gav))
                 .timeout(Duration.ofSeconds(30))
                 .header("Authorization", manager.basicAuthHeader());
+    }
+
+    /**
+     * {@code baseUrl} isn't always just scheme and authority: {@code FLOCI_SERVICES_CODEARTIFACT_
+     * MAVEN_URL} can point at a pre-configured Reposilite instance behind its own path prefix, so
+     * that prefix is carried over, and carried over with whatever encoding it was configured with
+     * untouched, rather than dropped or re-encoded. {@code path} can separately carry
+     * caller-supplied text (a package or asset name), so it's not safe to hand straight to
+     * {@link URI#create} either: a raw string concatenation would let a {@code #} in that text
+     * truncate the request at a URI fragment, or a {@code ?} reinterpret the rest as a query
+     * string, silently fetching a different path than the one actually requested.
+     */
+    private static URI requestUri(String baseUrl, String path) {
+        try {
+            String encodedPath = new URI(null, null, path, null, null).getRawPath();
+            return SidecarUriUtils.combine(URI.create(baseUrl), encodedPath);
+        } catch (URISyntaxException e) {
+            throw new IllegalStateException("Could not build a request URI for " + path, e);
+        }
     }
 
     private <T> HttpResponse<T> send(HttpRequest request, HttpResponse.BodyHandler<T> bodyHandler) {

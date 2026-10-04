@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsT
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -372,15 +373,127 @@ class EventBridgeServiceTest {
         service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
                 null, null, null, REGION);
         Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue", null, null);
+        target.setRoleArn("arn:aws:iam::000000000000:role/eventbridge-target");
         target.setRetryPolicy(new Target.RetryPolicy(4, 120));
         target.setDeadLetterConfig(new Target.DeadLetterConfig("arn:aws:sqs:us-east-1:000000000000:dlq"));
 
         service.putTargets("my-rule", null, List.of(target), REGION);
 
         Target stored = service.listTargetsByRule("my-rule", null, REGION).getFirst();
+        assertEquals(target.getRoleArn(), stored.getRoleArn());
         assertEquals(new Target.RetryPolicy(4, 120), stored.getRetryPolicy());
         assertEquals(new Target.DeadLetterConfig("arn:aws:sqs:us-east-1:000000000000:dlq"),
                 stored.getDeadLetterConfig());
+    }
+
+    @Test
+    void crossAccountBusUpdateReplacesStoredTargetWithoutArn() {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        service.putTargets("role-rule", null, List.of(new Target("bus", null, null, null)), REGION);
+        String arn = "arn:aws:events:us-east-1:111111111111:event-bus/destination";
+
+        service.putTargets("role-rule", null, List.of(new Target("bus", arn, null, null)), REGION);
+
+        List<Target> stored = service.listTargetsByRule("role-rule", null, REGION);
+        assertEquals(1, stored.size());
+        assertEquals(arn, stored.getFirst().getArn());
+        assertNull(stored.getFirst().getRoleArn());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "aws, us-east-1",
+            "aws-us-gov, us-gov-west-1",
+            "aws-cn, cn-north-1"
+    })
+    void omittedRoleOnCrossAccountBusUpdateRetainsTheStoredRole(String partition, String region) {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, region);
+        String arn = "arn:" + partition + ":events:" + region + ":111111111111:event-bus/destination";
+        Target original = new Target("bus", arn, null, null);
+        original.setRoleArn("arn:" + partition + ":iam::000000000000:role/eventbridge-target");
+        service.putTargets("role-rule", null, List.of(original), region);
+
+        Target updated = new Target("bus", arn, "{\"updated\":true}", null);
+        service.putTargets("role-rule", null, List.of(updated), region);
+
+        Target stored = service.listTargetsByRule("role-rule", null, region).getFirst();
+        assertEquals(original.getRoleArn(), stored.getRoleArn());
+        assertEquals(updated.getInput(), stored.getInput());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws:events:us-east-1:000000000000:event-bus/local",
+            "arn:aws:states:us-east-1:111111111111:stateMachine:workflow",
+            "arn:aws:events:us-east-1:111111111111:rule/other"
+    })
+    void omittedRoleDoesNotRetainRolesForOtherTargetTypes(String arn) {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        Target original = new Target("target", arn, null, null);
+        original.setRoleArn("arn:aws:iam::000000000000:role/original");
+        service.putTargets("role-rule", null, List.of(original), REGION);
+
+        service.putTargets("role-rule", null, List.of(new Target("target", arn, null, null)), REGION);
+
+        assertNull(service.listTargetsByRule("role-rule", null, REGION).getFirst().getRoleArn());
+    }
+
+    @Test
+    void replacingCrossAccountBusArnOrIdDoesNotCopyTheOldRole() {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        String arn = "arn:aws:events:us-east-1:111111111111:event-bus/original";
+        Target original = new Target("bus", arn, null, null);
+        original.setRoleArn("arn:aws:iam::000000000000:role/original");
+        service.putTargets("role-rule", null, List.of(original), REGION);
+
+        service.putTargets("role-rule", null, List.of(new Target("other-id", arn, null, null)), REGION);
+        service.putTargets("role-rule", null, List.of(new Target("bus", arn + "-changed", null, null)), REGION);
+
+        assertTrue(service.listTargetsByRule("role-rule", null, REGION).stream()
+                .allMatch(target -> target.getRoleArn() == null));
+    }
+
+    @Test
+    void explicitRoleUpdateReplacesCrossAccountBusRole() {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        String arn = "arn:aws:events:us-east-1:111111111111:event-bus/destination";
+        Target original = new Target("bus", arn, null, null);
+        original.setRoleArn("arn:aws:iam::000000000000:role/original");
+        service.putTargets("role-rule", null, List.of(original), REGION);
+        Target updated = new Target("bus", arn, null, null);
+        updated.setRoleArn("arn:aws:iam::000000000000:role/replacement");
+
+        service.putTargets("role-rule", null, List.of(updated), REGION);
+
+        List<Target> stored = service.listTargetsByRule("role-rule", null, REGION);
+        assertEquals(1, stored.size());
+        assertEquals(updated.getRoleArn(), stored.getFirst().getRoleArn());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1601})
+    void putTargetsRejectsRoleArnOutsideModelLengthBounds(int length) {
+        Target valid = new Target("valid", "arn:aws:states:us-east-1:000000000000:stateMachine:valid", null, null);
+        Target invalid = new Target("invalid", valid.getArn(), null, null);
+        String role = "r".repeat(length);
+        invalid.setRoleArn(role);
+        String constraint = length == 0 ? "greater than or equal to 1" : "less than or equal to 1600";
+
+        assertPutTargetsValidation("1 validation error detected: Value '" + role + "' at "
+                + "'targets.2.member.roleArn' failed to satisfy constraint: Member must have length " + constraint,
+                valid, invalid);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 1600})
+    void putTargetsAcceptsRoleArnAtModelLengthBounds(int length) {
+        service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("workflow", "arn:aws:states:us-east-1:000000000000:stateMachine:example", null, null);
+        target.setRoleArn("r".repeat(length));
+
+        service.putTargets("role-rule", null, List.of(target), REGION);
+
+        assertEquals(target.getRoleArn(), service.listTargetsByRule("role-rule", null, REGION).getFirst().getRoleArn());
     }
 
     @Test

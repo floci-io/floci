@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -140,6 +142,24 @@ class ImageResolverTest {
     void passesThroughCustomImageWithColon() {
         String customImage = "myrepo:latest";
         assertEquals(customImage, resolver.resolve(customImage));
+    }
+
+    @Test
+    void resolvesConfiguredRuntimeImageByDigest() {
+        String digestImage = "public.ecr.aws/lambda/python:3.12@sha256:" + "a".repeat(64);
+        when(config.services().lambda().runtimeImages()).thenReturn(Map.of("python3.12", digestImage));
+        ImageResolver configuredResolver = new ImageResolver(config);
+
+        assertEquals(digestImage, configuredResolver.resolve("python3.12"));
+        assertEquals("public.ecr.aws/lambda/python:3.11", configuredResolver.resolve("python3.11"));
+    }
+
+    @Test
+    void unknownRuntimeCannotBeOverridden() {
+        when(config.services().lambda().runtimeImages()).thenReturn(Map.of("unknown", "example.com/unknown:1"));
+        ImageResolver configuredResolver = new ImageResolver(config);
+
+        assertThrows(AwsException.class, () -> configuredResolver.resolve("unknown"));
     }
 
     @Test

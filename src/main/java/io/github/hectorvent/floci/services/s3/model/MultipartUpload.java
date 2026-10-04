@@ -22,6 +22,8 @@ public class MultipartUpload {
     private String sseCustomerAlgorithm;
     private String sseCustomerKeyMd5;
     private String acl;
+    private String ownerAccountId;
+    private String initiatorAccountId;
     private ChecksumAlgorithm checksumAlgorithm;
     private ChecksumType checksumType;
     private Map<String, String> metadata;
@@ -76,6 +78,12 @@ public class MultipartUpload {
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
+
+    public String getOwnerAccountId() { return ownerAccountId; }
+    public void setOwnerAccountId(String ownerAccountId) { this.ownerAccountId = ownerAccountId; }
+
+    public String getInitiatorAccountId() { return initiatorAccountId; }
+    public void setInitiatorAccountId(String initiatorAccountId) { this.initiatorAccountId = initiatorAccountId; }
 
     public ChecksumAlgorithm getChecksumAlgorithm() { return checksumAlgorithm; }
     public void setChecksumAlgorithm(ChecksumAlgorithm checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; }

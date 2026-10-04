@@ -30,6 +30,7 @@ import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
+import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,6 +39,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -131,6 +133,7 @@ public class RdsQueryHandler {
                 case "CopyDBSnapshot" -> handleCopyDbSnapshot(params, region);
                 case "ModifyDBSnapshot" -> handleModifyDbSnapshot(params, region);
                 case "RestoreDBInstanceFromDBSnapshot" -> handleRestoreDbInstanceFromDbSnapshot(params, region);
+                case "RestoreDBInstanceToPointInTime" -> handleRestoreDbInstanceToPointInTime(params, region);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params, region);
                 case "DescribeDBSnapshotAttributes" -> handleDescribeDbSnapshotAttributes(params, region);
                 case "ModifyDBSnapshotAttribute" -> handleModifyDbSnapshotAttribute(params, region);
@@ -148,6 +151,7 @@ public class RdsQueryHandler {
                 case "DeleteDBClusterSnapshot" -> handleDeleteDbClusterSnapshot(params, region);
                 case "CopyDBClusterSnapshot" -> handleCopyDbClusterSnapshot(params, region);
                 case "RestoreDBClusterFromSnapshot" -> handleRestoreDbClusterFromSnapshot(params, region);
+                case "RestoreDBClusterToPointInTime" -> handleRestoreDbClusterToPointInTime(params, region);
                 case "DescribeDBClusterSnapshotAttributes" -> handleDescribeDbClusterSnapshotAttributes(params, region);
                 case "ModifyDBClusterSnapshotAttribute" -> handleModifyDbClusterSnapshotAttribute(params, region);
                 case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
@@ -2203,6 +2207,63 @@ public class RdsQueryHandler {
                 dbClusterSnapshotXml(copy))).build();
     }
 
+    private Response handleRestoreDbInstanceToPointInTime(MultivaluedMap<String, String> params, String region) {
+        try {
+            PointInTimeRestoreRequest request = new PointInTimeRestoreRequest(
+                    params.getFirst("TargetDBInstanceIdentifier"),
+                    params.getFirst("SourceDBInstanceIdentifier"),
+                    params.getFirst("SourceDbiResourceId"),
+                    params.getFirst("SourceDBInstanceAutomatedBackupsArn"),
+                    parseOptionalInstant(params.getFirst("RestoreTime")),
+                    parseOptionalBoolean(params, "UseLatestRestorableTime"),
+                    params.getFirst("DBInstanceClass"),
+                    parseIntegerParam(params, "Port"),
+                    params.getFirst("AvailabilityZone"),
+                    parseOptionalBoolean(params, "MultiAZ"),
+                    parseOptionalBoolean(params, "AutoMinorVersionUpgrade"),
+                    params.getFirst("DBName"),
+                    params.getFirst("OptionGroupName"),
+                    params.getFirst("DBParameterGroupName"),
+                    parseOptionalBoolean(params, "PubliclyAccessible"),
+                    params.getFirst("DBSubnetGroupName"),
+                    hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                    parseOptionalBoolean(params, "CopyTagsToSnapshot"),
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
+                    parseIntegerParam(params, "BackupRetentionPeriod"),
+                    params.getFirst("PreferredBackupWindow"),
+                    parseOptionalBoolean(params, "DeletionProtection"),
+                    parseTags(params));
+            DbInstance instance = service.restoreDbInstanceToPointInTime(request, region);
+            return Response.ok(AwsQueryResponse.envelope(
+                    "RestoreDBInstanceToPointInTime", AwsNamespaces.RDS, dbInstanceXml(instance))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleRestoreDbClusterToPointInTime(MultivaluedMap<String, String> params, String region) {
+        String clusterId = params.getFirst("DBClusterIdentifier");
+        Response missing = firstMissingParam("DBClusterIdentifier", clusterId);
+        if (missing != null) {
+            return missing;
+        }
+        try {
+            DbCluster cluster = service.restoreDbClusterToPointInTime(clusterId,
+                    params.getFirst("SourceDBClusterIdentifier"), params.getFirst("SourceDbClusterResourceId"),
+                    params.getFirst("RestoreType"),
+                    parseOptionalInstant(params.getFirst("RestoreToTime")),
+                    parseOptionalBoolean(params, "UseLatestRestorableTime"),
+                    optionalInt(params.getFirst("Port")), params.getFirst("DBSubnetGroupName"),
+                    params.getFirst("DBClusterParameterGroupName"),
+                    optionalBoolean(params.getFirst("EnableIAMDatabaseAuthentication")),
+                    params.getFirst("EngineMode"), parseTags(params), region);
+            return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
+                    dbClusterXml(cluster))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
     private Response handleRestoreDbClusterFromSnapshot(MultivaluedMap<String, String> params, String region) {
         String clusterId = params.getFirst("DBClusterIdentifier");
         String snapshotId = params.getFirst("SnapshotIdentifier");
@@ -2386,6 +2447,10 @@ public class RdsQueryHandler {
            .elem("MonitoringInterval", i.getMonitoringInterval())
            .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled())
            .elem("EngineLifecycleSupport", i.getEngineLifecycleSupport());
+        if (i.getBackupRetentionPeriod() > 0) {
+            // Point in time restore copies the source's current data, so the latest restorable time is now.
+            xml.elem("LatestRestorableTime", Instant.now().toString());
+        }
         if (i.getMonitoringRoleArn() != null && !i.getMonitoringRoleArn().isBlank()) {
             xml.elem("MonitoringRoleArn", i.getMonitoringRoleArn());
         }
@@ -2568,6 +2633,11 @@ public class RdsQueryHandler {
         }
         if (readerEp != null) {
             xml.elem("ReaderEndpoint", readerEp.address());
+        }
+        if (c.getCreatedAt() != null) {
+            // The restorable window runs from creation to now; see RestoreDBClusterToPointInTime.
+            xml.elem("EarliestRestorableTime", c.getCreatedAt().toString())
+               .elem("LatestRestorableTime", Instant.now().toString());
         }
         xml.elem("IAMDatabaseAuthenticationEnabled", c.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", c.isMultiAz())
