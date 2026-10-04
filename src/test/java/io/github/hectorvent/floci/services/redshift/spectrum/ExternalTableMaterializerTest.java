@@ -32,6 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -729,8 +730,7 @@ class ExternalTableMaterializerTest {
             assertThat(loading.await(10, TimeUnit.SECONDS), equalTo(true));
             Future<ExternalTableMaterializer.Outcome> second = executor.submit(
                     () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
-            Thread.sleep(300);
-            assertThat(second.isDone(), equalTo(false));
+            assertThrows(TimeoutException.class, () -> second.get(300, TimeUnit.MILLISECONDS));
 
             release.countDown();
 

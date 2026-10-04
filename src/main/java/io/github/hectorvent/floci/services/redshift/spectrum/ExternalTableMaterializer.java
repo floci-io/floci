@@ -270,7 +270,8 @@ public class ExternalTableMaterializer {
      * Iceberg manifests can name data files outside the table location. DuckDB performs the scan
      * with account credentials, so authorize each live data-file path as the bound role first.
      * The scan re-reads the metadata afterwards, so a metadata object overwritten between the two
-     * steps is not covered: closing that needs the authorized file list passed to DuckDB instead.
+     * steps is not covered. Before routing user queries here, pin the authorized snapshot and its
+     * file list for the scan, or enforce the role during the scan in the sidecar.
      */
     private void authorizeIcebergDataFiles(String accountId, ExternalSchemaBinding binding,
                                            RedshiftRoleAccess.RoleSession roleSession, Table table, Location location) {
