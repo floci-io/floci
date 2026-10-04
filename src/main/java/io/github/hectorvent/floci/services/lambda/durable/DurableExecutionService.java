@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableFunctionInvoker.DurableInvocationResult;
 import io.github.hectorvent.floci.services.lambda.durable.DurableFunctionInvoker.ResolvedDurableTarget;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableCheckpointReplay;
@@ -45,7 +46,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * The durable execution engine behind Lambda Durable Functions. It stores checkpointed operations,
@@ -75,9 +75,6 @@ public class DurableExecutionService implements Resettable {
     static final String INVALID_TOKEN = "Invalid checkpoint token";
     static final String TOKEN_FOR_OTHER_EXECUTION = "Checkpoint token is not valid for the durable execution ARN";
     static final String NOT_FOUND = "Durable Execution does not exist";
-    private static final Pattern EXECUTION_ARN = Pattern.compile(
-            "arn:([a-zA-Z0-9-]+):lambda:([a-zA-Z0-9-]+):(\\d{12}):function:([a-zA-Z0-9_-]+):"
-                    + "(\\$LATEST(?:\\.PUBLISHED)?|[0-9]+)/durable-execution/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)");
 
     private final AccountAwareStorageBackend<DurableExecution> store;
     private final ObjectMapper objectMapper;
@@ -702,12 +699,12 @@ public class DurableExecutionService implements Resettable {
     }
 
     static ArnParts parseArn(String executionArn) {
-        Matcher matcher = executionArn == null ? null : EXECUTION_ARN.matcher(executionArn);
+        Matcher matcher = executionArn == null ? null : LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(executionArn);
         if (matcher == null || !matcher.matches()) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + executionArn + "' at 'durableExecutionArn' failed to "
                             + "satisfy constraint: Member must satisfy regular expression pattern: "
-                            + EXECUTION_ARN.pattern(), 400);
+                            + LambdaArnUtils.DURABLE_EXECUTION_ARN.pattern(), 400);
         }
         return new ArnParts(executionArn, matcher.group(3), matcher.group(2), matcher.group(4), matcher.group(5),
                 matcher.group(6), matcher.group(7));

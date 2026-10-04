@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -21,7 +22,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -32,9 +32,6 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class ResourceArnBuilder {
-
-    private static final Pattern DURABLE_EXECUTION_ARN = Pattern.compile(
-            "arn:[^:/]+:lambda:[^:/]+:\\d{12}:function:[^:/]+:[^:/]+/durable-execution/[^/]+/[^/]+");
 
     /**
      * The IAM actions whose resource this builder can name. Deliberately only the
@@ -246,7 +243,7 @@ public class ResourceArnBuilder {
         if (executions < 0) {
             return null;
         }
-        Matcher matcher = DURABLE_EXECUTION_ARN.matcher(path.substring(executions + prefix.length()));
+        Matcher matcher = LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(path.substring(executions + prefix.length()));
         return matcher.lookingAt() ? matcher.group() : null;
     }
 
