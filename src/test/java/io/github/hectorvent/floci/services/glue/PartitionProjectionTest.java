@@ -450,4 +450,17 @@ class PartitionProjectionTest {
                 "WITH x AS (SELECT 1 AS key) SELECT * FROM audit_events a JOIN x ON a.id = x.key "
                         + "WHERE a.tenant = x.key", List.of(injectedTenantTable())));
     }
+
+    @Test
+    void multiPartFunctionCallsAreAcceptedAsStaticFilters() {
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = catalog.schema.fn('abc')",
+                List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = schema.fn('abc')",
+                List.of(injectedTenantTable())));
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = catalog.schema.fn(suffix)",
+                List.of(injectedTenantTable())));
+    }
 }

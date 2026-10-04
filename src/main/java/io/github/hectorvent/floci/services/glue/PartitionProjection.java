@@ -684,9 +684,17 @@ public final class PartitionProjection {
                 return true;
             }
         }
-        Pattern qualifiedPattern = Pattern.compile("(?<![A-Za-z0-9_$])" + IDENTIFIER
-                + "\\s*\\.\\s*" + IDENTIFIER + "(?!\\s*\\()", Pattern.CASE_INSENSITIVE);
-        if (qualifiedPattern.matcher(expr).find()) {
+        Pattern dotChainPattern = Pattern.compile("(?<![A-Za-z0-9_$])" + IDENTIFIER
+                + "(?:\\s*\\.\\s*" + IDENTIFIER + ")+", Pattern.CASE_INSENSITIVE);
+        Matcher dotMatcher = dotChainPattern.matcher(expr);
+        while (dotMatcher.find()) {
+            int end = dotMatcher.end();
+            while (end < expr.length() && Character.isWhitespace(expr.charAt(end))) {
+                end++;
+            }
+            if (end < expr.length() && expr.charAt(end) == '(') {
+                continue;
+            }
             return true;
         }
         return false;
