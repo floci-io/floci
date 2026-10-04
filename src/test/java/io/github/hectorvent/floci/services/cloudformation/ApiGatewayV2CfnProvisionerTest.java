@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudForm
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
@@ -32,6 +33,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -691,6 +693,26 @@ class ApiGatewayV2CfnProvisionerTest {
         assertFalse(provisioner.rollbackUpdate(integration), "the IntegrationUri change has no rollback");
 
         verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-1");
+    }
+
+    @Test
+    void failedIntegrationUpdateRestoresItsConnection() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+        when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap()))
+                .thenThrow(new AwsException("NotFoundException", "Integration not found", 404));
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-2"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_FAILED"), integration.getStatus());
+        InOrder order = inOrder(apiGatewayV2Service);
+        order.verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-2");
+        order.verify(apiGatewayV2Service).updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap());
+        order.verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-1");
+        assertFalse(integration.getAttributes().containsKey("__FlociUpdateRollbackFailure"));
+        assertFalse(integration.getAttributes().containsKey("__FlociIntegrationConnectionSnapshot"));
     }
 
     private static Integration priorVpcLinkIntegration() {

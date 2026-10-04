@@ -877,10 +877,27 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
             Integration prior = apiGatewayV2Service.getIntegration(region, apiId, r.getPhysicalId());
             r.getAttributes().put(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR,
                     integrationConnectionSnapshot(region, apiId, prior, req));
-            apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req);
-            // A connection removed from the template is removed here too. INTERNET is the AWS default.
-            integration = apiGatewayV2Service.replaceIntegrationConnection(region, apiId, r.getPhysicalId(),
-                    connectionType != null ? connectionType : "INTERNET", connectionId);
+            // The connection changes first, in one call. If the update after it fails, the connection
+            // is the only change to undo.
+            try {
+                // A connection removed from the template is removed here too. INTERNET is the AWS default.
+                apiGatewayV2Service.replaceIntegrationConnection(region, apiId, r.getPhysicalId(),
+                        connectionType != null ? connectionType : "INTERNET", connectionId);
+                integration = apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req);
+            } catch (RuntimeException failure) {
+                // The stack skips rollbackUpdate for a resource whose own update failed, so undo it here.
+                try {
+                    rollbackIntegrationConnection(r);
+                } catch (RuntimeException restoreFailure) {
+                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                            "Could not roll back the connection of integration " + r.getPhysicalId() + ": "
+                                    + restoreFailure.getMessage());
+                    if (restoreFailure != failure) {
+                        failure.addSuppressed(restoreFailure);
+                    }
+                }
+                throw failure;
+            }
         }
         r.setPhysicalId(integration.getIntegrationId());
         r.getAttributes().put("IntegrationId", integration.getIntegrationId());
