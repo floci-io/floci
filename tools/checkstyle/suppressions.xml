@@ -4,10 +4,7 @@
         "https://checkstyle.org/dtds/suppressions_1_2.dtd">
 <suppressions>
     <!-- Files that still use var. Remove an entry once its file is clean. -->
-    <suppress id="NoVar" files="/com/floci/test/CloudFormationEventSourceMappingTest\.java$"/>
     <suppress id="NoVar" files="/com/floci/test/ElastiCacheTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SqsMd5Test\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/StsTest\.java$"/>
     <suppress id="NoVar" files="/floci/core/common/IamEnforcementFilter\.java$"/>
     <suppress id="NoVar" files="/floci/services/apigateway/ApiGatewayService\.java$"/>
     <suppress id="NoVar" files="/floci/services/bedrockruntime/backend/BedrockOpenAiTranslator\.java$"/>
