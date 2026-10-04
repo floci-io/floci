@@ -716,7 +716,7 @@ public class DurableExecutionService implements Resettable {
     }
 
     private static AwsException invalidMarker() {
-        return new AwsException("InvalidParameterValueException", "Invalid marker", 400);
+        return new AwsException("InvalidParameterValueException", "Invalid Marker", 400);
     }
 
     private static int utf8Length(String value) {

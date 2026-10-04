@@ -181,6 +181,14 @@ class LambdaDurableExecutionApiIntegrationTest {
 
         given()
         .when()
+            .get(DURABLE + "/functions/api-durable-fn/durable-executions?Statuses=PAUSED&Marker=bogus")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", equalTo("Invalid Marker"));
+
+        given()
+        .when()
             .get(DURABLE + "/functions/api-plain-fn/durable-executions?Statuses=BOGUS")
         .then()
             .statusCode(400)

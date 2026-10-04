@@ -156,8 +156,10 @@ public class DurableExecutionController {
                 region, fn.getFunctionName(), qualified ? fn.getVersion() : null, durableExecutionName, statusFilter,
                 parseTimestamp(startedAfter, "startedAfter"), parseTimestamp(startedBefore, "startedBefore"),
                 Boolean.parseBoolean(reverseOrder), parseMaxItems(maxItems), marker);
-        PaginatedResult<DurableExecution> page = onlyUnmodelledStatuses
-                ? new PaginatedResult<>(List.of(), null) : service.list(request);
+        PaginatedResult<DurableExecution> page = service.list(request);
+        if (onlyUnmodelledStatuses) {
+            page = new PaginatedResult<>(List.of(), null);
+        }
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode executions = response.putArray("DurableExecutions");
         for (DurableExecution execution : page.items()) {
