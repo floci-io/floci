@@ -207,6 +207,35 @@ class S3ValidateSignaturesIntegrationTest {
             .statusCode(204);
     }
 
+    @Test
+    @Order(30)
+    void headerWithMalformedSigV4IsRejectedWithoutCreatingBucket() {
+        given()
+            .header("Authorization", "X Credential=111122223333/20261001/us-east-1/s3/aws4_request")
+        .when()
+            .put("/routing-check-malformed")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("AuthorizationHeaderMalformed"))
+            .body("Error.Message", equalTo("The authorization header you provided is invalid."));
+
+        given().filter(LOCAL_SIGNER).when().get("/routing-check-malformed").then().statusCode(404);
+    }
+
+    @Test
+    @Order(31)
+    void presignedQueryMissingAlgorithmIsRejectedWithoutCreatingBucket() {
+        given()
+        .when()
+            .put("/routing-check-missing-algo?X-Amz-Credential=111122223333%2F20261001%2Fus-east-1%2Fs3%2Faws4_request")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("AuthorizationQueryParametersError"))
+            .body("Error.Message", equalTo("Query-string authentication requires the X-Amz-Algorithm query parameter"));
+
+        given().filter(LOCAL_SIGNER).when().get("/routing-check-missing-algo").then().statusCode(404);
+    }
+
     private static void createIamUser(String userName) {
         String authorization = "AWS4-HMAC-SHA256 Credential=test/" + CREDENTIAL_DATE
                 + "/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=unused";
