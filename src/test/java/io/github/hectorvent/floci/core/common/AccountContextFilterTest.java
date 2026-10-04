@@ -420,6 +420,14 @@ class AccountContextFilterTest {
     }
 
     @Test
+    void blankAuthHeaderDoesNotHidePresignedQueryCredential() {
+        ContainerRequestContext ctx = mockContext("   ", "111122223333/20260617/eu-west-1/s3/aws4_request");
+        filter.filter(ctx);
+        assertEquals("111122223333", requestContext.getAccountId());
+        assertEquals("eu-west-1", requestContext.getRegion());
+    }
+
+    @Test
     void presignedCredentialWithoutAlgorithmStillRoutesInternalDownloadUrls() {
         ContainerRequestContext ctx = mockContext(null,
                 "111122223333/20260617/eu-west-1/s3/aws4_request", null);

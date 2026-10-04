@@ -84,7 +84,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
         } else {
             // A present Authorization header wins, as in IamEnforcementFilter: an unrecognised one
             // must not let the query string pick an account that IAM then never checks.
-            boolean hasAuthHeader = auth != null && !auth.isEmpty();
+            boolean hasAuthHeader = auth != null && !auth.isBlank();
             String credential = hasAuthHeader
                     ? null : ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
             if (credential != null && !credential.isEmpty()) {
