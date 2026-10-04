@@ -236,6 +236,18 @@ public enum SesListPaging {
      */
     <T> PaginatedResult<T> page(String region, String scope, List<T> all, Function<T, String> cursorOf,
                                 Integer pageSize, String nextToken) {
+        int limit = checkRequest(pageSize, nextToken);
+        String boundTo = scope.isEmpty() ? "" : "#" + scope.length() + "#" + scope;
+        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region + boundTo,
+                invalidToken);
+    }
+
+    /**
+     * What SES checks before anything else in the request: the page size and an empty token, which
+     * the tenant-style lists report together. Returns the page size to serve. {@link #page} runs it
+     * too, so a service calls it first only when its own checks must come after these.
+     */
+    int checkRequest(Integer pageSize, String nextToken) {
         boolean emptyToken = nextToken != null && nextToken.isEmpty() && emptyTokenInvalid;
         if (emptyToken && sizeAndEmptyTokenInvalid != null && pageSize != null
                 && (pageSize < 1 || pageSize > maxPageSize)) {
@@ -245,9 +257,7 @@ public enum SesListPaging {
         if (emptyToken) {
             throw invalidToken.apply(nextToken);
         }
-        String boundTo = scope.isEmpty() ? "" : "#" + scope.length() + "#" + scope;
-        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region + boundTo,
-                invalidToken);
+        return limit;
     }
 
     int pageSize(Integer requested) {

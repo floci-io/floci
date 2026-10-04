@@ -23,13 +23,16 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.Map;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.filterValues;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMapMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
@@ -46,6 +49,9 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
 public class SesTenantController {
 
     private static final Logger LOG = Logger.getLogger(SesTenantController.class);
+
+    /** In the order SES prints them when it refuses a key. */
+    private static final List<String> TENANT_FILTER_KEYS = List.of("SENDING_STATUS", "TENANT_NAME_CONTAINS");
 
     private final SesTenantService tenantService;
     private final SesService sesService;
@@ -123,10 +129,11 @@ public class SesTenantController {
                     ? objectMapper.createObjectNode()
                     : objectMapper.readTree(body);
             requireJsonObject(request);
+            Map<String, String> filter = stringMapMemberOrAbsent(request, "Filter");
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = stringMemberOrAbsent(request, "NextToken");
-            PaginatedResult<Tenant> page = tenantService.listTenants(region, SesListPaging.V2_LIST_TENANTS,
-                    pageSize, nextToken);
+            Map<String, String> present = filterValues(filter, TENANT_FILTER_KEYS);
+            PaginatedResult<Tenant> page = tenantService.listTenants(region, present, pageSize, nextToken);
             ObjectNode result = objectMapper.createObjectNode();
             ArrayNode tenants = result.putArray("Tenants");
             for (Tenant t : page.items()) {
