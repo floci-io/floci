@@ -156,7 +156,7 @@ cross-resource references.
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `Archive` (`KmsKeyIdentifier` is ignored) |
 | EventBridge Scheduler | `ScheduleGroup` |
-| Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported) |
+| Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported), `User` (management plane only; Ref returns the user ARN; Arn attribute supported; Policy and PosixProfile are not supported; a ServerId or UserName change replaces the user) |
 | Backup | `BackupVault` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
