@@ -263,7 +263,7 @@ public class SqsJsonHandler {
 
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages,
                 visibilityTimeout, waitTimeSeconds, region);
-        String senderId = sqsService.senderIdFor(queueUrl);
+        String defaultSenderId = sqsService.senderIdFor(queueUrl);
 
         ObjectNode response = objectMapper.createObjectNode();
         // Match AWS: omit the Messages field entirely when no messages are
@@ -286,6 +286,7 @@ public class SqsJsonHandler {
             }
             msgNode.put("Body", msg.getBody());
 
+            String senderId = msg.getSenderId() != null ? msg.getSenderId() : defaultSenderId;
             writeSystemAttributesJson(msgNode, msg, requestedAttrs, senderId);
 
             if (!selectedMessageAttrs.isEmpty()) {
