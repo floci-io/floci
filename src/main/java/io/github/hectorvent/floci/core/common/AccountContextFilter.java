@@ -9,6 +9,7 @@ import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
@@ -70,23 +71,28 @@ public class AccountContextFilter implements ContainerRequestFilter {
         Object pinnedAccount = ctx.getProperty(PINNED_ACCOUNT_PROPERTY);
         if (pinnedAccount != null) {
             requestContext.setAccountId(pinnedAccount.toString());
+            requestContext.setAccessKeyId(null);
             applyRegion(regionResolver.resolveRegionFromAuth(null));
             return;
         }
         String auth = ctx.getHeaderString("Authorization");
-        if (auth != null && !auth.isEmpty()) {
-            String akid = accountResolver.extractAccessKeyId(auth);
+        String akid = auth != null && !auth.isEmpty() ? accountResolver.extractAccessKeyId(auth) : null;
+        if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
+            requestContext.setAccessKeyId(akid);
             String region = regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
             rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
             rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
         } else {
-            String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
-            if (credential != null && !credential.isEmpty()) {
-                String akid = accountResolver.extractPresignedAccessKeyId(credential);
+            MultivaluedMap<String, String> queryParams = ctx.getUriInfo().getQueryParameters();
+            String credential = queryParams.getFirst("X-Amz-Credential");
+            String algorithm = queryParams.getFirst("X-Amz-Algorithm");
+            if (credential != null && !credential.isEmpty() && algorithm != null && !algorithm.isEmpty()) {
+                String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
-                        resolveAccount(akid, accountResolver.resolveFromPresignedCredential(credential)));
+                        resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
+                requestContext.setAccessKeyId(presignedAkid);
                 String region = regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));
@@ -94,6 +100,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
                         SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
             } else {
                 requestContext.setAccountId(accountResolver.resolve(null));
+                requestContext.setAccessKeyId(null);
                 applyRegion(regionResolver.resolveRegionFromAuth(null));
             }
         }

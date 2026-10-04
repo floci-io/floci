@@ -13,6 +13,7 @@ public class RequestContext {
     private String accountId;
     private String region;
     private String partition;
+    private String accessKeyId;
 
     public String getAccountId() {
         return accountId;
@@ -41,5 +42,13 @@ public class RequestContext {
 
     public void setPartition(String partition) {
         this.partition = partition;
+    }
+
+    public String getAccessKeyId() {
+        return accessKeyId;
+    }
+
+    public void setAccessKeyId(String accessKeyId) {
+        this.accessKeyId = accessKeyId;
     }
 }

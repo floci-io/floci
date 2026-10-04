@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -391,7 +392,44 @@ class AccountContextFilterTest {
         assertTrue(body.contains("polygondwanaland-west-1"), body);
     }
 
+    @Test
+    void populatesAccessKeyIdInRequestContextFromAuthHeader() {
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        ContainerRequestContext ctx = mockContext(auth, null);
+        filter.filter(ctx);
+        assertEquals("AKIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
+    }
+
+    @Test
+    void populatesAccessKeyIdInRequestContextFromPresignedQuery() {
+        ContainerRequestContext ctx = mockContext(null,
+                "AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request", "AWS4-HMAC-SHA256");
+        filter.filter(ctx);
+        assertEquals("AKIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
+    }
+
+    @Test
+    void accessKeyIdIsNullWhenNoAuthInfo() {
+        ContainerRequestContext ctx = mockContext(null, null);
+        filter.filter(ctx);
+        assertNull(requestContext.getAccessKeyId());
+    }
+
+    @Test
+    void accessKeyIdIsNullWhenPresignedQueryMissingAlgorithm() {
+        ContainerRequestContext ctx = mockContext(null,
+                "AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request", null);
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertNull(requestContext.getAccessKeyId());
+    }
+
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {
+        return mockContext(authHeader, xAmzCredential, xAmzCredential != null ? "AWS4-HMAC-SHA256" : null);
+    }
+
+    private ContainerRequestContext mockContext(String authHeader, String xAmzCredential, String xAmzAlgorithm) {
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         when(ctx.getHeaderString("Authorization")).thenReturn(authHeader);
 
@@ -399,6 +437,9 @@ class AccountContextFilterTest {
         MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
         if (xAmzCredential != null) {
             queryParams.add("X-Amz-Credential", xAmzCredential);
+        }
+        if (xAmzAlgorithm != null) {
+            queryParams.add("X-Amz-Algorithm", xAmzAlgorithm);
         }
         when(uriInfo.getQueryParameters()).thenReturn(queryParams);
         when(uriInfo.getPath()).thenReturn("/");
