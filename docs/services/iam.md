@@ -635,12 +635,35 @@ certificate body, certificate chain, or private key".
 `ServerCertificateId` uses AWS's `ASCA` prefix for certificates. `GetAccountSummary`'s
 `ServerCertificates` count is backed by this store rather than reporting zero.
 
-`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, as AWS does.
+`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, which is an
+intentional deviation rather than a recorded AWS answer. `DeleteConflict` is modeled on the
+operation, but the API Reference describes it only as "attached subordinate entities" without saying
+what counts as one for a certificate, and the operation's own page warns that if Elastic Load
+Balancing "doesn't detect the deletion of bound certificates, it may continue to use the
+certificates", which reads as the delete going through. The refusal is kept because a caller is
+better served by it than by a dangling reference, not because AWS is known to answer it.
 Services that reference a certificate (ELB Classic listeners, ELBv2 listeners, CloudFront
 distributions) report it through `ServerCertificateReferenceProvider`, which IAM consults without
 depending on them. In the other direction, ELB Classic rejects a listener whose `SSLCertificateId`
 names no certificate with `CertificateNotFound`, and CloudFront rejects an unknown
 `ViewerCertificate.IAMCertificateId` with `InvalidViewerCertificate`.
+
+Those two directions have to be one step, not two. A referring service checks the certificate and
+then saves the resource that names it, so a delete running in between sees no reference, removes the
+certificate, and leaves the resource holding something that is gone. CloudFront and ELB Classic
+therefore perform that check and the write while holding the lock the delete takes, which leaves
+only the two orders that make sense: the delete loses and answers `DeleteConflict`, or it wins and
+the create is refused for a certificate that no longer exists. ELBv2 does not validate certificate
+references at all, so a listener there can still name a certificate that was never present, even
+though `CertificateNotFound` is modeled on `CreateListener`, `ModifyListener` and
+`AddListenerCertificates`.
+
+Only a write that names an IAM certificate takes the lock. A listener with no certificate, a
+listener served by ACM, a removal, or a distribution without an `IAMCertificateId` cannot leave a
+resource holding a deleted certificate, and making those wait on a certificate delete, or it on
+them, would buy nothing. The delete reads a snapshot of each load balancer's listeners rather than
+the live list, so an unguarded write cannot end its walk in `ConcurrentModificationException`
+either, which no mapper covers and which would surface as an unmapped 500.
 
 ### SSH Public Keys
 

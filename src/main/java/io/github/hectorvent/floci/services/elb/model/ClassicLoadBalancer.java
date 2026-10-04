@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * A Classic (2012-06-01) load balancer — the {@code LoadBalancerDescription} shape.
@@ -30,7 +31,15 @@ public class ClassicLoadBalancer {
     private String accountId;
     private Instant createdTime;
 
-    private List<ClassicListener> listeners = new ArrayList<>();
+    /**
+     * Copy on write because IAM reads it from another thread. {@code DeleteServerCertificate}
+     * walks the listeners of every load balancer, through
+     * {@code ElbClassicService.serverCertificateReferences()}, looking for the certificate it is
+     * about to remove, and a listener write may be changing this list while it does. A plain list
+     * ends that walk in {@link java.util.ConcurrentModificationException}; iterating this one
+     * reads a snapshot, which also keeps the response renderer and Jackson off the live list.
+     */
+    private List<ClassicListener> listeners = new CopyOnWriteArrayList<>();
     private List<String> availabilityZones = new ArrayList<>();
     private List<String> subnets = new ArrayList<>();
     private List<String> securityGroups = new ArrayList<>();
@@ -73,7 +82,9 @@ public class ClassicLoadBalancer {
     public void setCreatedTime(Instant v) { this.createdTime = v; }
 
     public List<ClassicListener> getListeners() { return listeners; }
-    public void setListeners(List<ClassicListener> v) { this.listeners = v; }
+    public void setListeners(List<ClassicListener> v) {
+        this.listeners = new CopyOnWriteArrayList<>(v != null ? v : List.of());
+    }
 
     public List<String> getAvailabilityZones() { return availabilityZones; }
     public void setAvailabilityZones(List<String> v) { this.availabilityZones = v; }

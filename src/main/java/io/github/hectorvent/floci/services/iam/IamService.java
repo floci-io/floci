@@ -81,6 +81,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -2696,6 +2697,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void deleteServerCertificate(String name) {
         deleteServerCertificate(name, List.of());
+    }
+
+    /**
+     * Runs an action that checks a server certificate and then records a reference to it, holding
+     * the lock {@link #deleteServerCertificate} takes so the certificate cannot be deleted in
+     * between. Without it the check and the write straddle the delete: the delete sees no
+     * reference because the referring resource is not saved yet, removes the certificate, and the
+     * resource is then saved pointing at something that is gone.
+     *
+     * <p>Safe to call from inside a provider's own monitor, because the ordering only ever runs
+     * one way. {@code deleteServerCertificate} holds this lock while calling
+     * {@link ServerCertificateReferenceProvider#serverCertificateReferences()} on each provider,
+     * and those are plain reads over the provider's own store that take no provider monitor, so
+     * IAM never waits on a provider while a provider waits on IAM.
+     */
+    public <T> T supplyWithServerCertificatesHeld(Supplier<T> action) {
+        synchronized (serverCertificateLock) {
+            return action.get();
+        }
+    }
+
+    /** {@link #supplyWithServerCertificatesHeld} for an action with no result. */
+    public void runWithServerCertificatesHeld(Runnable action) {
+        synchronized (serverCertificateLock) {
+            action.run();
+        }
     }
 
     /**
