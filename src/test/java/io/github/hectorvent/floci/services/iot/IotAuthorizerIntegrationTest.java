@@ -127,6 +127,14 @@ class IotAuthorizerIntegrationTest {
 
         setStatus("it-auth-err", "INACTIVE");
         delete("it-auth-err");
+
+        given().contentType("application/json").body("{}")
+        .when().post("/default-authorizer")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-ErrorType", "InvalidRequestException")
+            .body("message", equalTo("1 validation error detected: Value at 'authorizerName' failed to satisfy constraint: "
+                    + "Member must not be null"));
     }
 
     @Test

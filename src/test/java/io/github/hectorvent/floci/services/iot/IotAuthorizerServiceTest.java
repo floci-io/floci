@@ -209,6 +209,17 @@ class IotAuthorizerServiceTest {
                 () -> service.createAuthorizer("a", unsigned().put("tokenKeyName", "bad name!"), REGION));
         assertInvalid(prefix + "'tokenKeyName' failed to satisfy constraint: Member must have length less than or equal to 128",
                 () -> service.createAuthorizer("a", unsigned().put("tokenKeyName", "t".repeat(129)), REGION));
+        String nameConstraint = "Value at 'authorizerName' failed to satisfy constraint: ";
+        assertInvalid("2 validation errors detected: " + nameConstraint + "Member must satisfy regular expression pattern: [\\w=,@-]+; "
+                        + nameConstraint + "Member must have length less than or equal to 128",
+                () -> service.createAuthorizer("!".repeat(129), unsigned(), REGION));
+        String tokenConstraint = "Value at 'tokenKeyName' failed to satisfy constraint: ";
+        assertInvalid("2 validation errors detected: " + tokenConstraint + "Member must satisfy regular expression pattern: [a-zA-Z0-9_-]+; "
+                        + tokenConstraint + "Member must have length greater than or equal to 1",
+                () -> service.createAuthorizer("a", unsigned().put("tokenKeyName", ""), REGION));
+        assertInvalid("2 validation errors detected: " + tokenConstraint + "Member must satisfy regular expression pattern: [a-zA-Z0-9_-]+; "
+                        + tokenConstraint + "Member must have length less than or equal to 128",
+                () -> service.createAuthorizer("a", unsigned().put("tokenKeyName", "!".repeat(129)), REGION));
         assertInvalid(prefix + "'tokenSigningPublicKeys' failed to satisfy constraint: Map keys must satisfy constraint: "
                         + "[Member must have length less than or equal to 128, Member must have length greater than or equal to 1, "
                         + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+]",
@@ -348,6 +359,28 @@ class IotAuthorizerServiceTest {
         service.clearDefaultAuthorizer(REGION);
         assertAwsError("ResourceNotFoundException", 404, none, () -> service.describeDefaultAuthorizer(REGION));
         assertAwsError("ResourceNotFoundException", 404, none, () -> service.describeDefaultAuthorizer("eu-west-1"));
+    }
+
+    @Test
+    void setDefaultValidatesTheNameBeforeTheLookupAndKeepsTheDefault() {
+        service.createAuthorizer("keep", unsigned(), REGION);
+        service.setDefaultAuthorizer("keep", REGION);
+        String constraint = "Value at 'authorizerName' failed to satisfy constraint: ";
+        String pattern = constraint + "Member must satisfy regular expression pattern: [\\w=,@-]+";
+        String tooLong = constraint + "Member must have length less than or equal to 128";
+
+        assertInvalid("1 validation error detected: " + constraint + "Member must not be null",
+                () -> service.setDefaultAuthorizer(null, REGION));
+        assertInvalid("2 validation errors detected: " + pattern + "; " + constraint + "Member must have length greater than or equal to 1",
+                () -> service.setDefaultAuthorizer("", REGION));
+        assertInvalid("1 validation error detected: " + pattern, () -> service.setDefaultAuthorizer("bad name!", REGION));
+        assertInvalid("1 validation error detected: " + tooLong, () -> service.setDefaultAuthorizer("a".repeat(129), REGION));
+        assertInvalid("2 validation errors detected: " + pattern + "; " + tooLong,
+                () -> service.setDefaultAuthorizer("!".repeat(129), REGION));
+        assertAwsError("ResourceNotFoundException", 404, "Authorizer absent not found",
+                () -> service.setDefaultAuthorizer("absent", REGION));
+
+        assertEquals("keep", service.describeDefaultAuthorizer(REGION).getAuthorizerName());
     }
 
     @Test

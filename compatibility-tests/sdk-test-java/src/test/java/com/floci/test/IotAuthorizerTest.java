@@ -233,7 +233,7 @@ class IotAuthorizerTest {
     }
 
     @Test
-    @DisplayName("Create rejects a malformed authorizer name and a malformed function ARN")
+    @DisplayName("Create rejects a malformed authorizer name, token key name and function ARN")
     void createRejectsMalformedNameAndFunctionArn() {
         assertAwsError(() -> iot.createAuthorizer(r -> r.authorizerName("bad name!")
                         .authorizerFunctionArn(functionArn("fn"))
@@ -241,6 +241,24 @@ class IotAuthorizerTest {
                 InvalidRequestException.class, 400,
                 "1 validation error detected: Value at 'authorizerName' failed to satisfy constraint: "
                         + "Member must satisfy regular expression pattern: [\\w=,@-]+");
+
+        assertAwsError(() -> iot.createAuthorizer(r -> r.authorizerName("!".repeat(129))
+                        .authorizerFunctionArn(functionArn("fn"))
+                        .signingDisabled(true)),
+                InvalidRequestException.class, 400,
+                "2 validation errors detected: Value at 'authorizerName' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: [\\w=,@-]+; "
+                        + "Value at 'authorizerName' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 128");
+
+        String emptyToken = name("emptytok");
+        assertCreateRejected(emptyToken, b -> b.authorizerFunctionArn(functionArn("fn"))
+                        .tokenKeyName("")
+                        .tokenSigningPublicKeys(Map.of("k1", rsaKey1)),
+                "2 validation errors detected: Value at 'tokenKeyName' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: [a-zA-Z0-9_-]+; "
+                        + "Value at 'tokenKeyName' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 1");
 
         String badArn = name("badarn");
         assertCreateRejected(badArn, b -> b.authorizerFunctionArn("not-an-arn").signingDisabled(true),
@@ -450,6 +468,29 @@ class IotAuthorizerTest {
                 ResourceNotFoundException.class, 404, "Default authorizer not found");
         assertAwsError(() -> iot.clearDefaultAuthorizer(r -> { }),
                 ResourceNotFoundException.class, 404, "Default authorizer not found");
+    }
+
+    @Test
+    @DisplayName("SetDefaultAuthorizer validates the authorizer name before looking it up")
+    void setDefaultAuthorizerValidatesTheName() {
+        String constraint = "Value at 'authorizerName' failed to satisfy constraint: ";
+        String pattern = constraint + "Member must satisfy regular expression pattern: [\\w=,@-]+";
+
+        assertAwsError(() -> iot.setDefaultAuthorizer(r -> { }), InvalidRequestException.class, 400,
+                "1 validation error detected: " + constraint + "Member must not be null");
+        assertAwsError(() -> iot.setDefaultAuthorizer(r -> r.authorizerName("")), InvalidRequestException.class, 400,
+                "2 validation errors detected: " + pattern + "; " + constraint
+                        + "Member must have length greater than or equal to 1");
+        assertAwsError(() -> iot.setDefaultAuthorizer(r -> r.authorizerName("bad name!")),
+                InvalidRequestException.class, 400, "1 validation error detected: " + pattern);
+        assertAwsError(() -> iot.setDefaultAuthorizer(r -> r.authorizerName("!".repeat(129))),
+                InvalidRequestException.class, 400,
+                "2 validation errors detected: " + pattern + "; " + constraint
+                        + "Member must have length less than or equal to 128");
+
+        String missing = name("nodefault");
+        assertAwsError(() -> iot.setDefaultAuthorizer(r -> r.authorizerName(missing)),
+                ResourceNotFoundException.class, 404, "Authorizer " + missing + " not found");
     }
 
     @Test

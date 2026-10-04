@@ -16,6 +16,7 @@ import java.security.KeyFactory;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -26,6 +27,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * AWS IoT Core custom authorizers: the records CreateAuthorizer and its peers manage, and the
@@ -196,6 +198,7 @@ public class IotAuthorizerService {
     }
 
     public IotAuthorizer setDefaultAuthorizer(String name, String region) {
+        requireNameLike("authorizerName", name, NAME_PATTERN);
         synchronized (lock) {
             IotAuthorizer authorizer = describeAuthorizer(name, region);
             if (authorizer.isDefaultAuthorizer()) {
@@ -347,13 +350,23 @@ public class IotAuthorizerService {
         }
     }
 
-    /** AWS reports the pattern before the length, as the measured messages show. */
+    /** AWS reports every violated constraint of the member, the pattern first, as the measured messages show. */
     private static void requireNameLike(String field, String value, Pattern pattern) {
+        if (value == null) {
+            throw constraint(field, "Member must not be null");
+        }
+        List<String> violations = new ArrayList<>();
         if (!pattern.matcher(value).matches()) {
-            throw constraint(field, "Member must satisfy regular expression pattern: " + pattern.pattern());
+            violations.add("Member must satisfy regular expression pattern: " + pattern.pattern());
+        }
+        if (value.isEmpty()) {
+            violations.add("Member must have length greater than or equal to 1");
         }
         if (value.length() > 128) {
-            throw constraint(field, "Member must have length less than or equal to 128");
+            violations.add("Member must have length less than or equal to 128");
+        }
+        if (!violations.isEmpty()) {
+            throw constraints(field, violations);
         }
     }
 
@@ -367,7 +380,14 @@ public class IotAuthorizerService {
     }
 
     private static AwsException constraint(String field, String constraint) {
-        return invalid("1 validation error detected: Value at '" + field + "' failed to satisfy constraint: " + constraint);
+        return constraints(field, List.of(constraint));
+    }
+
+    private static AwsException constraints(String field, List<String> constraints) {
+        return invalid(constraints.size() + " validation error" + (constraints.size() == 1 ? "" : "s") + " detected: "
+                + constraints.stream()
+                        .map(constraint -> "Value at '" + field + "' failed to satisfy constraint: " + constraint)
+                        .collect(Collectors.joining("; ")));
     }
 
     private static AwsException invalid(String message) {
