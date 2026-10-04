@@ -8,7 +8,9 @@ import org.junit.jupiter.api.Test;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 
@@ -129,6 +131,50 @@ class RegionScopedListsIntegrationTest {
                 .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
                 .contentType(DYNAMODB_JSON).body("{\"TableName\": \"" + table + "\"}")
             .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void dynamoDbImportClientTokensStayInTheirRegion() {
+        String table = "region-import-" + UUID.randomUUID().toString().substring(0, 8);
+        // The same request and ClientToken in two regions: each region starts its own import. The bucket is
+        // never created, so each job fails later without touching S3.
+        String request = """
+            {"S3BucketSource": {"S3Bucket": "region-import-no-bucket"}, "InputFormat": "DYNAMODB_JSON",
+             "ClientToken": "%s",
+             "TableCreationParameters": {"TableName": "%s",
+               "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+               "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+               "BillingMode": "PAY_PER_REQUEST"}}
+            """.formatted(UUID.randomUUID(), table);
+        String homeImportArn = importTable(HOME, request);
+        String otherImportArn = importTable(OTHER, request);
+
+        assertThat(otherImportArn, not(equalTo(homeImportArn)));
+        given().header("Authorization", auth(OTHER, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810.DescribeImport")
+                .contentType(DYNAMODB_JSON).body("{\"ImportArn\": \"" + otherImportArn + "\"}")
+            .when().post("/").then().statusCode(200)
+            .body("ImportTableDescription.ImportArn", equalTo(otherImportArn));
+        given().header("Authorization", auth(OTHER, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810.ListImports")
+                .contentType(DYNAMODB_JSON).body("{}")
+            .when().post("/").then().statusCode(200)
+            .body("ImportSummaryList.ImportArn", not(hasItem(homeImportArn)));
+
+        for (String region : new String[] {HOME, OTHER}) {
+            given().header("Authorization", auth(region, "dynamodb"))
+                    .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+                    .contentType(DYNAMODB_JSON).body("{\"TableName\": \"" + table + "\"}")
+                .when().post("/");
+        }
+    }
+
+    private static String importTable(String region, String request) {
+        return given().header("Authorization", auth(region, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810.ImportTable")
+                .contentType(DYNAMODB_JSON).body(request)
+            .when().post("/").then().statusCode(200)
+            .extract().path("ImportTableDescription.ImportArn");
     }
 
     @Test

@@ -4852,6 +4852,7 @@ public class DynamoDbService {
             return null;
         }
         var existing = importStore.scan(k -> true).stream()
+                .filter(d -> inRequestRegion(d.getImportArn()))
                 .filter(d -> clientToken.equals(d.getClientToken()))
                 .findFirst()
                 .orElse(null);
