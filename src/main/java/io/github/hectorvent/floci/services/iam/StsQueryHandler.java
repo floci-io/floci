@@ -238,9 +238,13 @@ public class StsQueryHandler {
         String accountId = regionResolver.getAccountId();
         String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
+        String sessionToken = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
+        if (sessionToken == null && params != null) {
+            sessionToken = getParam(params, "X-Amz-Security-Token");
+        }
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
-        String userId = iamService.resolveCallerUserId(accessKeyId).orElse(accountId);
+        String userId = iamService.resolveCallerUserId(accessKeyId, sessionToken).orElse(accountId);
         String result = new XmlBuilder()
                 .elem("UserId", userId)
                 .elem("Account", accountId)

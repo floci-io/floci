@@ -84,7 +84,8 @@ public class LambdaExecutionRoleCredentials {
                 "ASIA" + random(UPPER_ALPHANUMERIC, 16),
                 random(SECRET_CHARACTERS, 40),
                 random(SECRET_CHARACTERS, 200));
-        String assumedRoleId = role.get().getRoleId() != null ? role.get().getRoleId() + ":floci-session" : null;
+        String functionName = function.getFunctionName();
+        String assumedRoleId = role.get().getRoleId() != null ? role.get().getRoleId() + ":" + functionName : null;
         iamService.registerLambdaExecutionRoleSession(
                 functionAccountId, credentials.accessKeyId(), credentials.secretAccessKey(),
                 credentials.sessionToken(), roleArn, null, assumedRoleId);

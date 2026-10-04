@@ -34,6 +34,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -2394,7 +2396,7 @@ class SqsServiceTest {
         when(requestContextInstance.get()).thenReturn(requestContext);
 
         IamService iamService = mock(IamService.class);
-        when(iamService.resolveCallerUserId("AKIAIOSFODNN7EXAMPLE")).thenReturn(Optional.of("AIDAUSER123"));
+        when(iamService.resolveCallerUserId(eq("AKIAIOSFODNN7EXAMPLE"), any())).thenReturn(Optional.of("AIDAUSER123"));
 
         SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
                 requestContextInstance, iamService);
@@ -2415,7 +2417,7 @@ class SqsServiceTest {
         when(requestContextInstance.get()).thenReturn(requestContext);
 
         IamService iamService = mock(IamService.class);
-        when(iamService.resolveCallerUserId("AKIAOTHERKEY")).thenReturn(Optional.empty());
+        when(iamService.resolveCallerUserId(eq("AKIAOTHERKEY"), any())).thenReturn(Optional.empty());
 
         SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
                 requestContextInstance, iamService);
@@ -2449,7 +2451,7 @@ class SqsServiceTest {
         when(requestContextInstance.get()).thenReturn(requestContext);
 
         IamService iamService = mock(IamService.class);
-        when(iamService.resolveCallerUserId("AKIAIOSFODNN7EXAMPLE")).thenReturn(Optional.of("AIDAUSER123"));
+        when(iamService.resolveCallerUserId(eq("AKIAIOSFODNN7EXAMPLE"), any())).thenReturn(Optional.of("AIDAUSER123"));
 
         SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
                 requestContextInstance, iamService);
