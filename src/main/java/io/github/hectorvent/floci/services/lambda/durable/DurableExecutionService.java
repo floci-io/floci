@@ -258,8 +258,7 @@ public class DurableExecutionService implements Resettable {
             }
             // AWS does not replay the checkpoint that closed the execution.
             execution.setLastCheckpoint(clientToken == null || nextToken == null ? null
-                    : new DurableCheckpointReplay(checkpointToken, clientToken, nextToken,
-                            changed.stream().map(DurableOperation::getId).toList()));
+                    : new DurableCheckpointReplay(checkpointToken, clientToken, nextToken, changed));
             execution.setSeenSequence(execution.getChangeSequence());
             save(execution);
             result = new CheckpointResult(nextToken, changed);
@@ -635,14 +634,7 @@ public class DurableExecutionService implements Resettable {
                         execution.getCurrentInvocationId(), execution.getCheckpointSequence()))) {
             return null;
         }
-        List<DurableOperation> operations = new ArrayList<>();
-        for (String id : last.getOperationIds()) {
-            DurableOperation operation = execution.getOperations().get(id);
-            if (operation != null) {
-                operations.add(operation);
-            }
-        }
-        return new CheckpointResult(last.getResponseToken(), operations);
+        return new CheckpointResult(last.getResponseToken(), last.getOperations());
     }
 
     /** Checkpoint and state calls answer an unknown execution as a bad token, not as ResourceNotFoundException. */

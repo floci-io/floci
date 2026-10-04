@@ -6,7 +6,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.ArrayList;
 import java.util.List;
 
-/** The last accepted checkpoint, kept so a retry with the same ClientToken gets the same answer. */
+/** The last accepted checkpoint and its answer as sent, so a retry with the same ClientToken gets it again. */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class DurableCheckpointReplay {
@@ -14,17 +14,20 @@ public class DurableCheckpointReplay {
     private String requestToken;
     private String clientToken;
     private String responseToken;
-    private List<String> operationIds = new ArrayList<>();
+    private List<DurableOperation> operations = new ArrayList<>();
 
     public DurableCheckpointReplay() {
     }
 
     public DurableCheckpointReplay(String requestToken, String clientToken, String responseToken,
-                                   List<String> operationIds) {
+                                   List<DurableOperation> operations) {
         this.requestToken = requestToken;
         this.clientToken = clientToken;
         this.responseToken = responseToken;
-        this.operationIds = new ArrayList<>(operationIds);
+        this.operations = new ArrayList<>();
+        for (DurableOperation operation : operations) {
+            this.operations.add(operation.copy());
+        }
     }
 
     public String getRequestToken() { return requestToken; }
@@ -36,6 +39,6 @@ public class DurableCheckpointReplay {
     public String getResponseToken() { return responseToken; }
     public void setResponseToken(String responseToken) { this.responseToken = responseToken; }
 
-    public List<String> getOperationIds() { return operationIds; }
-    public void setOperationIds(List<String> operationIds) { this.operationIds = operationIds; }
+    public List<DurableOperation> getOperations() { return operations; }
+    public void setOperations(List<DurableOperation> operations) { this.operations = operations; }
 }

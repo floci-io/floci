@@ -209,20 +209,23 @@ class DurableExecutionServiceTest {
         invoker.script(event -> {
             String arn = event.get("DurableExecutionArn").asText();
             String first = token(event);
-            List<DurableOperationUpdate> updates = List.of(step("s1", DurableOperationAction.START, null, null),
-                    step("s1", DurableOperationAction.SUCCEED, "\"r\"", null));
+            List<DurableOperationUpdate> updates = List.of(waitStart("w1", 1));
             CheckpointResult accepted = service.checkpoint(arn, first, "ct-1", updates);
+            clock.advance(Duration.ofSeconds(2));
+            service.sweep();
             CheckpointResult retried = service.checkpoint(arn, first, "ct-1", List.of());
             assertEquals(accepted.checkpointToken(), retried.checkpointToken());
-            assertEquals(List.of("s1"), retried.newExecutionState().stream().map(DurableOperation::getId).toList());
+            assertEquals(DurableOperationStatus.STARTED, retried.newExecutionState().get(0).getStatus(),
+                    "the retry gets the answer as it was sent, not the fired wait");
             assertThrows(AwsException.class, () -> service.checkpoint(arn, first, "ct-2", updates));
-            service.checkpoint(arn, accepted.checkpointToken(), "ct-3", List.of());
+            CheckpointResult next = service.checkpoint(arn, accepted.checkpointToken(), "ct-3", List.of());
+            assertEquals(DurableOperationStatus.SUCCEEDED, next.newExecutionState().get(0).getStatus());
             assertThrows(AwsException.class, () -> service.checkpoint(arn, first, "ct-1", updates));
             return succeeded("");
         });
 
         DurableExecution execution = service.get(start("exec-1", "{}", true).getExecutionArn());
-        assertEquals(List.of("ExecutionStarted", "StepStarted", "StepSucceeded", "InvocationCompleted",
+        assertEquals(List.of("ExecutionStarted", "WaitStarted", "WaitSucceeded", "InvocationCompleted",
                 "ExecutionSucceeded"), eventTypes(execution));
     }
 
