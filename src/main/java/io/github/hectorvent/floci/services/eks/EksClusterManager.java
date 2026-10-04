@@ -2526,8 +2526,8 @@ public class EksClusterManager
             String clusterName = cluster != null ? cluster.getName() : "unknown";
             for (int i = 1; i < active.size(); i++) {
                 Nodegroup later = active.get(i);
-                LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) "
-                        + "is not applied to the node (already represented by nodegroup {2})",
+                LOG.warnv(
+                        "EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) is not applied to the node (already represented by nodegroup {2})",
                         clusterName, later.getNodegroupName(), first.getNodegroupName());
             }
         }

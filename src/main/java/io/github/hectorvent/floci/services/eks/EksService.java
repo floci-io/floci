@@ -818,8 +818,8 @@ public class EksService implements TagHandler, ResourceProvider {
                 }
                 firstNodeGroup(clusterName, accountId).ifPresent(first -> {
                     if (!nodegroupName.equals(first.getNodegroupName())) {
-                        LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) "
-                                + "is not applied to the node (already represented by nodegroup {2})",
+                        LOG.warnv(
+                                "EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) is not applied to the node (already represented by nodegroup {2})",
                                 clusterName, nodegroupName, first.getNodegroupName());
                     }
                 });
