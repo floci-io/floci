@@ -785,7 +785,9 @@ public class MarketplaceAgreementService implements Resettable {
 
     private static void validateRegion(String region) {
         if (region == null || !REGIONS.contains(region)) {
-            throw validation("AWS Marketplace Agreement API is available only in us-east-1."); // partition-literal: AWS's message text
+            throw validation("AWS Marketplace Agreement API is available only in "
+                    + "us-east-1, us-iso-east-1, us-isob-east-1, " // partition-literal: the served regions
+                    + "us-isof-south-1, and eusc-de-east-1."); // partition-literal: the served regions
         }
     }
 

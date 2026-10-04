@@ -77,5 +77,7 @@ class MarketplaceEntitlementServiceTest {
                 () -> service.getEntitlements(
                         mapper.readTree("{\"ProductCode\":\"product-local\"}"), "cn-north-1"));
         assertEquals("InvalidParameterException", error.getErrorCode());
+        assertEquals("AWS Marketplace Entitlement Service is available only in us-east-1, cn-northwest-1, "
+                + "and eusc-de-east-1.", error.getMessage());
     }
 }

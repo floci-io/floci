@@ -158,5 +158,7 @@ class MarketplaceAgreementServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.handle("SearchAgreements", request, "cn-north-1"));
         assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("AWS Marketplace Agreement API is available only in us-east-1, us-iso-east-1, us-isob-east-1, "
+                + "us-isof-south-1, and eusc-de-east-1.", error.getMessage());
     }
 }
