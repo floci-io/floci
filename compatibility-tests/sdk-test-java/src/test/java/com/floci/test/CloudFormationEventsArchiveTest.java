@@ -131,6 +131,29 @@ class CloudFormationEventsArchiveTest {
     }
 
     @Test
+    void declaringTheGeneratedNameExplicitlyIsRefusedAsACustomNamedReplacement() throws InterruptedException {
+        String bus = createBus();
+        createStack(template(null, false), parameters(bus, "7"));
+        String generated = cfn.describeStackResource(r -> r.stackName(stackName).logicalResourceId("Archive"))
+                .stackResourceDetail().physicalResourceId();
+
+        cfn.updateStack(r -> r.stackName(stackName).templateBody(template(generated, false))
+                .parameters(parameters(bus, "7")));
+        awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+
+        String reason = "CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename " + generated + " and update the stack again.";
+        assertThat(cfn.describeStackEvents(r -> r.stackName(stackName)).stackEvents())
+                .anyMatch(e -> "Archive".equals(e.logicalResourceId())
+                        && "UPDATE_FAILED".equals(e.resourceStatusAsString())
+                        && reason.equals(e.resourceStatusReason()));
+        assertThat(output("ArchiveRef")).isEqualTo(generated);
+        DescribeArchiveResponse archive = eventBridge.describeArchive(r -> r.archiveName(generated));
+        assertThat(archive.eventSourceArn()).isEqualTo(bus);
+        assertThat(archive.retentionDays()).isEqualTo(7);
+    }
+
+    @Test
     void failedUpdateRestoresTheInPlaceChangeMadeBeforeALaterResourceFailed() throws InterruptedException {
         String name = TestFixtures.uniqueName("orders");
         String broken = TestFixtures.uniqueName("broken");

@@ -212,9 +212,9 @@ Changing `Description`, `EventPattern`, or `RetentionDays` updates the archive i
 removed from the template is not sent, so the archive keeps its previous value, as on AWS. Changing
 `SourceArn` or `ArchiveName`, or dropping an explicit `ArchiveName`, replaces the archive: the new
 archive is created during the update and the previous one is deleted once the update commits. A
-replacement that keeps the same explicit `ArchiveName` fails with CloudFormation's custom-named
-resource error and leaves the archive unchanged. Stack deletion removes the archive and tolerates
-one that was already deleted.
+replacement that keeps the same explicit `ArchiveName`, or declares the generated name explicitly,
+fails with CloudFormation's custom-named resource error and leaves the archive unchanged. Stack
+deletion removes the archive and tolerates one that was already deleted.
 
 ## Secrets Manager Target Attachments
 

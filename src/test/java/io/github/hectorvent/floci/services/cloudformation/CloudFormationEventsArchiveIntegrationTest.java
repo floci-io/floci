@@ -29,9 +29,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * through the EventBridge API. {@code Ref} is the archive name and {@code Fn::GetAtt Arn} its ARN;
  * a description, pattern or retention change updates the archive in place, a property removed
  * from the template keeps its value, and a later resource failing rolls the change back; a source
- * change replaces the archive, and is refused for an explicitly named one; and the stack delete
- * removes it. Custom source buses are created through the EventBridge API so the stacks hold only
- * archives.
+ * change replaces the archive, and is refused for an explicitly named one, as is declaring a
+ * generated name explicitly; and the stack delete removes it. Custom source buses are created
+ * through the EventBridge API so the stacks hold only archives.
  */
 @QuarkusTest
 class CloudFormationEventsArchiveIntegrationTest {
@@ -188,16 +188,29 @@ class CloudFormationEventsArchiveIntegrationTest {
         String body = awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
 
         assertEquals(name, output(body, "ArchiveRef"));
-        String expectedReason = "CloudFormation cannot update a stack when a custom-named resource requires "
-                + "replacing. Rename " + name + " and update the stack again.";
-        List<Map<String, String>> stackEvents = XmlParser.extractGroups(cfn(stack, "DescribeStackEvents", null)
-                .then().statusCode(200).extract().asString(), "member");
-        assertTrue(stackEvents.stream().anyMatch(event -> "Archive".equals(event.get("LogicalResourceId"))
-                        && "UPDATE_FAILED".equals(event.get("ResourceStatus"))
-                        && expectedReason.equals(event.get("ResourceStatusReason"))),
-                "no UPDATE_FAILED event with the custom-named reason in " + stackEvents);
+        assertRefusedAsCustomNamedReplacement(stack, name);
         JsonPath archive = describeArchive(name).then().statusCode(200).extract().jsonPath();
         assertEquals(first, archive.getString("EventSourceArn"));
+        assertEquals(7, archive.getInt("RetentionDays"));
+    }
+
+    @Test
+    void declaringTheGeneratedNameExplicitlyIsRefused() throws Exception {
+        String bus = createBus();
+        Map<String, Object> created = archiveProperties(null, bus);
+        created.put("RetentionDays", 7);
+        String stack = createStack(template(created), "CREATE_COMPLETE");
+        String generated = output(awaitStatus(stack, "CREATE_COMPLETE"), "ArchiveRef");
+
+        Map<String, Object> named = archiveProperties(generated, bus);
+        named.put("RetentionDays", 7);
+        updateStack(stack, template(named));
+        String body = awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        assertEquals(generated, output(body, "ArchiveRef"));
+        assertRefusedAsCustomNamedReplacement(stack, generated);
+        JsonPath archive = describeArchive(generated).then().statusCode(200).extract().jsonPath();
+        assertEquals(bus, archive.getString("EventSourceArn"));
         assertEquals(7, archive.getInt("RetentionDays"));
     }
 
@@ -306,6 +319,17 @@ class CloudFormationEventsArchiveIntegrationTest {
     private static void assertArchiveGone(String name) throws Exception {
         assertEquals("ResourceNotFoundException", describeArchive(name).then().statusCode(400)
                 .extract().jsonPath().getString("__type"));
+    }
+
+    private static void assertRefusedAsCustomNamedReplacement(String stack, String name) {
+        String expectedReason = "CloudFormation cannot update a stack when a custom-named resource requires "
+                + "replacing. Rename " + name + " and update the stack again.";
+        List<Map<String, String>> stackEvents = XmlParser.extractGroups(cfn(stack, "DescribeStackEvents", null)
+                .then().statusCode(200).extract().asString(), "member");
+        assertTrue(stackEvents.stream().anyMatch(event -> "Archive".equals(event.get("LogicalResourceId"))
+                        && "UPDATE_FAILED".equals(event.get("ResourceStatus"))
+                        && expectedReason.equals(event.get("ResourceStatusReason"))),
+                "no UPDATE_FAILED event with the custom-named reason in " + stackEvents);
     }
 
     private static Map<String, Object> archiveProperties(String name, Object sourceArn) {

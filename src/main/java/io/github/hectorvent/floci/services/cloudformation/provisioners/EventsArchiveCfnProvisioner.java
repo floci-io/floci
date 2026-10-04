@@ -28,7 +28,8 @@ import java.util.regex.Pattern;
  * failed stack update can put them back. An update that changes either, or drops an explicit name
  * for a generated one, creates the new archive and leaves the displaced one to the
  * {@link ReplacementCleanup} record; a replacement that would keep an explicit name is refused, as
- * CloudFormation refuses it for any custom-named resource.
+ * CloudFormation refuses it for any custom-named resource, and so is declaring a generated name
+ * explicitly.
  */
 @ApplicationScoped
 public class EventsArchiveCfnProvisioner implements CfnResourceProvisioner {
@@ -88,7 +89,8 @@ public class EventsArchiveCfnProvisioner implements CfnResourceProvisioner {
                 ? eventBridgeService.describeArchive(ctx.priorPhysicalId(), ctx.region())
                 : null;
         boolean sourceChanged = prior != null && !sourceArn.equals(prior.getEventSourceArn());
-        if (sourceChanged && hasExplicitName && explicitName.equals(ctx.priorPhysicalId())) {
+        boolean nameWasGenerated = NAME_MODE_GENERATED.equals(attributesBefore.get(NAME_MODE_ATTR));
+        if ((sourceChanged || nameWasGenerated) && hasExplicitName && explicitName.equals(ctx.priorPhysicalId())) {
             throw new AwsException("ValidationError",
                     "CloudFormation cannot update a stack when a custom-named resource requires "
                             + "replacing. Rename " + explicitName + " and update the stack again.", 400);
