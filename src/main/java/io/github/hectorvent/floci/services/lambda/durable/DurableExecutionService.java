@@ -350,8 +350,10 @@ public class DurableExecutionService implements Resettable {
                 execution.setCurrentInvocationId(null);
                 execution.setCurrentInvocationStartedAt(null);
                 execution.setReinvokeRequested(false);
-                execution.setNextInvocationAttemptAt(null);
-                trigger(execution, clock.millis(), effects);
+                // A crash retry keeps its backoff, and the sweeper relaunches it when it is due.
+                if (execution.getNextInvocationAttemptAt() == null) {
+                    trigger(execution, clock.millis(), effects);
+                }
                 save(execution);
                 recovered++;
             }

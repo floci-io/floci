@@ -463,6 +463,20 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void aRestartKeepsTheBackoffOfAPendingRetry() {
+        invoker.script(event -> functionError("{\"errorMessage\":\"crash\",\"errorType\":\"E\"}"));
+        invoker.script(event -> succeeded("\"ok\""));
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+
+        newService(storage, invoker, clock).recoverAfterRestart();
+        assertEquals(1, invoker.events.size(), "the retry waits for its backoff");
+
+        clock.advance(Duration.ofSeconds(1));
+        service.sweep();
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(arn).getStatus());
+    }
+
+    @Test
     void aNewInvocationClearsAPendingRetry() {
         invoker.script(event -> functionError("{\"errorMessage\":\"crash\",\"errorType\":\"E\"}"));
         invoker.script(event -> {
