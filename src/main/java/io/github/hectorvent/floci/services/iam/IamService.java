@@ -52,7 +52,9 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -2282,8 +2284,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 existing.setPath(normalizePath(newPath));
             }
             existing.setServerCertificateName(targetName);
-            existing.setArn(iamArnBeside(existing.getArn(), "server-certificate",
+            String previousArn = existing.getArn();
+            existing.setArn(iamArnBeside(previousArn, "server-certificate",
                     existing.getPath(), targetName));
+            if (!previousArn.equals(existing.getArn()) && !existing.getFormerArns().contains(previousArn)) {
+                existing.getFormerArns().add(previousArn);
+            }
             if (!targetName.equals(name)) {
                 serverCertificates.delete(name);
             }
@@ -2292,10 +2298,47 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    /** The certificate carrying that ServerCertificateId, for callers that reference it by id. */
+    public Optional<ServerCertificate> findServerCertificateById(String serverCertificateId) {
+        if (serverCertificateId == null) {
+            return Optional.empty();
+        }
+        return serverCertificates.scan(k -> true).stream()
+                .filter(c -> serverCertificateId.equals(c.getServerCertificateId()))
+                .findFirst();
+    }
+
     public void deleteServerCertificate(String name) {
+        deleteServerCertificate(name, List.of());
+    }
+
+    /**
+     * Deletes a server certificate unless one of the providers reports it in use, in which case
+     * AWS answers {@code DeleteConflict} and the certificate stays.
+     */
+    public void deleteServerCertificate(String name, Collection<ServerCertificateReferenceProvider> providers) {
         validateIamResourceName(name, "ServerCertificateName");
         synchronized (serverCertificateLock) {
-            getServerCertificate(name);
+            ServerCertificate certificate = getServerCertificate(name);
+            Set<String> arnsCarriedByOthers = new HashSet<>();
+            for (ServerCertificate other : serverCertificates.scan(k -> true)) {
+                if (!other.getServerCertificateId().equals(certificate.getServerCertificateId())) {
+                    arnsCarriedByOthers.add(other.getArn());
+                }
+            }
+            for (ServerCertificateReferenceProvider provider : providers) {
+                for (ServerCertificateReferenceProvider.Reference reference : provider.serverCertificateReferences()) {
+                    String referenced = reference.certificate();
+                    if (certificate.getArn().equals(referenced)
+                            || certificate.getServerCertificateId().equals(referenced)
+                            || (certificate.getFormerArns().contains(referenced)
+                                    && !arnsCarriedByOthers.contains(referenced))) {
+                        throw new AwsException("DeleteConflict",
+                                "Cannot delete entity, must remove referencing " + reference.referrer()
+                                        + " first.", 409);
+                    }
+                }
+            }
             serverCertificates.delete(name);
         }
         LOG.infov("Deleted IAM server certificate: {0}", name);

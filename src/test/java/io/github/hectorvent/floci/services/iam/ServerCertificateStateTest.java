@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -141,6 +142,80 @@ class ServerCertificateStateTest {
         account.set(ACCOUNT_A);
         assertEquals(pair.privateKeyPem(), service.getServerCertificate("scoped").getPrivateKey(),
                 "account A's key was replaced by account B's upload");
+    }
+
+    @Test
+    void deleteIsRefusedWhileAProviderReferencesTheCertificateByArnOrById() {
+        IamService service = newService(new InMemoryStorage<>(), ACCOUNT_A);
+        CertificateGenerator.GeneratedCertificate pair = cheapMaterial();
+        ServerCertificate created = service.uploadServerCertificate("in-use", "/", pair.certificatePem(),
+                pair.privateKeyPem(), null, Map.of());
+
+        for (String reference : List.of(created.getArn(), created.getServerCertificateId())) {
+            ServerCertificateReferenceProvider provider = () -> List.of(
+                    new ServerCertificateReferenceProvider.Reference(reference, "load balancer web"));
+            AwsException conflict = assertThrows(AwsException.class,
+                    () -> service.deleteServerCertificate("in-use", List.of(provider)));
+            assertEquals("DeleteConflict", conflict.getErrorCode());
+            assertEquals(409, conflict.getHttpStatus());
+            assertTrue(conflict.getMessage().contains("load balancer web"));
+            assertTrue(service.findServerCertificate("in-use").isPresent());
+        }
+    }
+
+    @Test
+    void deleteIsRefusedWhenAProviderStillHoldsTheArnFromBeforeARename() {
+        IamService service = newService(new InMemoryStorage<>(), ACCOUNT_A);
+        CertificateGenerator.GeneratedCertificate pair = cheapMaterial();
+        ServerCertificate created = service.uploadServerCertificate("before", "/", pair.certificatePem(),
+                pair.privateKeyPem(), null, Map.of());
+        String formerArn = created.getArn();
+        ServerCertificate renamed = service.updateServerCertificate("before", "after", null);
+        assertNotEquals(formerArn, renamed.getArn());
+        ServerCertificateReferenceProvider provider = () -> List.of(
+                new ServerCertificateReferenceProvider.Reference(formerArn, "load balancer web"));
+
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.deleteServerCertificate("after", List.of(provider)));
+
+        assertEquals("DeleteConflict", conflict.getErrorCode());
+        assertTrue(service.findServerCertificate("after").isPresent());
+    }
+
+    @Test
+    void aFormerArnReusedByANewCertificateNoLongerBlocksTheRenamedOne() {
+        IamService service = newService(new InMemoryStorage<>(), ACCOUNT_A);
+        CertificateGenerator.GeneratedCertificate pair = cheapMaterial();
+        String formerArn = service.uploadServerCertificate("shared", "/", pair.certificatePem(),
+                pair.privateKeyPem(), null, Map.of()).getArn();
+        service.updateServerCertificate("shared", "moved", null);
+        ServerCertificate reused = service.uploadServerCertificate("shared", "/", pair.certificatePem(),
+                pair.privateKeyPem(), null, Map.of());
+        assertEquals(formerArn, reused.getArn());
+        ServerCertificateReferenceProvider provider = () -> List.of(
+                new ServerCertificateReferenceProvider.Reference(formerArn, "load balancer web"));
+
+        service.deleteServerCertificate("moved", List.of(provider));
+
+        assertTrue(service.findServerCertificate("moved").isEmpty());
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.deleteServerCertificate("shared", List.of(provider)));
+        assertEquals("DeleteConflict", conflict.getErrorCode());
+    }
+
+    @Test
+    void deleteSucceedsWhenProvidersReferenceOnlyOtherCertificates() {
+        IamService service = newService(new InMemoryStorage<>(), ACCOUNT_A);
+        CertificateGenerator.GeneratedCertificate pair = cheapMaterial();
+        service.uploadServerCertificate("free", "/", pair.certificatePem(), pair.privateKeyPem(),
+                null, Map.of());
+        ServerCertificateReferenceProvider provider = () -> List.of(
+                new ServerCertificateReferenceProvider.Reference(
+                        "arn:aws:iam::000000000000:server-certificate/other", "load balancer web"));
+
+        service.deleteServerCertificate("free", List.of(provider));
+
+        assertTrue(service.findServerCertificate("free").isEmpty());
     }
 
     private static int raceTogether(Runnable... actions) throws InterruptedException {

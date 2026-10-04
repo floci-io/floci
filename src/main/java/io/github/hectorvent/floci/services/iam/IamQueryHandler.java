@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -67,18 +68,21 @@ public class IamQueryHandler {
     private final SAMLProviderService samlProviderService;
     private final ServiceLastAccessedService serviceLastAccessedService;
     private final RegionResolver regionResolver;
+    private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
                            AccountResolver accountResolver, SAMLProviderService samlProviderService,
                            ServiceLastAccessedService serviceLastAccessedService,
-                           RegionResolver regionResolver) {
+                           RegionResolver regionResolver,
+                           Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.accountResolver = accountResolver;
         this.samlProviderService = samlProviderService;
         this.serviceLastAccessedService = serviceLastAccessedService;
         this.regionResolver = regionResolver;
+        this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
@@ -734,7 +738,8 @@ public class IamQueryHandler {
     }
 
     private Response handleDeleteServerCertificate(MultivaluedMap<String, String> params) {
-        iamService.deleteServerCertificate(getParam(params, "ServerCertificateName"));
+        iamService.deleteServerCertificate(getParam(params, "ServerCertificateName"),
+                serverCertificateReferenceProviders.stream().toList());
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteServerCertificate", AwsNamespaces.IAM)).build();
     }
 

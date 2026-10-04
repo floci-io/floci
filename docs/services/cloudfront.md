@@ -231,6 +231,9 @@ PUT, PATCH and DELETE).
   headers, allowed header removals, and sampled `Server-Timing` metrics. `Pragma: server-timing`
   forces those metrics for enabled policies. Distribution writes reject unknown policy IDs, and
   policies attached to a cache behavior cannot be deleted.
+- `ViewerCertificate.IAMCertificateId` must be the `ServerCertificateId` of an uploaded IAM server
+  certificate: distribution create and update reject an unknown one with `InvalidViewerCertificate`,
+  and `DeleteServerCertificate` returns `DeleteConflict` while a distribution references it.
 - Up to 20 custom response headers policies can be created, and one policy can be associated with
   up to 100 distributions.
 - The five AWS managed response headers policy IDs are available and can be selected with

@@ -572,11 +572,12 @@ certificate body, certificate chain, or private key".
 `ServerCertificateId` uses AWS's `ASCA` prefix for certificates. `GetAccountSummary`'s
 `ServerCertificates` count is backed by this store rather than reporting zero.
 
-One modeled error is not raised: AWS returns `DeleteConflict` from `DeleteServerCertificate` when a
-load balancer still references the certificate. Floci cannot determine that yet, because ELB
-Classic and CloudFront store certificate identifiers without resolving them against IAM. Tracked in
-[#4875](https://github.com/floci-io/floci/issues/4875), which covers both directions: rejecting a
-reference to a certificate that does not exist, and refusing to delete one that is in use.
+`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, as AWS does.
+Services that reference a certificate (ELB Classic listeners, ELBv2 listeners, CloudFront
+distributions) report it through `ServerCertificateReferenceProvider`, which IAM consults without
+depending on them. In the other direction, ELB Classic rejects a listener whose `SSLCertificateId`
+names no certificate with `CertificateNotFound`, and CloudFront rejects an unknown
+`ViewerCertificate.IAMCertificateId` with `InvalidViewerCertificate`.
 
 ### Signing Certificates
 
