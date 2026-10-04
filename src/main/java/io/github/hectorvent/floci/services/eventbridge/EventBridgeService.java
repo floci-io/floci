@@ -6,7 +6,6 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
@@ -130,24 +129,6 @@ public class EventBridgeService implements ResourceProvider {
         this.dispatcher = dispatcher;
         this.replayDispatcher = replayDispatcher;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
-    }
-
-    EventBridgeService(StorageBackend<String, EventBus> busStore,
-                       StorageBackend<String, Rule> ruleStore,
-                       StorageBackend<String, List<Target>> targetStore,
-                       StorageBackend<String, Archive> archiveStore,
-                       StorageBackend<String, List<ArchivedEvent>> archivedEventStore,
-                       StorageBackend<String, Replay> replayStore,
-                       StorageBackend<String, Connection> connectionStore,
-                       RegionResolver regionResolver,
-                       ObjectMapper objectMapper,
-                       RuleScheduler ruleScheduler,
-                       TargetDispatcher dispatcher,
-                       ReplayDispatcher replayDispatcher,
-                       ResourceGroupsTaggingService resourceGroupsTaggingService) {
-        this(busStore, ruleStore, targetStore, archiveStore, archivedEventStore, replayStore, connectionStore,
-                new InMemoryStorage<>(), regionResolver, objectMapper, ruleScheduler, dispatcher, replayDispatcher,
-                resourceGroupsTaggingService);
     }
 
     @PostConstruct

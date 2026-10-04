@@ -9,12 +9,14 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -96,9 +98,10 @@ class EventBridgeInvokerApiDestinationTest {
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         CountDownLatch start = new CountDownLatch(1);
         AtomicInteger granted = new AtomicInteger();
+        List<Future<?>> workers = new ArrayList<>();
         try {
             for (int i = 0; i < threads; i++) {
-                pool.submit(() -> {
+                workers.add(pool.submit(() -> {
                     start.await();
                     try {
                         invoker.acquireRatePermit(destination);
@@ -107,12 +110,15 @@ class EventBridgeInvokerApiDestinationTest {
                         assertEquals("ThrottlingException", throttled.getErrorCode());
                     }
                     return null;
-                });
+                }));
             }
             start.countDown();
+            // get() rethrows a worker's failure, which awaiting the pool alone would not surface
+            for (Future<?> worker : workers) {
+                worker.get(10, TimeUnit.SECONDS);
+            }
         } finally {
-            pool.shutdown();
-            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+            pool.shutdownNow();
         }
 
         // Two permits' worth of slack covers the one-second window rolling over mid-test

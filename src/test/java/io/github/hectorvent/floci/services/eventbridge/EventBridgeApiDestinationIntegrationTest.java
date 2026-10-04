@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -8,11 +9,20 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -207,24 +217,24 @@ class EventBridgeApiDestinationIntegrationTest {
     @Test
     @Order(8)
     void eventDeliveryToApiDestination() throws Exception {
-        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-        java.util.concurrent.atomic.AtomicReference<String> receivedUri = new java.util.concurrent.atomic.AtomicReference<>();
-        java.util.concurrent.atomic.AtomicReference<String> receivedBody = new java.util.concurrent.atomic.AtomicReference<>();
-        java.util.concurrent.atomic.AtomicReference<String> receivedApiKey = new java.util.concurrent.atomic.AtomicReference<>();
-        java.util.concurrent.atomic.AtomicReference<String> receivedConnHeader = new java.util.concurrent.atomic.AtomicReference<>();
-        java.util.concurrent.atomic.AtomicReference<String> receivedTargetHeader = new java.util.concurrent.atomic.AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<String> receivedUri = new AtomicReference<>();
+        AtomicReference<String> receivedBody = new AtomicReference<>();
+        AtomicReference<String> receivedApiKey = new AtomicReference<>();
+        AtomicReference<String> receivedConnHeader = new AtomicReference<>();
+        AtomicReference<String> receivedTargetHeader = new AtomicReference<>();
 
-        com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/webhook", exchange -> {
             try {
                 receivedUri.set(exchange.getRequestURI().toString());
                 receivedApiKey.set(exchange.getRequestHeaders().getFirst("x-api-key"));
                 receivedConnHeader.set(exchange.getRequestHeaders().getFirst("x-conn-hdr"));
                 receivedTargetHeader.set(exchange.getRequestHeaders().getFirst("x-target-hdr"));
-                receivedBody.set(new String(exchange.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
-                byte[] response = "{\"status\":\"ok\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                receivedBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                byte[] response = "{\"status\":\"ok\"}".getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(200, response.length);
-                try (java.io.OutputStream os = exchange.getResponseBody()) {
+                try (OutputStream os = exchange.getResponseBody()) {
                     os.write(response);
                 }
             } finally {
@@ -335,13 +345,13 @@ class EventBridgeApiDestinationIntegrationTest {
                     .when().post("/")
                     .then().statusCode(200);
 
-            boolean received = latch.await(5, java.util.concurrent.TimeUnit.SECONDS);
-            org.junit.jupiter.api.Assertions.assertTrue(received, "HTTP server should receive request from EventBridge delivery");
-            org.junit.jupiter.api.Assertions.assertEquals("/webhook/user-123?tenant=alpha", receivedUri.get());
-            org.junit.jupiter.api.Assertions.assertEquals("my-secret-key", receivedApiKey.get());
-            org.junit.jupiter.api.Assertions.assertEquals("conn-val", receivedConnHeader.get());
-            org.junit.jupiter.api.Assertions.assertEquals("target-val", receivedTargetHeader.get());
-            org.junit.jupiter.api.Assertions.assertTrue(receivedBody.get().contains("\"orderId\":\"12345\""));
+            boolean received = latch.await(5, TimeUnit.SECONDS);
+            assertTrue(received, "HTTP server should receive request from EventBridge delivery");
+            assertEquals("/webhook/user-123?tenant=alpha", receivedUri.get());
+            assertEquals("my-secret-key", receivedApiKey.get());
+            assertEquals("conn-val", receivedConnHeader.get());
+            assertEquals("target-val", receivedTargetHeader.get());
+            assertTrue(receivedBody.get().contains("\"orderId\":\"12345\""));
         } finally {
             server.stop(0);
         }

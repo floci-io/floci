@@ -63,6 +63,7 @@ class EventBridgeServiceTest {
                 new InMemoryStorage<>(),
                 replayStore,
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
                 new ObjectMapper(),
                 null,
