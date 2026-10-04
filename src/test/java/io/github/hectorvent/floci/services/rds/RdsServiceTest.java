@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -7187,7 +7188,7 @@ class RdsServiceTest {
     @Test
     void refreshRuntimeHealthMarksDeadContainerFailedAndStopsProxy() {
         when(rdsConfig.mock()).thenReturn(false);
-        when(containerManager.isContainerRunning("cont-id")).thenReturn(false);
+        when(containerManager.probeContainer("cont-id")).thenReturn(ContainerLiveness.NOT_RUNNING);
         DbInstance instance = rdsService.createDbInstance(
                 "dead-db", "postgres", "16", "admin", "password", "dbname",
                 "db.t3.micro", 20, false, null, null, null, null, false, false,
@@ -7205,6 +7206,44 @@ class RdsServiceTest {
         // Repeated health reads do not duplicate the transition event.
         rdsService.refreshDbInstanceRuntimeHealth(refreshed);
         assertEquals(1, rdsService.describeEvents("dead-db", "db-instance", null, null, 60).size());
+    }
+
+    @Test
+    void refreshRuntimeHealthKeepsAvailableStatusWhenLivenessProbeFails() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.probeContainer("cont-id")).thenReturn(ContainerLiveness.UNKNOWN);
+        DbInstance instance = rdsService.createDbInstance(
+                "blip-db", "postgres", "16", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, null, true);
+
+        DbInstance refreshed = rdsService.refreshDbInstanceRuntimeHealth(instance);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, refreshed.getStatus());
+        verify(proxyManager, never()).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
+        assertTrue(rdsService.describeEvents("blip-db", "db-instance", null, null, 60).isEmpty());
+    }
+
+    @Test
+    void refreshRuntimeHealthReprobesAfterAFailedProbeAndActsOnTheNextDefiniteAnswer() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.probeContainer("cont-id"))
+                .thenReturn(ContainerLiveness.UNKNOWN, ContainerLiveness.NOT_RUNNING);
+        DbInstance instance = rdsService.createDbInstance(
+                "recover-db", "postgres", "16", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, null, true);
+        String proxyKey = "rds-resource:" + instance.getDbInstanceArn();
+
+        DbInstance afterBlip = rdsService.refreshDbInstanceRuntimeHealth(instance);
+        assertEquals(DbInstanceStatus.AVAILABLE, afterBlip.getStatus());
+        verify(proxyManager, never()).stopProxy(proxyKey);
+
+        DbInstance afterDefiniteAnswer = rdsService.refreshDbInstanceRuntimeHealth(afterBlip);
+        assertEquals(DbInstanceStatus.FAILED, afterDefiniteAnswer.getStatus());
+        verify(proxyManager).stopProxy(proxyKey);
+        verify(containerManager, times(2)).probeContainer("cont-id");
+        assertEquals(1, rdsService.describeEvents("recover-db", "db-instance", null, null, 60).size());
     }
 
     @Test
