@@ -392,22 +392,31 @@ class AccountContextFilterTest {
     }
 
     @Test
-    void ignoresNonSigV4AuthHeader() {
+    void nonSigV4AuthHeaderDoesNotSelectAccount() {
         ContainerRequestContext ctx = mockContext(
                 "X Credential=111122223333/20260617/us-west-2/s3/aws4_request",
                 null);
         filter.filter(ctx);
         assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
-        assertEquals(DEFAULT_REGION, requestContext.getRegion());
     }
 
     @Test
-    void ignoresPresignedCredentialWhenAlgorithmMissing() {
+    void bareCredentialHeaderDoesNotSelectAccountButKeepsRegion() {
+        ContainerRequestContext ctx = mockContext(
+                "Credential=111122223333/20260617/us-west-2/s3/aws4_request",
+                null);
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals("us-west-2", requestContext.getRegion());
+    }
+
+    @Test
+    void presignedCredentialWithoutAlgorithmDoesNotSelectAccountButKeepsRegion() {
         ContainerRequestContext ctx = mockContext(null,
                 "111122223333/20260617/eu-west-1/s3/aws4_request", null);
         filter.filter(ctx);
         assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
-        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+        assertEquals("eu-west-1", requestContext.getRegion());
     }
 
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {

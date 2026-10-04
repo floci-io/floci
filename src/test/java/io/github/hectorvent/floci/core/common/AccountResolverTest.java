@@ -35,6 +35,13 @@ class AccountResolverTest {
     }
 
     @Test
+    void extractAccessKeyIdReturnsNullForBareCredentialHeader() {
+        String auth = "Credential=111122223333/20260617/us-east-1/s3/aws4_request";
+        assertNull(resolver.extractAccessKeyId(auth));
+        assertEquals(DEFAULT_ACCOUNT, resolver.resolve(auth));
+    }
+
+    @Test
     void extractAccessKeyIdReturnsNullForNonSigV4Header() {
         String auth = "X Credential=111122223333/20260617/us-east-1/s3/aws4_request";
         assertNull(resolver.extractAccessKeyId(auth));

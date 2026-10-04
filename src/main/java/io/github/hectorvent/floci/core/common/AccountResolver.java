@@ -11,7 +11,8 @@ import java.util.regex.Pattern;
 public class AccountResolver {
 
     private static final Pattern AKID_PATTERN = Pattern.compile("Credential=([^/]+)/");
-    private static final String SIGV4_PREFIX = "AWS4-HMAC-SHA256 ";
+    public static final String SIGV4_SCHEME = "AWS4-HMAC-SHA256";
+    private static final String SIGV4_PREFIX = SIGV4_SCHEME + " ";
     private static final String SIGV4A_PREFIX = "AWS4-ECDSA-P256-SHA256 ";
 
     private final String defaultAccountId;
@@ -48,9 +49,7 @@ public class AccountResolver {
             return null;
         }
         String trimmed = authorizationHeader.trim();
-        if (!trimmed.startsWith(SIGV4_PREFIX)
-                && !trimmed.startsWith(SIGV4A_PREFIX)
-                && !trimmed.startsWith("Credential=")) {
+        if (!trimmed.startsWith(SIGV4_PREFIX) && !trimmed.startsWith(SIGV4A_PREFIX)) {
             return null;
         }
         Matcher m = AKID_PATTERN.matcher(trimmed);

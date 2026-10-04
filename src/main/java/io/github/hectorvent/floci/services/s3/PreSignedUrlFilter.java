@@ -115,7 +115,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         // Only process if this is a pre-signed URL request
         String algorithm = queryParams.getFirst("X-Amz-Algorithm");
         if (algorithm == null) {
-            if (verifiesSignatures() && queryParams.containsKey("X-Amz-Credential")) {
+            if (verifiesSignatures()) {
                 requestContext.abortWith(
                     errorResponse(
                         400,

@@ -3492,7 +3492,7 @@ public class S3Controller {
         rejectUnknownPostRegion(credential);
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizeAdditionalResource(
-                    "Credential=" + credential, "s3:PutObject",
+                    AccountResolver.SIGV4_SCHEME + " Credential=" + credential, "s3:PutObject",
                     S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
         }
 

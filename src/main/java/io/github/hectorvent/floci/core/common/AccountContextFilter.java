@@ -75,8 +75,9 @@ public class AccountContextFilter implements ContainerRequestFilter {
             return;
         }
         String auth = ctx.getHeaderString("Authorization");
-        String akid = auth != null && !auth.isEmpty() ? accountResolver.extractAccessKeyId(auth) : null;
-        if (akid != null) {
+        if (auth != null && !auth.isEmpty()) {
+            // Only a SigV4/SigV4A scheme selects an account; any other header still feeds region.
+            String akid = accountResolver.extractAccessKeyId(auth);
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
             String region = regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
@@ -86,9 +87,15 @@ public class AccountContextFilter implements ContainerRequestFilter {
             MultivaluedMap<String, String> queryParams = ctx.getUriInfo().getQueryParameters();
             String credential = queryParams.getFirst("X-Amz-Credential");
             if (credential != null && !credential.isEmpty()) {
-                String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
-                requestContext.setAccountId(
-                        resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
+                // Without X-Amz-Algorithm this is not presigned auth: only the region is taken.
+                String algorithm = queryParams.getFirst("X-Amz-Algorithm");
+                if (algorithm != null && !algorithm.isEmpty()) {
+                    String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
+                    requestContext.setAccountId(resolveAccount(presignedAkid,
+                            accountResolver.resolveFromPresignedCredential(credential)));
+                } else {
+                    requestContext.setAccountId(accountResolver.resolve(null));
+                }
                 String region = regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));

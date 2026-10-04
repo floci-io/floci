@@ -237,6 +237,26 @@ class PreSignedUrlFilterTest {
     }
 
     @Test
+    void abortsWhenOnlySignatureParamPresentWithoutAlgorithm() {
+        PreSignedUrlGenerator presignGenerator = mock(PreSignedUrlGenerator.class);
+        when(presignGenerator.shouldValidateSignatures()).thenReturn(true);
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(presignGenerator, null, null, null, s3ResourceInfo());
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.add("X-Amz-Signature", "abc");
+        when(uriInfo.getQueryParameters()).thenReturn(queryParams);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+
+        filter.filter(ctx);
+
+        ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(captor.capture());
+        assertEquals(400, captor.getValue().getStatus());
+        assertTrue(((String) captor.getValue().getEntity()).contains("<Code>AuthorizationQueryParametersError</Code>"));
+    }
+
+    @Test
     void allowsPresignedParamWithoutAlgorithmWhenValidationDisabled() {
         PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, null, null, s3ResourceInfo());
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
