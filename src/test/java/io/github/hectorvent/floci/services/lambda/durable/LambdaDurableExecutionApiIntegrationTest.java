@@ -189,6 +189,13 @@ class LambdaDurableExecutionApiIntegrationTest {
 
         given()
         .when()
+            .get(DURABLE + "/functions/api-durable-fn/durable-executions?StartedAfter=NaN")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        given()
+        .when()
             .get(DURABLE + "/functions/api-durable-fn/durable-executions?MaxItems=x")
         .then()
             .statusCode(400)

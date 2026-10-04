@@ -234,11 +234,16 @@ public class DurableExecutionController {
             return Instant.parse(value).toEpochMilli();
         } catch (DateTimeParseException expected) {
             // Not ISO 8601. Some SDKs send epoch seconds instead.
+            double seconds;
             try {
-                return (long) (Double.parseDouble(value) * 1000);
+                seconds = Double.parseDouble(value);
             } catch (NumberFormatException e) {
                 throw new AwsException("InvalidParameterValueException", field + " must be a timestamp", 400);
             }
+            if (!Double.isFinite(seconds)) {
+                throw new AwsException("InvalidParameterValueException", field + " must be a timestamp", 400);
+            }
+            return (long) (seconds * 1000);
         }
     }
 }
