@@ -100,19 +100,7 @@ class EksStorageClassDockerIntegrationTest {
 
         String containerId = cluster.getContainerId();
 
-        // 1. Verify no StorageClass exists in the cluster
-        ContainerExec.Result scResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "storageclass", "-o", "jsonpath={.items[*].metadata.name}"});
-        assertEquals(0, scResult.exitCode(), "kubectl get storageclass failed: " + scResult.stderr());
-        assertTrue(scResult.stdout().trim().isEmpty(),
-                "No StorageClass should exist in newly created cluster, but found: " + scResult.stdout());
-
-        // 2. Explicitly verify local-path StorageClass is absent
-        ContainerExec.Result localPathResult = execInContainerWithExitCode(containerId,
-                new String[]{"kubectl", "get", "storageclass", "local-path"});
-        assertNotEquals(0, localPathResult.exitCode(), "local-path StorageClass must not exist");
-
-        // 3. Verify CoreDNS deployment is present and healthy in kube-system
+        // 1. Verify CoreDNS deployment is present and healthy in kube-system
         long corednsDeadline = System.currentTimeMillis() + 60000;
         boolean corednsRolledOut = false;
         while (System.currentTimeMillis() < corednsDeadline) {
@@ -126,13 +114,25 @@ class EksStorageClassDockerIntegrationTest {
         }
         assertTrue(corednsRolledOut, "CoreDNS deployment must be successfully rolled out");
 
-        // 4. Verify CoreDNS pods are running and ready
+        // 2. Verify CoreDNS pods are running and ready
         ContainerExec.Result podsResult = execInContainerWithExitCode(containerId,
                 new String[]{"kubectl", "get", "pods", "-n", "kube-system", "-l", "k8s-app=kube-dns",
                         "-o", "jsonpath={.items[*].status.phase}"});
         assertEquals(0, podsResult.exitCode(), "kubectl get pods failed: " + podsResult.stderr());
         assertTrue(podsResult.stdout().contains("Running"),
                 "CoreDNS pod must be in Running phase, but got: " + podsResult.stdout());
+
+        // 3. Verify no StorageClass exists in the cluster after manifests settle
+        ContainerExec.Result scResult = execInContainerWithExitCode(containerId,
+                new String[]{"kubectl", "get", "storageclass", "-o", "jsonpath={.items[*].metadata.name}"});
+        assertEquals(0, scResult.exitCode(), "kubectl get storageclass failed: " + scResult.stderr());
+        assertTrue(scResult.stdout().trim().isEmpty(),
+                "No StorageClass should exist in newly created cluster, but found: " + scResult.stdout());
+
+        // 4. Explicitly verify local-path StorageClass is absent
+        ContainerExec.Result localPathResult = execInContainerWithExitCode(containerId,
+                new String[]{"kubectl", "get", "storageclass", "local-path"});
+        assertNotEquals(0, localPathResult.exitCode(), "local-path StorageClass must not exist");
     }
 
     private boolean isDockerAvailable() {

@@ -512,7 +512,7 @@ The node name, the instance ID in `spec.providerID`, and the synthetic EC2 insta
 
 #### Storage classes
 
-A real EKS cluster starts with no StorageClass and no default storage provisioner installed. Floci matches this behavior: freshly created clusters do not include k3s's bundled `local-path` provisioner or a default StorageClass. A PersistentVolumeClaim without a `storageClassName` remains `Pending` until a storage class or CSI driver is installed, preventing unqualified claims from silently binding to the node filesystem.
+A real EKS cluster starts with no active storage provisioner installed. Floci matches this behavior: freshly created clusters do not include k3s's bundled `local-path` provisioner or a default StorageClass. A PersistentVolumeClaim without a `storageClassName` remains `Pending` until a storage class or CSI driver is installed, preventing unqualified claims from silently binding to the node filesystem.
 
 Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass.
 
