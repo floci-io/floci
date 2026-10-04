@@ -684,12 +684,10 @@ public final class PartitionProjection {
                 return true;
             }
         }
-        for (String alias : sourceAliases) {
-            Pattern pattern = Pattern.compile("(?<![A-Za-z0-9_$])" + identifierPattern(alias)
-                    + "\\s*\\.\\s*" + IDENTIFIER + "(?!\\s*\\()", Pattern.CASE_INSENSITIVE);
-            if (pattern.matcher(expr).find()) {
-                return true;
-            }
+        Pattern qualifiedPattern = Pattern.compile("(?<![A-Za-z0-9_$])" + IDENTIFIER
+                + "\\s*\\.\\s*" + IDENTIFIER + "(?!\\s*\\()", Pattern.CASE_INSENSITIVE);
+        if (qualifiedPattern.matcher(expr).find()) {
+            return true;
         }
         return false;
     }

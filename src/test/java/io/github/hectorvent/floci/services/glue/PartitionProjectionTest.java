@@ -443,4 +443,11 @@ class PartitionProjectionTest {
         assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
                 "SELECT * FROM audit_events WHERE tenant = lower(suffix)", List.of(tableWithCollidingCols)));
     }
+
+    @Test
+    void cteColumnValueIsNotAcceptedAsAStaticFilter() {
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "WITH x AS (SELECT 1 AS key) SELECT * FROM audit_events a JOIN x ON a.id = x.key "
+                        + "WHERE a.tenant = x.key", List.of(injectedTenantTable())));
+    }
 }
