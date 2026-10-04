@@ -302,6 +302,22 @@ class ExpressionEvaluatorTest {
             assertEquals(400, e.getHttpStatus());
         }
 
+        // begins_with on a Binary compares bytes: "AQ==" (the byte 1) is a prefix of "AQID"
+        // (the bytes 1, 2, 3) even though its base64 text is not.
+        @Test
+        void beginsWithOnABinaryMatchesABytePrefix() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":prefix\": {\"B\": \"AQ==\"}}");
+            assertTrue(ExpressionEvaluator.matches("begins_with(b, :prefix)", i, null, v));
+        }
+
+        @Test
+        void beginsWithOnABinaryRejectsADifferentFirstByte() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":prefix\": {\"B\": \"Ag==\"}}");
+            assertFalse(ExpressionEvaluator.matches("begins_with(b, :prefix)", i, null, v));
+        }
+
         @Test
         void beginsWithOnABinaryThatIsNotBase64IsRejected() throws Exception {
             JsonNode i = item("{\"b\": {\"B\": \"not base64!!\"}}");
