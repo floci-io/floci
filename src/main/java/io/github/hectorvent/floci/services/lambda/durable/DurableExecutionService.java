@@ -69,6 +69,7 @@ public class DurableExecutionService implements Resettable {
     static final int ASYNC_PAYLOAD_LIMIT = 1024 * 1024;
     static final int SYNC_PAYLOAD_LIMIT = 6 * 1024 * 1024;
     static final int DEFAULT_PAGE_SIZE = 100;
+    private static final int LOCK_STRIPES = 256;
     static final int MAX_PAGE_SIZE = 1000;
     static final String INVALID_TOKEN = "Invalid checkpoint token";
     static final String NOT_FOUND = "Durable Execution does not exist";
@@ -82,7 +83,8 @@ public class DurableExecutionService implements Resettable {
     private final DurableFunctionInvoker invoker;
     private final Executor launchExecutor;
     private final long invocationRetryDelayMillis;
-    private final ConcurrentHashMap<String, Object> executionLocks = new ConcurrentHashMap<>();
+    /** Striped, so a lookup of an unknown ARN never grows a map. Two executions may share a lock, never nest one. */
+    private final Object[] executionLocks = newLocks(LOCK_STRIPES);
     private final ConcurrentHashMap<String, Object> startLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CompletableFuture<DurableExecution>> completions = new ConcurrentHashMap<>();
     /** Moves on reset and shutdown so an invocation result from before cannot be written afterwards. */
@@ -372,7 +374,6 @@ public class DurableExecutionService implements Resettable {
     @Override
     public void clear() {
         generation.incrementAndGet();
-        executionLocks.clear();
         startLocks.clear();
         for (CompletableFuture<DurableExecution> waiter : completions.values()) {
             waiter.completeExceptionally(new AwsException("ResourceNotFoundException", NOT_FOUND, 404));
@@ -687,7 +688,15 @@ public class DurableExecutionService implements Resettable {
     }
 
     private Object lockFor(String accountId, String storeKey) {
-        return executionLocks.computeIfAbsent(lockKey(accountId, storeKey), ignored -> new Object());
+        return executionLocks[Math.floorMod(lockKey(accountId, storeKey).hashCode(), executionLocks.length)];
+    }
+
+    private static Object[] newLocks(int count) {
+        Object[] locks = new Object[count];
+        for (int i = 0; i < count; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
     }
 
     private Object startLock(String accountId, String region) {
