@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
+import io.github.hectorvent.floci.services.ram.model.SharePermission;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -217,6 +218,37 @@ public class RamController {
             array.add(node);
         }
         response.set("principals", array);
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/listresourcesharepermissions")
+    @Consumes(MediaType.WILDCARD)
+    public Response listResourceSharePermissions(String body) {
+        JsonNode request = readTree(body);
+        List<SharePermission> permissions = service.listResourceSharePermissions(
+                request.hasNonNull("resourceShareArn") ? request.path("resourceShareArn").asText() : null,
+                regionResolver.getAccountId(), regionResolver.getRegion());
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = objectMapper.createArrayNode();
+        for (SharePermission permission : permissions) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("arn", permission.arn());
+            node.put("version", "1");
+            node.put("defaultVersion", true);
+            node.put("name", permission.name());
+            node.put("resourceType", permission.resourceType());
+            node.put("status", "ATTACHABLE");
+            node.put("creationTime", permission.creationTime().toEpochMilli() / 1000.0);
+            node.put("lastUpdatedTime", permission.lastUpdatedTime().toEpochMilli() / 1000.0);
+            node.put("isResourceTypeDefault", true);
+            node.put("permissionType", "AWS_MANAGED");
+            node.put("featureSet", "STANDARD");
+            node.set("tags", objectMapper.createArrayNode());
+            array.add(node);
+        }
+        response.set("permissions", array);
         return Response.ok(response).build();
     }
 

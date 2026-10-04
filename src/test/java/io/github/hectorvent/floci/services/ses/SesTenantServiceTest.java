@@ -598,11 +598,11 @@ class SesTenantServiceTest {
             service.associate(tenant, identityRef(domain), REGION, () -> {});
         }
 
-        PaginatedResult<TenantResourceAssociation> first = service.listTenantResources(tenant, null, REGION,
+        PaginatedResult<TenantResourceAssociation> first = service.listTenantResources("acme", null, REGION,
                 SesListPaging.V2_LIST_TENANT_RESOURCES, 2, null);
         assertEquals(List.of(identityRef("a.example.com").arn(), identityRef("b.example.com").arn()),
                 first.items().stream().map(TenantResourceAssociation::resourceArn).toList());
-        PaginatedResult<TenantResourceAssociation> rest = service.listTenantResources(tenant, null, REGION,
+        PaginatedResult<TenantResourceAssociation> rest = service.listTenantResources("acme", null, REGION,
                 SesListPaging.V2_LIST_TENANT_RESOURCES, 2, first.nextToken());
         assertEquals(List.of(identityRef("c.example.com").arn()),
                 rest.items().stream().map(TenantResourceAssociation::resourceArn).toList());

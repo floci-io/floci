@@ -66,6 +66,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
@@ -121,8 +122,14 @@ public class CodePipelineService {
     private final Map<String, byte[]> runtimeArtifacts = new ConcurrentHashMap<>();
     // An execution's status turns Failed as soon as one action fails, while its runner is still waiting
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
-    private final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
+    final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
     private final long sourcePollIntervalMs;
+    // Test hooks, set only through the package-private constructor: a shortened wait, and a probe
+    // for the gap before the override timeout cleanup.
+    private final long runFinishWaitNanos;
+    private final Runnable beforeOverrideTimeoutCleanup;
+
+    private static final long DEFAULT_RUN_FINISH_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     /** Matches the {@code source-poll-interval-ms} default in application.yml. */
     private static final long DEFAULT_SOURCE_POLL_INTERVAL_MS = 500L;
@@ -135,7 +142,8 @@ public class CodePipelineService {
                         CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                         LambdaService lambdaService, S3Service s3Service) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
-                detachedEventPublisher(mapper), DEFAULT_SOURCE_POLL_INTERVAL_MS);
+                detachedEventPublisher(mapper), DEFAULT_SOURCE_POLL_INTERVAL_MS,
+                DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { });
     }
 
     public CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
@@ -153,7 +161,8 @@ public class CodePipelineService {
                                EmulatorConfig config, CodePipelineEventPublisher eventPublisher) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
                 eventPublisher,
-                resolveSourcePollInterval(config.services().codepipeline().sourcePollIntervalMs()));
+                resolveSourcePollInterval(config.services().codepipeline().sourcePollIntervalMs()),
+                DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { });
     }
 
     /**
@@ -179,10 +188,11 @@ public class CodePipelineService {
     }
 
     @SuppressWarnings("unchecked")
-    private CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
-                                CodeBuildService codeBuildService, CodeDeployService codeDeployService,
-                                LambdaService lambdaService, S3Service s3Service,
-                                CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs) {
+    CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
+                        CodeBuildService codeBuildService, CodeDeployService codeDeployService,
+                        LambdaService lambdaService, S3Service s3Service,
+                        CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs,
+                        long runFinishWaitNanos, Runnable beforeOverrideTimeoutCleanup) {
         this.pipelineStore = storageFactory.create(
                 "codepipeline", "codepipeline-pipelines.json", new TypeReference<Map<String, CodePipelinePipeline>>() {});
         this.executionStore = storageFactory.create(
@@ -196,6 +206,8 @@ public class CodePipelineService {
         this.s3Service = s3Service;
         this.eventPublisher = eventPublisher;
         this.sourcePollIntervalMs = sourcePollIntervalMs;
+        this.runFinishWaitNanos = runFinishWaitNanos;
+        this.beforeOverrideTimeoutCleanup = beforeOverrideTimeoutCleanup;
     }
 
     public JsonNode handle(String action, JsonNode request, String region, String account) {
@@ -224,7 +236,7 @@ public class CodePipelineService {
             case "GetActionType" -> getActionType(request, region, account);
             case "DeleteCustomActionType" -> deleteCustomActionType(request, region, account);
             case "ListActionTypes" -> listActionTypes(request, region, account);
-            case "ListRuleTypes" -> emptyPage("ruleTypes");
+            case "ListRuleTypes" -> listRuleTypes();
             case "PollForJobs" -> pollForJobs(request, region, account, false);
             case "PollForThirdPartyJobs" -> pollForJobs(request, region, account, true);
             case "AcknowledgeJob", "AcknowledgeThirdPartyJob" -> acknowledgeJob(request, region, account);
@@ -568,7 +580,7 @@ public class CodePipelineService {
         execution.setLastUpdateTime(execution.getStartTime());
         execution.setSourceRevisions(new ArrayList<>());
         execution.setSourceRevisionOverrides(sourceRevisionOverrides(request, pipeline));
-        execution.setVariables(variableList(request.path("variables")));
+        execution.setVariables(variableList(request.path("variables"), pipeline.getDeclaration().path("variables")));
         Map<String, String> trigger = new LinkedHashMap<>();
         trigger.put("triggerType", triggerType);
         trigger.put("triggerDetail", triggerDetail);
@@ -590,9 +602,7 @@ public class CodePipelineService {
             execution.setLastUpdateTime(now());
             putExecution(execution);
             eventPublisher.pipelineStateChange(execution, "FAILED");
-            throw new AwsException("ConflictException",
-                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
-                            + "Try again later.", 400);
+            throw pipelineBusy();
         }
         return mapper.createObjectNode().put("pipelineExecutionId", execution.getPipelineExecutionId());
     }
@@ -875,11 +885,15 @@ public class CodePipelineService {
             execution.setStatusSummary("Stage retry could not be scheduled.");
             execution.setLastUpdateTime(now());
             putExecution(execution);
-            throw new AwsException("ConflictException",
-                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
-                            + "Try again later.", 400);
+            throw pipelineBusy();
         }
         return mapper.createObjectNode().put("pipelineExecutionId", executionId);
+    }
+
+    private static AwsException pipelineBusy() {
+        return new AwsException("ConflictException",
+                "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
+                        + "Try again later.", 400);
     }
 
     // Runs under startLocks so two concurrent retries cannot both pass the status checks,
@@ -959,13 +973,195 @@ public class CodePipelineService {
     }
 
     private ObjectNode overrideStageCondition(JsonNode request, String region, String account) {
-        requireExecution(account, region, text(request, "pipelineName"), text(request, "pipelineExecutionId"));
+        String pipelineName = text(request, "pipelineName");
+        String stageName = text(request, "stageName");
+        String conditionType = text(request, "conditionType");
+        if (!"BEFORE_ENTRY".equals(conditionType) && !"ON_SUCCESS".equals(conditionType)) {
+            throw new AwsException("ValidationException",
+                    "conditionType must be BEFORE_ENTRY or ON_SUCCESS", 400);
+        }
+        CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
+        JsonNode stage = stageByName(pipeline, stageName);
+        CodePipelineExecution execution = requireExecution(
+                account, region, pipelineName, text(request, "pipelineExecutionId"));
+        if (!Objects.equals(execution.getPipelineVersion(), pipeline.getVersion())) {
+            throw new AwsException("ConditionNotOverridableException",
+                    "The pipeline structure changed after this execution started", 400);
+        }
+        // A run that failed on this very condition resumes from the overridden stage, skipping the
+        // stage's already-succeeded actions; admission shares the retry path's lock and run tracking.
+        // The run marks itself Failed slightly before it leaves activeRuns; an override landing in that
+        // window waits (outside the lock, which finishExecutionRun needs) for the run to finish, so it
+        // resumes instead of storing a flag nothing will read.
+        String conditionFailedSummary = "Condition " + conditionType + " failed in stage " + stageName + ".";
+        boolean[] runStillFinishing = new boolean[1];
+        Map<String, String> resumed = null;
+        long finishDeadline = System.nanoTime() + runFinishWaitNanos;
+        do {
+            runStillFinishing[0] = false;
+            resumed = startLocks.withLock(lockKey(execution), () -> {
+                synchronized (execution) {
+                    execution.getConditionOverrides().put(stageName + "/" + conditionType, true);
+                }
+                boolean failedOnThisCondition = "Failed".equals(execution.getStatus())
+                        && conditionFailedSummary.equals(execution.getStatusSummary());
+                if (failedOnThisCondition && activeRuns.contains(runKey(execution))) {
+                    runStillFinishing[0] = true;
+                    return null;
+                }
+                if (!failedOnThisCondition) {
+                    putExecution(execution);
+                    return null;
+                }
+                execution.setStatus("InProgress");
+                execution.setStatusSummary("Condition " + conditionType + " overridden in stage "
+                        + stageName + ".");
+                execution.setStopRequested(false);
+                execution.setAbandon(false);
+                execution.setLastUpdateTime(now());
+                putExecution(execution);
+                activeRuns.add(runKey(execution));
+                return latestActionStatuses(execution, stageName);
+            });
+            if (runStillFinishing[0]) {
+                try {
+                    TimeUnit.MILLISECONDS.sleep(10);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        } while (runStillFinishing[0] && System.nanoTime() - finishDeadline < 0);
+        if (runStillFinishing[0]) {
+            beforeOverrideTimeoutCleanup.run();
+            // Another override may have resumed the run since this waiter's last check; clear the flag
+            // only under the resume lock and only while the run is still failed on this condition.
+            startLocks.withLock(lockKey(execution), () -> {
+                synchronized (execution) {
+                    if ("Failed".equals(execution.getStatus())
+                            && conditionFailedSummary.equals(execution.getStatusSummary())) {
+                        execution.getConditionOverrides().remove(stageName + "/" + conditionType);
+                        putExecution(execution);
+                    }
+                }
+                return null;
+            });
+            throw pipelineBusy();
+        }
+        Map<String, String> resumeStatuses = resumed;
+        if (resumeStatuses != null) {
+            try {
+                executor.submit(() -> runRetriedStage(pipeline, execution, stage, "FAILED_ACTIONS",
+                        resumeStatuses));
+            } catch (RejectedExecutionException exception) {
+                activeRuns.remove(runKey(execution));
+                execution.setStatus("Failed");
+                execution.setStatusSummary("Stage resume could not be scheduled.");
+                execution.setLastUpdateTime(now());
+                putExecution(execution);
+                throw pipelineBusy();
+            }
+        }
         return mapper.createObjectNode();
     }
 
     private ObjectNode listRuleExecutions(JsonNode request, String region, String account) {
-        requirePipeline(account, region, text(request, "pipelineName"));
-        return emptyPage("ruleExecutionDetails");
+        String pipelineName = text(request, "pipelineName");
+        requirePipeline(account, region, pipelineName);
+        String executionFilter = request.path("filter").path("pipelineExecutionId").asText(null);
+        List<ObjectNode> details = new ArrayList<>();
+        for (CodePipelineExecution execution : executions(account, region, pipelineName)) {
+            if (executionFilter != null
+                    && !executionFilter.equals(execution.getPipelineExecutionId())) {
+                continue;
+            }
+            List<Map<String, Object>> ruleSnapshot = new ArrayList<>();
+            synchronized (execution) {
+                for (Map<String, Object> rule : execution.getRuleExecutions()) {
+                    ruleSnapshot.add(new LinkedHashMap<>(rule));
+                }
+            }
+            for (Map<String, Object> rule : ruleSnapshot) {
+                ObjectNode detail = mapper.createObjectNode();
+                detail.put("pipelineExecutionId", execution.getPipelineExecutionId());
+                detail.put("ruleExecutionId", Objects.toString(rule.get("ruleExecutionId"), null));
+                if (execution.getPipelineVersion() != null) {
+                    detail.put("pipelineVersion", execution.getPipelineVersion());
+                }
+                detail.put("stageName", Objects.toString(rule.get("stageName"), null));
+                detail.put("ruleName", Objects.toString(rule.get("ruleName"), null));
+                detail.put("status", Objects.toString(rule.get("status"), null));
+                if (rule.get("startTime") instanceof Number start) {
+                    detail.put("startTime", start.doubleValue());
+                }
+                if (rule.get("lastUpdateTime") instanceof Number updated) {
+                    detail.put("lastUpdateTime", updated.doubleValue());
+                }
+                ObjectNode input = detail.putObject("input");
+                input.putObject("ruleTypeId")
+                        .put("category", "Rule")
+                        .put("owner", "AWS")
+                        .put("provider", Objects.toString(rule.get("ruleProvider"), ""))
+                        .put("version", "1");
+                detail.putObject("output").putObject("executionResult")
+                        .put("externalExecutionSummary", Objects.toString(rule.get("summary"), ""));
+                details.add(detail);
+            }
+        }
+        Page page = page(request, details.size(), 100);
+        ObjectNode response = mapper.createObjectNode();
+        ArrayNode array = response.putArray("ruleExecutionDetails");
+        for (int i = page.start(); i < page.end(); i++) {
+            array.add(details.get(i));
+        }
+        addNextToken(response, page, details.size());
+        return response;
+    }
+
+    /** The AWS-owned rule types available for V2 stage conditions. */
+    private ObjectNode listRuleTypes() {
+        ObjectNode response = mapper.createObjectNode();
+        ArrayNode ruleTypes = response.putArray("ruleTypes");
+        ruleTypes.add(ruleTypeNode("LambdaInvoke",
+                "Invokes a Lambda function and passes when the invocation succeeds",
+                List.of("FunctionName")));
+        ruleTypes.add(ruleTypeNode("VariableCheck",
+                "Compares a pipeline variable against a value with EQ, NE, CONTAINS or MATCHES",
+                List.of("Variable", "Value", "Operator")));
+        ruleTypes.add(ruleTypeNode("Commands",
+                "Runs shell commands (accepted but not evaluated by the emulator)",
+                List.of("Commands")));
+        ruleTypes.add(ruleTypeNode("DeploymentWindow",
+                "Restricts deployments to a time window (accepted but not evaluated by the emulator)",
+                List.of("Cron", "TimeZone")));
+        ruleTypes.add(ruleTypeNode("CloudWatchAlarm",
+                "Passes when a CloudWatch alarm is in the expected state (accepted but not evaluated by the emulator)",
+                List.of("AlarmName", "AlarmStates")));
+        return response;
+    }
+
+    private ObjectNode ruleTypeNode(String provider, String description, List<String> properties) {
+        ObjectNode node = mapper.createObjectNode();
+        node.putObject("id")
+                .put("category", "Rule")
+                .put("owner", "AWS")
+                .put("provider", provider)
+                .put("version", "1");
+        ObjectNode settings = node.putObject("settings");
+        settings.put("thirdPartyConfigurationUrl", "");
+        ArrayNode props = node.putArray("ruleConfigurationProperties");
+        for (String property : properties) {
+            props.addObject()
+                    .put("name", property)
+                    .put("required", true)
+                    .put("key", true)
+                    .put("secret", false)
+                    .put("description", description);
+        }
+        node.putObject("inputArtifactDetails")
+                .put("minimumCount", 0)
+                .put("maximumCount", 1);
+        return node;
     }
 
     private ObjectNode createCustomActionType(JsonNode request, String region, String account) {
@@ -1200,22 +1396,9 @@ public class CodePipelineService {
         String stageName = stage.path("name").asText();
         try {
             int stageIndex = stageIndex(pipeline, stageName);
-            execution.setCurrentStage(stageName);
-            execution.getStageExecutionStatuses().put(stageName, "InProgress");
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
-            runStage(pipeline, execution, stage, retryMode, previousStatuses);
-            if ("Failed".equals(execution.getStatus())) {
-                execution.getStageExecutionStatuses().put(stageName, "Failed");
+            if (!runStageInRun(pipeline, execution, stage, retryMode, previousStatuses)) {
                 return;
             }
-            if (finishIfStopped(execution)) {
-                return;
-            }
-            execution.getStageExecutionStatuses().put(stageName, "Succeeded");
-            execution.setCurrentStage(null);
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
             runStagesFrom(pipeline, execution, stageIndex + 1);
         } catch (Exception e) {
             if (execution.getCurrentStage() != null) {
@@ -1239,29 +1422,259 @@ public class CodePipelineService {
             if (finishIfStopped(execution)) {
                 return;
             }
-            execution.setCurrentStage(stageName);
-            execution.getStageExecutionStatuses().put(stageName, "InProgress");
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
-            eventPublisher.stageStateChange(execution, stageName, "STARTED");
-            runStage(pipeline, execution, stage);
-            if ("Failed".equals(execution.getStatus())) {
-                execution.getStageExecutionStatuses().put(stageName, "Failed");
-                eventPublisher.stageStateChange(execution, stageName, "FAILED");
+            if (!runStageInRun(pipeline, execution, stage, "ALL_ACTIONS", Map.of())) {
                 return;
             }
-            if (finishIfStopped(execution)) {
-                eventPublisher.stageStateChange(execution, stageName, "STOPPED");
-                return;
-            }
-            execution.getStageExecutionStatuses().put(stageName, "Succeeded");
-            execution.setCurrentStage(null);
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
-            eventPublisher.stageStateChange(execution, stageName, "SUCCEEDED");
         }
         execution.setStatus("Succeeded");
         execution.setStatusSummary("Pipeline execution succeeded.");
+    }
+
+    /**
+     * Runs one stage of an execution, between its V2 {@code beforeEntry} and {@code onSuccess}
+     * conditions.
+     *
+     * @return {@code false} when the execution must not continue to the next stage
+     */
+    private boolean runStageInRun(CodePipelinePipeline pipeline, CodePipelineExecution execution, JsonNode stage,
+                                  String retryMode, Map<String, String> previousStatuses) {
+        String stageName = stage.path("name").asText();
+        execution.setCurrentStage(stageName);
+        execution.getStageExecutionStatuses().put(stageName, "InProgress");
+        execution.setLastUpdateTime(now());
+        putExecution(execution);
+
+        // Evaluated before STARTED is published: AWS documents no skipped-stage event, so a stage
+        // skipped by its beforeEntry condition emits no stage events at all.
+        ConditionOutcome entry = evaluateConditions(execution, stage, "BEFORE_ENTRY");
+        if (entry == ConditionOutcome.SKIP_STAGE) {
+            execution.getStageExecutionStatuses().put(stageName, "Skipped");
+            execution.setCurrentStage(null);
+            execution.setLastUpdateTime(now());
+            putExecution(execution);
+            return true;
+        }
+        eventPublisher.stageStateChange(execution, stageName, "STARTED");
+        if (entry == ConditionOutcome.FAIL) {
+            failForCondition(execution, stageName, "BEFORE_ENTRY");
+            execution.getStageExecutionStatuses().put(stageName, "Failed");
+            eventPublisher.stageStateChange(execution, stageName, "FAILED");
+            return false;
+        }
+
+        runStage(pipeline, execution, stage, retryMode, previousStatuses);
+        if ("Failed".equals(execution.getStatus())) {
+            execution.getStageExecutionStatuses().put(stageName, "Failed");
+            eventPublisher.stageStateChange(execution, stageName, "FAILED");
+            return false;
+        }
+        if (finishIfStopped(execution)) {
+            eventPublisher.stageStateChange(execution, stageName, "STOPPED");
+            return false;
+        }
+
+        // A SKIP result only makes sense before entry; after the stage ran it cannot be skipped, so a
+        // failed onSuccess condition fails the stage whatever its declared result.
+        if (evaluateConditions(execution, stage, "ON_SUCCESS") != ConditionOutcome.PASS) {
+            failForCondition(execution, stageName, "ON_SUCCESS");
+            execution.getStageExecutionStatuses().put(stageName, "Failed");
+            eventPublisher.stageStateChange(execution, stageName, "FAILED");
+            return false;
+        }
+        execution.getStageExecutionStatuses().put(stageName, "Succeeded");
+        execution.setCurrentStage(null);
+        execution.setLastUpdateTime(now());
+        putExecution(execution);
+        eventPublisher.stageStateChange(execution, stageName, "SUCCEEDED");
+        return true;
+    }
+
+    // ---------------------------------------------------------------- V2 stage conditions
+
+    private enum ConditionOutcome { PASS, FAIL, SKIP_STAGE }
+
+    /**
+     * Evaluates the stage's {@code beforeEntry}/{@code onSuccess} condition block. Rules run
+     * through the AWS rule providers we emulate: {@code LambdaInvoke} (real invocation via the
+     * Lambda service) and {@code VariableCheck} (pipeline-variable comparison); other providers
+     * pass permissively. A condition overridden via OverrideStageCondition always passes.
+     */
+    private ConditionOutcome evaluateConditions(CodePipelineExecution execution, JsonNode stage,
+                                                String conditionType) {
+        JsonNode block = stage.path(conditionBlockField(conditionType));
+        if (block.isMissingNode() || !block.has("conditions")) {
+            return ConditionOutcome.PASS;
+        }
+        if (Boolean.TRUE.equals(execution.getConditionOverrides()
+                .get(stage.path("name").asText() + "/" + conditionType))) {
+            return ConditionOutcome.PASS;
+        }
+        for (JsonNode condition : block.path("conditions")) {
+            boolean passed = true;
+            for (JsonNode rule : condition.path("rules")) {
+                if (!evaluateRule(execution, stage.path("name").asText(), conditionType, rule)) {
+                    passed = false;
+                }
+            }
+            if (!passed) {
+                return "SKIP".equals(condition.path("result").asText("FAIL")) && "BEFORE_ENTRY".equals(conditionType)
+                        ? ConditionOutcome.SKIP_STAGE : ConditionOutcome.FAIL;
+            }
+        }
+        return ConditionOutcome.PASS;
+    }
+
+    private static String conditionBlockField(String conditionType) {
+        return switch (conditionType) {
+            case "BEFORE_ENTRY" -> "beforeEntry";
+            case "ON_SUCCESS" -> "onSuccess";
+            case "ON_FAILURE" -> "onFailure";
+            default -> throw new AwsException("ValidationException",
+                    "Unknown condition type " + conditionType, 400);
+        };
+    }
+
+    private boolean evaluateRule(CodePipelineExecution execution, String stageName,
+                                 String conditionType, JsonNode rule) {
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("ruleExecutionId", UUID.randomUUID().toString());
+        record.put("ruleName", rule.path("name").asText());
+        record.put("stageName", stageName);
+        record.put("conditionType", conditionType);
+        record.put("ruleProvider", rule.path("ruleTypeId").path("provider").asText());
+        record.put("startTime", now());
+        record.put("status", "InProgress");
+        synchronized (execution) {
+            execution.getRuleExecutions().add(record);
+            putExecution(execution);
+        }
+        boolean passed;
+        String summary;
+        try {
+            String provider = rule.path("ruleTypeId").path("provider").asText();
+            passed = switch (provider) {
+                case "LambdaInvoke" -> lambdaRulePasses(execution, rule);
+                case "VariableCheck" -> variableCheckPasses(execution, rule);
+                // Commands / DeploymentWindow / CloudWatchAlarm and unknown providers pass permissively.
+                default -> true;
+            };
+            summary = passed ? "Rule passed." : "Rule condition was not met.";
+        } catch (Exception e) {
+            passed = false;
+            summary = Objects.toString(e.getMessage(), "Rule evaluation failed");
+        }
+        synchronized (execution) {
+            record.put("status", passed ? "Succeeded" : "Failed");
+            record.put("summary", summary);
+            record.put("lastUpdateTime", now());
+            putExecution(execution);
+        }
+        return passed;
+    }
+
+    private boolean lambdaRulePasses(CodePipelineExecution execution, JsonNode rule) {
+        String functionName = rule.path("configuration").path("FunctionName").asText(null);
+        if (functionName == null) {
+            throw new AwsException("ValidationException",
+                    "LambdaInvoke rules require configuration.FunctionName", 400);
+        }
+        ObjectNode event = mapper.createObjectNode();
+        event.put("ruleName", rule.path("name").asText());
+        event.put("pipelineName", execution.getPipelineName());
+        event.put("pipelineExecutionId", execution.getPipelineExecutionId());
+        InvokeResult result = lambdaService.invoke(execution.getRegion(), functionName,
+                event.toString().getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+        return result.getFunctionError() == null && result.getStatusCode() < 400;
+    }
+
+    /** Above this length, a MATCHES pattern or subject is rejected rather than risking
+     * catastrophic regex backtracking on pipeline-declared input. */
+    private static final int MAX_VARIABLE_CHECK_MATCH_LENGTH = 256;
+
+    private static final long MATCHES_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(1);
+
+    /** A regex subject whose {@code charAt} throws once the deadline passes, so a catastrophically
+     * backtracking pattern aborts instead of holding the run forever. */
+    private static final class DeadlineCharSequence implements CharSequence {
+        private final CharSequence delegate;
+        private final long deadlineNanos;
+
+        DeadlineCharSequence(CharSequence delegate, long deadlineNanos) {
+            this.delegate = delegate;
+            this.deadlineNanos = deadlineNanos;
+        }
+
+        @Override
+        public char charAt(int index) {
+            if (System.nanoTime() - deadlineNanos > 0) {
+                throw new IllegalStateException("MATCHES pattern evaluation timed out");
+            }
+            return delegate.charAt(index);
+        }
+
+        @Override
+        public int length() {
+            return delegate.length();
+        }
+
+        @Override
+        public CharSequence subSequence(int start, int end) {
+            return new DeadlineCharSequence(delegate.subSequence(start, end), deadlineNanos);
+        }
+
+        @Override
+        public String toString() {
+            return delegate.toString();
+        }
+    }
+
+    private boolean variableCheckPasses(CodePipelineExecution execution, JsonNode rule) {
+        JsonNode config = rule.path("configuration");
+        String variable = resolveVariableReference(execution, config.path("Variable").asText(""));
+        String value = config.path("Value").asText("");
+        return switch (config.path("Operator").asText("EQ")) {
+            case "EQ" -> variable.equals(value);
+            case "NE" -> !variable.equals(value);
+            case "CONTAINS" -> variable.contains(value);
+            case "MATCHES" -> {
+                if (value.length() > MAX_VARIABLE_CHECK_MATCH_LENGTH
+                        || variable.length() > MAX_VARIABLE_CHECK_MATCH_LENGTH) {
+                    throw new AwsException("ValidationException",
+                            "VariableCheck MATCHES pattern or value exceeds "
+                                    + MAX_VARIABLE_CHECK_MATCH_LENGTH + " characters", 400);
+                }
+                yield Pattern.compile(value).matcher(new DeadlineCharSequence(variable,
+                        System.nanoTime() + MATCHES_TIMEOUT_NANOS)).matches();
+            }
+            default -> throw new AwsException("ValidationException",
+                    "Unknown VariableCheck operator", 400);
+        };
+    }
+
+    /** Resolves {@code #{variables.name}} references against the execution's variables. */
+    private String resolveVariableReference(CodePipelineExecution execution, String reference) {
+        String name = reference;
+        if (reference.startsWith("#{") && reference.endsWith("}")) {
+            name = reference.substring(2, reference.length() - 1);
+            if (name.startsWith("variables.")) {
+                name = name.substring("variables.".length());
+            }
+        }
+        for (Map<String, String> variable : execution.getVariables()) {
+            if (variable.get("name").equals(name)) {
+                return variable.getOrDefault("resolvedValue", "");
+            }
+        }
+        // An unresolved reference must fail the rule, not compare as its own placeholder text.
+        throw new AwsException("ValidationException",
+                "VariableCheck variable " + reference + " could not be resolved", 400);
+    }
+
+    private void failForCondition(CodePipelineExecution execution, String stageName, String conditionType) {
+        execution.setStatus("Failed");
+        execution.setStatusSummary(
+                "Condition " + conditionType + " failed in stage " + stageName + ".");
+        putExecution(execution);
     }
 
     private void finishExecutionRun(CodePipelineExecution execution) {
@@ -2038,9 +2451,12 @@ public class CodePipelineService {
     }
 
     private void putExecution(CodePipelineExecution execution) {
-        executionStore.putForAccount(execution.getAccountId(),
-                executionKey(execution.getRegion(), execution.getPipelineName(),
-                        execution.getPipelineExecutionId()), execution);
+        // Serializing the execution walks its rule records, which evaluateRule mutates under this lock.
+        synchronized (execution) {
+            executionStore.putForAccount(execution.getAccountId(),
+                    executionKey(execution.getRegion(), execution.getPipelineName(),
+                            execution.getPipelineExecutionId()), execution);
+        }
     }
 
     private void storeItem(String account, String region, String type, String id,
@@ -2207,7 +2623,7 @@ public class CodePipelineService {
         node.remove(List.of("accountId", "region", "startTime", "lastUpdateTime",
                 "sourceRevisions", "sourceRevisionOverrides", "actionExecutions", "currentStage",
                 "stopRequested", "abandon", "rollbackTargetPipelineExecutionId", "stageExecutionStatuses",
-                "artifactsReleased"));
+                "artifactsReleased", "ruleExecutions", "conditionOverrides"));
         if (execution.getRollbackTargetPipelineExecutionId() != null) {
             node.putObject("rollbackMetadata").put(
                     "rollbackTargetPipelineExecutionId", execution.getRollbackTargetPipelineExecutionId());
@@ -2422,13 +2838,24 @@ public class CodePipelineService {
         execution.getSourceRevisions().add(sourceRevision);
     }
 
-    private List<Map<String, String>> variableList(JsonNode node) {
+    /** The request's variables, plus the declared default of every pipeline variable it omits. */
+    private List<Map<String, String>> variableList(JsonNode node, JsonNode declared) {
         List<Map<String, String>> result = new ArrayList<>();
+        Set<String> supplied = new HashSet<>();
         if (node != null && node.isArray()) {
             for (JsonNode variable : node) {
+                supplied.add(variable.path("name").asText());
                 result.add(Map.of(
                         "name", variable.path("name").asText(),
                         "resolvedValue", variable.path("value").asText()));
+            }
+        }
+        if (declared != null && declared.isArray()) {
+            for (JsonNode variable : declared) {
+                String name = variable.path("name").asText();
+                if (!supplied.contains(name) && variable.hasNonNull("defaultValue")) {
+                    result.add(Map.of("name", name, "resolvedValue", variable.path("defaultValue").asText()));
+                }
             }
         }
         return result;

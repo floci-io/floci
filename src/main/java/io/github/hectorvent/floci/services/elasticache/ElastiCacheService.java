@@ -1538,6 +1538,7 @@ public class ElastiCacheService implements ResourceProvider {
                 passwords != null ? passwords : List.of(),
                 accessString != null ? accessString : "on ~* +@all",
                 normalizedEngine, "active", Instant.now());
+        user.setArn(regionResolver.buildArn("elasticache", regionResolver.getRegion(), "user:" + userId));
 
         users.put(userId, user);
         LOG.infov("ElastiCache user {0} created with authMode={1}", userId, authMode);

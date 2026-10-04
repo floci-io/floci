@@ -2,12 +2,14 @@ package io.github.hectorvent.floci.services.appsync.graphql;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuth;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuthContext;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthMiddleware;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthRequestInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.SidecarFieldAuthorizationPlanner;
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.AppSyncResolverError;
@@ -80,6 +82,7 @@ class AppSyncExecutionControllerTest {
                 new ObjectMapper(),
                 authMiddleware,
                 requestContext,
+                new RegionResolver("cn-north-1", "000000000000"),
                 resolverExecutor,
                 callbackSessions,
                 reachableEndpoint);
@@ -161,6 +164,20 @@ class AppSyncExecutionControllerTest {
         Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
         assertEquals("InternalFailure", error.get("errorType"));
         assertEquals("InternalFailure", error.get("message"));
+    }
+
+    @Test
+    void aRequestWithoutARegionAuthorizesInTheDeploymentDefaultRegion() {
+        GraphqlApi api = new GraphqlApi();
+        api.setApiId("api-1");
+        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(authMiddleware.authenticate(any(), any(), any())).thenThrow(AppSyncAuth.unauthorized());
+
+        controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
+
+        ArgumentCaptor<AuthRequestInfo> info = ArgumentCaptor.forClass(AuthRequestInfo.class);
+        verify(authMiddleware).authenticate(any(), any(), info.capture());
+        assertEquals("cn-north-1", info.getValue().region());
     }
 
     @Test

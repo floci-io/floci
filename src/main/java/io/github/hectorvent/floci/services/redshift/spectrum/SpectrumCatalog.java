@@ -45,6 +45,50 @@ public class SpectrumCatalog implements Resettable {
         return schemas.getForAccount(accountId, schemaKey(accountId, databaseName, schemaName));
     }
 
+    /**
+     * Phase one stored a schema under the Glue database name, while its tables carry the Redshift
+     * database, so the schema's own {@code databaseName} cannot be matched against the session's.
+     * The Redshift database scope comes from {@link #legacySchemaNames}, which requires tables in it.
+     */
+    public Optional<SpectrumExternalSchema> findLegacySchema(String accountId, String databaseName, String schemaName) {
+        if (!legacySchemaNames(accountId, databaseName).contains(schemaName)) {
+            return Optional.empty();
+        }
+        String prefix = accountId + ":";
+        List<SpectrumExternalSchema> candidates = schemas.scanForAccount(accountId, key -> key.startsWith(prefix))
+                .stream()
+                .filter(schema -> accountId.equals(schema.accountId()) && schema.schemaName().equals(schemaName))
+                .sorted(Comparator.comparing(SpectrumExternalSchema::databaseName))
+                .toList();
+        if (candidates.size() > 1) {
+            // same-named schemas of other Glue databases must not lend their IAM role to this one: keep
+            // those whose location covers a table of this Redshift database
+            List<SpectrumExternalTable> tables = tablesForSchema(accountId, databaseName, schemaName);
+            List<SpectrumExternalSchema> owning = candidates.stream()
+                    .filter(schema -> tables.stream().anyMatch(table -> table.location().startsWith(schema.location())))
+                    .toList();
+            if (!owning.isEmpty()) {
+                return Optional.of(owning.getFirst());
+            }
+        }
+        return candidates.stream().findFirst();
+    }
+
+    public List<String> legacySchemaNames(String accountId, String databaseName) {
+        String prefix = accountId + ":";
+        String tablePrefix = accountId + ":" + databaseName + ":";
+        List<String> knownSchemas = schemas.scanForAccount(accountId, key -> key.startsWith(prefix)).stream()
+                .filter(schema -> accountId.equals(schema.accountId()))
+                .map(SpectrumExternalSchema::schemaName)
+                .toList();
+        return tables.scanForAccount(accountId, key -> key.startsWith(tablePrefix)).stream()
+                .filter(table -> accountId.equals(table.accountId()) && knownSchemas.contains(table.schemaName()))
+                .map(SpectrumExternalTable::schemaName)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
     public Optional<SpectrumExternalTable> table(String accountId, String databaseName,
                                                  String schemaName, String tableName) {
         return tables.getForAccount(accountId, tableKey(accountId, databaseName, schemaName, tableName));

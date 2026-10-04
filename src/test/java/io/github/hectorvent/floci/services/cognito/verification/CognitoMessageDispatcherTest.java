@@ -34,7 +34,7 @@ class CognitoMessageDispatcherTest {
     void setUp() {
         ses = mock(SesService.class);
         sns = mock(SnsService.class);
-        dispatcher = new CognitoMessageDispatcher(ses, sns);
+        dispatcher = new CognitoMessageDispatcher(ses, sns, "us-east-1");
     }
 
     @Test
@@ -181,6 +181,29 @@ class CognitoMessageDispatcherTest {
         verify(sns).publish(isNull(), isNull(), eq("+5215551234567"),
             anyString(), isNull(), isNull(), anyString());
         verifyNoInteractions(ses);
+    }
+
+    @Test
+    void dispatch_sendsFromThePoolsOwnRegion() {
+        UserPool pool = pool(Map.of());
+        pool.setArn("arn:aws-cn:cognito-idp:cn-north-1:000000000000:userpool/cn-north-1_AbCdEfGhI");
+
+        dispatcher.dispatch(pool, user("alice@example.com", "+5215551234567"),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL", "SMS"));
+
+        assertEquals("cn-north-1", sentEmail().region());
+        verify(sns).publish(isNull(), isNull(), eq("+5215551234567"), anyString(), isNull(), isNull(),
+            eq("cn-north-1"));
+    }
+
+    @Test
+    void dispatch_poolWithoutAnArnSendsFromTheDeploymentDefaultRegion() {
+        CognitoMessageDispatcher china = new CognitoMessageDispatcher(ses, sns, "cn-northwest-1");
+
+        china.dispatch(pool(Map.of()), user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("cn-northwest-1", sentEmail().region());
     }
 
     private SendEmailRequest sentEmail() {

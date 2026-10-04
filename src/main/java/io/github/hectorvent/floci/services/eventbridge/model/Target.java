@@ -11,6 +11,7 @@ public class Target {
 
     private String id;
     private String arn;
+    private String roleArn;
     private String input;
     private String inputPath;
     private InputTransformer inputTransformer;
@@ -19,6 +20,7 @@ public class Target {
     private EcsParameters ecsParameters;
     private RetryPolicy retryPolicy;
     private DeadLetterConfig deadLetterConfig;
+    private HttpParameters httpParameters;
 
     public Target() {}
 
@@ -34,6 +36,9 @@ public class Target {
 
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
+
+    public String getRoleArn() { return roleArn; }
+    public void setRoleArn(String roleArn) { this.roleArn = roleArn; }
 
     public String getInput() { return input; }
     public void setInput(String input) { this.input = input; }
@@ -58,6 +63,9 @@ public class Target {
 
     public DeadLetterConfig getDeadLetterConfig() { return deadLetterConfig; }
     public void setDeadLetterConfig(DeadLetterConfig deadLetterConfig) { this.deadLetterConfig = deadLetterConfig; }
+
+    public HttpParameters getHttpParameters() { return httpParameters; }
+    public void setHttpParameters(HttpParameters httpParameters) { this.httpParameters = httpParameters; }
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)

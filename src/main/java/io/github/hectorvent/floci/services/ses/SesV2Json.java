@@ -9,8 +9,10 @@ import io.github.hectorvent.floci.services.ses.model.Tag;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Helpers shared by the SES v2 REST JSON controllers: body and member shape checks that answer
@@ -143,6 +145,88 @@ final class SesV2Json {
                     "NUMBER_VALUE can not be converted to a Boolean", 400);
         }
         throw unexpectedStartError(node);
+    }
+
+    /**
+     * A structure member as the AWS deserializer reads it: absent or null is returned as is, an
+     * array is "Start of list found where not expected" and any other non-object "Expected null".
+     */
+    static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
+        JsonNode node = parent.path(field);
+        if (node.isMissingNode() || node.isNull() || node.isObject()) {
+            return node;
+        }
+        if (node.isArray()) {
+            throw unexpectedStartError(node);
+        }
+        throw new AwsException("SerializationException", "Expected null", 400);
+    }
+
+    /** A string member with the AWS deserializer's message for each wrong JSON type. */
+    static String typedStringMemberOrAbsent(JsonNode parent, String field) {
+        JsonNode node = parent.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (node.isTextual()) {
+            return node.textValue();
+        }
+        if (node.isNumber()) {
+            throw new AwsException("SerializationException",
+                    "NUMBER_VALUE can not be converted to a String", 400);
+        }
+        if (node.isBoolean()) {
+            throw new AwsException("SerializationException",
+                    (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
+                            + " can not be converted to a String", 400);
+        }
+        throw unexpectedStartError(node);
+    }
+
+    /**
+     * A string-to-string map member, such as a list operation's {@code Filter}: absent or null is
+     * null, a null value is kept as null so a key check still sees its key, and a value of another
+     * JSON type gets the deserializer's message for it.
+     */
+    static Map<String, String> stringMapMemberOrAbsent(JsonNode parent, String field) {
+        JsonNode node = structureMemberOrAbsent(parent, field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonNode> entry : node.properties()) {
+            values.put(entry.getKey(), typedStringMemberOrAbsent(node, entry.getKey()));
+        }
+        return values;
+    }
+
+    /**
+     * A {@code Filter} map checked against the model's own constraints, as the SES validation layer
+     * reports them: every key in the enum, listed in the order SES prints it, and no empty value, a
+     * key being checked before a value. Returns the entries that carry a value; an absent filter is
+     * an empty one.
+     */
+    static Map<String, String> filterValues(Map<String, String> filter, List<String> keys) {
+        if (filter == null) {
+            return Map.of();
+        }
+        if (!keys.containsAll(filter.keySet())) {
+            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+                    + "failed to satisfy constraint: Map keys must satisfy constraint: "
+                    + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]", 400);
+        }
+        if (filter.containsValue("")) {
+            throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
+                    + "failed to satisfy constraint: Map value must satisfy constraint: "
+                    + "[Member must have length greater than or equal to 1]", 400);
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        filter.forEach((key, value) -> {
+            if (value != null) {
+                values.put(key, value);
+            }
+        });
+        return values;
     }
 
     static AwsException unexpectedStartError(JsonNode node) {

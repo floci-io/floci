@@ -116,6 +116,45 @@ class UnknownServiceScopeGuardIntegrationTest {
     }
 
     @Test
+    void sesv2IsNotASigningScope() {
+        // Every SDK signs SES v2 as ses (botocore sesv2 signingName), so a REST request signed
+        // sesv2 names no service Floci serves.
+        given()
+            .header("Authorization", authorization("sesv2"))
+        .when()
+            .get("/v2/email/account")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("UnknownOperationException"));
+
+        given()
+            .header("Authorization", authorization("ses"))
+        .when()
+            .get("/v2/email/account")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void apigatewayv2IsNotASigningScope() {
+        // API Gateway v2 signs as apigateway in every SDK (botocore apigatewayv2 signingName).
+        given()
+            .header("Authorization", authorization("apigatewayv2"))
+        .when()
+            .get("/v2/apis")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("UnknownOperationException"));
+
+        given()
+            .header("Authorization", authorization("apigateway"))
+        .when()
+            .get("/v2/apis")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void unsignedRequestIsUntouched() {
         given()
         .when()

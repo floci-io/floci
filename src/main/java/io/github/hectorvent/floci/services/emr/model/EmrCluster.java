@@ -44,6 +44,8 @@ public class EmrCluster {
     private String ec2Attributes;
     private String applications;
     private String configurations;
+    // The cluster's BootstrapActions (BootstrapActionConfig list) as given, raw JSON; null when none.
+    private String bootstrapActions;
     // The cluster's ManagedScalingPolicy and AutoTerminationPolicy as given, raw JSON; null when none.
     private String managedScalingPolicy;
     private String autoTerminationPolicy;
@@ -156,6 +158,9 @@ public class EmrCluster {
 
     public String getConfigurations() { return configurations; }
     public void setConfigurations(String configurations) { this.configurations = configurations; }
+
+    public String getBootstrapActions() { return bootstrapActions; }
+    public void setBootstrapActions(String bootstrapActions) { this.bootstrapActions = bootstrapActions; }
 
     public String getManagedScalingPolicy() { return managedScalingPolicy; }
     public void setManagedScalingPolicy(String managedScalingPolicy) { this.managedScalingPolicy = managedScalingPolicy; }

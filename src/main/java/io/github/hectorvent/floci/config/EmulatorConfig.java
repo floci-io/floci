@@ -4,6 +4,7 @@ import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
 import java.net.URI;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
@@ -876,6 +877,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("verdaccio/verdaccio:6.10.4")
         String npmImage();
+
+        /**
+         * Image used for the per-repository pypiserver container backing the {@code pypi} format.
+         * Same reasoning as {@link #npmImage()}: pypiserver has no native concept of multiple
+         * named indexes inside one instance either, so this gets one container per CodeArtifact
+         * repository too, and there is no single external instance a URL override could name.
+         */
+        @WithDefault("pypiserver/pypiserver:v2.4.2")
+        String pypiImage();
     }
 
     interface ConnectServiceConfig {
@@ -1592,6 +1602,9 @@ public interface EmulatorConfig {
         int proxyBackendConnectTimeoutMillis();
         @WithDefault("100")
         int proxyMaxConnections();
+
+        @WithDefault("1000000")
+        long spectrumMaxRows();
     }
 
     interface RdsServiceConfig {
@@ -2690,6 +2703,9 @@ public interface EmulatorConfig {
         @WithDefault("public.ecr.aws") // partition-literal: configurable; ECR Public exists only in the commercial partition
         String ecrBaseUri();
 
+        /** Full image references for individual runtimes, keyed by Lambda runtime identifier. */
+        Map<String, String> runtimeImages();
+
         @WithDefault("128")
         int defaultMemoryMb();
 
@@ -3260,12 +3276,24 @@ public interface EmulatorConfig {
          * --disable-kube-proxy} instead of its bundled networking stack. k3s's default flannel CNI
          * and kube-proxy run embedded in the k3s server process itself (not separate, killable
          * DaemonSets), so a real CNI (e.g. Cilium) can only cleanly take over if k3s never starts
-         * its own in the first place — there is no way to evict them after the fact. CoreDNS,
+         * its own in the first place: there is no way to evict them after the fact. CoreDNS,
          * local-path-provisioner, and metrics-server are unaffected; they don't depend on which CNI
          * is in place.
          */
         @WithDefault("false")
         boolean disableCni();
+
+        /**
+         * When false (default), starts k3s with {@code --disable=local-storage} so clusters match
+         * AWS EKS by starting with no default StorageClass and no host-path provisioner. When true,
+         * retains k3s's bundled local-path provisioner and default StorageClass for local workloads
+         * that rely on automatic volume binding without installing a CSI driver.
+         *
+         * <p>Like {@link #disableCni()}, k3s's local-path-provisioner runs embedded in the k3s server
+         * process itself, so this flag must be set at startup rather than applied afterwards.
+         */
+        @WithDefault("false")
+        boolean defaultStorageClass();
 
         /**
          * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
@@ -3453,10 +3481,10 @@ public interface EmulatorConfig {
         /**
          * Size of the connection pool behind the shared Docker client. Every Docker call leases a
          * connection from it, and some hold one for as long as a container runs: a Lambda
-         * container holds two (its followed log stream and its exit watcher) plus one per
-         * extension, and other container-backed services hold one for their log stream. Once
-         * those fill the pool, create, start, stop and remove wait for a free connection,
-         * including the calls that would release one, so the emulator stalls.
+         * container holds one (its exit watcher) plus one per extension. Log-follow streams
+         * live in the separate streaming pool. Once the long-lived connections fill this pool,
+         * create, start, stop and remove wait for a free connection, including the calls that
+         * would release one, so the emulator stalls.
          *
          * <p>1024 rather than the former hard-coded 100, which capped live Lambda containers at
          * about 50: a tenth of the 500 that the runtime API port range
@@ -3465,6 +3493,17 @@ public interface EmulatorConfig {
          */
         @WithDefault("1024")
         int maxConnections();
+
+        /**
+         * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
+         * long-lived container log-follow streams that occupy a slot for a container's entire
+         * lifetime. Exec-output and container-wait streams stay on the main pool. Total live
+         * containers is unbounded across distinct functions (each {@code WarmPool} caps only
+         * per-function), so this pool is sized generously rather than tied to any single
+         * function's warm-pool cap.
+         */
+        @WithDefault("512")
+        int streamingMaxConnections();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

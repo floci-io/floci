@@ -374,14 +374,18 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
-        String body = instanceIdentityDocument(inst, config.defaultAccountId());
+        String body = instanceIdentityDocument(inst, config.defaultAccountId(), config.defaultAvailabilityZone());
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "application/json")
                 .end(body);
     }
 
-    static String instanceIdentityDocument(Instance inst, String accountId) {
-        String az = inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : "us-east-1a"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+    /**
+     * {@code defaultAvailabilityZone} answers for an instance with no placement, the same configured
+     * zone {@code /latest/meta-data/placement/availability-zone} reports for it.
+     */
+    static String instanceIdentityDocument(Instance inst, String accountId, String defaultAvailabilityZone) {
+        String az = inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : defaultAvailabilityZone;
         String architecture = inst.getArchitecture() == null || inst.getArchitecture().isBlank()
                 ? "x86_64"
                 : inst.getArchitecture();

@@ -154,7 +154,8 @@ class IotTest {
     @Test
     void domainConfigurationLifecycle() {
         String name = "java-iot-domain";
-        String certificateArn = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-1111-1111-1111-111111111111";
+        String certificateArn = TestFixtures.arn("acm", "000000000000",
+                "certificate/11111111-1111-1111-1111-111111111111");
         boolean leftOver = iot.listDomainConfigurations(ListDomainConfigurationsRequest.builder().build())
                 .domainConfigurations().stream()
                 .anyMatch(summary -> name.equals(summary.domainConfigurationName()));
@@ -191,7 +192,7 @@ class IotTest {
                 .build());
         assertThat(created.domainConfigurationName()).isEqualTo(name);
         assertThat(created.domainConfigurationArn())
-                .startsWith("arn:aws:iot:us-east-1:000000000000:domainconfiguration/" + name + "/");
+                .startsWith(TestFixtures.arn("iot", "000000000000", "domainconfiguration/" + name + "/"));
 
         assertThatThrownBy(() -> iot.createDomainConfiguration(CreateDomainConfigurationRequest.builder()
                 .domainConfigurationName(name)
@@ -376,7 +377,7 @@ class IotTest {
         assertThat(remainingTags.tags()).extracting(Tag::key).containsExactly("owner");
 
         assertThatThrownBy(() -> iot.listTagsForResource(ListTagsForResourceRequest.builder()
-                .resourceArn("arn:aws:iot:us-east-1:000000000000:thing/missing-tagged-thing")
+                .resourceArn(TestFixtures.arn("iot", "000000000000", "thing/missing-tagged-thing"))
                 .build()))
                 .isInstanceOf(ResourceNotFoundException.class);
     }
@@ -506,7 +507,8 @@ class IotTest {
                             .ruleDisabled(false)
                             .actions(Action.builder()
                                     .sqs(SqsAction.builder()
-                                            .roleArn("arn:aws:iam::000000000000:role/iot-rule-role")
+                                            .roleArn(TestFixtures.globalArn(
+                                                    "iam", "000000000000", "role/iot-rule-role"))
                                             .queueUrl(queueUrl)
                                             .useBase64(false)
                                             .build())

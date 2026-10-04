@@ -32,6 +32,7 @@ import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
+import software.amazon.awssdk.services.rds.model.InvalidRestoreException;
 import software.amazon.awssdk.services.rds.model.ListTagsForResourceResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbClusterResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbProxyResponse;
@@ -44,6 +45,7 @@ import software.amazon.awssdk.services.rds.model.RdsException;
 import software.amazon.awssdk.services.rds.model.RegisterDbProxyTargetsResponse;
 import software.amazon.awssdk.services.rds.model.Tag;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -607,6 +609,69 @@ class RdsControlPlaneTest {
                 try {
                     rds.deleteDBCluster(b -> b.dbClusterIdentifier(name).skipFinalSnapshot(true));
                 } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Point in time restore of an instance and a cluster, and the restorable times")
+    void sdkRestoresAnInstanceAndAClusterToAPointInTime() {
+        String instanceName = TestFixtures.uniqueName("rds-pitr-db");
+        String restoredInstance = instanceName + "-restored";
+        String clusterName = TestFixtures.uniqueName("rds-pitr-cluster");
+        String restoredCluster = clusterName + "-restored";
+        try {
+            createDbInstance(rds, instanceName, "pitr-secret");
+            DBInstance source = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertThat(source.latestRestorableTime()).isNotNull();
+
+            DBInstance restored = rds.restoreDBInstanceToPointInTime(b -> b
+                    .sourceDBInstanceIdentifier(instanceName)
+                    .targetDBInstanceIdentifier(restoredInstance)
+                    .useLatestRestorableTime(true)
+                    .dbInstanceClass("db.t3.small"))
+                    .dbInstance();
+            assertThat(restored.dbInstanceIdentifier()).isEqualTo(restoredInstance);
+            assertThat(restored.dbInstanceClass()).isEqualTo("db.t3.small");
+            assertThat(restored.dbName()).isEqualTo("app");
+
+            assertThatThrownBy(() -> rds.restoreDBInstanceToPointInTime(b -> b
+                    .sourceDBInstanceIdentifier(instanceName)
+                    .targetDBInstanceIdentifier(instanceName + "-early")
+                    // Before the source existed, so outside its restorable window.
+                    .restoreTime(Instant.now().minusSeconds(3 * 86400))))
+                    .isInstanceOf(InvalidRestoreException.class);
+
+            rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("pitr-secret")
+                    .databaseName("app"));
+            DBCluster sourceCluster = rds.describeDBClusters(b -> b.dbClusterIdentifier(clusterName))
+                    .dbClusters().get(0);
+            assertThat(sourceCluster.earliestRestorableTime()).isNotNull();
+            assertThat(sourceCluster.latestRestorableTime()).isAfterOrEqualTo(sourceCluster.earliestRestorableTime());
+
+            DBCluster restoredFromTime = rds.restoreDBClusterToPointInTime(b -> b
+                    .dbClusterIdentifier(restoredCluster)
+                    .sourceDBClusterIdentifier(sourceCluster.dbClusterArn())
+                    .restoreToTime(sourceCluster.earliestRestorableTime())
+                    .restoreType("copy-on-write"))
+                    .dbCluster();
+            assertThat(restoredFromTime.dbClusterIdentifier()).isEqualTo(restoredCluster);
+            assertThat(restoredFromTime.databaseName()).isEqualTo("app");
+        } finally {
+            deleteDbInstance(rds, restoredInstance);
+            deleteDbInstance(rds, instanceName);
+            for (String name : List.of(restoredCluster, clusterName)) {
+                try {
+                    rds.deleteDBCluster(b -> b.dbClusterIdentifier(name).skipFinalSnapshot(true));
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + name, e);
+                }
             }
         }
     }

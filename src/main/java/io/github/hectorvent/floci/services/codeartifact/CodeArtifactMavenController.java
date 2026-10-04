@@ -18,10 +18,6 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.Optional;
-
 /**
  * Serves the real Maven repository wire protocol behind the URL {@code GetRepositoryEndpoint}
  * returns for the {@code maven} format: plain GET/PUT/HEAD over a GAV path, not a CodeArtifact
@@ -42,9 +38,6 @@ import java.util.Optional;
  */
 @Path("/codeartifact/maven/{domain}/{repository}/{gav:.+}")
 public class CodeArtifactMavenController {
-
-    private static final String BEARER_PREFIX = "Bearer ";
-    private static final String BASIC_PREFIX = "Basic ";
 
     private final CodeArtifactService service;
     private final ReposiliteSidecarClient reposilite;
@@ -96,7 +89,7 @@ public class CodeArtifactMavenController {
     }
 
     private String requireRepositoryId(HttpHeaders headers, String domain, String repository) {
-        String token = extractToken(headers);
+        String token = CodeArtifactTokenExtractor.extractToken(headers);
         AuthorizationTokenScope scope = service.resolveAuthorizationToken(token, domain)
                 .orElseThrow(() -> new NotAuthorizedException("Basic realm=\"floci-codeartifact\""));
         String repoId;
@@ -107,34 +100,5 @@ public class CodeArtifactMavenController {
         }
         reposilite.ensureRepository(repoId);
         return repoId;
-    }
-
-    /**
-     * {@code null} when neither scheme is present, malformed, or the Basic credentials have no
-     * password field; {@link CodeArtifactService#resolveAuthorizationToken} treats a null token
-     * the same as any other invalid one.
-     */
-    private static String extractToken(HttpHeaders headers) {
-        String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
-        if (authorization == null) {
-            return null;
-        }
-        if (authorization.startsWith(BEARER_PREFIX)) {
-            return authorization.substring(BEARER_PREFIX.length());
-        }
-        if (authorization.startsWith(BASIC_PREFIX)) {
-            return passwordFromBasicCredentials(authorization.substring(BASIC_PREFIX.length()));
-        }
-        return null;
-    }
-
-    private static String passwordFromBasicCredentials(String base64Credentials) {
-        try {
-            String decoded = new String(Base64.getDecoder().decode(base64Credentials), StandardCharsets.UTF_8);
-            int separator = decoded.indexOf(':');
-            return separator >= 0 ? decoded.substring(separator + 1) : null;
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
     }
 }

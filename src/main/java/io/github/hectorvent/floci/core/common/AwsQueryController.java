@@ -112,7 +112,17 @@ public class AwsQueryController {
             "UpdateSAMLProvider", "DeleteSAMLProvider",
             "TagSAMLProvider", "UntagSAMLProvider", "ListSAMLProviderTags",
             "GenerateServiceLastAccessedDetails", "GetServiceLastAccessedDetails",
-            "GetServiceLastAccessedDetailsWithEntities", "ListPoliciesGrantingServiceAccess"
+            "GetServiceLastAccessedDetailsWithEntities", "ListPoliciesGrantingServiceAccess",
+            "UploadServerCertificate", "GetServerCertificate", "UpdateServerCertificate",
+            "DeleteServerCertificate", "ListServerCertificates",
+            "TagServerCertificate", "UntagServerCertificate", "ListServerCertificateTags",
+            "CreateVirtualMFADevice", "DeleteVirtualMFADevice", "ListVirtualMFADevices",
+            "EnableMFADevice", "DeactivateMFADevice", "ResyncMFADevice", "ListMFADevices",
+            "TagMFADevice", "UntagMFADevice", "ListMFADeviceTags",
+            "UploadSSHPublicKey", "GetSSHPublicKey", "ListSSHPublicKeys",
+            "UpdateSSHPublicKey", "DeleteSSHPublicKey",
+            "UploadSigningCertificate", "ListSigningCertificates",
+            "UpdateSigningCertificate", "DeleteSigningCertificate"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(

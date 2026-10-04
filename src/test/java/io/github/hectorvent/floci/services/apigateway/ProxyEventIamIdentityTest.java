@@ -9,6 +9,8 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 
@@ -60,7 +62,7 @@ class ProxyEventIamIdentityTest {
         controller = new ApiGatewayExecuteController(
                 null, null, null, null,
                 regionResolver, MAPPER, null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
     }
 
     @Test
@@ -75,6 +77,18 @@ class ProxyEventIamIdentityTest {
         assertEquals("AIDAEXAMPLEUSERID", identity.get("caller").asText());
         assertEquals("AIDAEXAMPLEUSERID", identity.get("user").asText());
         assertEquals("arn:aws:iam::000000000000:user/alice", identity.get("userArn").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bad_host", "[bad", "", "bad host"})
+    void invalidHostFallsBackToExecuteApiDomainInRestProxyEvent(String host) throws Exception {
+        when(headers.getHeaderString("Host")).thenReturn(host);
+        JsonNode context = MAPPER.readTree(controller.buildProxyEvent(
+                        "us-east-1", "api1", "GET", "/iam", "/iam", "res1", "test", null,
+                        headers, uriInfo, null, "req-1", null, null, null, CALLER))
+                .path("requestContext");
+        assertEquals("api1.execute-api.us-east-1.amazonaws.com", context.path("domainName").asText());
+        assertEquals("api1", context.path("domainPrefix").asText());
     }
 
     @Test

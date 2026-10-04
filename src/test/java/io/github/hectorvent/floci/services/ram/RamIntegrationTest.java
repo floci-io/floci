@@ -13,6 +13,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 
 /**
  * Verifies the RAM restJson1 organization-sharing opt-in:
@@ -381,6 +382,116 @@ class RamIntegrationTest {
             .statusCode(200)
             .body("resourceShares.size()", equalTo(1))
             .body("resourceShares[0].name", equalTo("http-filtered-share"));
+    }
+
+    @Test
+    void listResourceSharePermissionsReturnsDefaultManagedPermissionPerResourceType() {
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {
+                        "name": "perm-share",
+                        "resourceArns": [
+                            "arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0p1",
+                            "arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0p2",
+                            "arn:aws:ec2:us-east-1:000000000000:subnet/subnet-0p3"
+                        ]
+                    }
+                    """)
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+            .extract().path("resourceShare.resourceShareArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"resourceShareArn\": \"" + shareArn + "\"}")
+        .when()
+            .post("/listresourcesharepermissions")
+        .then()
+            .statusCode(200)
+            .body("permissions.size()", equalTo(2))
+            .body("permissions.resourceType", hasItems("ec2:TransitGateway", "ec2:Subnet"))
+            .body("permissions.find { it.resourceType == 'ec2:TransitGateway' }.arn",
+                    equalTo("arn:aws:ram::aws:permission/AWSRAMDefaultPermissionTransitGateway"))
+            .body("permissions[0].permissionType", equalTo("AWS_MANAGED"))
+            .body("permissions[0].status", equalTo("ATTACHABLE"))
+            .body("permissions[0].defaultVersion", equalTo(true))
+            .body("permissions[0].isResourceTypeDefault", equalTo(true));
+    }
+
+    @Test
+    void listResourceSharePermissionsGroupsColonDelimitedResourcesByType() {
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {
+                        "name": "perm-share-clusters",
+                        "resourceArns": [
+                            "arn:aws:rds:us-east-1:000000000000:cluster:db1",
+                            "arn:aws:rds:us-east-1:000000000000:cluster:db2"
+                        ]
+                    }
+                    """)
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+            .extract().path("resourceShare.resourceShareArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"resourceShareArn\": \"" + shareArn + "\"}")
+        .when()
+            .post("/listresourcesharepermissions")
+        .then()
+            .statusCode(200)
+            .body("permissions.size()", equalTo(1))
+            .body("permissions[0].resourceType", equalTo("rds:Cluster"))
+            .body("permissions[0].name", equalTo("AWSRAMDefaultPermissionCluster"));
+    }
+
+    @Test
+    void listResourceSharePermissionsRejectsAShareArnWithoutAnId() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"resourceShareArn\": \"arn:aws:ram:us-east-1:000000000000:resource-share/\"}")
+        .when()
+            .post("/listresourcesharepermissions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("MalformedArnException"));
+    }
+
+    @Test
+    void listResourceSharePermissionsRejectsUnknownAndMissingShare() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"resourceShareArn\": \"arn:aws:ram:us-east-1:000000000000:resource-share/none\"}")
+        .when()
+            .post("/listresourcesharepermissions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("UnknownResourceException"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .post("/listresourcesharepermissions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
     }
 
     @Test

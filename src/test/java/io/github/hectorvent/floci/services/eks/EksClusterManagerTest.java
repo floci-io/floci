@@ -104,16 +104,17 @@ class EksClusterManagerTest {
         cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/demo");
         cluster.setCreatedAt(Instant.parse("2026-09-17T00:00:00Z"));
         assertEquals("/_floci/eks/clusters/demo/token-webhook/scope/123456789012"
-                + "/us-west-2/2026-09-17T00:00:00Z", EksClusterManager.webhookPath(cluster));
+                + "/us-west-2/2026-09-17T00:00:00Z", EksClusterManager.webhookPath(cluster, "cn-north-1"));
     }
 
     @Test
     void webhookPathHandlesMissingArnOrCreatedAtGracefully() {
+        // Without an ARN the region is the deployment default the caller passes, not us-east-1.
         Cluster cluster = new Cluster();
         cluster.setName("demo");
         cluster.setAccountId("123456789012");
         assertEquals("/_floci/eks/clusters/demo/token-webhook/scope/123456789012"
-                + "/us-east-1/1970-01-01T00:00:00Z", EksClusterManager.webhookPath(cluster));
+                + "/cn-north-1/1970-01-01T00:00:00Z", EksClusterManager.webhookPath(cluster, "cn-north-1"));
     }
 
     @Test
@@ -168,17 +169,17 @@ class EksClusterManagerTest {
     @Test
     void registriesYamlMirrorsEveryRegionHostnameAndThePathStyleForm() {
         String yaml = EksClusterManager.buildRegistriesYaml(
-                "000000000000", AwsRegions.ALL, 4566, "http://floci:4566");
+                "000000000000", AwsRegions.advertised("aws"), 4566, "http://floci:4566");
 
         assertTrue(yaml.startsWith("mirrors:\n"));
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".localhost:4566\":"),
                     "should mirror the " + region + " hostname");
         }
         assertTrue(yaml.contains("\"localhost:4566\":"), "should mirror the path-style form");
         assertFalse(yaml.contains("\"*\""), "must not catch-all public registries");
         long endpoints = yaml.lines().filter(l -> l.contains("- \"http://floci:4566\"")).count();
-        assertEquals(AwsRegions.ALL.size() + 1, endpoints,
+        assertEquals(AwsRegions.advertised("aws").size() + 1, endpoints,
                 "every mirror should point at Floci's in-network data plane");
     }
 
@@ -196,9 +197,9 @@ class EksClusterManagerTest {
     void registriesYamlTlsAliasesPreserveLoopbackMirrorsAndInternalHttpEndpoint() {
         String endpoint = "http://host.docker.internal:4577";
         String yaml = EksClusterManager.buildRegistriesYaml(
-                "111122223333", AwsRegions.ALL, 4577, endpoint, true);
+                "111122223333", AwsRegions.advertised("aws"), 4577, endpoint, true);
 
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost:4577\":"));
             assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost.floci.io:4577\":"));
         }
@@ -210,7 +211,7 @@ class EksClusterManagerTest {
         assertFalse(yaml.contains("ghcr.io"));
         assertFalse(yaml.contains("https://"), "internal pulls still use the HTTP data plane");
         long endpoints = yaml.lines().filter(line -> line.contains("- \"" + endpoint + "\"")).count();
-        assertEquals(2L * (AwsRegions.ALL.size() + 1), endpoints);
+        assertEquals(2L * (AwsRegions.advertised("aws").size() + 1), endpoints);
     }
 
     @Test
@@ -234,6 +235,7 @@ class EksClusterManagerTest {
         List<String> args = EksClusterManager.buildServerArgs(false);
 
         assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
         assertFalse(args.contains("--flannel-backend=none"));
         assertFalse(args.contains("--disable-network-policy"));
         assertFalse(args.contains("--disable-kube-proxy"));
@@ -246,8 +248,27 @@ class EksClusterManagerTest {
         assertTrue(args.contains("--flannel-backend=none"));
         assertTrue(args.contains("--disable-network-policy"));
         assertTrue(args.contains("--disable-kube-proxy"));
-        // Base args must still be present — disableCni only adds flags, never replaces them.
+        // Base args must still be present: disableCni only adds flags, never replaces them.
         assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
+        assertTrue(args.contains("--tls-san=localhost"));
+    }
+
+    @Test
+    void serverArgsRetainLocalStorageWhenDefaultStorageClassEnabled() {
+        List<String> args = EksClusterManager.buildServerArgs(false, true, null, null);
+
+        assertTrue(args.contains("--disable=traefik"));
+        assertFalse(args.contains("--disable=local-storage"));
+        assertTrue(args.contains("--tls-san=localhost"));
+    }
+
+    @Test
+    void serverArgsDisableLocalStorageWhenDefaultStorageClassDisabled() {
+        List<String> args = EksClusterManager.buildServerArgs(false, false, null, null);
+
+        assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
         assertTrue(args.contains("--tls-san=localhost"));
     }
 
@@ -328,7 +349,8 @@ class EksClusterManagerTest {
                 "io.floci.resource-id", "my-cluster",
                 "io.floci.account", "000000000000",
                 "io.floci.region", "us-east-1",
-                "io.floci.eks.node-capacity", "m5.large:unbounded"));
+                "io.floci.eks.node-capacity", "m5.large:unbounded",
+                "io.floci.eks.default-storage-class", "false"));
     }
 
     @ParameterizedTest
@@ -360,6 +382,43 @@ class EksClusterManagerTest {
             verify(builder).withEmbeddedDns();
         } else {
             verify(builder, never()).withEmbeddedDns();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void startClusterDefaultStorageClassFlag(boolean defaultStorageClass) {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().eks().defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+        when(config.services().eks().defaultStorageClass()).thenReturn(defaultStorageClass);
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class, Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.create(any())).thenReturn("container-id");
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                config, new RegionResolver("us-east-1", "000000000000"));
+
+        Cluster cluster = new Cluster();
+        cluster.setName("my-cluster");
+
+        manager.startCluster(cluster);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withCmd(cmdCaptor.capture());
+        List<String> cmd = cmdCaptor.getValue();
+
+        if (defaultStorageClass) {
+            assertFalse(cmd.contains("--disable=local-storage"));
+        } else {
+            assertTrue(cmd.contains("--disable=local-storage"));
         }
     }
 
@@ -461,6 +520,35 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void restoreClusterPreservesPreUpgradeLocalStorageWhenContainerSurvives() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-pre-upgrade")));
+            when(lifecycleManager.adopt("cid-pre-upgrade", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-pre-upgrade", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals(Boolean.TRUE, cluster.getDefaultStorageClass());
+        }
+
+        @Test
+        void restoreClusterPreservesDefaultStorageClassLabelFromSurvivingContainer() {
+            Container container = containerFromJson("{\"Id\":\"cid-new\","
+                    + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                    + "\"io.floci.eks.default-storage-class\":\"false\"}}");
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(container));
+            when(lifecycleManager.adopt("cid-new", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-new", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals(Boolean.FALSE, cluster.getDefaultStorageClass());
+        }
+
+        @Test
         void recreatesAnOldSurvivorWithoutCapacityLimits() {
             when(lifecycleManager.findByName("floci-eks-demo"))
                     .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
@@ -532,6 +620,33 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void deletingAClusterWhoseContainerDockerCouldNotRemoveKeepsItsPortReserved() {
+            stubFreshStart("cid-1", 6441);
+            Mockito.doThrow(new IllegalStateException("Failed to remove container cid-1"))
+                    .when(lifecycleManager).stopAndRemoveStrict("cid-1", null);
+            Cluster cluster = cluster();
+            manager.startCluster(cluster);
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            verify(portAllocator, never()).release(6441);
+        }
+
+        @Test
+        void retryingADeleteAfterContainerRemovalFailedHandsThePortBack() {
+            stubFreshStart("cid-1", 6441);
+            Mockito.doThrow(new IllegalStateException("Failed to remove container cid-1")).doNothing()
+                    .when(lifecycleManager).stopAndRemoveStrict("cid-1", null);
+            Cluster cluster = cluster();
+            manager.startCluster(cluster);
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+            manager.stopCluster(cluster);
+
+            verify(portAllocator, Mockito.times(1)).release(6441);
+        }
+
+        @Test
         void retryingADeleteAfterBackupCleanupFailedHandsThePortBackOnlyOnce() {
             Cluster cluster = cluster();
             cluster.setDockerName("floci-eks-demo");
@@ -553,6 +668,7 @@ class EksClusterManagerTest {
             Cluster cluster = cluster();
 
             assertThrows(IllegalStateException.class, () -> manager.startCluster(cluster));
+            assertEquals(0, cluster.getHostPort());
             manager.stopCluster(cluster);
 
             verify(portAllocator, Mockito.times(1)).release(6441);
@@ -583,7 +699,7 @@ class EksClusterManagerTest {
             verify(lifecycleManager, Mockito.times(3))
                     .removeIfExistsStrict("floci-aws-eks-capacity-backup.foo");
             verify(lifecycleManager, never()).removeIfExistsStrict(other.getDockerName());
-            verify(lifecycleManager, never()).stopAndRemove("cid-other", null);
+            verify(lifecycleManager, never()).stopAndRemoveStrict("cid-other", null);
         }
 
         @ParameterizedTest
@@ -603,7 +719,7 @@ class EksClusterManagerTest {
 
             manager.stopCluster(cluster);
 
-            verify(lifecycleManager).stopAndRemove("cid-numeric", null);
+            verify(lifecycleManager).stopAndRemoveStrict("cid-numeric", null);
             verify(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.999999999999");
             verify(lifecycleManager, never()).removeIfExistsStrict(otherDockerName);
         }
@@ -751,7 +867,7 @@ class EksClusterManagerTest {
             cluster.setContainerId("cid-1");
             manager.stopCluster(cluster);
 
-            verify(lifecycleManager).stopAndRemove("cid-1", null);
+            verify(lifecycleManager).stopAndRemoveStrict("cid-1", null);
             // The volume must survive so restoreCluster can bring the workloads back.
             verify(lifecycleManager, never()).removeVolume(anyString());
         }
@@ -766,7 +882,7 @@ class EksClusterManagerTest {
 
             assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
 
-            verify(lifecycleManager).stopAndRemove("cid-new", null);
+            verify(lifecycleManager).stopAndRemoveStrict("cid-new", null);
             verify(lifecycleManager, never()).removeVolume(anyString());
         }
 
@@ -778,7 +894,7 @@ class EksClusterManagerTest {
             cluster.setContainerId("cid-1");
             manager.stopCluster(cluster);
 
-            verify(lifecycleManager).stopAndRemove("cid-1", null);
+            verify(lifecycleManager).stopAndRemoveStrict("cid-1", null);
             verify(lifecycleManager).removeVolume("floci-aws-eks-demo");
         }
 
@@ -1609,6 +1725,40 @@ class EksClusterManagerTest {
 
             manager.unregisterMetadataEndpoint(cluster);
             verify(metadataServer).unregisterInstance(any());
+            assertNull(manager.getRegisteredClusterNodeInstance(cluster));
+        }
+
+        @Test
+        void aDeleteThatCouldNotRemoveTheContainerKeepsItsNodeOnTheMetadataServer() {
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+            cluster.setContainerId("container-42");
+            Mockito.doThrow(new IllegalStateException("Failed to remove container container-42"))
+                    .when(lifecycleManager).stopAndRemoveStrict("container-42", null);
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            verify(metadataServer, never()).unregisterInstance(any());
+            assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
+        }
+
+        @Test
+        void retryingADeleteAfterContainerRemovalFailedRemovesTheNodeFromTheMetadataServer() {
+            EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+            when(config.storage()).thenReturn(storage);
+            when(storage.mode()).thenReturn("memory");
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+            cluster.setContainerId("container-42");
+            Mockito.doThrow(new IllegalStateException("Failed to remove container container-42"))
+                    .doNothing()
+                    .when(lifecycleManager).stopAndRemoveStrict("container-42", null);
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            manager.stopCluster(cluster);
+
             assertNull(manager.getRegisteredClusterNodeInstance(cluster));
         }
     }
@@ -2479,6 +2629,7 @@ class EksClusterManagerTest {
             List<String> args = EksClusterManager.buildServerArgs(false, "172.20.0.0/16", "10.44.0.0/16");
             assertTrue(args.contains("--service-cidr=172.20.0.0/16"));
             assertTrue(args.contains("--cluster-cidr=10.44.0.0/16"));
+            assertTrue(args.contains("--disable=local-storage"));
             assertFalse(args.contains("--flannel-backend=none"));
         }
 
@@ -2488,6 +2639,7 @@ class EksClusterManagerTest {
             assertTrue(args.contains("--flannel-backend=none"));
             assertTrue(args.contains("--disable-network-policy"));
             assertTrue(args.contains("--disable-kube-proxy"));
+            assertTrue(args.contains("--disable=local-storage"));
             assertTrue(args.contains("--service-cidr=10.100.0.0/16"));
             assertTrue(args.contains("--cluster-cidr=10.42.0.0/16"));
         }
@@ -2779,6 +2931,72 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void logHandleSurvivesADeleteThatCouldNotRemoveTheContainer() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.startCluster(cluster);
+            Mockito.doThrow(new IllegalStateException("Failed to remove container"))
+                    .when(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockHandle);
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            assertEquals(mockHandle, manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void aRecreatedClusterReplacesALogHandleLeftBehindUnderItsName() throws Exception {
+            Cluster stale = new Cluster();
+            stale.setName("prod-cluster");
+            stale.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.startCluster(stale);
+            Closeable freshHandle = Mockito.mock(Closeable.class);
+            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(freshHandle);
+            Cluster recreated = new Cluster();
+            recreated.setName("prod-cluster");
+            recreated.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+
+            manager.startCluster(recreated);
+
+            verify(mockHandle).close();
+            assertEquals(freshHandle, manager.getLogHandle(recreated));
+        }
+
+        @Test
+        void retryingADeleteAfterContainerRemovalFailedReleasesTheLogHandle() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.startCluster(cluster);
+            Mockito.doThrow(new IllegalStateException("Failed to remove container"))
+                    .doNothing()
+                    .when(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockHandle);
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            manager.stopCluster(cluster);
+
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void aFailedDeleteOverlappingASuccessfulOneLeavesNoLogHandleBehind() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.startCluster(cluster);
+            String containerId = "container-id-123456789012345678901234567890";
+            Mockito.doAnswer(failing -> {
+                manager.stopCluster(cluster);
+                throw new IllegalStateException("Failed to remove container");
+            }).doNothing().when(lifecycleManager).stopAndRemoveStrict(eq(containerId), any());
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
         void logHandleIsReleasedOnClusterStop() {
             Cluster cluster = new Cluster();
             cluster.setName("prod-cluster");
@@ -2789,7 +3007,7 @@ class EksClusterManagerTest {
 
             manager.stopCluster(cluster);
 
-            verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockHandle);
+            verify(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockHandle);
             assertNull(manager.getLogHandle(cluster));
         }
 
@@ -2809,7 +3027,7 @@ class EksClusterManagerTest {
             manager.startCluster(cluster);
             manager.stopCluster(cluster);
 
-            verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockHandle);
+            verify(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockHandle);
             assertNull(manager.getLogHandle(cluster));
         }
 
@@ -2823,7 +3041,7 @@ class EksClusterManagerTest {
             manager.detachCluster(cluster);
 
             verify(mockHandle).close();
-            verify(lifecycleManager, never()).stopAndRemove(anyString(), any());
+            verify(lifecycleManager, never()).stopAndRemoveStrict(anyString(), any());
             assertNull(manager.getLogHandle(cluster));
         }
 
@@ -2994,7 +3212,7 @@ class EksClusterManagerTest {
                     "us-east-1", "eks-audit:audit-cluster", false);
 
             manager.stopCluster(cluster);
-            verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockAuditHandle);
+            verify(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockAuditHandle);
             assertNull(manager.getLogHandle(cluster));
         }
 

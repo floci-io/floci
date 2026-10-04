@@ -35,6 +35,9 @@ class CustomResourceProvisionerTest {
     private static final String SERVICE_TOKEN =
             "arn:aws:lambda:us-east-1:000000000000:function:MyHandler";
 
+    private static final String STACK_ID =
+            "arn:aws:cloudformation:us-east-1:000000000000:stack/my-stack/1b2c3d4e-0000-0000-0000-000000000001";
+
     private final ObjectMapper mapper = new ObjectMapper();
     private LambdaService lambdaService;
     private CustomResourceResponseStore store;
@@ -57,7 +60,7 @@ class CustomResourceProvisionerTest {
 
     private CloudFormationTemplateEngine engine() {
         return new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
-                "stack/id", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), mapper,
+                STACK_ID, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), mapper,
                 (Function<String, String>) name -> null);
     }
 
@@ -105,6 +108,8 @@ class CustomResourceProvisionerTest {
                 eq(InvocationType.RequestResponse));
         JsonNode event = readEvent(payload);
         assertEquals("Create", event.get("RequestType").asText());
+        // The real stack id, so a handler can DescribeStacks(event.StackId).
+        assertEquals(STACK_ID, event.get("StackId").asText());
         assertTrue(event.get("ResponseURL").asText().startsWith("http://floci:4566/cfn-response/"));
         assertEquals("hi", event.get("ResourceProperties").get("Message").asText());
         // CloudFormation carries ServiceToken both at the top level and inside ResourceProperties.
@@ -137,6 +142,7 @@ class CustomResourceProvisionerTest {
                 eq(InvocationType.RequestResponse));
         JsonNode event = readEvent(payload);
         assertEquals("Update", event.get("RequestType").asText());
+        assertEquals(STACK_ID, event.get("StackId").asText());
         assertEquals("phys-123", event.get("PhysicalResourceId").asText());
         assertEquals("hi", event.get("ResourceProperties").get("Message").asText());
         // CloudFormation includes the previous properties on Update so handlers can diff.
@@ -218,6 +224,7 @@ class CustomResourceProvisionerTest {
                 eq(InvocationType.RequestResponse));
         JsonNode deleteEvent = readEvent(() -> payloads.getAllValues().get(1));
         assertEquals("Delete", deleteEvent.get("RequestType").asText());
+        assertEquals(STACK_ID, deleteEvent.get("StackId").asText());
         assertEquals("phys-123", deleteEvent.get("PhysicalResourceId").asText());
         assertEquals("hi", deleteEvent.get("ResourceProperties").get("Message").asText());
     }

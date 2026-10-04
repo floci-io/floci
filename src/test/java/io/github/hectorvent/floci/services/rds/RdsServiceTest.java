@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -37,6 +38,7 @@ import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
 import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
+import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
@@ -1721,7 +1723,7 @@ class RdsServiceTest {
 
     @Test
     void describeOrderableDbInstanceOptionsFiltersByEngineVersionAndClass() {
-        var result = rdsService.describeOrderableDbInstanceOptions(
+        List<Map<String, String>> result = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "18.1", "db.t3.micro");
 
         assertEquals(1, result.size());
@@ -1732,9 +1734,9 @@ class RdsServiceTest {
 
     @Test
     void describeOrderableDbInstanceOptionsIncludesModernGravitonPostgresClasses() {
-        var flociPinned = rdsService.describeOrderableDbInstanceOptions(
+        List<Map<String, String>> flociPinned = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "18.1", "db.m8g.large");
-        var awsEquivalent = rdsService.describeOrderableDbInstanceOptions(
+        List<Map<String, String>> awsEquivalent = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "18.4", "db.m8g.large");
 
         assertEquals(1, flociPinned.size());
@@ -1747,7 +1749,7 @@ class RdsServiceTest {
 
     @Test
     void describeOrderableDbInstanceOptionsIncludesCurrentSmallGravitonPostgresClass() {
-        var result = rdsService.describeOrderableDbInstanceOptions(
+        List<Map<String, String>> result = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "16.14", "db.t4g.small");
 
         assertEquals(1, result.size());
@@ -2487,6 +2489,35 @@ class RdsServiceTest {
                 any(), any(), any(), any(), any(), any());
         assertEquals("InvalidDBInstanceState", assertThrows(AwsException.class,
                 () -> rdsService.startDbInstance("standalone")).getErrorCode());
+    }
+
+    @Test
+    void pointInTimeRestoreFailsAndCleansUpWhenTheTargetContainerDidNotStart() {
+        rdsService.createDbInstance("pitr-source", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+        rdsService.createDbCluster("pitr-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        // The target's container fails to start, so there is nothing to copy the source into.
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(null);
+
+        AwsException instanceFault = assertThrows(AwsException.class, () -> rdsService.restoreDbInstanceToPointInTime(
+                new PointInTimeRestoreRequest("pitr-target", "pitr-source", null, null, null, true,
+                        null, null, null, null, null, null, null, null, null, null, null, null, null,
+                        null, null, null, Map.of()),
+                "us-east-1"));
+        assertEquals("InvalidDBInstanceState", instanceFault.getErrorCode());
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
+                () -> rdsService.getDbInstance("pitr-target")).getErrorCode());
+
+        AwsException clusterFault = assertThrows(AwsException.class, () -> rdsService.restoreDbClusterToPointInTime(
+                "pitr-cluster-target", "pitr-cluster", null, null, null, true,
+                null, null, null, null, null, Map.of(), "us-east-1"));
+        assertEquals("InvalidDBClusterStateFault", clusterFault.getErrorCode());
+        assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class,
+                () -> rdsService.getDbCluster("pitr-cluster-target")).getErrorCode());
+        verify(containerManager, never()).createPostgresSnapshot(any(), any());
     }
 
     @Test
@@ -7157,7 +7188,7 @@ class RdsServiceTest {
     @Test
     void refreshRuntimeHealthMarksDeadContainerFailedAndStopsProxy() {
         when(rdsConfig.mock()).thenReturn(false);
-        when(containerManager.isContainerRunning("cont-id")).thenReturn(false);
+        when(containerManager.probeContainer("cont-id")).thenReturn(ContainerLiveness.NOT_RUNNING);
         DbInstance instance = rdsService.createDbInstance(
                 "dead-db", "postgres", "16", "admin", "password", "dbname",
                 "db.t3.micro", 20, false, null, null, null, null, false, false,
@@ -7167,7 +7198,7 @@ class RdsServiceTest {
 
         assertEquals(DbInstanceStatus.FAILED, refreshed.getStatus());
         verify(proxyManager).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
-        var events = rdsService.describeEvents("dead-db", "db-instance", null, null, 60);
+        List<RdsEvent> events = rdsService.describeEvents("dead-db", "db-instance", null, null, 60);
         assertEquals(1, events.size());
         assertEquals(List.of("availability"), events.getFirst().eventCategories());
         assertEquals(refreshed.getDbInstanceArn(), events.getFirst().sourceArn());
@@ -7175,6 +7206,44 @@ class RdsServiceTest {
         // Repeated health reads do not duplicate the transition event.
         rdsService.refreshDbInstanceRuntimeHealth(refreshed);
         assertEquals(1, rdsService.describeEvents("dead-db", "db-instance", null, null, 60).size());
+    }
+
+    @Test
+    void refreshRuntimeHealthKeepsAvailableStatusWhenLivenessProbeFails() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.probeContainer("cont-id")).thenReturn(ContainerLiveness.UNKNOWN);
+        DbInstance instance = rdsService.createDbInstance(
+                "blip-db", "postgres", "16", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, null, true);
+
+        DbInstance refreshed = rdsService.refreshDbInstanceRuntimeHealth(instance);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, refreshed.getStatus());
+        verify(proxyManager, never()).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
+        assertTrue(rdsService.describeEvents("blip-db", "db-instance", null, null, 60).isEmpty());
+    }
+
+    @Test
+    void refreshRuntimeHealthReprobesAfterAFailedProbeAndActsOnTheNextDefiniteAnswer() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.probeContainer("cont-id"))
+                .thenReturn(ContainerLiveness.UNKNOWN, ContainerLiveness.NOT_RUNNING);
+        DbInstance instance = rdsService.createDbInstance(
+                "recover-db", "postgres", "16", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, null, true);
+        String proxyKey = "rds-resource:" + instance.getDbInstanceArn();
+
+        DbInstance afterBlip = rdsService.refreshDbInstanceRuntimeHealth(instance);
+        assertEquals(DbInstanceStatus.AVAILABLE, afterBlip.getStatus());
+        verify(proxyManager, never()).stopProxy(proxyKey);
+
+        DbInstance afterDefiniteAnswer = rdsService.refreshDbInstanceRuntimeHealth(afterBlip);
+        assertEquals(DbInstanceStatus.FAILED, afterDefiniteAnswer.getStatus());
+        verify(proxyManager).stopProxy(proxyKey);
+        verify(containerManager, times(2)).probeContainer("cont-id");
+        assertEquals(1, rdsService.describeEvents("recover-db", "db-instance", null, null, 60).size());
     }
 
     @Test

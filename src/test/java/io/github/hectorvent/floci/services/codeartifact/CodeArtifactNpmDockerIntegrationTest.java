@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -282,6 +283,34 @@ class CodeArtifactNpmDockerIntegrationTest {
         given().header("Authorization", "Bearer " + token)
                 .get("/codeartifact/npm/" + domain + "/" + REPO + "/" + PACKAGE_NAME)
                 .then().statusCode(200);
+    }
+
+    /**
+     * The real-world gap this closes: {@code GetPackageVersionAsset} used to 404 for every
+     * npm-published package since Floci's generic-format package-version store never had a
+     * record for it (npm publishing goes straight to Verdaccio, bypassing it entirely). Proves the
+     * JSON API now bridges to the same tarball {@link #publishThenFetchRoundTripsTheRealNpmEnvelope}
+     * already confirmed is really there, through the real sidecar, not a mock.
+     */
+    @Test
+    @Order(9)
+    void getPackageVersionAssetBridgesToTheRealVerdaccioSidecar() throws IOException {
+        byte[] fetched = given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=" + PACKAGE_NAME + "-1.0.0.tgz")
+                .then().statusCode(200)
+                .header("X-AssetName", equalTo(PACKAGE_NAME + "-1.0.0.tgz"))
+                .extract().asByteArray();
+        assertArrayEquals(expectedTarballBytes, fetched);
+    }
+
+    @Test
+    @Order(9)
+    void getPackageVersionAssetReturns404ForAnNpmAssetThatWasNeverPublished() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=does-not-exist.tgz")
+                .then().statusCode(404);
     }
 
     /**

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
+import io.github.hectorvent.floci.core.common.MultipartFormParser;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -28,6 +29,7 @@ import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.CopyObjectOptions;
+import io.github.hectorvent.floci.services.s3.model.CopySourceConditions;
 import io.github.hectorvent.floci.services.s3.model.QueueNotification;
 import io.github.hectorvent.floci.services.s3.model.ObjectLockRetention;
 import io.github.hectorvent.floci.services.s3.model.Part;
@@ -232,8 +234,8 @@ public class S3Controller {
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListAllMyBucketsResult", AwsNamespaces.S3)
                     .start("Owner")
-                    .elem("ID", "owner")
-                    .elem("DisplayName", "owner")
+                    .elem("ID", regionResolver.getAccountId())
+                    .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
                     .end("Owner")
                     .start("Buckets");
             for (Bucket b : buckets) {
@@ -1709,13 +1711,17 @@ public class S3Controller {
                .elem("Size", part.getSize())
                .end("Part");
         }
+        String ownerAccountId = upload.getOwnerAccountId() != null
+                ? upload.getOwnerAccountId() : s3Service.getBucketOwnerAccountId(bucket);
+        String initiatorAccountId = upload.getInitiatorAccountId() != null
+                ? upload.getInitiatorAccountId() : ownerAccountId;
         xml.start("Initiator")
-           .elem("ID", "owner")
-           .elem("DisplayName", "owner")
+           .elem("ID", initiatorAccountId)
+           .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
            .end("Initiator")
            .start("Owner")
-           .elem("ID", "owner")
-           .elem("DisplayName", "owner")
+           .elem("ID", ownerAccountId)
+           .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
            .end("Owner")
            .elem("StorageClass", upload.getStorageClass());
         xml.end("ListPartsResult");
@@ -2096,11 +2102,13 @@ public class S3Controller {
      * Format: hex-size;chunk-signature=sig\r\n data \r\n ... 0;chunk-signature=sig\r\n
      */
     private byte[] decodeAwsChunked(byte[] body, String contentEncoding, String contentSha256) {
-        boolean isAwsChunked = (contentEncoding != null
-                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked"))
-                || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".equals(contentSha256)
+        boolean declaresStreamingPayload = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".equals(contentSha256)
                 || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
+                || "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD".equals(contentSha256)
+                || "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
                 || "STREAMING-UNSIGNED-PAYLOAD-TRAILER".equals(contentSha256);
+        boolean isAwsChunked = declaresStreamingPayload || (contentEncoding != null
+                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked"));
         if (!isAwsChunked) {
             return body;
         }
@@ -2109,6 +2117,7 @@ public class S3Controller {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             String raw = new String(body, StandardCharsets.ISO_8859_1);
             int pos = 0;
+            boolean complete = false;
             while (pos < raw.length()) {
                 int lineEnd = raw.indexOf('\n', pos);
                 if (lineEnd < 0) break;
@@ -2116,7 +2125,11 @@ public class S3Controller {
                 int semiColon = line.indexOf(';');
                 String hexSize = semiColon >= 0 ? line.substring(0, semiColon) : line;
                 int chunkSize = Integer.parseInt(hexSize.trim(), 16);
-                if (chunkSize == 0) break;
+                if (chunkSize == 0) {
+                    // A streaming body ends with an empty line, after any trailer headers.
+                    complete = !declaresStreamingPayload || reachesEmptyLine(raw, lineEnd + 1);
+                    break;
+                }
 
                 int dataStart = lineEnd + 1;
                 byte[] chunkData = new byte[chunkSize];
@@ -2125,13 +2138,43 @@ public class S3Controller {
 
                 pos = dataStart + chunkSize;
                 if (pos < raw.length() && raw.charAt(pos) == '\r') pos++;
-                if (pos < raw.length() && raw.charAt(pos) == '\n') pos++;
+                boolean lineBreak = pos < raw.length() && raw.charAt(pos) == '\n';
+                if (lineBreak) pos++;
+                if (declaresStreamingPayload && !lineBreak) {
+                    throw new IllegalArgumentException("aws-chunked chunk is not followed by a line break");
+                }
+            }
+            if (!complete) {
+                throw new IllegalArgumentException("aws-chunked body ends before its final chunk");
             }
             return out.toByteArray();
         } catch (Exception e) {
+            // A streaming payload is always framed, so storing it raw would save the chunk
+            // headers as the object's content. Without that declaration, a Content-Encoding
+            // naming aws-chunked does not guarantee framing, and the body is kept as sent.
+            if (declaresStreamingPayload) {
+                LOG.debugv("Rejecting malformed aws-chunked body: {0}", e.getMessage());
+                throw new AwsException("IncompleteBody",
+                        "You did not provide the number of bytes specified by the Content-Length HTTP header.",
+                        400);
+            }
             LOG.debugv("Failed to decode aws-chunked body, using raw: {0}", e.getMessage());
             return body;
         }
+    }
+
+    private static boolean reachesEmptyLine(String raw, int pos) {
+        while (pos < raw.length()) {
+            int lineEnd = raw.indexOf('\n', pos);
+            if (lineEnd < 0) {
+                return false;
+            }
+            if (raw.substring(pos, lineEnd).trim().isEmpty()) {
+                return true;
+            }
+            pos = lineEnd + 1;
+        }
+        return false;
     }
 
     /**
@@ -2793,7 +2836,10 @@ public class S3Controller {
                         .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
                         .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
                         .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
-                        .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp")));
+                        .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
+                        .withIfMatch(httpHeaders.getHeaderString("If-Match"))
+                        .withIfNoneMatch(httpHeaders.getHeaderString("If-None-Match"))
+                        .withCopySourceConditions(copySourceConditions(httpHeaders)));
         XmlBuilder xmlBuilder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyObjectResult", AwsNamespaces.S3)
@@ -2830,7 +2876,8 @@ public class S3Controller {
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
                 copySourceSseCustomerHeaders(httpHeaders),
-                sseCustomerHeaders(httpHeaders));
+                sseCustomerHeaders(httpHeaders),
+                copySourceConditions(httpHeaders));
         // The destination multipart upload's own SSE settings (captured at
         // CreateMultipartUpload), not anything from this request's headers.
         // UploadPartCopy doesn't take server-side-encryption headers itself,
@@ -2854,6 +2901,16 @@ public class S3Controller {
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
         return response.build();
+    }
+
+    private CopySourceConditions copySourceConditions(HttpHeaders httpHeaders) {
+        String ifModifiedSince = httpHeaders.getHeaderString("x-amz-copy-source-if-modified-since");
+        String ifUnmodifiedSince = httpHeaders.getHeaderString("x-amz-copy-source-if-unmodified-since");
+        return new CopySourceConditions(
+                httpHeaders.getHeaderString("x-amz-copy-source-if-match"),
+                httpHeaders.getHeaderString("x-amz-copy-source-if-none-match"),
+                ifModifiedSince != null ? parseHttpDate(ifModifiedSince) : null,
+                ifUnmodifiedSince != null ? parseHttpDate(ifUnmodifiedSince) : null);
     }
 
     private S3Service.SseCustomerHeaders copySourceSseCustomerHeaders(HttpHeaders httpHeaders) {
@@ -3429,55 +3486,14 @@ public class S3Controller {
     }
 
     private Response doHandlePresignedPost(String bucket, String contentType, byte[] body) {
-        String boundary = extractBoundary(contentType);
-        if (boundary == null) {
-            throw new AwsException("InvalidArgument",
-                    "Could not determine multipart boundary from Content-Type.", 400);
-        }
+        String boundary = MultipartFormParser.extractBoundary(contentType).orElseThrow(() ->
+                new AwsException("InvalidArgument",
+                        "Could not determine multipart boundary from Content-Type.", 400));
 
-        Map<String, String> fields = new LinkedHashMap<>();
-        byte[] fileData = null;
-        String fileContentType = null;
-
-        byte[] boundaryBytes = ("--" + boundary).getBytes(StandardCharsets.UTF_8);
-        List<byte[]> parts = splitMultipartParts(body, boundaryBytes);
-
-        for (byte[] part : parts) {
-            int headerEnd = indexOfDoubleNewline(part);
-            if (headerEnd < 0) {
-                continue;
-            }
-            String headers = new String(part, 0, headerEnd, StandardCharsets.UTF_8);
-            int bodyStart = headerEnd + 4; // skip \r\n\r\n
-            byte[] partBody = Arrays.copyOfRange(part, bodyStart, part.length);
-
-            // Trim trailing \r\n from part body
-            if (partBody.length >= 2
-                    && partBody[partBody.length - 2] == '\r'
-                    && partBody[partBody.length - 1] == '\n') {
-                partBody = Arrays.copyOf(partBody, partBody.length - 2);
-            }
-
-            String disposition = extractHeaderValue(headers, "Content-Disposition");
-            if (disposition == null) {
-                continue;
-            }
-            String fieldName = extractDispositionParam(disposition, "name");
-            if (fieldName == null) {
-                continue;
-            }
-
-            String filename = extractDispositionParam(disposition, "filename");
-            if (filename != null) {
-                fileData = partBody;
-                String partContentType = extractHeaderValue(headers, "Content-Type");
-                if (partContentType != null) {
-                    fileContentType = partContentType.trim();
-                }
-            } else {
-                fields.put(fieldName, new String(partBody, StandardCharsets.UTF_8));
-            }
-        }
+        MultipartFormParser.ParsedForm form = MultipartFormParser.parse(body, boundary);
+        Map<String, String> fields = form.fields();
+        byte[] fileData = form.file().map(MultipartFormParser.FilePart::content).orElse(null);
+        String fileContentType = form.file().map(MultipartFormParser.FilePart::contentType).orElse(null);
 
         String key = fields.get("key");
         if (key == null || key.isEmpty()) {
@@ -3753,123 +3769,6 @@ public class S3Controller {
         return fields.get(fieldName);
     }
 
-    private static String extractBoundary(String contentType) {
-        if (contentType == null) {
-            return null;
-        }
-        for (String part : contentType.split(";")) {
-            String trimmed = part.trim();
-            if (trimmed.toLowerCase(Locale.ROOT).startsWith("boundary=")) {
-                String boundary = trimmed.substring("boundary=".length()).trim();
-                if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
-                    boundary = boundary.substring(1, boundary.length() - 1);
-                }
-                return boundary;
-            }
-        }
-        return null;
-    }
-
-    private static List<byte[]> splitMultipartParts(byte[] body, byte[] boundary) {
-        java.util.ArrayList<byte[]> parts = new java.util.ArrayList<>();
-        int pos = indexOf(body, boundary, 0);
-        if (pos < 0) {
-            return parts;
-        }
-        // Skip past the first boundary line
-        pos += boundary.length;
-        // Skip the CRLF or -- after boundary
-        if (pos < body.length - 1 && body[pos] == '-' && body[pos + 1] == '-') {
-            return parts; // closing boundary immediately
-        }
-        if (pos < body.length - 1 && body[pos] == '\r' && body[pos + 1] == '\n') {
-            pos += 2;
-        }
-
-        while (pos < body.length) {
-            int nextBoundary = indexOf(body, boundary, pos);
-            if (nextBoundary < 0) {
-                break;
-            }
-            parts.add(Arrays.copyOfRange(body, pos, nextBoundary));
-            pos = nextBoundary + boundary.length;
-            // Check for closing boundary --
-            if (pos < body.length - 1 && body[pos] == '-' && body[pos + 1] == '-') {
-                break;
-            }
-            // Skip CRLF after boundary
-            if (pos < body.length - 1 && body[pos] == '\r' && body[pos + 1] == '\n') {
-                pos += 2;
-            }
-        }
-        return parts;
-    }
-
-    private static int indexOf(byte[] data, byte[] pattern, int fromIndex) {
-        outer:
-        for (int i = fromIndex; i <= data.length - pattern.length; i++) {
-            for (int j = 0; j < pattern.length; j++) {
-                if (data[i + j] != pattern[j]) {
-                    continue outer;
-                }
-            }
-            return i;
-        }
-        return -1;
-    }
-
-    private static int indexOfDoubleNewline(byte[] data) {
-        for (int i = 0; i < data.length - 3; i++) {
-            if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n') {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private static String extractHeaderValue(String headers, String headerName) {
-        String lowerHeaders = headers.toLowerCase(Locale.ROOT);
-        String lowerName = headerName.toLowerCase(Locale.ROOT) + ":";
-        int idx = lowerHeaders.indexOf(lowerName);
-        if (idx < 0) {
-            return null;
-        }
-        int valueStart = idx + lowerName.length();
-        int lineEnd = headers.indexOf('\r', valueStart);
-        if (lineEnd < 0) {
-            lineEnd = headers.indexOf('\n', valueStart);
-        }
-        if (lineEnd < 0) {
-            lineEnd = headers.length();
-        }
-        return headers.substring(valueStart, lineEnd).trim();
-    }
-
-    private static String extractDispositionParam(String disposition, String paramName) {
-        String search = paramName + "=";
-        int idx = disposition.indexOf(search);
-        if (idx < 0) {
-            return null;
-        }
-        int valueStart = idx + search.length();
-        if (valueStart >= disposition.length()) {
-            return null;
-        }
-        if (disposition.charAt(valueStart) == '"') {
-            valueStart++;
-            int valueEnd = disposition.indexOf('"', valueStart);
-            if (valueEnd < 0) {
-                return disposition.substring(valueStart);
-            }
-            return disposition.substring(valueStart, valueEnd);
-        } else {
-            int valueEnd = disposition.indexOf(';', valueStart);
-            if (valueEnd < 0) {
-                valueEnd = disposition.length();
-            }
-            return disposition.substring(valueStart, valueEnd).trim();
-        }
-    }
 
     private static final int MAX_INLINE_TAGS = 10;
     private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;

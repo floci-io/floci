@@ -63,6 +63,10 @@
     "StageName",
     "ApiId"
   ],
+  "AWS::ApiGatewayV2::VpcLink": [
+    "SecurityGroupIds",
+    "SubnetIds"
+  ],
   "AWS::AppSync::ApiKey": [
     "ApiId"
   ],

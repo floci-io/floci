@@ -416,7 +416,7 @@ public class WarmPool implements ContainerTeardown {
         long idleTimeoutMs = config.services().lambda().containerIdleTimeoutSeconds() * 1000L;
         long now = clock.millis();
 
-        for (var entry : poolStates.entrySet()) {
+        for (Map.Entry<String, PoolState> entry : poolStates.entrySet()) {
             String functionName = entry.getKey();
             PoolState poolState = entry.getValue();
             List<ContainerHandle> toEvict = new ArrayList<>();

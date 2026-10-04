@@ -32,9 +32,18 @@ public enum SesListPaging {
             false),
 
     V2_LIST_EMAIL_IDENTITIES(Namespace.IDENTITY, 25, 1000,
-            size -> badRequest("Value " + size + " for parameter PageSize is invalid. "
-                    + "PageSize must be between 1 and 1000."),
+            SesListPaging::emailIdentitiesPageSizeError,
             token -> badRequest("Invalid NextToken <" + token + ">."),
+            false),
+
+    /**
+     * ListEmailIdentities with a Filter (probed 2026-10-03): the same list, but a token SES refuses
+     * is answered without echoing it. Only a token from another filter could be observed; a token
+     * that is not one at all is taken to be refused the same way.
+     */
+    V2_LIST_EMAIL_IDENTITIES_FILTERED(Namespace.IDENTITY, 25, 1000,
+            SesListPaging::emailIdentitiesPageSizeError,
+            token -> badRequest("Invalid NextToken."),
             false),
 
     /** 195 identities came back whole without a MaxItems, so the default is taken to be the bound. */
@@ -227,6 +236,18 @@ public enum SesListPaging {
      */
     <T> PaginatedResult<T> page(String region, String scope, List<T> all, Function<T, String> cursorOf,
                                 Integer pageSize, String nextToken) {
+        int limit = checkRequest(pageSize, nextToken);
+        String boundTo = scope.isEmpty() ? "" : "#" + scope.length() + "#" + scope;
+        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region + boundTo,
+                invalidToken);
+    }
+
+    /**
+     * What SES checks before anything else in the request: the page size and an empty token, which
+     * the tenant-style lists report together. Returns the page size to serve. {@link #page} runs it
+     * too, so a service calls it first only when its own checks must come after these.
+     */
+    int checkRequest(Integer pageSize, String nextToken) {
         boolean emptyToken = nextToken != null && nextToken.isEmpty() && emptyTokenInvalid;
         if (emptyToken && sizeAndEmptyTokenInvalid != null && pageSize != null
                 && (pageSize < 1 || pageSize > maxPageSize)) {
@@ -236,9 +257,7 @@ public enum SesListPaging {
         if (emptyToken) {
             throw invalidToken.apply(nextToken);
         }
-        String boundTo = scope.isEmpty() ? "" : "#" + scope.length() + "#" + scope;
-        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region + boundTo,
-                invalidToken);
+        return limit;
     }
 
     int pageSize(Integer requested) {
@@ -309,6 +328,11 @@ public enum SesListPaging {
         } catch (NumberFormatException e) {
             throw new AwsException("MalformedInput", null, 400);
         }
+    }
+
+    private static AwsException emailIdentitiesPageSizeError(int size) {
+        return badRequest("Value " + size + " for parameter PageSize is invalid. "
+                + "PageSize must be between 1 and 1000.");
     }
 
     private static AwsException badRequest(String message) {

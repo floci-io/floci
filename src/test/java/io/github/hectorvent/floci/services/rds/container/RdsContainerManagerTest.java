@@ -61,6 +61,12 @@ class RdsContainerManagerTest {
     Path tempDir;
 
     @Test
+    void quotePostgresIdentifierDoublesEmbeddedQuotes() {
+        assertEquals("\"appdb\"", RdsContainerManager.quotePostgresIdentifier("appdb"));
+        assertEquals("\"app\"\"db\"", RdsContainerManager.quotePostgresIdentifier("app\"db"));
+    }
+
+    @Test
     void mysql84UsesSupportedNativePasswordOptions() {
         assertEquals(
                 List.of(

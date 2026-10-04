@@ -44,6 +44,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScali
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
@@ -52,6 +53,8 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatc
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUserPoolGroupCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUserPoolUserCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUserPoolUserToGroupAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkAclCfnProvisioner;
@@ -88,6 +91,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsMetri
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftClusterCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftServerlessCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleCfnProvisioner;
@@ -128,6 +132,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
@@ -217,6 +222,7 @@ final class CfnProvisionerFixture {
         private WafV2Service wafV2Service;
         private BackupService backupService;
         private RedshiftService redshiftService;
+        private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
@@ -294,6 +300,8 @@ final class CfnProvisionerFixture {
             if (cognitoService != null) {
                 discovered.add(new CognitoCfnProvisioner(cognitoService));
                 discovered.add(new CognitoUserPoolGroupCfnProvisioner(cognitoService));
+                discovered.add(new CognitoUserPoolUserCfnProvisioner(cognitoService));
+                discovered.add(new CognitoUserPoolUserToGroupAttachmentCfnProvisioner(cognitoService));
             }
             if (cloudFrontService != null) {
                 discovered.add(new CloudFrontCfnProvisioner(cloudFrontService));
@@ -389,6 +397,7 @@ final class CfnProvisionerFixture {
             }
             if (eventBridgeService != null) {
                 discovered.add(new EventsCfnProvisioner(eventBridgeService));
+                discovered.add(new EventsArchiveCfnProvisioner(eventBridgeService));
             }
             if (batchService != null) {
                 discovered.add(new BatchCfnProvisioner(batchService));
@@ -430,6 +439,9 @@ final class CfnProvisionerFixture {
             }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
+            }
+            if (redshiftServerlessService != null) {
+                discovered.add(new RedshiftServerlessCfnProvisioner(redshiftServerlessService));
             }
             if (cloudMapService != null) {
                 discovered.add(new CloudMapCfnProvisioner(cloudMapService));
@@ -689,6 +701,11 @@ final class CfnProvisionerFixture {
 
         public Builder redshift(RedshiftService s) {
             return redshiftService(s);
+        }
+
+        public Builder redshiftServerlessService(RedshiftServerlessService s) {
+            this.redshiftServerlessService = s;
+            return this;
         }
 
         public Builder cloudMap(CloudMapService v) {

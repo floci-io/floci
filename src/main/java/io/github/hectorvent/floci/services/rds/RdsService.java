@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -46,6 +47,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
@@ -1180,6 +1182,188 @@ public class RdsService implements Resettable, ResourceProvider {
         return instance;
     }
 
+    // ── Point in time restore ─────────────────────────────────────────────────
+
+    // The RDS rule for a PostgreSQL DBName: a letter, then letters, digits or underscores, 63 at most.
+    private static final Pattern POSTGRES_DB_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_]{0,62}");
+
+    /**
+     * The earliest time a DB instance can be restored to: the later of its creation and the start
+     * of its backup retention period. Floci restores from the source's current data (see
+     * {@link #restoreDbInstanceToPointInTime}), so the latest restorable time is always now.
+     */
+    public static Instant earliestRestorableTime(DbInstance instance, Instant now) {
+        Instant retentionStart = now.minus(Duration.ofDays(instance.getBackupRetentionPeriod()));
+        Instant created = instance.getCreatedAt();
+        return created != null && created.isAfter(retentionStart) ? created : retentionStart;
+    }
+
+    /**
+     * Creates a new DB instance from a source instance as of a time in its restorable window.
+     *
+     * <p>Floci keeps no transaction log, so it cannot rebuild the source as it was at an earlier
+     * time. The requested time is checked against the window as AWS checks it, and the new
+     * instance is then seeded from a dump of the source taken now, the mechanism read replicas
+     * use. The restored data is therefore the source's latest state for any time in the window.
+     */
+    public DbInstance restoreDbInstanceToPointInTime(PointInTimeRestoreRequest request, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String targetId = request.targetDbInstanceIdentifier();
+        if (targetId == null || targetId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetDBInstanceIdentifier is required.", 400);
+        }
+        DbInstance source = resolvePointInTimeSource(request, effectiveRegion);
+        String sourceId = source.getDbInstanceIdentifier();
+        if (source.getDbClusterIdentifier() != null && !source.getDbClusterIdentifier().isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "DB instance " + sourceId + " belongs to DB cluster " + source.getDbClusterIdentifier()
+                    + ". Use RestoreDBClusterToPointInTime to restore the cluster.", 400);
+        }
+        if (source.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + sourceId + " is not in available state.", 400);
+        }
+        if (source.getBackupRetentionPeriod() <= 0) {
+            throw new AwsException("PointInTimeRestoreNotEnabled",
+                    "Point-in-time restore is not enabled for DB instance " + sourceId
+                    + " because its backup retention period is 0.", 400);
+        }
+        Instant now = Instant.now();
+        requireRestorableTime(request.restoreTime(), request.useLatestRestorableTime(),
+                earliestRestorableTime(source, now), now, "RestoreTime");
+        if (source.getEngine() != DatabaseEngine.POSTGRES) {
+            // CreateDBSnapshot draws the same line: the copy of the source is pg_dumpall based.
+            throw new AwsException("InvalidDBInstanceState",
+                    "Operation RestoreDBInstanceToPointInTime is not supported for engine "
+                    + source.getEngine() + ".", 400);
+        }
+
+        String dbName = firstNonBlank(request.dbName(), source.getDbName());
+        // The database the source's dump carries: its DBName, or, without one, the database the
+        // image names after the master user.
+        String sourceDatabase = firstNonBlank(source.getDbName(),
+                firstNonBlank(source.getMasterUsername(), "postgres"));
+        boolean renameDatabase = !isBlank(request.dbName()) && !request.dbName().equals(sourceDatabase);
+        if (renameDatabase && !POSTGRES_DB_NAME.matcher(request.dbName()).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "DBName must begin with a letter and contain only letters, digits and underscores, "
+                    + "up to 63 characters.", 400);
+        }
+
+        String engineParam = source.getEngineIdentifier() != null
+                ? source.getEngineIdentifier() : source.getEngine().name().toLowerCase(Locale.ROOT);
+        // Encryption follows the source, as it does for a snapshot restore; backups and windows
+        // not in the request take the defaults a new instance gets.
+        DbInstanceSettings settings = new DbInstanceSettings(
+                source.isStorageEncrypted() ? Boolean.TRUE : null,
+                source.isStorageEncrypted() ? source.getKmsKeyId() : null,
+                request.backupRetentionPeriod(), request.preferredBackupWindow(), null,
+                request.copyTagsToSnapshot());
+        DbInstance instance = createDbInstance(targetId, engineParam, source.getEngineVersion(),
+                source.getMasterUsername(), source.getMasterPassword(), dbName,
+                firstNonBlank(request.dbInstanceClass(), source.getDbInstanceClass()),
+                source.getAllocatedStorage(),
+                Boolean.TRUE.equals(request.iamDatabaseAuthenticationEnabled()),
+                request.dbParameterGroupName(), request.dbSubnetGroupName(), null,
+                request.availabilityZone(), Boolean.TRUE.equals(request.multiAz()), false, null,
+                request.tags() != null ? request.tags() : Map.of(),
+                request.vpcSecurityGroupIds() != null ? request.vpcSecurityGroupIds() : List.of(),
+                request.optionGroupName(), effectiveRegion,
+                request.autoMinorVersionUpgrade() == null || request.autoMinorVersionUpgrade(),
+                // Deletion protection is turned on only once the copy succeeds, so a failed copy can
+                // still remove the target it created.
+                settings, request.publiclyAccessible(), request.port(), null);
+
+        if (!config.services().rds().mock()) {
+            try {
+                // Without both containers there is nothing to copy from or into, and reporting the
+                // restore as done would hand back an instance without the source's data.
+                if (source.getContainerId() == null || instance.getContainerId() == null) {
+                    throw new IllegalStateException("the source or target database container is not running");
+                }
+                String sqlDump = containerManager.createPostgresSnapshot(
+                        source.getContainerId(), source.getMasterUsername());
+                containerManager.restorePostgresSnapshot(
+                        instance.getContainerId(), instance.getMasterUsername(), sqlDump);
+                if (renameDatabase) {
+                    // The dump brings the source's database under its own name.
+                    containerManager.renamePostgresDatabase(instance.getContainerId(),
+                            instance.getMasterUsername(), sourceDatabase, dbName);
+                }
+            } catch (Exception e) {
+                try {
+                    deleteDbInstance(targetId, effectiveRegion);
+                } catch (RuntimeException cleanupError) {
+                    e.addSuppressed(cleanupError);
+                }
+                AwsException failure = new AwsException("InvalidDBInstanceState",
+                        "Failed to restore DB instance " + sourceId + " to " + targetId + ": "
+                        + e.getMessage(), 400);
+                failure.initCause(e);
+                throw failure;
+            }
+        }
+        if (Boolean.TRUE.equals(request.deletionProtection())) {
+            instance.setDeletionProtection(true);
+            putInstanceForScope(currentAccountId(), effectiveRegion, targetId, instance);
+        }
+        LOG.infov("DB instance {0} restored to point in time as {1}", sourceId, targetId);
+        return instance;
+    }
+
+    /**
+     * The source of a point in time restore. A live instance can be named by identifier or by its
+     * DbiResourceId; an automated backups ARN names retained backups, which Floci does not keep.
+     */
+    private DbInstance resolvePointInTimeSource(PointInTimeRestoreRequest request, String region) {
+        String byId = request.sourceDbInstanceIdentifier();
+        String byResourceId = request.sourceDbiResourceId();
+        String byBackupsArn = request.sourceDbInstanceAutomatedBackupsArn();
+        int named = (isBlank(byId) ? 0 : 1) + (isBlank(byResourceId) ? 0 : 1) + (isBlank(byBackupsArn) ? 0 : 1);
+        if (named != 1) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify exactly one of SourceDBInstanceIdentifier, SourceDbiResourceId and "
+                    + "SourceDBInstanceAutomatedBackupsArn.", 400);
+        }
+        if (!isBlank(byId)) {
+            return getDbInstance(byId, region);
+        }
+        if (!isBlank(byResourceId)) {
+            return listDbInstancesByDbiResourceIds(List.of(byResourceId), region).stream()
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("DBInstanceNotFound",
+                            "DB instance with resource ID " + byResourceId + " not found.", 404));
+        }
+        throw new AwsException("DBInstanceAutomatedBackupNotFound",
+                "Automated backups " + byBackupsArn + " not found.", 404);
+    }
+
+    /**
+     * Exactly one of a restore time and the latest restorable time must be asked for, and a
+     * restore time must lie in the window from {@code earliest} to {@code latest}.
+     */
+    private static void requireRestorableTime(Instant restoreTime, Boolean useLatest,
+                                              Instant earliest, Instant latest, String timeParam) {
+        boolean latestRequested = Boolean.TRUE.equals(useLatest);
+        if (restoreTime != null && latestRequested) {
+            throw new AwsException("InvalidParameterCombination",
+                    timeParam + " cannot be specified when UseLatestRestorableTime is true.", 400);
+        }
+        if (restoreTime == null && !latestRequested) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify either " + timeParam + " or UseLatestRestorableTime.", 400);
+        }
+        if (restoreTime != null && (restoreTime.isBefore(earliest) || restoreTime.isAfter(latest))) {
+            throw new AwsException("InvalidRestoreFault",
+                    "The restore time " + restoreTime + " is outside the restorable window from "
+                    + earliest + " to " + latest + ".", 400);
+        }
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
     // ── Read replicas ─────────────────────────────────────────────────────────
 
     static final String READ_REPLICATION_REPLICATING = "replicating";
@@ -1792,6 +1976,93 @@ public class RdsService implements Resettable, ResourceProvider {
         return cluster;
     }
 
+    /**
+     * Creates a new DB cluster from a source cluster as of a time in its restorable window, from
+     * the cluster's creation to now. Floci does not model a cluster's backup retention period, so
+     * the window opens at creation. As for an instance, the data is the source's state when the
+     * request arrives (see {@link #restoreDbInstanceToPointInTime}). Like a cluster snapshot
+     * restore, this creates the cluster only; instances are added with CreateDBInstance.
+     */
+    public DbCluster restoreDbClusterToPointInTime(String clusterId, String sourceClusterRef,
+                                                   String sourceClusterResourceId, String restoreType,
+                                                   Instant restoreToTime, Boolean useLatestRestorableTime,
+                                                   Integer port, String dbSubnetGroupName, String parameterGroupName,
+                                                   Boolean iamEnabled, String engineMode,
+                                                   Map<String, String> tags, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        if (isBlank(clusterId)) {
+            throw new AwsException("InvalidParameterValue", "DBClusterIdentifier is required.", 400);
+        }
+        if (isBlank(sourceClusterRef) == isBlank(sourceClusterResourceId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify exactly one of SourceDBClusterIdentifier and SourceDbClusterResourceId.", 400);
+        }
+        if (restoreType != null && !"full-copy".equals(restoreType) && !"copy-on-write".equals(restoreType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "RestoreType must be full-copy or copy-on-write.", 400);
+        }
+        // SourceDBClusterIdentifier takes the cluster's identifier or its ARN (API reference).
+        DbCluster source = !isBlank(sourceClusterRef)
+                ? getDbCluster(clusterIdentifierFromArnOrName(sourceClusterRef, effectiveRegion), effectiveRegion)
+                : listDbClusters(null, effectiveRegion).stream()
+                        .filter(c -> sourceClusterResourceId.equals(c.getDbClusterResourceId()))
+                        .findFirst()
+                        .orElseThrow(() -> new AwsException("DBClusterNotFoundFault",
+                                "DB cluster with resource ID " + sourceClusterResourceId + " not found.", 404));
+        String sourceId = source.getDbClusterIdentifier();
+        if (source.getStatus() != null && source.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBClusterStateFault",
+                    "DB cluster " + sourceId + " is not in available state.", 400);
+        }
+        Instant now = Instant.now();
+        Instant earliest = source.getCreatedAt() != null ? source.getCreatedAt() : now;
+        requireRestorableTime(restoreToTime, useLatestRestorableTime, earliest, now, "RestoreToTime");
+        if (source.getEngine() != DatabaseEngine.POSTGRES) {
+            throw new AwsException("InvalidDBClusterStateFault",
+                    "Operation RestoreDBClusterToPointInTime is not supported for engine "
+                    + source.getEngine() + ".", 400);
+        }
+
+        String engineParam = source.getEngineIdentifier() != null
+                ? source.getEngineIdentifier() : source.getEngine().name().toLowerCase(Locale.ROOT);
+        DbCluster cluster = createDbClusterWithPort(clusterId, engineParam, source.getEngineVersion(),
+                source.getMasterUsername(), source.getMasterPassword(), source.getDatabaseName(),
+                iamEnabled != null ? iamEnabled : source.isIamDatabaseAuthenticationEnabled(),
+                parameterGroupName, dbSubnetGroupName, null, false, effectiveRegion,
+                null, null, null, false, null,
+                !isBlank(engineMode) ? engineMode : source.getEngineMode(),
+                source.isStorageEncrypted(), port);
+        if (tags != null && !tags.isEmpty()) {
+            cluster.getTags().putAll(tags);
+            putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
+        }
+        if (!config.services().rds().mock()) {
+            try {
+                if (source.getContainerId() == null || cluster.getContainerId() == null) {
+                    throw new IllegalStateException("the source or target database container is not running");
+                }
+                String sqlDump = containerManager.createPostgresSnapshot(
+                        source.getContainerId(), source.getMasterUsername());
+                containerManager.restorePostgresSnapshot(
+                        cluster.getContainerId(), cluster.getMasterUsername(), sqlDump);
+            } catch (Exception e) {
+                try {
+                    deleteDbCluster(clusterId, effectiveRegion);
+                } catch (Exception cleanupError) {
+                    e.addSuppressed(cleanupError);
+                }
+                AwsException failure = new AwsException("InvalidDBClusterStateFault",
+                        "Failed to restore DB cluster " + sourceId + " to " + clusterId + ": "
+                        + e.getMessage(), 400);
+                failure.initCause(e);
+                throw failure;
+            }
+        }
+        LOG.infov("DB cluster {0} restored to point in time as {1}", sourceId, clusterId);
+        return cluster;
+    }
+
     private DbClusterSnapshot clusterSnapshotOf(DbCluster cluster, String snapshotId, String region) {
         DbClusterSnapshot snapshot = new DbClusterSnapshot();
         snapshot.setDbClusterSnapshotIdentifier(snapshotId);
@@ -1866,6 +2137,27 @@ public class RdsService implements Resettable, ResourceProvider {
                     "Cannot " + operation + " DB cluster snapshot " + snapshot.getDbClusterSnapshotIdentifier()
                             + " while its status is " + snapshot.getStatus() + ".", 400);
         }
+    }
+
+    /** A cluster named by identifier or by ARN; an ARN for another account or Region names no cluster here. */
+    private String clusterIdentifierFromArnOrName(String source, String region) {
+        if (!source.startsWith("arn:")) {
+            return source;
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(source);
+        } catch (IllegalArgumentException malformed) {
+            throw new AwsException("InvalidParameterValue", "Invalid DB cluster identifier: " + source, 400);
+        }
+        String resource = arn.resource();
+        if (!"rds".equals(arn.service()) || !resource.startsWith("cluster:")) {
+            throw new AwsException("InvalidParameterValue", "Invalid DB cluster identifier: " + source, 400);
+        }
+        if (!region.equals(arn.region()) || !currentAccountId().equals(arn.accountId())) {
+            throw new AwsException("DBClusterNotFoundFault", "DB cluster " + source + " not found.", 404);
+        }
+        return resource.substring("cluster:".length());
     }
 
     private String clusterSnapshotIdentifierFromArnOrName(String source, String region) {
@@ -2394,7 +2686,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 || instance.getContainerId().isBlank()) {
             return instance;
         }
-        if (containerManager.isContainerRunning(instance.getContainerId())) {
+        ContainerLiveness liveness = containerManager.probeContainer(instance.getContainerId());
+        if (liveness != ContainerLiveness.NOT_RUNNING) {
             return instance;
         }
 
@@ -6498,7 +6791,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
         String requestedTag = engineVersion.trim();
         // Aurora MySQL versions read 8.0.mysql_aurora.3.08.0. The MySQL image tag is the part in front.
-        var auroraSuffix = requestedTag.indexOf(".mysql_aurora.");
+        int auroraSuffix = requestedTag.indexOf(".mysql_aurora.");
         if (auroraSuffix > 0) {
             requestedTag = requestedTag.substring(0, auroraSuffix);
         }

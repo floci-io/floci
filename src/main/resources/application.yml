@@ -308,12 +308,16 @@ floci:
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
     # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for every Docker call Floci makes. Each
-    # live Lambda container holds 2 connections for its whole lifetime (log follow + exit watcher),
-    # so the warm-container ceiling is about max-connections / 2; past it, create/start/stop/remove
-    # wait for a free connection and the emulator stalls. 1024 covers the 500 containers the
-    # runtime API port range allows. Keep in step with the @WithDefault on
+    # live Lambda container holds 1 connection for its whole lifetime (its exit watcher) plus one
+    # per extension; log follow uses the streaming pool below. Past the limit,
+    # create/start/stop/remove wait for a free connection and the emulator stalls. 1024 covers
+    # the 500 containers the runtime API port range allows. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.maxConnections: a value set here WINS over the annotation.
     max-connections: 1024
+    # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for container log-follow streams, so
+    # they never starve create/start/stop/remove. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
+    streaming-max-connections: 512
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -353,6 +357,8 @@ floci:
       # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
       docker-flags: ""
       ecr-base-uri: public.ecr.aws            # FLOCI_SERVICES_LAMBDA_ECR_BASE_URI — registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
+      # runtime-images:                   # Optional full image references keyed by Lambda runtime
+      #   "python3.12": "public.ecr.aws/lambda/python:3.12@sha256:<digest>"
       honour-architectures: false             # Select the Lambda architecture for Docker pull and create
       default-memory-mb: 128
       default-timeout-seconds: 3
@@ -445,6 +451,7 @@ floci:
       proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
       proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
       proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
+      spectrum-max-rows: 1000000                  # FLOCI_SERVICES_REDSHIFT_SPECTRUM_MAX_ROWS; rows loaded per external table per query
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
@@ -686,6 +693,7 @@ floci:
       iam-auth-webhook: true       # validate `aws eks get-token` SigV4 tokens through a k3s webhook
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+      default-storage-class: false # start k3s without its bundled local-path provisioner to match EKS
       imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
       imds-pod-network: false      # route link-local IMDS traffic from ordinary pod network namespaces (requires imds: true)
       irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key
@@ -928,6 +936,7 @@ floci:
       # maven-url: http://floci-reposilite:8080  # set to skip Reposilite sidecar container management
       maven-image: "dzikoysk/reposilite:3.6.3"
       npm-image: "verdaccio/verdaccio:6.10.4"
+      pypi-image: "pypiserver/pypiserver:v2.4.2"
     marketplace:
       enabled: true
     dms:

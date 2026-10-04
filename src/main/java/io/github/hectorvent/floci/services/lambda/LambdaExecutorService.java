@@ -162,6 +162,11 @@ public class LambdaExecutorService implements Resettable {
 
     InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
                         String invokedQualifier) {
+        return invoke(fn, payload, type, chainDepth, invokedQualifier, null);
+    }
+
+    InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
+                        String invokedQualifier, String clientContext) {
         String requestId = UUID.randomUUID().toString();
 
         if (type == InvocationType.DryRun) {
@@ -215,7 +220,7 @@ public class LambdaExecutorService implements Resettable {
         }
 
         try {
-            return executeSync(fn, payload, requestId);
+            return executeSync(fn, payload, requestId, clientContext);
         } finally {
             permit.close();
         }
@@ -271,7 +276,7 @@ public class LambdaExecutorService implements Resettable {
         }
         InvokeResult result;
         try (permit) {
-            result = executeSync(event.fn(), event.payload(), event.requestId());
+            result = executeSync(event.fn(), event.payload(), event.requestId(), null);
         } catch (RuntimeException e) {
             LOG.warnv("Error in async Lambda execution for {0}: {1}", event.fn().getFunctionName(), e.getMessage());
             // Stops retrying, as upstream did: routes the previous attempt's result, or UnknownError when
@@ -312,7 +317,8 @@ public class LambdaExecutorService implements Resettable {
                 event.invokedQualifier());
     }
 
-    private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId) {
+    private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId,
+                                     String clientContext) {
         ContainerHandle handle;
         try {
             handle = warmPool.acquire(fn);
@@ -327,6 +333,7 @@ public class LambdaExecutorService implements Resettable {
             PendingInvocation invocation = new PendingInvocation(
                     requestId, payload, deadlineMs, fn.getFunctionArn(),
                     new CompletableFuture<>());
+            invocation.setClientContext(clientContext);
 
             handle.getRuntimeApiServer().enqueue(invocation);
 

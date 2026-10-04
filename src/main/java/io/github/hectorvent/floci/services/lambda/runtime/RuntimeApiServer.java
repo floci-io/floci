@@ -8,6 +8,7 @@ import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
+import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
@@ -947,13 +948,16 @@ public class RuntimeApiServer {
         // failed Future if the socket dies mid-flush. Funnel both into one handler.
         Future<Void> write;
         try {
-            write = ctx.response()
+            HttpServerResponse response = ctx.response()
                     .setStatusCode(200)
                     .putHeader("Content-Type", "application/json")
                     .putHeader("Lambda-Runtime-Aws-Request-Id", invocation.getRequestId())
                     .putHeader("Lambda-Runtime-Invoked-Function-Arn", invocation.getFunctionArn())
-                    .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()))
-                    .end(body);
+                    .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()));
+            if (invocation.getClientContext() != null) {
+                response.putHeader("Lambda-Runtime-Client-Context", invocation.getClientContext());
+            }
+            write = response.end(body);
         } catch (IllegalStateException alreadyEnded) {
             write = Future.failedFuture(alreadyEnded);
         }

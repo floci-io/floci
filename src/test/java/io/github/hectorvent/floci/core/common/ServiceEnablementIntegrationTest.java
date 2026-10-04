@@ -170,6 +170,49 @@ class ServiceEnablementIntegrationTest {
             .body("message", equalTo("Service fis is not enabled."));
     }
 
+    /**
+     * {@code CodeArtifactMavenController} and {@code CodeArtifactPypiController} serve a real
+     * package-manager wire protocol, not a CodeArtifact JSON API action, so nothing about a
+     * request to either carries a SigV4 signature or an {@code X-Amz-Target} for
+     * {@code ServiceEnabledFilter} to resolve a service from the normal ways. Both must still be
+     * registered in the {@code codeartifact} descriptor's own resource-class set, matched by JAX-RS
+     * routing alone: without that registration a disabled codeartifact service does not stop
+     * either from reaching its own token check and responding with a 401 instead of ever saying
+     * the service itself is unavailable. Caught after CodeArtifactPypiController needed the exact
+     * same registration CodeArtifactMavenController had been missing.
+     */
+    @Test
+    void mavenWireProtocolRequestsAreRejectedWhenServiceDisabled() {
+        given()
+            .header("Authorization", "Bearer whatever")
+        .when()
+            .get("/codeartifact/maven/some-domain/some-repo/some/path/1.0/file.jar")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .header("X-Amzn-Errortype", "ServiceNotAvailableException")
+            .body("__type", equalTo("ServiceNotAvailableException"))
+            .body("message", equalTo("Service codeartifact is not enabled."));
+    }
+
+    @Test
+    void pypiWireProtocolRequestsAreRejectedWhenServiceDisabled() {
+        // Not the bare "/simple/" root: AWS doesn't support that path either (only
+        // /simple/<project>/ is), so Floci has no route for it at all, and a request to a
+        // genuinely unrouted path 404s before this filter ever runs. "/simple/<project>/" is a
+        // real, routed endpoint, so it still demonstrates the service-disabled rejection.
+        given()
+            .header("Authorization", "Bearer whatever")
+        .when()
+            .get("/codeartifact/pypi/some-domain/some-repo/simple/some-pkg/")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .header("X-Amzn-Errortype", "ServiceNotAvailableException")
+            .body("__type", equalTo("ServiceNotAvailableException"))
+            .body("message", equalTo("Service codeartifact is not enabled."));
+    }
+
     @Test
     void signedRdsDataExecuteRequestsReturnJsonWhenServiceDisabled() {
         given()
@@ -203,6 +246,7 @@ class ServiceEnablementIntegrationTest {
         public Map<String, String> getConfigOverrides() {
             return Map.of(
                     "floci.services.acm.enabled", "false",
+                    "floci.services.codeartifact.enabled", "false",
                     "floci.services.dynamodb.enabled", "false",
                     "floci.services.ecs.enabled", "false",
                     "floci.services.fis.enabled", "false",

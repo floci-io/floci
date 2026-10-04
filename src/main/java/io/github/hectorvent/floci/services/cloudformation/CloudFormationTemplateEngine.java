@@ -103,6 +103,11 @@ public class CloudFormationTemplateEngine {
         this.dynamicReferenceResolver = dynamicReferenceResolver;
     }
 
+    /** The id of the stack this engine resolves for, as {@code AWS::StackId} returns it. */
+    public String stackId() {
+        return stackId;
+    }
+
     /**
      * Resolves a property value, including CloudFormation dynamic reference syntax
      * ({@code {{resolve:ssm:...}}}, {@code {{resolve:secretsmanager:...}}}) in the result, the same
@@ -650,7 +655,8 @@ public class CloudFormationTemplateEngine {
 
     private String resolveGetAttParts(String logicalId, String attrName) {
         Map<String, String> attrs = resourceAttributes.get(logicalId);
-        if (attrs != null && attrs.containsKey(attrName)) {
+        // Provisioners keep private state under __Floci keys; AWS resolves no such attribute.
+        if (attrs != null && attrs.containsKey(attrName) && !attrName.startsWith("__Floci")) {
             return attrs.get(attrName);
         }
         LOG.warnv("Unresolved GetAtt: {0}.{1}", logicalId, attrName);

@@ -76,38 +76,38 @@ class SchemaCompatibilityCheckerTest {
 
     @Test
     void noneAlwaysCompatible() {
-        var r = SchemaCompatibilityChecker.check("NONE", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("NONE", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
         assertTrue(r.compatible());
     }
 
     @Test
     void disabledShortCircuits() {
-        var r = SchemaCompatibilityChecker.check("DISABLED", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("DISABLED", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
         assertTrue(r.compatible());
     }
 
     @Test
     void emptyExistingIsCompatible() {
-        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(), AVRO_V1, "AVRO");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("BACKWARD", List.of(), AVRO_V1, "AVRO");
         assertTrue(r.compatible());
     }
 
     @Test
     void backwardAcceptsAddOptionalField() {
-        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(AVRO_V1), AVRO_ADD_OPTIONAL, "AVRO");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("BACKWARD", List.of(AVRO_V1), AVRO_ADD_OPTIONAL, "AVRO");
         assertTrue(r.compatible(), () -> "expected compatible, got: " + r.reason());
     }
 
     @Test
     void backwardRejectsAddRequiredField() {
-        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("BACKWARD", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
         assertFalse(r.compatible());
         assertNotNull(r.reason());
     }
 
     @Test
     void backwardAllRejectsRequiredAddedAcrossAnyPriorVersion() {
-        var r = SchemaCompatibilityChecker.check("BACKWARD_ALL",
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("BACKWARD_ALL",
                 List.of(AVRO_V1, AVRO_ADD_OPTIONAL), AVRO_ADD_REQUIRED, "AVRO");
         assertFalse(r.compatible());
     }
@@ -117,13 +117,13 @@ class SchemaCompatibilityCheckerTest {
         // FORWARD: latest reader can read new (writer) data. Adding a required field
         // means new writers produce extra fields that old readers don't know about,
         // which old readers ignore — so it is FORWARD-compatible.
-        var r = SchemaCompatibilityChecker.check("FORWARD", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("FORWARD", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
         assertTrue(r.compatible(), () -> "expected compatible, got: " + r.reason());
     }
 
     @Test
     void protobufBackwardRejectsRemovingRequiredField() {
-        var r = SchemaCompatibilityChecker.check(
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check(
                 "BACKWARD",
                 List.of(PROTOBUF_REQUIRED_EMAIL),
                 PROTOBUF_REMOVE_REQUIRED_EMAIL,
@@ -134,7 +134,7 @@ class SchemaCompatibilityCheckerTest {
 
     @Test
     void protobufForwardRejectsAddingRequiredField() {
-        var r = SchemaCompatibilityChecker.check(
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check(
                 "FORWARD",
                 List.of(PROTOBUF_OPTIONAL_EMAIL),
                 PROTOBUF_ADD_REQUIRED_PHONE,
@@ -265,7 +265,7 @@ class SchemaCompatibilityCheckerTest {
 
     @Test
     void jsonBackwardAcceptsAnUnchangedSchema() {
-        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_V1, "JSON");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_V1, "JSON");
         assertTrue(r.compatible(), () -> "expected compatible, got: " + r.reason());
     }
 
@@ -276,21 +276,21 @@ class SchemaCompatibilityCheckerTest {
      */
     @Test
     void jsonBackwardTreatsANewOptionalPropertyAsNarrowing() {
-        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_ADD_OPTIONAL, "JSON");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_ADD_OPTIONAL, "JSON");
         assertFalse(r.compatible());
         assertNotNull(r.reason());
     }
 
     @Test
     void jsonBackwardRejectsAddingARequiredProperty() {
-        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_ADD_REQUIRED, "JSON");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_ADD_REQUIRED, "JSON");
         assertFalse(r.compatible());
         assertNotNull(r.reason());
     }
 
     @Test
     void jsonFirstVersionIsCompatible() {
-        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(), JSON_V1, "JSON");
+        SchemaCompatibilityChecker.Result r = SchemaCompatibilityChecker.check("BACKWARD", List.of(), JSON_V1, "JSON");
         assertTrue(r.compatible(), () -> "expected compatible, got: " + r.reason());
     }
 }

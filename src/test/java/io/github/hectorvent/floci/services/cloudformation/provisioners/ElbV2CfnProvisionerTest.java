@@ -15,6 +15,8 @@ import io.github.hectorvent.floci.services.elbv2.model.Rule;
 import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -600,6 +602,61 @@ class ElbV2CfnProvisionerTest {
         StackResource rule = resource("AWS::ElasticLoadBalancingV2::ListenerRule", "Rule");
         assertThrows(AwsException.class, () -> provisioner.provision(rule,
                 mapper.createObjectNode().put("ListenerArn", LISTENER_ARN).put("Priority", "high"), ctx()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Port", "HealthCheckIntervalSeconds", "HealthCheckTimeoutSeconds",
+            "HealthyThresholdCount", "UnhealthyThresholdCount"})
+    void aNonIntegerTargetGroupIntegerIsAValidationError(String property) {
+        assertRejected(property, "ten");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Port", "HealthCheckIntervalSeconds", "HealthCheckTimeoutSeconds",
+            "HealthyThresholdCount", "UnhealthyThresholdCount"})
+    void aLiteralBlankTargetGroupIntegerIsAValidationError(String property) {
+        assertRejected(property, "");
+        assertRejected(property, "  ");
+    }
+
+    private void assertRejected(String property, String value) {
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::TargetGroup", "Tg");
+        ObjectNode props = mapper.createObjectNode().put("Name", "web-tg").put(property, value);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("Value of property " + property + " must be an integer.", e.getMessage());
+        assertNull(r.getPhysicalId());
+        verify(elb, never()).createTargetGroup(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void anIntegerAnIntrinsicResolvesToNothingReachesTheServiceUnset() {
+        // Fn::If [cond, 30, AWS::NoValue] drops the property; the engine resolves AWS::NoValue to blank.
+        when(elb.createTargetGroup(eq(REGION), eq("fn-tg"), isNull(), isNull(), isNull(), isNull(), eq("lambda"),
+                isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(),
+                eq(Map.of()))).thenReturn(targetGroup("fn-tg"));
+        ObjectNode props = mapper.createObjectNode().put("Name", "fn-tg").put("TargetType", "lambda");
+        props.putObject("HealthCheckIntervalSeconds").put("Ref", "AWS::NoValue");
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::TargetGroup", "Tg");
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals(TG_ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void absentTargetGroupIntegersReachTheServiceUnset() {
+        when(elb.createTargetGroup(eq(REGION), eq("fn-tg"), isNull(), isNull(), isNull(), isNull(), eq("lambda"),
+                isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(),
+                eq(Map.of()))).thenReturn(targetGroup("fn-tg"));
+        StackResource r = resource("AWS::ElasticLoadBalancingV2::TargetGroup", "Tg");
+
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "fn-tg").put("TargetType", "lambda"), ctx());
+
+        assertEquals(TG_ARN, r.getPhysicalId());
     }
 
     @Test

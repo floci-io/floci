@@ -38,6 +38,7 @@ import java.util.concurrent.TimeUnit;
 public class RedshiftContainerManager {
 
     private static final Logger LOG = Logger.getLogger(RedshiftContainerManager.class);
+    private static final String DEFAULT_DATABASE = "dev";
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -60,6 +61,12 @@ public class RedshiftContainerManager {
     }
 
     public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
+        return start(accountId, clusterIdentifier, masterUsername, masterPassword, DEFAULT_DATABASE);
+    }
+
+    /** Starts the container with {@code databaseName} as its one database, instead of the default {@code dev}. */
+    public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername,
+                                         String masterPassword, String databaseName) {
         String image = config.services().redshift().imageVersion();
         String containerName = containerName(accountId, clusterIdentifier);
         // Only the current name: no volume backs this container, so removing a legacy-named survivor
@@ -69,7 +76,7 @@ public class RedshiftContainerManager {
         List<String> envVars = List.of(
                 "POSTGRES_USER=" + masterUsername,
                 "POSTGRES_PASSWORD=" + masterPassword,
-                "POSTGRES_DB=dev"
+                "POSTGRES_DB=" + databaseName
         );
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
@@ -88,7 +95,8 @@ public class RedshiftContainerManager {
 
         ContainerSpec spec = specBuilder.build();
         ContainerInfo info = lifecycleManager.createAndStart(spec);
-        return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort);
+        return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort,
+                databaseName);
     }
 
     /**
@@ -102,19 +110,26 @@ public class RedshiftContainerManager {
      * project's decision not to back Redshift containers with a Docker volume.
      */
     public RedshiftContainerHandle adoptOrStart(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
+        return adoptOrStart(accountId, clusterIdentifier, masterUsername, masterPassword, DEFAULT_DATABASE);
+    }
+
+    /** As {@link #adoptOrStart(String, String, String, String)} for a container whose database is not {@code dev}. */
+    public RedshiftContainerHandle adoptOrStart(String accountId, String clusterIdentifier, String masterUsername,
+                                                String masterPassword, String databaseName) {
         String containerName = containerName(accountId, clusterIdentifier);
         Optional<Container> existing = lifecycleManager.findByName(containerName);
         if (existing.isEmpty()) {
             LOG.warnv("No surviving container for cluster {0}; starting a fresh empty one: the previous"
                     + " contents are not recoverable (no Docker volume backs Redshift containers)", clusterIdentifier);
-            return start(accountId, clusterIdentifier, masterUsername, masterPassword);
+            return start(accountId, clusterIdentifier, masterUsername, masterPassword, databaseName);
         }
 
         LOG.infov("Adopting existing container {0} for cluster {1} to avoid discarding its data",
                 containerName, clusterIdentifier);
         int enginePort = 5432;
         ContainerInfo info = lifecycleManager.adopt(existing.get().getId(), List.of(enginePort));
-        return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort);
+        return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort,
+                databaseName);
     }
 
     private RedshiftContainerHandle initializeAndRegisterHandle(
@@ -123,7 +138,8 @@ public class RedshiftContainerManager {
             String clusterIdentifier,
             String masterUsername,
             String containerName,
-            int enginePort) {
+            int enginePort,
+            String databaseName) {
         EndpointInfo endpoint = info.getEndpoint(enginePort);
         RedshiftContainerHandle handle = new RedshiftContainerHandle(
                 info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
@@ -140,8 +156,8 @@ public class RedshiftContainerManager {
             LOG.warnv("Failed to stream logs for {0}", containerName);
         }
 
-        waitForReady(containerName, info.containerId(), masterUsername, "dev");
-        bootstrapCatalog(info.containerId(), masterUsername, "dev");
+        waitForReady(containerName, info.containerId(), masterUsername, databaseName);
+        bootstrapCatalog(info.containerId(), masterUsername, databaseName);
 
         containers.put(containerKey(accountId, clusterIdentifier), handle);
         return handle;
@@ -200,6 +216,12 @@ public class RedshiftContainerManager {
     }
 
     public void alterUserPassword(String accountId, String clusterIdentifier, String username, String newPassword) {
+        alterUserPassword(accountId, clusterIdentifier, username, newPassword, DEFAULT_DATABASE);
+    }
+
+    /** As the four-argument form, connecting to {@code databaseName} instead of {@code dev}. */
+    public void alterUserPassword(String accountId, String clusterIdentifier, String username, String newPassword,
+                                  String databaseName) {
         RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
@@ -234,7 +256,7 @@ public class RedshiftContainerManager {
             }
         }
         String sql = "ALTER USER " + effectiveUser + " PASSWORD '" + newPassword + "'";
-        String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", "dev", "-c", sql};
+        String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", databaseName, "-c", sql};
         try {
             ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 15);
             if (result.exitCode() != 0) {

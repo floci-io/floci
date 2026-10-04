@@ -23,12 +23,12 @@ import java.util.Optional;
  * Spectrum: validates an {@code IAM_ROLE} ARN against the cluster and Redshift's trust policy,
  * mints a short-lived session, and evaluates the role's identity policy for one S3 action.
  *
- * <p>Extracted from {@link S3CopySimulator}, whose {@code S3TransferException} this still throws
- * (same package, matching {@link ManifestReader}'s existing precedent for this kind of extraction).
+ * <p>Extracted from {@link S3CopySimulator} so the Spectrum package shares one implementation.
  */
-final class RedshiftRoleAccess {
+public final class RedshiftRoleAccess {
 
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
+    private static final String SQLSTATE_INTERNAL = "XX000";
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final String UPPER_ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -36,6 +36,8 @@ final class RedshiftRoleAccess {
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     /** COPY/UNLOAD is synchronous end-to-end; this only needs to outlive one statement. */
     private static final Duration ROLE_SESSION_TTL = Duration.ofMinutes(5);
+    /** Spectrum streams rows lazily and authorizes each object as it is read, so one query can outlive a COPY. */
+    public static final Duration STREAMING_ROLE_SESSION_TTL = Duration.ofMinutes(30);
 
     // S3Service's signed-request authorization only checks the bucket's resource policy: for a
     // genuine HTTP request the identity-policy gate already happened upstream in
@@ -50,14 +52,20 @@ final class RedshiftRoleAccess {
     private RedshiftRoleAccess() {
     }
 
-    record RoleSession(String accessKeyId, String sessionToken) {
+    public record RoleSession(String accessKeyId, String sessionToken) {
     }
 
     /**
      * Validates the role ARN, its account and Redshift trust policy, then mints a short-lived session.
      */
-    static RoleSession resolveRoleSession(String iamRoleArn, IamService iamService,
+    public static RoleSession resolveRoleSession(String iamRoleArn, IamService iamService,
                                           String clusterAccountId, List<String> associatedRoleArns) {
+        return resolveRoleSession(iamRoleArn, iamService, clusterAccountId, associatedRoleArns, ROLE_SESSION_TTL);
+    }
+
+    public static RoleSession resolveRoleSession(String iamRoleArn, IamService iamService,
+                                          String clusterAccountId, List<String> associatedRoleArns,
+                                          Duration sessionTtl) {
         AwsArnUtils.Arn parsed;
         try {
             parsed = AwsArnUtils.parse(iamRoleArn);
@@ -100,11 +108,11 @@ final class RedshiftRoleAccess {
         String sessionToken = randomString(SECRET_CHARACTERS, 200);
         iamService.registerSessionForAccount(parsed.accountId(), accessKeyId,
                 randomString(SECRET_CHARACTERS, 40), sessionToken, iamRoleArn,
-                Instant.now().plus(ROLE_SESSION_TTL), null);
+                Instant.now().plus(sessionTtl), null);
         return new RoleSession(accessKeyId, sessionToken);
     }
 
-    static void releaseRoleSession(RoleSession roleSession, String iamRoleArn, IamService iamService) {
+    public static void releaseRoleSession(RoleSession roleSession, String iamRoleArn, IamService iamService) {
         if (roleSession == null) {
             return;
         }
@@ -116,8 +124,13 @@ final class RedshiftRoleAccess {
      * Evaluates the role's identity-based policy for one S3 action, skipped entirely when
      * {@code FLOCI_SERVICES_S3_ENFORCE_AUTH} is off (matching the anonymous path's behavior).
      */
-    static void authorizeRoleAction(S3Service s3, IamService iamService, String roleArn,
+    public static void authorizeRoleAction(S3Service s3, IamService iamService, String roleArn,
                                     String action, String resourceArn) {
+        authorizeRoleAction(s3, iamService, roleArn, action, resourceArn, Map.of());
+    }
+
+    public static void authorizeRoleAction(S3Service s3, IamService iamService, String roleArn,
+                                    String action, String resourceArn, Map<String, List<String>> conditionContext) {
         if (!s3.isAuthEnforced()) {
             return;
         }
@@ -129,19 +142,57 @@ final class RedshiftRoleAccess {
                     "IAM Role '" + roleArn + "' could not be assumed: " + e.getMessage(), e);
         }
         IamPolicyEvaluator.SimulationDecision decision =
-                ROLE_POLICY_EVALUATOR.simulatePrincipalPolicy(caller, action, resourceArn, Map.of());
+                ROLE_POLICY_EVALUATOR.simulatePrincipalPolicy(caller, action, resourceArn, conditionContext);
         if (decision != IamPolicyEvaluator.SimulationDecision.ALLOWED) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "S3 access denied for IAM Role '" + roleArn + "': " + action + " on " + resourceArn, null);
         }
     }
 
+    /**
+     * Authorizes {@code s3:ListBucket} as the role's signed session: the identity policy first, then
+     * the bucket policy through the signed-request path COPY uses, so a bucket-policy deny applies
+     * even when the identity policy allows the action. {@code prefix} feeds the {@code s3:prefix}
+     * condition key an identity policy may use to constrain the listing.
+     */
+    public static void authorizeRoleList(S3Service s3, IamService iamService, RoleSession roleSession,
+                                         String roleArn, String bucket, String prefix) {
+        authorizeRoleAction(s3, iamService, roleArn, "s3:ListBucket", bucketArn(roleArn, bucket),
+                Map.of("s3:prefix", List.of(prefix == null ? "" : prefix)));
+        try {
+            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), bucket);
+        } catch (AwsException e) {
+            throw signedAccessFailure(e, "s3://" + bucket);
+        }
+    }
+
+    /** {@code s3:GetObject} counterpart of {@link #authorizeRoleList}. */
+    public static void authorizeRoleRead(S3Service s3, IamService iamService, RoleSession roleSession,
+                                         String roleArn, String bucket, String key) {
+        authorizeRoleAction(s3, iamService, roleArn, "s3:GetObject", objectArn(roleArn, bucket, key));
+        try {
+            s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), bucket, key);
+        } catch (AwsException e) {
+            throw signedAccessFailure(e, "s3://" + bucket + "/" + key);
+        }
+    }
+
+    /** A bucket that does not exist is not an access denial, and reporting it as one hides the real cause. */
+    private static S3CopySimulator.S3TransferException signedAccessFailure(AwsException e, String target) {
+        if ("NoSuchBucket".equals(e.getErrorCode())) {
+            return new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
+                    "S3 bucket does not exist for " + target, e);
+        }
+        return new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                "S3 access denied for " + target, e);
+    }
+
     /** The bucket and object ARNs live in the role's partition: a China role authorizes China buckets. */
-    static String bucketArn(String roleArn, String bucket) {
+    public static String bucketArn(String roleArn, String bucket) {
         return AwsArnUtils.Arn.global(AwsArnUtils.parse(roleArn).partition(), "s3", "", bucket).toString();
     }
 
-    static String objectArn(String roleArn, String bucket, String key) {
+    public static String objectArn(String roleArn, String bucket, String key) {
         return bucketArn(roleArn, bucket) + "/" + key;
     }
 

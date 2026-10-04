@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.CreateVolumeCmd;
+import com.github.dockerjava.api.command.CreateVolumeResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesCmd;
@@ -24,11 +25,16 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntConsumer;
+import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -166,6 +172,70 @@ class ContainerLifecycleManagerVolumeTest {
     }
 
     @Test
+    void strictContainerCleanupStopsContainerBeforeClosingItsLogStream() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        List<String> operations = new ArrayList<>();
+        doAnswer(invocation -> {
+            operations.add("stop");
+            return null;
+        }).when(stop).exec();
+        doAnswer(invocation -> {
+            operations.add("remove");
+            return null;
+        }).when(remove).exec();
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+
+        manager.stopAndRemoveStrict("container-id", () -> operations.add("logs"));
+
+        assertEquals(List.of("stop", "remove", "logs"), operations);
+    }
+
+    @Test
+    void strictContainerCleanupClosesTheLogStreamOfAnAlreadyMissingContainer() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new NotFoundException("gone"));
+        List<String> operations = new ArrayList<>();
+
+        manager.stopAndRemoveStrict("container-id", () -> operations.add("logs"));
+
+        assertEquals(List.of("logs"), operations);
+    }
+
+    @Test
+    void strictContainerCleanupLeavesTheLogStreamOpenWhenDockerCouldNotStopOrRemoveTheContainer() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new DockerException("stop failed", 500));
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+        List<String> operations = new ArrayList<>();
+
+        assertThrows(IllegalStateException.class, () ->
+                manager.stopAndRemoveStrict("container-id", () -> operations.add("logs")));
+
+        assertEquals(List.of(), operations);
+    }
+
+    @Test
+    void strictContainerCleanupLeavesTheLogStreamOpenWhenDockerStoppedButCouldNotRemoveTheContainer() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+        List<String> operations = new ArrayList<>();
+
+        assertThrows(IllegalStateException.class, () ->
+                manager.stopAndRemoveStrict("container-id", () -> operations.add("logs")));
+
+        assertEquals(List.of(), operations);
+    }
+
+    @Test
     void strictContainerCleanupPropagatesRemovalFailure() {
         StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
         RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
@@ -190,6 +260,20 @@ class ContainerLifecycleManagerVolumeTest {
         assertDoesNotThrow(() -> manager.stopAndRemoveStrict("container-id", null));
 
         verify(remove).exec();
+    }
+
+    @Test
+    void strictContainerCleanupClosesTheLogStreamOnceForcedRemovalSucceedsAfterStopFailure() throws Exception {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        Closeable logStream = mock(Closeable.class);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new DockerException("stop failed", 500));
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+
+        manager.stopAndRemoveStrict("container-id", logStream);
+
+        verify(logStream).close();
     }
 
     @Test
@@ -429,6 +513,95 @@ class ContainerLifecycleManagerVolumeTest {
                 Optional.of("0777"), "busybox:stable");
 
         verify(dockerClient, times(2)).createContainerCmd("busybox:stable");
+    }
+
+    /** Stubs {@code inspectVolumeCmd("vol").exec()} to defer to {@code behaviour}, counting calls. */
+    private AtomicInteger inspectVolumeBehaving(IntFunction<InspectVolumeResponse> behaviour) {
+        AtomicInteger calls = new AtomicInteger();
+        InspectVolumeCmd cmd = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("vol")).thenReturn(cmd);
+        when(cmd.exec()).thenAnswer(inv -> behaviour.apply(calls.incrementAndGet()));
+        return calls;
+    }
+
+    /** Stubs {@code createVolumeCmd()...exec()} to defer to {@code behaviour}, counting calls. */
+    private AtomicInteger createVolumeBehaving(IntConsumer behaviour) {
+        AtomicInteger calls = new AtomicInteger();
+        CreateVolumeCmd cmd = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenAnswer(inv -> {
+            behaviour.accept(calls.incrementAndGet());
+            return mock(CreateVolumeResponse.class);
+        });
+        return calls;
+    }
+
+    @Test
+    void ensureVolume_createsMissingVolumeExactlyOnce() {
+        AtomicInteger inspects = inspectVolumeBehaving(attempt -> {
+            throw new NotFoundException("No such volume: vol");
+        });
+        AtomicInteger creates = createVolumeBehaving(attempt -> {
+        });
+
+        manager.ensureVolume("vol");
+
+        assertEquals(1, inspects.get());
+        assertEquals(1, creates.get(), "a missing volume must be created");
+    }
+
+    @Test
+    void ensureVolume_doesNotCreateWhenVolumeAlreadyExists() {
+        // This existence guard is what keeps ensureVolume idempotent now that transient-I/O
+        // retries live at the transport: when the daemon created the volume but the response was
+        // lost to a broken pipe, the transport's replayed create finds the volume already there,
+        // POST /volumes/create with the same name is itself idempotent, and later ensureVolume
+        // calls see it exists and do nothing.
+        AtomicInteger inspects = inspectVolumeBehaving(attempt ->
+                mock(InspectVolumeResponse.class));
+
+        manager.ensureVolume("vol");
+
+        assertEquals(1, inspects.get());
+        verify(dockerClient, never()).createVolumeCmd();
+    }
+
+    @Test
+    void ensureVolume_doesNotRetryOnTopOfTheTransport() {
+        inspectVolumeBehaving(attempt -> {
+            throw new NotFoundException("No such volume: vol");
+        });
+        RuntimeException transportGaveUp = new RuntimeException(new IOException("Broken pipe"));
+        AtomicInteger creates = createVolumeBehaving(attempt -> {
+            throw transportGaveUp;
+        });
+
+        RuntimeException thrown =
+                assertThrows(RuntimeException.class, () -> manager.ensureVolume("vol"));
+
+        assertSame(transportGaveUp, thrown,
+                "a transient error surfacing here means the transport already spent the retry"
+                        + " budget; it must surface unchanged");
+        assertEquals(1, creates.get(),
+                "no call-site loop: an outer retry would compound backoff on an exhausted"
+                        + " inner one");
+    }
+
+    @Test
+    void ensureVolume_doesNotSwallowDaemonRejection() {
+        inspectVolumeBehaving(attempt -> {
+            throw new NotFoundException("No such volume: vol");
+        });
+        DockerException rejected = new DockerException("volume name already in use", 409);
+        AtomicInteger creates = createVolumeBehaving(attempt -> {
+            throw rejected;
+        });
+
+        DockerException thrown =
+                assertThrows(DockerException.class, () -> manager.ensureVolume("vol"));
+
+        assertSame(rejected, thrown, "a genuine daemon rejection must surface unchanged");
+        assertEquals(1, creates.get(), "a name conflict never clears on a retry");
     }
 
     @Test

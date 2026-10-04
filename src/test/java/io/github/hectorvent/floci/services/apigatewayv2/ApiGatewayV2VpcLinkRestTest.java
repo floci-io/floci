@@ -83,6 +83,94 @@ class ApiGatewayV2VpcLinkRestTest {
     }
 
     @Test
+    @Order(5)
+    void updateVpcLinkRenamesTheLinkOnly() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"renamed-vpc-link"}
+                        """)
+                .when().patch("/v2/vpclinks/" + vpcLinkId)
+                .then()
+                .statusCode(200)
+                .body("vpcLinkId", equalTo(vpcLinkId))
+                .body("name", equalTo("renamed-vpc-link"))
+                .body("subnetIds", hasItems("subnet-aaaa1111", "subnet-bbbb2222"))
+                .body("securityGroupIds", hasItem("sg-cccc3333"))
+                .body("tags.Env", equalTo("test"));
+
+        given()
+                .when().get("/v2/vpclinks/" + vpcLinkId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("renamed-vpc-link"));
+    }
+
+    @Test
+    @Order(6)
+    void updateNonexistentVpcLinkReturns404() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"missing"}
+                        """)
+                .when().patch("/v2/vpclinks/does-not-exist")
+                .then()
+                .statusCode(404)
+                .body("message", containsString("VpcLink not found"));
+    }
+
+    @Test
+    @Order(7)
+    void tagResourceAddsTagsToTheVpcLink() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"Team":"platform"}}
+                        """)
+                .when().post("/v2/tags/" + vpcLinkArn())
+                .then()
+                .statusCode(201);
+
+        given()
+                .when().get("/v2/tags/" + vpcLinkArn())
+                .then()
+                .statusCode(200)
+                .body("tags.Env", equalTo("test"))
+                .body("tags.Team", equalTo("platform"));
+    }
+
+    @Test
+    @Order(8)
+    void untagResourceRemovesTagsFromTheVpcLink() {
+        given()
+                .queryParam("tagKeys", "Env")
+                .when().delete("/v2/tags/" + vpcLinkArn())
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/v2/vpclinks/" + vpcLinkId)
+                .then()
+                .statusCode(200)
+                .body("tags.Env", nullValue())
+                .body("tags.Team", equalTo("platform"));
+    }
+
+    @Test
+    @Order(9)
+    void tagResourceOnUnknownVpcLinkReturns404() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"Team":"platform"}}
+                        """)
+                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/vpclinks/does-not-exist")
+                .then()
+                .statusCode(404);
+    }
+
+    @Test
     @Order(10)
     void createApi() {
         apiId = given()
@@ -214,6 +302,10 @@ class ApiGatewayV2VpcLinkRestTest {
                 .when().get("/v2/vpclinks/" + vpcLinkId)
                 .then()
                 .statusCode(404);
+    }
+
+    private static String vpcLinkArn() {
+        return "arn:aws:apigateway:us-east-1::/vpclinks/" + vpcLinkId;
     }
 
     @Test

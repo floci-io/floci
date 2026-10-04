@@ -30,12 +30,16 @@ import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.filterValues;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMapMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
  * SES V2 email-identity endpoints ({@code /v2/email/identities}), including the sending
@@ -51,6 +55,10 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrA
 public class SesIdentityController {
 
     private static final Logger LOG = Logger.getLogger(SesIdentityController.class);
+
+    /** In the order SES prints them when it refuses a key. */
+    private static final List<String> IDENTITY_FILTER_KEYS =
+            List.of("IDENTITY_NAME_CONTAINS", "VERIFICATION_STATUS", "IDENTITY_TYPE");
 
     private final SesIdentityService identityService;
     private final SesService sesService;
@@ -123,14 +131,36 @@ public class SesIdentityController {
         }
     }
 
+    /**
+     * The binding SDKs sent before the Filter member moved this operation to POST (AWS SDK for Java
+     * 2.55.8, botocore 1.43.105). It is gone from the model, but SES still answers it (probed
+     * 2026-10-03), so it stays for older SDKs and takes no filter.
+     */
     @GET
     @Path("/identities")
     public Response listEmailIdentities(@Context HttpHeaders headers,
                                         @QueryParam("PageSize") String pageSize,
                                         @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        PaginatedResult<Identity> page = identityService.listIdentities(null, region,
-                SesListPaging.V2_LIST_EMAIL_IDENTITIES, SesListPaging.parseQueryPageSize(pageSize), nextToken);
+        return emailIdentitiesPage(region, Map.of(), SesListPaging.parseQueryPageSize(pageSize), nextToken);
+    }
+
+    /** The binding SDKs use since the Filter member was added. */
+    @POST
+    @Path("/list-identities")
+    public Response listEmailIdentitiesWithFilter(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode request = readOptionBody(objectMapper, body);
+        Map<String, String> filter = stringMapMemberOrAbsent(request, "Filter");
+        Integer pageSize = intMemberOrAbsent(request, "PageSize");
+        String nextToken = stringMemberOrAbsent(request, "NextToken");
+        Map<String, String> present = filterValues(filter, IDENTITY_FILTER_KEYS);
+        return emailIdentitiesPage(region, present, pageSize, nextToken);
+    }
+
+    private Response emailIdentitiesPage(String region, Map<String, String> filter, Integer pageSize,
+                                         String nextToken) {
+        PaginatedResult<Identity> page = identityService.listV2Identities(region, filter, pageSize, nextToken);
 
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode items = result.putArray("EmailIdentities");

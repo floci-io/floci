@@ -42,6 +42,19 @@ class SpectrumCatalogTest {
     }
 
     @Test
+    void legacySchemaLookupKeepsTheSchemaWhoseLocationCoversTheTablesOfThisDatabase() {
+        String roleA = "arn:aws:iam::000000000000:role/A";
+        String roleB = "arn:aws:iam::000000000000:role/B";
+        catalog.createSchema(new SpectrumExternalSchema(ACCOUNT, "glue_a", "analytics", "s3://other/root/", roleA));
+        SpectrumExternalSchema owning = new SpectrumExternalSchema(
+                ACCOUNT, "glue_b", "analytics", "s3://warehouse/events/", roleB);
+        catalog.createSchema(owning);
+        catalog.createTable(table("events"));
+
+        assertEquals(java.util.Optional.of(owning), catalog.findLegacySchema(ACCOUNT, "dev", "analytics"));
+    }
+
+    @Test
     void createsAndListsExternalTablesInStableNameOrder() {
         SpectrumExternalTable second = table("zebra");
         SpectrumExternalTable first = table("alpha");

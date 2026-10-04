@@ -7,6 +7,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
@@ -25,6 +26,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
@@ -97,6 +99,7 @@ public class EksClusterManager
     private static final int K3S_API_SERVER_PORT = 6443;
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
     private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
+    private static final String DEFAULT_STORAGE_CLASS_LABEL = "io.floci.eks.default-storage-class";
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
@@ -488,7 +491,18 @@ public class EksClusterManager
                 ? cluster.getPodCidr()
                 : DEFAULT_POD_CIDR;
 
-        List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
+        boolean defaultStorageClass = cluster != null && cluster.getDefaultStorageClass() != null
+                ? cluster.getDefaultStorageClass()
+                : config.services().eks().defaultStorageClass();
+        if (cluster != null) {
+            cluster.setDefaultStorageClass(defaultStorageClass);
+        }
+
+        List<String> serverArgs = buildServerArgs(
+                config.services().eks().disableCni(),
+                defaultStorageClass,
+                serviceCidr,
+                clusterCidr);
 
         EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
         if (nodeLimits != null) {
@@ -530,6 +544,7 @@ public class EksClusterManager
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
                 "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
         labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
+        labels.put(DEFAULT_STORAGE_CLASS_LABEL, String.valueOf(defaultStorageClass));
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -676,6 +691,13 @@ public class EksClusterManager
         if (existing.isEmpty()) {
             LOG.infov("No surviving k3s container for EKS cluster {0}; recreating it "
                     + "(a surviving data volume is reused)", cluster.getName());
+            if (cluster.getDefaultStorageClass() == null) {
+                boolean targetSetting = config.services().eks().defaultStorageClass();
+                LOG.infov("Recreating EKS cluster {0} with defaultStorageClass={1} "
+                        + "(set floci.services.eks.default-storage-class: true to retain bundled local-path)",
+                        cluster.getName(), String.valueOf(targetSetting));
+                cluster.setDefaultStorageClass(targetSetting);
+            }
             startCluster(cluster);
             return;
         }
@@ -684,6 +706,14 @@ public class EksClusterManager
         Map<String, String> existingLabels = existing.get().getLabels();
         boolean capacityChanged = existingLabels == null
                 || !desiredCapacity.equals(existingLabels.get(NODE_CAPACITY_LABEL));
+        if (existingLabels != null && existingLabels.containsKey(DEFAULT_STORAGE_CLASS_LABEL)) {
+            cluster.setDefaultStorageClass(Boolean.parseBoolean(existingLabels.get(DEFAULT_STORAGE_CLASS_LABEL)));
+        } else if (cluster.getDefaultStorageClass() == null) {
+            // Surviving container was created before defaultStorageClass was configurable:
+            // preserve prior behavior with local-storage enabled.
+            cluster.setDefaultStorageClass(true);
+            LOG.infov("Adopting pre-upgrade EKS cluster {0} with local-storage enabled", cluster.getName());
+        }
         if (!adoptSurvivingCluster(cluster, existing.get().getId())) {
             startCluster(cluster);
             return;
@@ -914,17 +944,31 @@ public class EksClusterManager
      * cluster's workloads survive a Floci restart and are re-latched by {@link #restoreCluster}.
      */
     public void stopCluster(Cluster cluster) {
-        unregisterMetadataEndpoint(cluster);
-        Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
+        String resourceName = clusterResourceName(cluster);
         if (cluster.getContainerId() == null) {
-            closeQuietly(logStream);
+            unregisterMetadataEndpoint(cluster);
+            closeQuietly(clusterLogHandles.remove(resourceName));
             return;
         }
-        lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
-        if (cluster.getHostPort() > 0) {
-            portAllocator.release(cluster.getHostPort());
-            // Cleared so a delete retried after a failed backup cleanup cannot free a reused port.
+        Closeable logStream = clusterLogHandles.get(resourceName);
+        // Strict: a container Docker could not remove may still be running and publishing the
+        // port, so the delete fails and keeps the cluster record, its metadata endpoint, log
+        // handle and port reservation; a retried delete releases them once the container is gone.
+        lifecycleManager.stopAndRemoveStrict(cluster.getContainerId(), logStream);
+        unregisterMetadataEndpoint(cluster);
+        // Removed by value so an overlapping delete cannot drop a handle it does not own.
+        if (logStream != null) {
+            clusterLogHandles.remove(resourceName, logStream);
+        }
+        int hostPort;
+        // Read and cleared together so overlapping deletes, or a delete retried after a failed
+        // backup cleanup, cannot release a port that has since been reused.
+        synchronized (cluster) {
+            hostPort = cluster.getHostPort();
             cluster.setHostPort(0);
+        }
+        if (hostPort > 0) {
+            portAllocator.release(hostPort);
         }
         if (cluster.getDockerName() != null) {
             // A failed backup cleanup must not leave the live node running. Keep the cluster
@@ -1082,9 +1126,10 @@ public class EksClusterManager
             return;
         }
         String resourceName = clusterResourceName(cluster);
-        if (clusterLogHandles.containsKey(resourceName)) {
-            return;
-        }
+        // Logs are attached only for a container that was just started or adopted, so a handle
+        // still registered under this name follows an earlier container: close it rather than
+        // leave the new cluster without control-plane logs.
+        closeQuietly(clusterLogHandles.remove(resourceName));
         String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
         String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
         String region = clusterRegion(cluster);
@@ -1122,13 +1167,13 @@ public class EksClusterManager
         }
 
         if (handles.size() == 1) {
-            clusterLogHandles.put(resourceName, handles.getFirst());
+            closeQuietly(clusterLogHandles.put(resourceName, handles.getFirst()));
         } else if (handles.size() > 1) {
-            clusterLogHandles.put(resourceName, () -> {
+            closeQuietly(clusterLogHandles.put(resourceName, () -> {
                 for (Closeable h : handles) {
                     closeQuietly(h);
                 }
-            });
+            }));
         }
     }
 
@@ -1302,14 +1347,20 @@ public class EksClusterManager
     }
 
     /**
-     * Builds the k3s {@code server} command-line args. When {@code disableCni} is true, flannel,
-     * k3s's default network policy controller, and kube-proxy are all disabled up front: see the
-     * {@code disableCni} config javadoc for why this must happen at startup, not after the fact.
+     * Builds the k3s {@code server} command-line args. When {@code defaultStorageClass} is false,
+     * k3s's bundled local-path provisioner is disabled so clusters match AWS EKS by starting with
+     * no default StorageClass. When {@code disableCni} is true, flannel, k3s's default network
+     * policy controller, and kube-proxy are all disabled up front: see the {@code disableCni}
+     * config javadoc for why this must happen at startup, not after the fact.
      */
-    static List<String> buildServerArgs(boolean disableCni, String serviceCidr, String clusterCidr) {
+    static List<String> buildServerArgs(boolean disableCni, boolean defaultStorageClass,
+            String serviceCidr, String clusterCidr) {
         List<String> serverArgs = new ArrayList<>(List.of("server",
                 "--disable=traefik",
                 "--tls-san=localhost"));
+        if (!defaultStorageClass) {
+            serverArgs.add("--disable=local-storage");
+        }
         if (disableCni) {
             serverArgs.add("--flannel-backend=none");
             serverArgs.add("--disable-network-policy");
@@ -1324,8 +1375,12 @@ public class EksClusterManager
         return serverArgs;
     }
 
+    static List<String> buildServerArgs(boolean disableCni, String serviceCidr, String clusterCidr) {
+        return buildServerArgs(disableCni, false, serviceCidr, clusterCidr);
+    }
+
     static List<String> buildServerArgs(boolean disableCni) {
-        return buildServerArgs(disableCni, null, null);
+        return buildServerArgs(disableCni, false, null, null);
     }
 
     /**
@@ -1401,7 +1456,7 @@ public class EksClusterManager
         try {
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildWebhookKubeconfig("http://" + dockerHostResolver.resolve() + ":"
-                    + config.port() + webhookPath(cluster)));
+                    + config.port() + webhookPath(cluster, clusterRegion(cluster))));
         } catch (IOException e) {
             LOG.warnv("EKS token-webhook disabled for cluster {0}: could not write kubeconfig: {1}",
                     clusterName, e.getMessage());
@@ -1418,11 +1473,8 @@ public class EksClusterManager
      */
     private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(localFile)
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, localFile);
         } catch (Exception e) {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
@@ -1850,11 +1902,8 @@ public class EksClusterManager
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(REGISTRIES_TAR_ENTRY, content)))
-                    .withRemotePath("/etc")
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
+                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644);
             LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}", endpoint, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "
@@ -2068,18 +2117,13 @@ public class EksClusterManager
         return "http://" + dockerHostResolver.resolve() + ":" + config.port() + webhookPath(clusterName);
     }
 
-    static String webhookPath(Cluster cluster) {
+    /** The cluster's ARN names its region; {@code defaultRegion} answers for a cluster without one. */
+    static String webhookPath(Cluster cluster, String defaultRegion) {
         // client-go replaces a server URL query when constructing its TokenReview request.
         String accountId = cluster.getAccountId() != null && !cluster.getAccountId().isBlank()
                 ? cluster.getAccountId()
                 : (cluster.getArn() != null && cluster.getArn().split(":", 6).length > 4 ? cluster.getArn().split(":", 6)[4] : "000000000000");
-        String region = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
-        if (cluster.getArn() != null) {
-            String[] parts = cluster.getArn().split(":", 6);
-            if (parts.length > 3 && !parts[3].isBlank()) {
-                region = parts[3];
-            }
-        }
+        String region = AwsArnUtils.regionOrDefault(cluster.getArn(), defaultRegion);
         Instant createdAt = cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.EPOCH;
         return webhookPath(cluster.getName()) + "/scope/" + accountId
                 + "/" + region + "/" + createdAt;
@@ -2271,7 +2315,7 @@ public class EksClusterManager
                         vpcId, vpcConfig.getSubnetIds(), vpcRouteTables);
                 List<EksVpcRouteProgramming.VpcRouteEntry> entries = applicable.isEmpty()
                         ? List.of()
-                        : EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, applicable, ec2);
+                        : EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, region, applicable, ec2);
 
                 Set<String> desiredDests = entries.stream()
                         .map(EksVpcRouteProgramming.VpcRouteEntry::destinationCidrBlock)
@@ -2386,7 +2430,8 @@ public class EksClusterManager
         if (config != null && config.defaultRegion() != null && !config.defaultRegion().isBlank()) {
             return config.defaultRegion();
         }
-        return "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+        // Reached only by a test constructor that wires neither the resolver nor the config.
+        return "us-east-1"; // partition-literal: unreachable under CDI, where the resolver or config answers
     }
 
     String deriveClusterNodeAvailabilityZone(Cluster cluster, String region) {

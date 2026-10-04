@@ -167,7 +167,7 @@ class EksTokenValidator {
         if (iamService.isSeededDeployerAccessKey(accessKeyId)) {
             return null;
         }
-        Optional<String> secretKey = iamService.findSecretKey(accessKeyId, sessionToken);
+        Optional<String> secretKey = iamService.findSecretKeyInAnyAccount(accessKeyId, sessionToken);
         return secretKey.orElse(null);
     }
 

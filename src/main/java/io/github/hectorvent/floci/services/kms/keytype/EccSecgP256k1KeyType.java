@@ -30,7 +30,7 @@ final class EccSecgP256k1KeyType implements KmsKeyType {
 
     @Override
     public void generateKeyMaterial(KmsKey key, String region) throws GeneralSecurityException {
-        AsymmetricKeys.store(key, BcEcKeys.generateKeyPair(CURVE));
+        BcEcKeys.generateKeyPair(key, CURVE, random);
     }
 
     @Override

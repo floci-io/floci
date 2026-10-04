@@ -193,7 +193,7 @@ public class CognitoService implements ResourceProvider {
                 lambdaService,
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
-                new CognitoMessageDispatcher(sesService, snsService),
+                new CognitoMessageDispatcher(sesService, snsService, regionResolver.getDefaultRegion()),
                 certificateManager,
                 clock
         );
@@ -355,6 +355,61 @@ public class CognitoService implements ResourceProvider {
         poolStore.put(id, updatedPool);
         LOG.infov("Updated User Pool: {0}", id);
         return updatedPool;
+    }
+
+    /**
+     * A copy of the settings {@link #updateUserPool} can change, and nothing else (no signing
+     * material), for a caller that puts them back with {@link #restoreUserPoolSettings}: the rollback
+     * of a CloudFormation update that changed the pool in place.
+     */
+    public UserPool userPoolSettings(String userPoolId) {
+        UserPool settings = new UserPool();
+        settings.setId(userPoolId);
+        copyUserPoolSettings(describeUserPool(userPoolId), settings);
+        return MAPPER.convertValue(settings, UserPool.class);
+    }
+
+    /**
+     * Puts back the settings {@link #userPoolSettings} copied, including clearing one the update
+     * added, which {@link #updateUserPool} cannot do since it only applies what a request names.
+     * Everything else on the pool, its users and signing keys among them, stays as it is now.
+     */
+    public UserPool restoreUserPoolSettings(UserPool settings) {
+        UserPool pool = describeUserPool(settings.getId());
+        UserPool restored = MAPPER.convertValue(pool, UserPool.class);
+        copyUserPoolSettings(MAPPER.convertValue(settings, UserPool.class), restored);
+        restored.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        poolStore.put(restored.getId(), restored);
+        LOG.infov("Restored User Pool settings: {0}", restored.getId());
+        return restored;
+    }
+
+    /** The name and every field {@code populateUserPool} sets, which is what an update can change. */
+    private static void copyUserPoolSettings(UserPool from, UserPool to) {
+        to.setName(from.getName());
+        to.setPolicies(from.getPolicies());
+        to.setDeletionProtection(from.getDeletionProtection());
+        to.setLambdaConfig(from.getLambdaConfig());
+        to.setSchemaAttributes(from.getSchemaAttributes());
+        to.setAutoVerifiedAttributes(from.getAutoVerifiedAttributes());
+        to.setAliasAttributes(from.getAliasAttributes());
+        to.setUsernameAttributes(from.getUsernameAttributes());
+        to.setSmsVerificationMessage(from.getSmsVerificationMessage());
+        to.setEmailVerificationMessage(from.getEmailVerificationMessage());
+        to.setEmailVerificationSubject(from.getEmailVerificationSubject());
+        to.setVerificationMessageTemplate(from.getVerificationMessageTemplate());
+        to.setSmsAuthenticationMessage(from.getSmsAuthenticationMessage());
+        to.setMfaConfiguration(from.getMfaConfiguration());
+        to.setDeviceConfiguration(from.getDeviceConfiguration());
+        to.setEmailConfiguration(from.getEmailConfiguration());
+        to.setSmsConfiguration(from.getSmsConfiguration());
+        to.setUserPoolTags(from.getUserPoolTags());
+        to.setAdminCreateUserConfig(from.getAdminCreateUserConfig());
+        to.setUserPoolAddOns(from.getUserPoolAddOns());
+        to.setUsernameConfiguration(from.getUsernameConfiguration());
+        to.setAccountRecoverySetting(from.getAccountRecoverySetting());
+        to.setUserAttributeUpdateSettings(from.getUserAttributeUpdateSettings());
+        to.setUserPoolTier(from.getUserPoolTier());
     }
 
     public void addCustomAttributes(String userPoolId, List<Map<String, Object>> customAttributes) {
@@ -1186,6 +1241,59 @@ public class CognitoService implements ResourceProvider {
         clientStore.put(clientId, client);
         LOG.infov("Updated User Pool Client: {0} for pool {1}", clientId, userPoolId);
         return client;
+    }
+
+    /**
+     * A copy of the settings {@link #updateUserPoolClient} can change, for a caller that puts them
+     * back with {@link #restoreUserPoolClientSettings}: the rollback of a CloudFormation update that
+     * changed the client in place. A deep copy, since an update mutates the stored client.
+     */
+    public UserPoolClient userPoolClientSettings(String userPoolId, String clientId) {
+        UserPoolClient settings = new UserPoolClient();
+        settings.setUserPoolId(userPoolId);
+        settings.setClientId(clientId);
+        copyUserPoolClientSettings(describeUserPoolClient(userPoolId, clientId), settings);
+        return MAPPER.convertValue(settings, UserPoolClient.class);
+    }
+
+    /**
+     * Puts back the settings {@link #userPoolClientSettings} copied, including clearing one the
+     * update added, which {@link #updateUserPoolClient} cannot do since a null there keeps the
+     * current value. The client's id, secrets and branding stay as they are now.
+     */
+    public UserPoolClient restoreUserPoolClientSettings(UserPoolClient settings) {
+        UserPoolClient client = describeUserPoolClient(settings.getUserPoolId(), settings.getClientId());
+        UserPoolClient restored = MAPPER.convertValue(client, UserPoolClient.class);
+        copyUserPoolClientSettings(MAPPER.convertValue(settings, UserPoolClient.class), restored);
+        restored.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        clientStore.put(restored.getClientId(), restored);
+        LOG.infov("Restored User Pool Client settings: {0} for pool {1}", restored.getClientId(),
+                restored.getUserPoolId());
+        return restored;
+    }
+
+    /** The name and every field {@link #updateUserPoolClient} sets. */
+    private static void copyUserPoolClientSettings(UserPoolClient from, UserPoolClient to) {
+        to.setClientName(from.getClientName());
+        to.setAllowedOAuthFlowsUserPoolClient(from.isAllowedOAuthFlowsUserPoolClient());
+        to.setAllowedOAuthFlows(from.getAllowedOAuthFlows());
+        to.setAllowedOAuthScopes(from.getAllowedOAuthScopes());
+        to.setAnalyticsConfiguration(from.getAnalyticsConfiguration());
+        to.setCallbackURLs(from.getCallbackURLs());
+        to.setDefaultRedirectURI(from.getDefaultRedirectURI());
+        to.setExplicitAuthFlows(from.getExplicitAuthFlows());
+        to.setAccessTokenValidity(from.getAccessTokenValidity());
+        to.setIdTokenValidity(from.getIdTokenValidity());
+        to.setAuthSessionValidity(from.getAuthSessionValidity());
+        to.setLogoutURLs(from.getLogoutURLs());
+        to.setPreventUserExistenceErrors(from.getPreventUserExistenceErrors());
+        to.setReadAttributes(from.getReadAttributes());
+        to.setRefreshTokenValidity(from.getRefreshTokenValidity());
+        to.setSupportedIdentityProviders(from.getSupportedIdentityProviders());
+        to.setTokenValidityUnits(from.getTokenValidityUnits());
+        to.setWriteAttributes(from.getWriteAttributes());
+        to.setRefreshTokenRotation(from.getRefreshTokenRotation());
+        to.setEnableTokenRevocation(from.getEnableTokenRevocation());
     }
 
     private static void validateAuthSessionValidity(Integer authSessionValidity) {

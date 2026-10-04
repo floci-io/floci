@@ -211,10 +211,14 @@ class ApiGatewayPutRestApiMergeAuthorizationTest {
             }
             """;
     private static final byte[] DENY_POLICY = """
-            {"principalId":"blocked","policyDocument":{"Statement":[{"Effect":"Deny"}]}}
+            {"principalId":"blocked","policyDocument":{"Version":"2012-10-17","Statement":[
+              {"Effect":"Deny","Action":"execute-api:Invoke","Resource":"*"}
+            ]}}
             """.getBytes(StandardCharsets.UTF_8);
     private static final byte[] ALLOW_POLICY = """
-            {"principalId":"allowed","policyDocument":{"Statement":[{"Effect":"Allow"}]}}
+            {"principalId":"allowed","policyDocument":{"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"execute-api:Invoke","Resource":"*"}
+            ]}}
             """.getBytes(StandardCharsets.UTF_8);
 
     @InjectMock

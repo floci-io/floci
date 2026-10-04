@@ -2,21 +2,27 @@ package io.github.hectorvent.floci.services.elb;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elb.model.ClassicHealthCheck;
 import io.github.hectorvent.floci.services.elb.model.ClassicListener;
 import io.github.hectorvent.floci.services.elb.model.ClassicLoadBalancer;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.ServerCertificateReferenceProvider;
+import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
 import java.time.Instant;
@@ -26,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -45,8 +52,9 @@ import java.util.stream.Collectors;
  * inventing a result.
  */
 @ApplicationScoped
-public class ElbClassicService {
+public class ElbClassicService implements ServerCertificateReferenceProvider {
 
+    private static final Logger LOG = Logger.getLogger(ElbClassicService.class);
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final Ec2Service ec2Service;
@@ -54,6 +62,8 @@ public class ElbClassicService {
     private final StorageFactory storageFactory;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final IamService iamService;
+    private final AcmService acmService;
 
     // region → load balancer name → record
     private Map<String, Map<String, ClassicLoadBalancer>> loadBalancers = new ConcurrentHashMap<>();
@@ -62,7 +72,15 @@ public class ElbClassicService {
                              ElbClassicHealthChecker healthChecker,
                              StorageFactory storageFactory,
                              EmulatorConfig config) {
-        this(ec2Service, healthChecker, storageFactory, config, null);
+        this(ec2Service, healthChecker, storageFactory, config, null, null, null);
+    }
+
+    public ElbClassicService(Ec2Service ec2Service,
+                             ElbClassicHealthChecker healthChecker,
+                             StorageFactory storageFactory,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver) {
+        this(ec2Service, healthChecker, storageFactory, config, regionResolver, null, null);
     }
 
     @Inject
@@ -70,12 +88,16 @@ public class ElbClassicService {
                              ElbClassicHealthChecker healthChecker,
                              StorageFactory storageFactory,
                              EmulatorConfig config,
-                             RegionResolver regionResolver) {
+                             RegionResolver regionResolver,
+                             IamService iamService,
+                             AcmService acmService) {
         this.ec2Service = ec2Service;
         this.healthChecker = healthChecker;
         this.storageFactory = storageFactory;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.iamService = iamService;
+        this.acmService = acmService;
     }
 
     @PostConstruct
@@ -138,6 +160,7 @@ public class ElbClassicService {
         for (ClassicListener listener : listeners) {
             validateListener(listener);
         }
+        requireCertificates(region, listeners);
 
         Map<String, ClassicLoadBalancer> regionLbs =
                 loadBalancers.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
@@ -258,6 +281,7 @@ public class ElbClassicService {
         for (ClassicListener listener : listeners) {
             validateListener(listener);
         }
+        requireCertificates(region, listeners);
         for (ClassicListener listener : listeners) {
             ClassicListener existing = lb.getListeners().stream()
                     .filter(l -> l.getLoadBalancerPort().equals(listener.getLoadBalancerPort()))
@@ -531,6 +555,63 @@ public class ElbClassicService {
         if (name.startsWith("-") || name.endsWith("-")) {
             throw new AwsException("ValidationError",
                     "LoadBalancerName '" + name + "' cannot start or end with a hyphen.", 400);
+        }
+    }
+
+    @Override
+    public List<Reference> serverCertificateReferences() {
+        List<Reference> references = new ArrayList<>();
+        for (Map<String, ClassicLoadBalancer> regionLbs : loadBalancers.values()) {
+            for (ClassicLoadBalancer lb : regionLbs.values()) {
+                for (ClassicListener listener : lb.getListeners()) {
+                    String certificate = listener.getSslCertificateId();
+                    if (certificate != null && !certificate.isBlank()) {
+                        references.add(new Reference(certificate,
+                                "load balancer " + lb.getLoadBalancerName()));
+                    }
+                }
+            }
+        }
+        return references;
+    }
+
+    private void requireCertificates(String region, List<ClassicListener> listeners) {
+        for (ClassicListener listener : listeners) {
+            String certificateId = listener.getSslCertificateId();
+            if (certificateId != null && !certificateId.isBlank() && !certificateExists(region, certificateId)) {
+                throw new AwsException("CertificateNotFound",
+                        "Server Certificate not found for the key: " + certificateId, 400);
+            }
+        }
+    }
+
+    private boolean certificateExists(String region, String certificateArn) {
+        if (!AwsArnUtils.isArn(certificateArn)) {
+            return false;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(certificateArn);
+        return switch (arn.service()) {
+            case "iam" -> iamService == null || iamServerCertificate(arn, certificateArn).isPresent();
+            case "acm" -> acmService == null || acmCertificateExists(region, certificateArn);
+            default -> false;
+        };
+    }
+
+    private Optional<ServerCertificate> iamServerCertificate(AwsArnUtils.Arn arn, String certificateArn) {
+        if (!arn.resource().startsWith("server-certificate/")) {
+            return Optional.empty();
+        }
+        String name = arn.resource().substring(arn.resource().lastIndexOf('/') + 1);
+        return iamService.findServerCertificate(name)
+                .filter(certificate -> certificateArn.equals(certificate.getArn()));
+    }
+
+    private boolean acmCertificateExists(String region, String certificateArn) {
+        try {
+            return certificateArn.equals(acmService.describeCertificate(certificateArn, region).getArn());
+        } catch (AwsException e) {
+            LOG.debugv("ACM certificate {0} not usable in {1}: {2}", certificateArn, region, e.getMessage());
+            return false;
         }
     }
 
