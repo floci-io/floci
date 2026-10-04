@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -28,6 +29,9 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
@@ -172,7 +176,7 @@ public class EksClusterManager
     @Inject
     jakarta.enterprise.inject.Instance<Ec2Service> ec2ServiceInstance;
     private Ec2Service ec2Service;
-    private BiFunction<String, String, List<Nodegroup>> nodegroupSupplier;
+    private final StorageBackend<String, Nodegroup> nodeGroupStorage;
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
 
@@ -182,10 +186,6 @@ public class EksClusterManager
 
     public void setEc2Service(Ec2Service ec2Service) {
         this.ec2Service = ec2Service;
-    }
-
-    public void setNodegroupSupplier(BiFunction<String, String, List<Nodegroup>> nodegroupSupplier) {
-        this.nodegroupSupplier = nodegroupSupplier;
     }
 
     private Ec2Service ec2Service() {
@@ -375,7 +375,6 @@ public class EksClusterManager
                 null, logStreamer);
     }
 
-    @Inject
     public EksClusterManager(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
                              ContainerDetector containerDetector,
@@ -388,6 +387,24 @@ public class EksClusterManager
                              EksOidcService oidcService,
                              FlociCertificateAuthority certificateAuthority,
                              ContainerLogStreamer logStreamer) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer,
+                oidcService, certificateAuthority, logStreamer, (StorageBackend<String, Nodegroup>) null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService,
+                             FlociCertificateAuthority certificateAuthority,
+                             ContainerLogStreamer logStreamer,
+                             StorageBackend<String, Nodegroup> nodeGroupStorage) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -400,6 +417,30 @@ public class EksClusterManager
         this.oidcService = oidcService;
         this.certificateAuthority = certificateAuthority;
         this.logStreamer = logStreamer;
+        this.nodeGroupStorage = nodeGroupStorage;
+    }
+
+    @Inject
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService,
+                             FlociCertificateAuthority certificateAuthority,
+                             ContainerLogStreamer logStreamer,
+                             StorageFactory storageFactory) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer,
+                oidcService, certificateAuthority, logStreamer,
+                storageFactory != null
+                        ? storageFactory.create("eks", "eks-nodegroups.json",
+                                new TypeReference<Map<String, Nodegroup>>() {})
+                        : null);
     }
 
     /**
@@ -2451,21 +2492,32 @@ public class EksClusterManager
         return "us-east-1"; // partition-literal: unreachable under CDI, where the resolver or config answers
     }
 
-    Nodegroup selectFirstNodegroup(Cluster cluster) {
-        List<Nodegroup> groups = cluster != null ? cluster.getNodegroups() : null;
-        if ((groups == null || groups.isEmpty()) && nodegroupSupplier != null && cluster != null) {
-            groups = nodegroupSupplier.apply(cluster.getName(), resolveClusterAccountId(cluster));
+    List<Nodegroup> listActiveNodegroups(Cluster cluster) {
+        if (nodeGroupStorage == null || cluster == null || cluster.getName() == null) {
+            return List.of();
         }
-        if (groups == null || groups.isEmpty()) {
-            return null;
+        String prefix = cluster.getName() + "/";
+        String accountId = resolveClusterAccountId(cluster);
+        List<Nodegroup> groups;
+        if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
+            groups = aware.scanAllAccountEntries(key -> key.startsWith(prefix)).stream()
+                    .filter(entry -> accountId == null || accountId.equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value)
+                    .toList();
+        } else {
+            groups = nodeGroupStorage.scan(key -> key.startsWith(prefix));
         }
-        List<Nodegroup> active = groups.stream()
+        return groups.stream()
                 .filter(g -> g.getStatus() == null || g.getStatus() == NodegroupStatus.ACTIVE)
                 .sorted(Comparator.comparing(Nodegroup::getCreatedAt,
                                 Comparator.nullsLast(Comparator.naturalOrder()))
                         .thenComparing(Nodegroup::getNodegroupName,
                                 Comparator.nullsLast(Comparator.naturalOrder())))
                 .toList();
+    }
+
+    Nodegroup selectFirstNodegroup(Cluster cluster) {
+        List<Nodegroup> active = listActiveNodegroups(cluster);
         if (active.isEmpty()) {
             return null;
         }
@@ -2514,7 +2566,7 @@ public class EksClusterManager
                 for (Map.Entry<String, String> entry : nodegroup.getLabels().entrySet()) {
                     String k = entry.getKey();
                     String v = entry.getValue();
-                    if (k != null && !k.isBlank() && v != null && !k.startsWith("topology.kubernetes.io/")) {
+                    if (k != null && !k.isBlank() && v != null && !isReservedNodeLabelKey(k)) {
                         labels.put(k, v);
                     }
                 }
@@ -2534,35 +2586,46 @@ public class EksClusterManager
         return sb.toString();
     }
 
+    private static boolean isReservedNodeLabelKey(String key) {
+        return key.startsWith("topology.kubernetes.io/")
+                || key.startsWith("eks.amazonaws.com/") // partition-literal: Kubernetes label prefix is partition-invariant
+                || "node.kubernetes.io/instance-type".equals(key);
+    }
+
     private String resolveNodegroupInstanceType(Cluster cluster, Nodegroup nodegroup) {
         if (nodegroup != null && nodegroup.getInstanceTypes() != null && !nodegroup.getInstanceTypes().isEmpty()) {
             String first = nodegroup.getInstanceTypes().getFirst();
             if (first != null && !first.isBlank()) {
-                return first;
+                return selectNodeInstanceType(first.trim());
             }
         }
         return nodeInstanceType(cluster);
     }
 
     private String resolveNodegroupImageId(Nodegroup nodegroup) {
-        if (nodegroup != null && nodegroup.getLaunchTemplate() instanceof Map<?, ?> map) {
-            Object directImage = map.get("imageId");
-            if (directImage != null && !directImage.toString().isBlank()) {
-                return directImage.toString().trim();
+        if (nodegroup != null) {
+            if (nodegroup.getReleaseVersion() != null && !nodegroup.getReleaseVersion().isBlank()) {
+                return nodegroup.getReleaseVersion().trim();
             }
-            Ec2Service ec2 = ec2Service();
-            if (ec2 != null) {
-                String id = map.get("id") != null ? map.get("id").toString().trim() : null;
-                String name = map.get("name") != null ? map.get("name").toString().trim() : null;
-                String version = map.get("version") != null ? map.get("version").toString().trim() : null;
-                if ((id != null && !id.isBlank()) || (name != null && !name.isBlank())) {
-                    try {
-                        LaunchTemplateData data = ec2.resolveLaunchTemplateData(null, id, name, version);
-                        if (data != null && data.getImageId() != null && !data.getImageId().isBlank()) {
-                            return data.getImageId().trim();
+            if (nodegroup.getLaunchTemplate() instanceof Map<?, ?> map) {
+                Object directImage = map.get("imageId");
+                if (directImage != null && !directImage.toString().isBlank()) {
+                    return directImage.toString().trim();
+                }
+                Ec2Service ec2 = ec2Service();
+                if (ec2 != null) {
+                    String id = map.get("id") != null ? map.get("id").toString().trim() : null;
+                    String name = map.get("name") != null ? map.get("name").toString().trim() : null;
+                    String version = map.get("version") != null ? map.get("version").toString().trim() : null;
+                    if ((id != null && !id.isBlank()) || (name != null && !name.isBlank())) {
+                        try {
+                            LaunchTemplateData data = ec2.resolveLaunchTemplateData(null, id, name, version);
+                            if (data != null && data.getImageId() != null && !data.getImageId().isBlank()) {
+                                return data.getImageId().trim();
+                            }
+                        } catch (Exception ignored) {
+                            // Swallowing is safe because falling back to default image id is standard
                         }
-                    } catch (Exception ignored) {
-                        // Swallowing is safe because falling back to default image id is standard
                     }
                 }
             }

@@ -1037,7 +1037,7 @@ class EksServiceTest {
     }
 
     @Test
-    void createNodeGroupRecordsLabelsAndTaintsOnCluster() {
+    void createNodeGroupRecordsLabelsAndTaints() {
         createTestCluster("metadata-cluster");
         CreateNodeGroupRequest request = nodeGroupRequest("labeled-ng");
         request.setLabels(Map.of("role", "worker", "tier", "frontend"));
@@ -1049,14 +1049,13 @@ class EksServiceTest {
         assertEquals("worker", nodegroup.getLabels().get("role"));
         assertEquals(1, nodegroup.getTaints().size());
 
-        Cluster storedCluster = eksService.describeCluster("metadata-cluster");
-        assertNotNull(storedCluster.getNodegroups());
-        assertEquals(1, storedCluster.getNodegroups().size());
-        assertEquals("labeled-ng", storedCluster.getNodegroups().getFirst().getNodegroupName());
+        Nodegroup retrieved = eksService.describeNodeGroup("metadata-cluster", "labeled-ng");
+        assertEquals("SPOT", retrieved.getCapacityType());
+        assertEquals("worker", retrieved.getLabels().get("role"));
+        assertEquals(1, retrieved.getTaints().size());
 
         eksService.deleteNodeGroup("metadata-cluster", "labeled-ng");
-        Cluster afterDelete = eksService.describeCluster("metadata-cluster");
-        assertTrue(afterDelete.getNodegroups().isEmpty());
+        assertEquals(List.of(), eksService.listNodeGroups("metadata-cluster"));
     }
 
     @Test

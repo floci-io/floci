@@ -134,7 +134,6 @@ public class EksService implements TagHandler, ResourceProvider {
         this.addons = addons;
         if (this.clusterManager != null) {
             this.clusterManager.setEc2Service(this.ec2Service);
-            this.clusterManager.setNodegroupSupplier(this::listNodeGroupsForCluster);
         }
     }
 
@@ -214,9 +213,6 @@ public class EksService implements TagHandler, ResourceProvider {
                 if (cluster.getNodeInstanceType() == null) {
                     firstNodeGroup(cluster.getName(), entry.accountId()).ifPresent(group ->
                             cluster.setNodeInstanceType(selectedNodeInstanceType(group)));
-                }
-                if (cluster.getNodegroups() == null || cluster.getNodegroups().isEmpty()) {
-                    cluster.setNodegroups(listNodeGroupsForCluster(cluster.getName(), entry.accountId()));
                 }
                 clusterManager.restoreCluster(cluster);
             } catch (Exception e) {
@@ -805,7 +801,7 @@ public class EksService implements TagHandler, ResourceProvider {
             if (firstGroup && !config.services().eks().mock() && clusterManager != null) {
                 applyFirstNodeGroupCapacity(clusterName, nodegroupName, currentCluster, nodeGroup);
                 if (currentCluster.getContainerId() != null && currentCluster.getStatus() == ClusterStatus.ACTIVE) {
-                    LOG.infov("EKS cluster {0} is already running; nodegroup {1} labels and taints will be applied when the cluster is restarted or restored",
+                    LOG.infov("EKS cluster {0} is already running; nodegroup {1} node labels and taints are not applied to the running node",
                             clusterName, nodegroupName);
                 }
             } else if (!firstGroup && pendingFirst == null
@@ -827,14 +823,6 @@ public class EksService implements TagHandler, ResourceProvider {
                                 clusterName, nodegroupName, first.getNodegroupName());
                     }
                 });
-            }
-
-            if (currentCluster.getNodegroups() == null) {
-                currentCluster.setNodegroups(new ArrayList<>());
-            }
-            if (currentCluster.getNodegroups().stream().noneMatch(g -> nodegroupName.equals(g.getNodegroupName()))) {
-                currentCluster.getNodegroups().add(nodeGroup);
-                storage.put(clusterName, currentCluster);
             }
 
             if (nodeGroup.getStatus() == NodegroupStatus.ACTIVE && (hasUserData || pendingFirst != null)) {
@@ -989,11 +977,6 @@ public class EksService implements TagHandler, ResourceProvider {
             nodeGroup.setStatus(NodegroupStatus.DELETING);
             nodeGroup.setModifiedAt(Instant.now());
             nodeGroupStorage.delete(nodeGroupKey(clusterName, nodegroupName));
-            Cluster cluster = storage.get(clusterName).orElse(null);
-            if (cluster != null && cluster.getNodegroups() != null) {
-                cluster.getNodegroups().removeIf(g -> nodegroupName.equals(g.getNodegroupName()));
-                storage.put(clusterName, cluster);
-            }
             return nodeGroup;
         }
     }

@@ -354,12 +354,12 @@ When managed nodegroups are defined for a cluster, Floci applies their labels an
 #### Applied labels
 Floci configures `--kubelet-arg=node-labels=...` with the following entries:
 - Standard topology labels: `topology.kubernetes.io/region` and `topology.kubernetes.io/zone`.
-- Instance type: `node.kubernetes.io/instance-type` (sourced from the nodegroup's first configured instance type, or defaulting to `t3.medium`).
+- Instance type: `node.kubernetes.io/instance-type` (sourced from the nodegroup's first configured instance type, or defaulting to `m5.large`).
 - EKS system labels:
   - `eks.amazonaws.com/nodegroup=<nodegroupName>`
   - `eks.amazonaws.com/capacityType=<ON_DEMAND|SPOT>` (defaults to `ON_DEMAND` when omitted)
-  - `eks.amazonaws.com/nodegroup-image=<releaseVersion>` (when `releaseVersion` is specified)
-- User-defined labels: all key-value pairs specified in the nodegroup's `labels` map.
+  - `eks.amazonaws.com/nodegroup-image=<imageId>` (sourced from `releaseVersion`, launch template AMI, or defaulting to `ami-eks-k3s`)
+- User-defined labels: all key-value pairs specified in the nodegroup's `labels` map, excluding reserved system keys (`topology.kubernetes.io/*`, `eks.amazonaws.com/*`, and `node.kubernetes.io/instance-type`).
 
 #### Applied taints
 Floci configures `--kubelet-arg=register-with-taints=...` using the taints specified on the nodegroup. Each taint is formatted as `key=value:effect` (or `key:effect` if value is omitted or empty). AWS taint effects are mapped to standard Kubernetes casing:
@@ -371,7 +371,7 @@ Floci configures `--kubelet-arg=register-with-taints=...` using the taints speci
 Floci runs one k3s container per cluster. The worker node reflects the metadata of the first active nodegroup (ordered by `createdAt` ascending, then `nodegroupName`). If additional nodegroups are created on the same cluster, Floci logs a warning that only the first nodegroup provides node metadata to the shared node.
 
 #### Timing and post-start nodegroups
-Kubelet flags are fixed when the cluster container starts. For nodegroups created while the cluster is already running, metadata is recorded in the EKS store and Floci logs an informational message. The labels and taints take effect when the cluster restarts or is restored from state.
+Kubelet flags are fixed when the cluster container starts. For nodegroups created while the cluster is already running, metadata is recorded in the EKS store and Floci logs an informational message that labels and taints are not applied to the running node. Surviving cluster containers are adopted as-is without rebuilding kubelet flags on restore.
 
 ### Metadata only inputs
 
