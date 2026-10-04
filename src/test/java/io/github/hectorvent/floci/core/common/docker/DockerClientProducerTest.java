@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.core.DefaultDockerClientConfig;
+import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -730,8 +732,8 @@ class DockerClientProducerTest {
         Files.writeString(certDir.resolve("ca.pem"), "not a certificate");
         Files.writeString(certDir.resolve("cert.pem"), "not a certificate");
         Files.writeString(certDir.resolve("key.pem"), "not a key");
-        com.github.dockerjava.core.DefaultDockerClientConfig tlsConfig =
-                com.github.dockerjava.core.DefaultDockerClientConfig.createDefaultConfigBuilder()
+        DefaultDockerClientConfig tlsConfig =
+                DefaultDockerClientConfig.createDefaultConfigBuilder()
                         .withDockerHost("tcp://127.0.0.1:2376")
                         .withDockerTlsVerify(true)
                         .withDockerCertPath(certDir.toString())
@@ -745,13 +747,13 @@ class DockerClientProducerTest {
     @Test
     void newHttpClient_plainTcpConfig_buildsWithoutTls() throws IOException {
         // Catches: passing the SSL config breaking hosts that have no TLS material
-        com.github.dockerjava.core.DefaultDockerClientConfig plainConfig =
-                com.github.dockerjava.core.DefaultDockerClientConfig.createDefaultConfigBuilder()
+        DefaultDockerClientConfig plainConfig =
+                DefaultDockerClientConfig.createDefaultConfigBuilder()
                         .withDockerHost("tcp://127.0.0.1:2375")
                         .withDockerTlsVerify(false)
                         .build();
 
-        try (var client = DockerClientProducer.newHttpClient(plainConfig, 10)) {
+        try (ApacheDockerHttpClient client = DockerClientProducer.newHttpClient(plainConfig, 10)) {
             assertNull(plainConfig.getSSLConfig(), "a config without TLS verify carries no SSL config");
             assertEquals("tcp://127.0.0.1:2375", plainConfig.getDockerHost().toString());
         }
