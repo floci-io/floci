@@ -82,7 +82,11 @@ public class AccountContextFilter implements ContainerRequestFilter {
             rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
             rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
         } else {
-            String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+            // A present Authorization header wins, as in IamEnforcementFilter: an unrecognised one
+            // must not let the query string pick an account that IAM then never checks.
+            boolean hasAuthHeader = auth != null && !auth.isEmpty();
+            String credential = hasAuthHeader
+                    ? null : ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
             if (credential != null && !credential.isEmpty()) {
                 // Floci's own download URLs (Lambda layers, Kubernetes init containers) carry only
                 // X-Amz-Credential, so it must steer the account without an algorithm.

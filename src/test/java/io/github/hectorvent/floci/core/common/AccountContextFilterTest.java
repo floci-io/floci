@@ -411,6 +411,15 @@ class AccountContextFilterTest {
     }
 
     @Test
+    void unrecognisedAuthHeaderStopsQueryCredentialFromSelectingAccount() {
+        ContainerRequestContext ctx = mockContext("Credential=111122223333/20260617/us-west-2/s3/aws4_request",
+                "444455556666/20260617/eu-west-1/s3/aws4_request");
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
+    @Test
     void presignedCredentialWithoutAlgorithmStillRoutesInternalDownloadUrls() {
         ContainerRequestContext ctx = mockContext(null,
                 "111122223333/20260617/eu-west-1/s3/aws4_request", null);
