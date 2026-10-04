@@ -383,11 +383,28 @@ Lambda. floci supports two shapes:
   event and waits for it to `PUT` its `SUCCESS`/`FAILED` result to the response URL. Inline `ZipFile`
   handlers get the `cfn-response` / `cfnresponse` module bundled in (see the Lambda row in
   [Supported Resource Types](#supported-resource-types)), so Solutions-style handlers work unmodified.
+  The event's `StackId` is the id of the stack that contains the resource, the value
+  `Ref AWS::StackId` returns and `DescribeStacks` reports, on `Create`, `Update` and `Delete` alike.
+  In a nested stack it is the nested stack's own id.
 - **CDK Provider framework** — when the `ServiceToken` points at a CDK `framework.onEvent` function,
   floci drives the asynchronous provider protocol: `onEvent` starts the work and `framework.isComplete`
   is polled (via Step Functions [`Retry`](step-functions.md)) until it reports done, at which point the
   ResponseURL callback fires. The wait is bounded by an async custom-resource timeout (3 minutes by
   default); a resource that never completes fails the stack rather than hanging.
+
+A failed stack update rolls back a custom resource whose handler was sent an `Update`, as
+CloudFormation does. This holds whether the handler applied the update and a later resource failed,
+or the handler answered `FAILED` itself. The handler is sent a second `Update` under the same
+`PhysicalResourceId`, with the old properties as `ResourceProperties` and the attempted ones as
+`OldResourceProperties`, so it can undo the change. A handler that answers `FAILED` to that rollback
+leaves the resource `UPDATE_FAILED` with its `Reason`, and the stack `UPDATE_ROLLBACK_FAILED`. The
+old properties still become the resource's own, as on AWS: a later `DeleteStack` sends them in its
+`Delete`, and the next update sends them as `OldResourceProperties`. An update whose handler returned
+a new `PhysicalResourceId` replaced the resource. Its rollback sends no `Update`: the new id gets a
+`Delete` with the attempted properties, and the resource goes back to the old id. CloudFormation sends
+that `Delete` in its `UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS` phase. Floci has no rollback
+cleanup phase and sends it during the rollback. When the rollback's own `Update` returns a new id,
+the id it was sent gets a `Delete` straight away for the same reason.
 
 ## Deleted Stacks
 
