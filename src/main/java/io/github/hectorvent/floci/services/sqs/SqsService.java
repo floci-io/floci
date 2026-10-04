@@ -808,8 +808,8 @@ public class SqsService implements Resettable, ResourceProvider {
                         return ctx.getAccountId();
                     }
                 }
-            } catch (ContextNotActiveException ignored) {
-                // outside request scope, fall through to default
+            } catch (ContextNotActiveException | RuntimeException ignored) {
+                // outside request scope or unsatisfied bean resolution, fall through to default
             }
         }
         return regionResolver.getAccountId();
