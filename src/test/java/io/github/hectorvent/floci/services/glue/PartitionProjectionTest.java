@@ -98,8 +98,11 @@ class PartitionProjectionTest {
     // ---- injected columns ----
 
     private Table injectedTenantTable() {
-        return table("audit_events", projecting("projection.tenant.type", "injected"),
+        Table t = table("audit_events", projecting("projection.tenant.type", "injected"),
                 List.of(column("tenant")));
+        t.getStorageDescriptor().setColumns(List.of(column("id"), column("suffix"), column("other"),
+                column("other_tenant")));
+        return t;
     }
 
     @Test
@@ -401,5 +404,26 @@ class PartitionProjectionTest {
         assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
                 "SELECT * FROM other_table WHERE id IN (SELECT id FROM audit_events WHERE tenant = 'abc')",
                 List.of(injectedTenantTable(), other)));
+    }
+
+    @Test
+    void expressionsEvaluatedWithoutReadingDataAreAccepted() {
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = lower('ABC')", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = 'ab' || 'c'", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = concat('a', 'b')", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = CAST(123 AS varchar)", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = ('ab' || 'c')", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE lower('ABC') = tenant", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant IN (lower('ABC'), 'def')", List.of(injectedTenantTable())));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant IN (concat('a', 'b'), 'c')",
+                List.of(injectedTenantTable())));
     }
 }

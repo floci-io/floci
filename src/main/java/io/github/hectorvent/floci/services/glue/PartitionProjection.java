@@ -50,10 +50,6 @@ public final class PartitionProjection {
                     "(?:SELECT|FROM|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|JOIN|ON|USING|WINDOW|QUALIFY|FETCH)"),
             Pattern.CASE_INSENSITIVE);
 
-    private static final Pattern CONSTANT = Pattern.compile(
-            "^(?:'(?:''|[^'])*'|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?|TRUE|FALSE)$",
-            Pattern.CASE_INSENSITIVE);
-
     private static final Set<String> TABLE_ALIAS_KEYWORDS = Set.of("where", "join", "inner", "left", "right",
             "full", "cross", "on", "group", "having", "order", "limit", "offset", "union", "intersect",
             "except", "window", "qualify", "fetch", "using", "natural", "lateral", "tablesample");
@@ -182,17 +178,61 @@ public final class PartitionProjection {
         if (!tableAliases(scope.fromClause(), table.getName()).contains(alias)) {
             return false;
         }
-        if (hasStaticEquality(scope.whereClause(), alias, column, false)) {
+        Set<String> sourceCols = sourceColumns(scope, tables);
+        Set<String> sourceAliases = sourceAliases(scope, tables);
+        if (hasStaticEquality(scope.whereClause(), alias, column, false, sourceCols, sourceAliases)) {
             return true;
         }
         long declaringSources = tables.stream()
                 .filter(other -> other != null && other.getName() != null && declaresColumn(other, column))
                 .mapToLong(other -> tableAliases(scope.fromClause(), other.getName()).size())
                 .sum();
-        if (declaringSources == 1 && hasStaticEquality(scope.whereClause(), alias, column, true)) {
+        if (declaringSources == 1
+                && hasStaticEquality(scope.whereClause(), alias, column, true, sourceCols, sourceAliases)) {
             return true;
         }
         return false;
+    }
+
+    private static Set<String> sourceColumns(WhereScope scope, List<Table> tables) {
+        Set<String> columns = new HashSet<>();
+        for (Table table : tables) {
+            if (table == null || table.getName() == null) {
+                continue;
+            }
+            if (!tableAliases(scope.fromClause(), table.getName()).isEmpty()) {
+                if (table.getStorageDescriptor() != null && table.getStorageDescriptor().getColumns() != null) {
+                    for (Column col : table.getStorageDescriptor().getColumns()) {
+                        if (col != null && col.getName() != null && !col.getName().isBlank()) {
+                            columns.add(col.getName().toLowerCase(Locale.ROOT));
+                        }
+                    }
+                }
+                if (table.getPartitionKeys() != null) {
+                    for (Column key : table.getPartitionKeys()) {
+                        if (key != null && key.getName() != null && !key.getName().isBlank()) {
+                            columns.add(key.getName().toLowerCase(Locale.ROOT));
+                        }
+                    }
+                }
+            }
+        }
+        return columns;
+    }
+
+    private static Set<String> sourceAliases(WhereScope scope, List<Table> tables) {
+        Set<String> aliases = new HashSet<>();
+        for (Table table : tables) {
+            if (table == null || table.getName() == null) {
+                continue;
+            }
+            List<String> found = tableAliases(scope.fromClause(), table.getName());
+            if (!found.isEmpty()) {
+                aliases.add(unquoteIdentifier(table.getName()).toLowerCase(Locale.ROOT));
+                aliases.addAll(found);
+            }
+        }
+        return aliases;
     }
 
     private record WhereScope(String fromClause, String whereClause) {
@@ -477,62 +517,250 @@ public final class PartitionProjection {
         return identifier;
     }
 
-    private static boolean hasStaticEquality(String clause, String alias, String column, boolean allowUnqualified) {
+    private static boolean hasStaticEquality(String clause, String alias, String column, boolean allowUnqualified,
+                                           Set<String> sourceColumns, Set<String> sourceAliases) {
         String qualified = identifierPattern(alias) + "\\s*\\.\\s*" + identifierPattern(column);
         String left = allowUnqualified ? "(?:" + qualified + "|" + identifierPattern(column) + ")" : qualified;
-        String constant = "(?:'(?:''|[^'])*'|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?|TRUE|FALSE)";
-        String notContinued = "(?!\\s*(?:\\|\\||::|[-+*/%]))";
-        String parenLiteral = "(?:\\(\\s*)*" + constant + "(?:\\s*\\))*" + notContinued;
+        Pattern colPattern = Pattern.compile("(?<![A-Za-z0-9_$])" + left + "(?![A-Za-z0-9_$])",
+                Pattern.CASE_INSENSITIVE);
+        Matcher m = colPattern.matcher(clause);
+        while (m.find()) {
+            int colStart = m.start();
+            int colEnd = m.end();
 
-        // 1. left = literal or literal = left
-        Pattern eqPattern = Pattern.compile("(?i)(?<![A-Za-z0-9_$])(?:"
-                + left + "\\s*(?<![<>=!])=(?!=)\\s*(" + parenLiteral + ")"
-                + "|(" + parenLiteral + ")\\s*(?<![<>=!])=(?!=)\\s*" + left
-                + ")(?![A-Za-z0-9_$])");
-        Matcher eqMatcher = eqPattern.matcher(clause);
-        while (eqMatcher.find()) {
-            String expr = eqMatcher.group(1) != null ? eqMatcher.group(1) : eqMatcher.group(2);
-            if (isStaticLiteral(expr)) {
-                return true;
+            // 1. IN list: col [NOT] IN (...) or NOT col IN (...)
+            int afterCol = colEnd;
+            while (afterCol < clause.length() && Character.isWhitespace(clause.charAt(afterCol))) {
+                afterCol++;
             }
-        }
-
-        // 2. left IN (...)
-        Pattern inPattern = Pattern.compile("(?i)(?<!NOT\\s+)(?<![A-Za-z0-9_$])" + left + "\\s+IN\\s*\\(");
-        Matcher inMatcher = inPattern.matcher(clause);
-        while (inMatcher.find()) {
-            String before = clause.substring(0, inMatcher.start()).trim();
-            if (before.toUpperCase(Locale.ROOT).endsWith("NOT")) {
+            boolean isNotIn = isPrecededByNot(clause, colStart);
+            if (afterCol + 3 <= clause.length() && clause.regionMatches(true, afterCol, "NOT", 0, 3)
+                    && isWordBoundary(clause, afterCol, 3)) {
+                isNotIn = true;
+                afterCol += 3;
+                while (afterCol < clause.length() && Character.isWhitespace(clause.charAt(afterCol))) {
+                    afterCol++;
+                }
+            }
+            if (afterCol + 2 <= clause.length() && clause.regionMatches(true, afterCol, "IN", 0, 2)
+                    && isWordBoundary(clause, afterCol, 2)) {
+                if (!isNotIn) {
+                    int afterIn = afterCol + 2;
+                    while (afterIn < clause.length() && Character.isWhitespace(clause.charAt(afterIn))) {
+                        afterIn++;
+                    }
+                    if (afterIn < clause.length() && clause.charAt(afterIn) == '(') {
+                        int parenStart = afterIn;
+                        int parenEnd = findMatchingParen(clause, parenStart);
+                        if (parenEnd != -1) {
+                            String listContent = clause.substring(parenStart + 1, parenEnd);
+                            List<String> items = splitList(listContent);
+                            if (!items.isEmpty() && items.size() <= 1000
+                                    && items.stream().allMatch(item ->
+                                            isValidValue(item, sourceColumns, sourceAliases))) {
+                                return true;
+                            }
+                        }
+                    }
+                }
                 continue;
             }
-            int parenStart = inMatcher.end() - 1;
-            int depth = 1;
-            int k = parenStart + 1;
-            while (k < clause.length() && depth > 0) {
-                char c = clause.charAt(k);
-                if (c == '(') {
-                    depth++;
-                } else if (c == ')') {
-                    depth--;
+
+            // 2. Equality on the left: col = value
+            int p = colEnd;
+            while (p < clause.length()) {
+                char c = clause.charAt(p);
+                if (Character.isWhitespace(c) || c == ')') {
+                    p++;
+                } else {
+                    break;
                 }
-                k++;
             }
-            if (depth == 0) {
-                int parenEnd = k - 1;
-                String listContent = clause.substring(parenStart + 1, parenEnd);
-                List<String> items = splitList(listContent);
-                if (!items.isEmpty() && items.size() <= 1000
-                        && items.stream().allMatch(PartitionProjection::isStaticLiteral)) {
-                    return true;
+            if (p < clause.length() && clause.charAt(p) == '=') {
+                if (isSingleEquals(clause, p, colEnd)) {
+                    int valStart = p + 1;
+                    int depth = 0;
+                    int k = valStart;
+                    while (k < clause.length()) {
+                        char c = clause.charAt(k);
+                        if (c == '(') {
+                            depth++;
+                        } else if (c == ')') {
+                            if (depth == 0) {
+                                break;
+                            }
+                            depth--;
+                        } else if (depth == 0) {
+                            if (c == ';') {
+                                break;
+                            }
+                            if (isKeywordAt(clause, k, "AND") || isKeywordAt(clause, k, "OR")) {
+                                break;
+                            }
+                        }
+                        k++;
+                    }
+                    String valExpr = clause.substring(valStart, k).trim();
+                    if (isValidValue(valExpr, sourceColumns, sourceAliases)) {
+                        return true;
+                    }
+                }
+            }
+
+            // 3. Equality on the right: value = col
+            int q = colStart - 1;
+            while (q >= 0) {
+                char c = clause.charAt(q);
+                if (Character.isWhitespace(c) || c == '(') {
+                    q--;
+                } else {
+                    break;
+                }
+            }
+            if (q >= 0 && clause.charAt(q) == '=') {
+                if (isSingleEquals(clause, q, 0)) {
+                    int valEnd = q;
+                    int depth = 0;
+                    int j = q - 1;
+                    while (j >= 0) {
+                        char c = clause.charAt(j);
+                        if (c == ')') {
+                            depth++;
+                        } else if (c == '(') {
+                            if (depth == 0) {
+                                break;
+                            }
+                            depth--;
+                        } else if (depth == 0) {
+                            if (c == ';') {
+                                break;
+                            }
+                            if (isKeywordBefore(clause, j, "AND") || isKeywordBefore(clause, j, "OR")) {
+                                break;
+                            }
+                        }
+                        j--;
+                    }
+                    int valStart = j + 1;
+                    String valExpr = clause.substring(valStart, valEnd).trim();
+                    if (isValidValue(valExpr, sourceColumns, sourceAliases)) {
+                        return true;
+                    }
                 }
             }
         }
         return false;
     }
 
-    private static boolean isStaticLiteral(String expr) {
+    private static boolean isValidValue(String expr, Set<String> sourceColumns, Set<String> sourceAliases) {
         if (expr == null) {
             return false;
+        }
+        String stripped = stripParens(expr).trim();
+        if (stripped.isEmpty()) {
+            return false;
+        }
+        return !namesSourceColumn(expr, sourceColumns, sourceAliases);
+    }
+
+    private static boolean namesSourceColumn(String expr, Set<String> sourceColumns, Set<String> sourceAliases) {
+        if (expr == null || expr.isBlank()) {
+            return false;
+        }
+        for (String col : sourceColumns) {
+            Pattern pattern = Pattern.compile("(?<![A-Za-z0-9_$])" + identifierPattern(col)
+                    + "(?![A-Za-z0-9_$])", Pattern.CASE_INSENSITIVE);
+            if (pattern.matcher(expr).find()) {
+                return true;
+            }
+        }
+        for (String alias : sourceAliases) {
+            Pattern pattern = Pattern.compile("(?<![A-Za-z0-9_$])" + identifierPattern(alias)
+                    + "\\s*\\.\\s*" + IDENTIFIER, Pattern.CASE_INSENSITIVE);
+            if (pattern.matcher(expr).find()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isSingleEquals(String text, int equalsIndex, int minBeforeIndex) {
+        int before = equalsIndex - 1;
+        while (before >= minBeforeIndex && Character.isWhitespace(text.charAt(before))) {
+            before--;
+        }
+        if (before >= 0) {
+            char b = text.charAt(before);
+            if (b == '!' || b == '<' || b == '>' || b == '=') {
+                return false;
+            }
+        }
+        int after = equalsIndex + 1;
+        while (after < text.length() && Character.isWhitespace(text.charAt(after))) {
+            after++;
+        }
+        if (after < text.length()) {
+            char a = text.charAt(after);
+            if (a == '=' || a == '<' || a == '>') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int findMatchingParen(String text, int openParenIndex) {
+        int depth = 1;
+        int i = openParenIndex + 1;
+        while (i < text.length() && depth > 0) {
+            char c = text.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            }
+            i++;
+        }
+        return depth == 0 ? i - 1 : -1;
+    }
+
+    private static boolean isPrecededByNot(String text, int colStart) {
+        int j = colStart - 1;
+        while (j >= 0 && (Character.isWhitespace(text.charAt(j)) || text.charAt(j) == '(')) {
+            j--;
+        }
+        if (j < 2) {
+            return false;
+        }
+        return text.regionMatches(true, j - 2, "NOT", 0, 3) && isWordBoundary(text, j - 2, 3);
+    }
+
+    private static boolean isKeywordAt(String text, int index, String keyword) {
+        int len = keyword.length();
+        if (index + len > text.length()) {
+            return false;
+        }
+        if (!text.regionMatches(true, index, keyword, 0, len)) {
+            return false;
+        }
+        return isWordBoundary(text, index, len);
+    }
+
+    private static boolean isKeywordBefore(String text, int index, String keyword) {
+        int len = keyword.length();
+        int end = index;
+        while (end >= 0 && Character.isWhitespace(text.charAt(end))) {
+            end--;
+        }
+        if (end + 1 < len) {
+            return false;
+        }
+        int start = end - len + 1;
+        return text.regionMatches(true, start, keyword, 0, len) && isWordBoundary(text, start, len);
+    }
+
+    private static String stripParens(String expr) {
+        if (expr == null) {
+            return "";
         }
         String trimmed = expr.trim();
         while (trimmed.startsWith("(") && trimmed.endsWith(")")) {
@@ -555,7 +783,7 @@ public final class PartitionProjection {
             }
             trimmed = trimmed.substring(1, trimmed.length() - 1).trim();
         }
-        return CONSTANT.matcher(trimmed).matches();
+        return trimmed;
     }
 
     private static List<String> splitList(String content) {
