@@ -2395,6 +2395,34 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void nodegroupCapacityTypeCapacityBlock() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("block-group");
+            nodegroup.setCapacityType("CAPACITY_BLOCK");
+            nodeGroupStorage.put("prod-cluster/block-group", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+            assertEquals("CAPACITY_BLOCK", labels.get("eks.amazonaws.com/capacityType"));
+            assertEquals("block-group", labels.get("eks.amazonaws.com/nodegroup"));
+        }
+
+        @Test
         void clusterWithNoNodegroupsProducesSameArgumentsAsBefore() {
             Cluster cluster = new Cluster();
             cluster.setName("prod-cluster");

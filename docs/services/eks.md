@@ -357,7 +357,7 @@ Floci configures `--kubelet-arg=node-labels=...` with the following entries:
 - Instance type: `node.kubernetes.io/instance-type` (sourced from the nodegroup's first configured instance type, or defaulting to `m5.large`).
 - EKS system labels:
   - `eks.amazonaws.com/nodegroup=<nodegroupName>`
-  - `eks.amazonaws.com/capacityType=<ON_DEMAND|SPOT>` (defaults to `ON_DEMAND` when omitted)
+  - `eks.amazonaws.com/capacityType=<ON_DEMAND|SPOT|CAPACITY_BLOCK>` (defaults to `ON_DEMAND` when omitted)
   - `eks.amazonaws.com/nodegroup-image=<imageId>` (sourced from `releaseVersion`, launch template AMI, or defaulting to `ami-eks-k3s`)
 - User-defined labels: all key-value pairs specified in the nodegroup's `labels` map, excluding reserved system keys (`topology.kubernetes.io/*`, `eks.amazonaws.com/*`, and `node.kubernetes.io/instance-type`).
 
