@@ -2435,5 +2435,31 @@ class IamServiceTest {
         assertTrue(userIdOpt.isPresent());
         assertEquals("AROAEC2ROLE:i-1234567890abcdef0", userIdOpt.get());
     }
+
+    @Test
+    void resolveCallerUserIdResolvesFromRoleArnWhenAssumedRoleIdNotExplicitlySet() {
+        IamRole role = iamService.createRole("UnsetAssumedRole", "/", "{}", null, 3600, null);
+        iamService.registerSession(
+                "ASIAROLEARNKEY", "test-secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000",
+                "custom-session", null);
+
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIAROLEARNKEY");
+        assertTrue(userIdOpt.isPresent());
+        assertEquals(role.getRoleId() + ":custom-session", userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdReturnsAssumedRoleIdForLambdaExecutionRole() {
+        IamRole role = iamService.createRole("LambdaFuncRole", "/", "{}", null, 3600, null);
+        String assumedRoleId = role.getRoleId() + ":my-function";
+        iamService.registerLambdaExecutionRoleSession(
+                "000000000000", "ASIALAMBDAKEY", "secret", "token", role.getArn(),
+                "my-function", assumedRoleId);
+
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIALAMBDAKEY");
+        assertTrue(userIdOpt.isPresent());
+        assertEquals(assumedRoleId, userIdOpt.get());
+    }
 }
 

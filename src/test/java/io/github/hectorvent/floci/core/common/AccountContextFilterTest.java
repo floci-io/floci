@@ -417,12 +417,13 @@ class AccountContextFilterTest {
     }
 
     @Test
-    void accessKeyIdIsNullWhenPresignedQueryMissingAlgorithm() {
+    void resolvesFromPresignedCredentialWhenAlgorithmIsMissing() {
         ContainerRequestContext ctx = mockContext(null,
                 "AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request", null);
         filter.filter(ctx);
+        assertEquals("AKIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
         assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
-        assertNull(requestContext.getAccessKeyId());
+        assertEquals("us-east-1", requestContext.getRegion());
     }
 
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {

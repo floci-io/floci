@@ -2424,4 +2424,39 @@ class SqsServiceTest {
 
         assertEquals("123456789012", message.getSenderId());
     }
+
+    @Test
+    void sendMessageOutsideRequestContextFallsBackToQueueOwnerAccount() {
+        String region = "us-east-1";
+        RegionResolver customResolver = new RegionResolver("us-east-1", "999988887777");
+        SqsService service = new SqsService(new InMemoryStorage<>(), null, null, null,
+                30, 1048576, BASE_URL, customResolver, false, null, clock,
+                ReceiptHandle.DEFAULT_SECRET, null, null);
+        Queue queue = service.createQueue("foreign-account-queue", null, region);
+        Message message = service.sendMessage(queue.getQueueUrl(), "hello", 0, region);
+
+        assertEquals("999988887777", message.getSenderId());
+    }
+
+    @Test
+    void sendMessageUsesExplicitSenderIdWhenProvided() {
+        String region = "us-east-1";
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        RequestContext requestContext = new RequestContext();
+        requestContext.setAccessKeyId("AKIAIOSFODNN7EXAMPLE");
+        requestContext.setAccountId("123456789012");
+        when(requestContextInstance.get()).thenReturn(requestContext);
+
+        IamService iamService = mock(IamService.class);
+        when(iamService.resolveCallerUserId("AKIAIOSFODNN7EXAMPLE")).thenReturn(Optional.of("AIDAUSER123"));
+
+        SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
+                requestContextInstance, iamService);
+        Queue queue = service.createQueue("sender-id-explicit-queue", null, region);
+        Message message = service.sendMessage(queue.getQueueUrl(), "hello", 0, null, null, null, null,
+                "sns.amazonaws.com", region);
+
+        assertEquals("sns.amazonaws.com", message.getSenderId());
+    }
 }

@@ -298,6 +298,87 @@ class SqsPrincipalSenderIdIntegrationTest {
         }
     }
 
+    @Test
+    void senderIdIsSnsServicePrincipalWhenDeliveredFromSnsSubscription() {
+        String queueName = "sns-sender-id-queue";
+        String topicName = "sns-sender-id-topic";
+        String queueUrl = null;
+        String topicArn = null;
+        String subscriptionArn = null;
+
+        try {
+            queueUrl = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateQueue")
+                    .formParam("QueueName", queueName)
+                    .when().post("/").then().statusCode(200)
+                    .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+            String queueArn = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "GetQueueAttributes")
+                    .formParam("QueueUrl", queueUrl)
+                    .formParam("AttributeName.1", "QueueArn")
+                    .when().post("/").then().statusCode(200)
+                    .extract().xmlPath().getString("GetQueueAttributesResponse.GetQueueAttributesResult.Attribute.find { it.Name == 'QueueArn' }.Value");
+
+            topicArn = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateTopic")
+                    .formParam("Name", topicName)
+                    .when().post("/").then().statusCode(200)
+                    .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+
+            subscriptionArn = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "Subscribe")
+                    .formParam("TopicArn", topicArn)
+                    .formParam("Protocol", "sqs")
+                    .formParam("Endpoint", queueArn)
+                    .when().post("/").then().statusCode(200)
+                    .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+
+            String authHeader = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sns/aws4_request, SignedHeaders=host, Signature=abc";
+            given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .header("Authorization", authHeader)
+                    .formParam("Action", "Publish")
+                    .formParam("TopicArn", topicArn)
+                    .formParam("Message", "hello-from-sns")
+                    .when().post("/").then().statusCode(200);
+
+            XmlPath xml = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ReceiveMessage")
+                    .formParam("QueueUrl", queueUrl)
+                    .formParam("MaxNumberOfMessages", "1")
+                    .formParam("VisibilityTimeout", "0")
+                    .formParam("AttributeName.1", "SenderId")
+                    .when().post("/").then().statusCode(200)
+                    .body(containsString("<Name>SenderId</Name>"))
+                    .extract().xmlPath();
+
+            String senderId = xml.getString("ReceiveMessageResponse.ReceiveMessageResult.Message.Attribute.Value");
+            assertEquals("sns.amazonaws.com", senderId);
+        } finally {
+            if (subscriptionArn != null && !subscriptionArn.isEmpty()) {
+                given()
+                        .contentType("application/x-www-form-urlencoded")
+                        .formParam("Action", "Unsubscribe")
+                        .formParam("SubscriptionArn", subscriptionArn)
+                        .when().post("/");
+            }
+            if (topicArn != null) {
+                given()
+                        .contentType("application/x-www-form-urlencoded")
+                        .formParam("Action", "DeleteTopic")
+                        .formParam("TopicArn", topicArn)
+                        .when().post("/");
+            }
+            deleteQueue(queueUrl);
+        }
+    }
+
     private void deleteQueue(String queueUrl) {
         if (queueUrl == null) {
             return;

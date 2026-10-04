@@ -25,7 +25,6 @@ import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -793,6 +792,10 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     String resolveCurrentSenderId() {
+        return resolveCurrentSenderId(null);
+    }
+
+    String resolveCurrentSenderId(String queueUrl) {
         if (requestContextInstance != null) {
             try {
                 RequestContext ctx = requestContextInstance.get();
@@ -808,11 +811,11 @@ public class SqsService implements Resettable, ResourceProvider {
                         return ctx.getAccountId();
                     }
                 }
-            } catch (ContextNotActiveException | RuntimeException ignored) {
+            } catch (RuntimeException ignored) {
                 // outside request scope or unsatisfied bean resolution, fall through to default
             }
         }
-        return regionResolver.getAccountId();
+        return senderIdFor(queueUrl);
     }
 
     public Message sendMessage(String queueUrl, String body, Integer delaySeconds, String region) {
@@ -838,6 +841,16 @@ public class SqsService implements Resettable, ResourceProvider {
                                Map<String, MessageAttributeValue> messageAttributes,
                                String awsTraceHeader,
                                String region) {
+        return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId,
+                messageAttributes, awsTraceHeader, null, region);
+    }
+
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds,
+                               String messageGroupId, String messageDeduplicationId,
+                               Map<String, MessageAttributeValue> messageAttributes,
+                               String awsTraceHeader,
+                               String senderId,
+                               String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -852,6 +865,7 @@ public class SqsService implements Resettable, ResourceProvider {
         }
 
         int queueDelaySeconds = parseNonNegativeSecondsAttribute(queue.getAttributes().get("DelaySeconds"));
+        String effectiveSenderId = senderId != null ? senderId : resolveCurrentSenderId(queueUrl);
 
         // Resolve the effective delay:
         //   - FIFO queues only support queue-level DelaySeconds per AWS SQS,
@@ -932,7 +946,7 @@ public class SqsService implements Resettable, ResourceProvider {
                     // continues tracking the deduplication ID for the full interval.
                     // Return the original identity without re-enqueueing a message.
                     Message response = new Message(body);
-                    response.setSenderId(resolveCurrentSenderId());
+                    response.setSenderId(effectiveSenderId);
                     if (identity != null) {
                         response.setMessageId(identity.messageId());
                         response.setSequenceNumber(identity.sequenceNumber());
@@ -951,7 +965,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 persistDedup(storageKey);
 
                 Message message = new Message(body);
-                message.setSenderId(resolveCurrentSenderId());
+                message.setSenderId(effectiveSenderId);
                 message.setMessageGroupId(messageGroupId);
                 message.setMessageDeduplicationId(dedupId);
                 message.setSequenceNumber(sequenceCounter.incrementAndGet());
@@ -981,7 +995,7 @@ public class SqsService implements Resettable, ResourceProvider {
         // Standard queue. MessageGroupId is retained for ReceiveMessage to
         // return (fair queues); it has no effect on standard-queue delivery.
         Message message = new Message(body);
-        message.setSenderId(resolveCurrentSenderId());
+        message.setSenderId(effectiveSenderId);
         message.setMessageGroupId(messageGroupId);
         message.setAwsTraceHeader(awsTraceHeader);
         if (effectiveDelaySeconds > 0) {
