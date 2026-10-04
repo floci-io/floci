@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentC
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreToolsController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
+import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionController;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsController;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaNetworkConnectorsController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
@@ -140,6 +141,7 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("lambda"), Set.of(),
                         Set.of(LambdaController.class,
+                                DurableExecutionController.class,
                                 LambdaMicrovmsController.class,
                                 LambdaNetworkConnectorsController.class)),
                 descriptor("apigateway", "apigateway", config.services().apigateway().enabled(), true,

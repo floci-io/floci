@@ -384,6 +384,8 @@ floci:
       # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
       # code-volume-populate-concurrency:     # FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY — max concurrent first-time code-volume populates (default max(2, cpus/2), which a CPU-constrained container collapses to 2)
       executor: docker                        # docker | kubernetes (run Lambda environments as pods)
+      durable-sweep-enabled: true             # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_ENABLED - fire durable execution timers (waits, step retries, execution timeouts, retention)
+      durable-sweep-interval-seconds: 1       # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_INTERVAL_SECONDS
       # kubernetes:
       #   namespace: default                  # Namespace Lambda pods are created in
       #   labels:                             # Extra pod labels, key=value entries

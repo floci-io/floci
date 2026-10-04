@@ -151,6 +151,8 @@ floci:
       honour-architectures: false
       zip-max-entries: 100000
       async-retry-delay-seconds: 1
+      durable-sweep-enabled: true
+      durable-sweep-interval-seconds: 1
       # aws-config-path:
       hot-reload:
         enabled: true

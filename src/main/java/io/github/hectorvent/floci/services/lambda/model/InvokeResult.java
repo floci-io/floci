@@ -11,6 +11,7 @@ public class InvokeResult {
     private String logResult;
     private String requestId;
     private String executedVersion;
+    private String durableExecutionArn;
 
     public InvokeResult() {
     }
@@ -69,5 +70,13 @@ public class InvokeResult {
 
     public void setExecutedVersion(String executedVersion) {
         this.executedVersion = executedVersion;
+    }
+
+    public String getDurableExecutionArn() {
+        return durableExecutionArn;
+    }
+
+    public void setDurableExecutionArn(String durableExecutionArn) {
+        this.durableExecutionArn = durableExecutionArn;
     }
 }

@@ -2709,6 +2709,17 @@ public interface EmulatorConfig {
         @WithDefault("3")
         int defaultTimeoutSeconds();
 
+        /**
+         * Run the background sweep that fires durable execution timers. These are waits, step
+         * retries, execution timeouts and retention expiry. When off, timers are recorded but never fire.
+         */
+        @WithDefault("true")
+        boolean durableSweepEnabled();
+
+        /** How often the durable sweep runs. Waits are whole seconds, so 1s bounds their lateness. */
+        @WithDefault("1")
+        long durableSweepIntervalSeconds();
+
         Optional<String> dockerHostOverride();
 
         /**

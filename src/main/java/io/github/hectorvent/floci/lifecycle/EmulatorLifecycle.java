@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbRuntime;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
+import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
@@ -108,6 +109,7 @@ public class EmulatorLifecycle {
     private final InitLifecycleState initLifecycleState;
     private final SchemaCreationWorker schemaCreationWorker;
     private final StepFunctionsService stepFunctionsService;
+    private final DurableExecutionService durableExecutionService;
     private final Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
     private final DynamoDbRuntime dynamoDbRuntime;
@@ -148,6 +150,7 @@ public class EmulatorLifecycle {
                              InitLifecycleState initLifecycleState,
                              SchemaCreationWorker schemaCreationWorker,
                              StepFunctionsService stepFunctionsService,
+                             DurableExecutionService durableExecutionService,
                              Instance<ContainerTeardown> containerTeardowns,
                              PersistentPathValidator persistentPathValidator,
                              DynamoDbRuntime dynamoDbRuntime,
@@ -187,6 +190,7 @@ public class EmulatorLifecycle {
         this.initLifecycleState = initLifecycleState;
         this.schemaCreationWorker = schemaCreationWorker;
         this.stepFunctionsService = stepFunctionsService;
+        this.durableExecutionService = durableExecutionService;
         this.containerTeardowns = containerTeardowns;
         this.persistentPathValidator = persistentPathValidator;
         this.dynamoDbRuntime = dynamoDbRuntime;
@@ -235,6 +239,9 @@ public class EmulatorLifecycle {
         schemaCreationWorker.recoverOrphans();
         schemaCreationWorker.rehydrateSchemas();
         stepFunctionsService.abortAbandonedExecutions();
+        if (config.services().lambda().enabled()) {
+            durableExecutionService.recoverAfterRestart();
+        }
 
         // The selected DynamoDB backend is ready before any persisted stream consumer reads it.
         dynamoDbRuntime.start();
