@@ -4,7 +4,9 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.core.MediaType;
@@ -27,11 +29,19 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 @Provider
+@Priority(Priorities.AUTHENTICATION)
 public class PreSignedUrlFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(PreSignedUrlFilter.class);
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String LEGACY_SECRET_KEY = "test";
+    private static final Set<String> PRESIGNED_QUERY_PARAMS = Set.of(
+            "X-Amz-Algorithm",
+            "X-Amz-Credential",
+            "X-Amz-Signature",
+            "X-Amz-Date",
+            "X-Amz-SignedHeaders",
+            "X-Amz-Expires");
     private static final Set<String> CHECKSUM_HEADERS_REQUIRING_SIGNATURE =
             Set.of(
                     "x-amz-checksum-algorithm",
@@ -69,9 +79,27 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
         MultivaluedMap<String, String> queryParams = requestContext.getUriInfo().getQueryParameters();
 
+        boolean hasPresignedParam = false;
+        for (String param : PRESIGNED_QUERY_PARAMS) {
+            if (queryParams.containsKey(param)) {
+                hasPresignedParam = true;
+                break;
+            }
+        }
+        if (!hasPresignedParam) {
+            return;
+        }
+
         // Only process if this is a pre-signed URL request
         String algorithm = queryParams.getFirst("X-Amz-Algorithm");
         if (algorithm == null) {
+            requestContext.abortWith(
+                errorResponse(
+                    400,
+                    "AuthorizationQueryParametersError",
+                    "Query-string authentication requires the X-Amz-Algorithm query parameter"
+                )
+            );
             return;
         }
 
