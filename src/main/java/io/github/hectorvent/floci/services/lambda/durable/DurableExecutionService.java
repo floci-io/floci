@@ -487,6 +487,8 @@ public class DurableExecutionService implements Resettable {
             close(execution, DurableExecutionStatus.FAILED, null, error, endedAt, effects);
         } else {
             execution.setNextInvocationAttemptAt(endedAt + (invocationRetryDelayMillis << (failures - 1)));
+            // The retry sees every change, so a wake-up that arrived during this invocation is spent.
+            execution.setReinvokeRequested(false);
         }
     }
 

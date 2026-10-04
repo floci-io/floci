@@ -439,6 +439,30 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void aWakeUpDuringAFailedInvocationDoesNotAddAnInvocationAfterTheRetry() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(waitStart("w1", 1)));
+            return pending();
+        });
+        invoker.script(event -> {
+            clock.advance(Duration.ofSeconds(1));
+            service.sweep();
+            return functionError("{\"errorMessage\":\"crash\",\"errorType\":\"E\"}");
+        });
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(waitStart("w2", 60)));
+            return pending();
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        service.recoverAfterRestart();
+
+        service.sweep();
+
+        assertEquals(3, invoker.events.size(), "the retry is the only invocation after the crash");
+        assertEquals(DurableExecutionStatus.RUNNING, service.get(arn).getStatus());
+    }
+
+    @Test
     void aNewInvocationClearsAPendingRetry() {
         invoker.script(event -> functionError("{\"errorMessage\":\"crash\",\"errorType\":\"E\"}"));
         invoker.script(event -> {
