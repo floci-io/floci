@@ -346,7 +346,9 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
         ObjectNode cleanup = read(attempted, CLEANUP_ATTR);
-        if (cleanup != null && !cleanup.path("retainable").asBoolean()) {
+        if (cleanup == null) {
+            previous.getAttributes().remove(CLEANUP_ATTR);
+        } else if (!cleanup.path("retainable").asBoolean()) {
             previous.getAttributes().put(CLEANUP_ATTR, cleanup.toString());
         }
     }

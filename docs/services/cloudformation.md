@@ -126,6 +126,9 @@ the managed server and retains its tracking if deletion fails. Committed replace
 `UpdateReplacePolicy: Retain`. Otherwise, old-server deletion uses at most three attempts; after
 three failures the old server leaves stack management and must be deleted through Cognito.
 Failed rollback replacements remain tracked for deletion retries. The committed server stays current.
+Historical cleanup that completes successfully stays removed if a later provisioning step fails
+and the committed resource metadata is restored. Failures before cleanup completes keep the
+cleanup record for retry.
 Before retrying historical cleanup, Floci checks live resources managed by other stacks in the same
 account, including stacks in another region. If one manages the same pool and identifier, Floci
 skips deletion and permanently drops that cleanup record. A later deletion of the other stack does
