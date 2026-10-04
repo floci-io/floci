@@ -157,27 +157,29 @@ class RegionIsolationIntegrationTest {
         String eastSharedUrl = createQueue("us-east-1", shared);
         String westSharedUrl = createQueue("us-west-2", shared);
 
-        given()
-            .header("Authorization", sqsAuth("us-east-1"))
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "ListQueues")
-        .when().post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString(eastOnly), containsString(shared), not(containsString(westOnly)));
-        given()
-            .header("Authorization", sqsAuth("us-west-2"))
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "ListQueues")
-        .when().post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString(westOnly), containsString(shared), not(containsString(eastOnly)));
-
-        deleteQueue("us-east-1", eastOnlyUrl);
-        deleteQueue("us-west-2", westOnlyUrl);
-        deleteQueue("us-east-1", eastSharedUrl);
-        deleteQueue("us-west-2", westSharedUrl);
+        try {
+            given()
+                .header("Authorization", sqsAuth("us-east-1"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ListQueues")
+            .when().post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(eastOnly), containsString(shared), not(containsString(westOnly)));
+            given()
+                .header("Authorization", sqsAuth("us-west-2"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ListQueues")
+            .when().post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(westOnly), containsString(shared), not(containsString(eastOnly)));
+        } finally {
+            deleteQueue("us-east-1", eastOnlyUrl);
+            deleteQueue("us-west-2", westOnlyUrl);
+            deleteQueue("us-east-1", eastSharedUrl);
+            deleteQueue("us-west-2", westSharedUrl);
+        }
     }
 
     private static String sqsAuth(String region) {
