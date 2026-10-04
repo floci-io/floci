@@ -32,9 +32,11 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -87,8 +89,10 @@ public class DurableExecutionController {
                              @QueryParam("CheckpointToken") String checkpointToken,
                              @QueryParam("Marker") String marker,
                              @QueryParam("MaxItems") String maxItems) {
+        Integer pageSize = parseMaxItems(maxItems);
+        requireValid(DurableExecutionService.maxItemsViolation(pageSize));
         DurableExecutionService.StatePage page = service.getState(ownedArn(headers, arn), checkpointToken, marker,
-                parseMaxItems(maxItems));
+                pageSize);
         return Response.ok(DurableWire.operations(page.operations(), page.nextMarker())).build();
     }
 
@@ -99,7 +103,9 @@ public class DurableExecutionController {
                                @QueryParam("Marker") String marker,
                                @QueryParam("MaxItems") String maxItems,
                                @QueryParam("ReverseOrder") String reverseOrder) {
-        PaginatedResult<DurableHistoryEvent> page = service.history(ownedArn(headers, arn), parseMaxItems(maxItems), marker,
+        Integer pageSize = parseMaxItems(maxItems);
+        requireValid(DurableExecutionService.maxItemsViolation(pageSize));
+        PaginatedResult<DurableHistoryEvent> page = service.history(ownedArn(headers, arn), pageSize, marker,
                 Boolean.parseBoolean(reverseOrder));
         boolean includeData = Boolean.parseBoolean(includeExecutionData);
         ObjectNode response = objectMapper.createObjectNode();
@@ -153,7 +159,7 @@ public class DurableExecutionController {
         Long after = parseTimestamp(startedAfter);
         Long before = parseTimestamp(startedBefore);
         Integer pageSize = parseMaxItems(maxItems);
-        DurableExecutionService.pageSize(pageSize);
+        requireValid(DurableExecutionService.maxItemsViolation(pageSize), statusesViolation(statuses));
         Set<DurableExecutionStatus> statusFilter = parseStatuses(statuses);
         LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
         boolean qualified = (qualifier != null && !qualifier.isBlank())
@@ -222,29 +228,47 @@ public class DurableExecutionController {
         }
     }
 
+    private static void requireValid(String... violations) {
+        List<String> found = Arrays.stream(violations).filter(Objects::nonNull).toList();
+        if (!found.isEmpty()) {
+            throw DurableExecutionService.validationError(found);
+        }
+    }
+
+    private static String statusesViolation(List<String> statuses) {
+        if (statuses == null) {
+            return null;
+        }
+        for (String status : statuses) {
+            if (!UNMODELLED_STATUSES.contains(status) && !isExecutionStatus(status)) {
+                return "Value '" + statuses + "' at 'statuses' failed to satisfy constraint: Member must satisfy "
+                        + "constraint: [Member must satisfy enum value set: [SUCCEEDED, TIMED_OUT, DELETING, STOPPED, "
+                        + "PAUSED, PAUSING, FAILED, RUNNING], Member must not be null]";
+            }
+        }
+        return null;
+    }
+
+    private static boolean isExecutionStatus(String status) {
+        for (DurableExecutionStatus candidate : DurableExecutionStatus.values()) {
+            if (candidate.name().equals(status)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Values are already valid. A status Floci never assigns matches nothing. */
     private static Set<DurableExecutionStatus> parseStatuses(List<String> statuses) {
         if (statuses == null || statuses.isEmpty()) {
             return null;
         }
-        Set<DurableExecutionStatus> parsed = EnumSet.noneOf(DurableExecutionStatus.class);
-        for (String status : statuses) {
-            if (UNMODELLED_STATUSES.contains(status)) {
-                continue;
-            }
-            try {
-                parsed.add(DurableExecutionStatus.valueOf(status));
-            } catch (IllegalArgumentException e) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + statuses + "' at 'statuses' failed to satisfy "
-                                + "constraint: Member must satisfy constraint: [Member must satisfy enum value set: "
-                                + "[SUCCEEDED, TIMED_OUT, DELETING, STOPPED, PAUSED, PAUSING, FAILED, RUNNING], "
-                                + "Member must not be null]", 400);
-            }
-        }
         if (statuses.size() > 1) {
             throw new AwsException("InvalidParameterValueException", "Cannot filter by more than one status", 400);
         }
-        return parsed;
+        String status = statuses.get(0);
+        return UNMODELLED_STATUSES.contains(status) ? EnumSet.noneOf(DurableExecutionStatus.class)
+                : EnumSet.of(DurableExecutionStatus.valueOf(status));
     }
 
     /** AWS takes ISO 8601, a plain date or epoch seconds. */

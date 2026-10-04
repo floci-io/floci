@@ -88,6 +88,13 @@ class LambdaDurableExecutionApiIntegrationTest {
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
 
+        raw().get(DURABLE + "/durable-executions/" + ENCODED_UNKNOWN_EXECUTION + "/history?MaxItems=-1")
+            .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value '-1' at 'maxItems' failed to satisfy "
+                    + "constraint: Member must have value greater than or equal to 0"));
+
         raw().contentType("application/json").body("{\"CheckpointToken\": \"QUJD\", \"Updates\": []}")
             .post(DURABLE + "/durable-executions/" + UNKNOWN_EXECUTION + "/checkpoint")
             .then()
@@ -215,10 +222,12 @@ class LambdaDurableExecutionApiIntegrationTest {
 
         given()
         .when()
-            .get(DURABLE + "/functions/no-such-durable-fn/durable-executions?MaxItems=5000")
+            .get(DURABLE + "/functions/no-such-durable-fn/durable-executions?Statuses=BOGUS&MaxItems=-1")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", startsWith("2 validation errors detected: Value '-1' at 'maxItems' failed to satisfy "
+                    + "constraint: Member must have value greater than or equal to 0; Value '[BOGUS]' at 'statuses'"));
 
         given()
         .when()

@@ -741,16 +741,30 @@ public class DurableExecutionService implements Resettable {
         return startLocks.computeIfAbsent(accountId + ":" + region, ignored -> new Object());
     }
 
-    static int pageSize(Integer maxItems) {
-        if (maxItems == null || maxItems == 0) {
-            return DEFAULT_PAGE_SIZE;
+    private static int pageSize(Integer maxItems) {
+        String violation = maxItemsViolation(maxItems);
+        if (violation != null) {
+            throw validationError(List.of(violation));
         }
-        if (maxItems < 1 || maxItems > MAX_PAGE_SIZE) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + maxItems + "' at 'maxItems' failed to satisfy "
-                            + "constraint: Member must have value less than or equal to " + MAX_PAGE_SIZE, 400);
+        return maxItems == null || maxItems == 0 ? DEFAULT_PAGE_SIZE : maxItems;
+    }
+
+    /** Null when MaxItems is in range. Zero asks for the default page. */
+    static String maxItemsViolation(Integer maxItems) {
+        if (maxItems == null) {
+            return null;
         }
-        return maxItems;
+        String bound = maxItems < 0 ? "greater than or equal to 0"
+                : MAX_PAGE_SIZE < maxItems ? "less than or equal to " + MAX_PAGE_SIZE : null;
+        return bound == null ? null
+                : "Value '" + maxItems + "' at 'maxItems' failed to satisfy constraint: Member must have value " + bound;
+    }
+
+    /** AWS reports every invalid member of a request in one ValidationException. */
+    static AwsException validationError(List<String> violations) {
+        String count = violations.size() == 1 ? "1 validation error detected: "
+                : violations.size() + " validation errors detected: ";
+        return new AwsException("ValidationException", count + String.join("; ", violations), 400);
     }
 
     private static AwsException invalidMarker() {
