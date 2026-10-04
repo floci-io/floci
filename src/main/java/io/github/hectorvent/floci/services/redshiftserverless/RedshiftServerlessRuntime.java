@@ -105,29 +105,27 @@ public class RedshiftServerlessRuntime {
         try {
             proxyManager.updateMasterPassword(relayKey(accountId, backendId), newPassword);
         } catch (RuntimeException e) {
-            restorePassword(accountId, backendId, masterUsername, dbName, oldPassword);
+            if (oldPassword != null) {
+                try {
+                    containerManager.alterUserPassword(accountId, backendId, masterUsername, oldPassword, dbName);
+                } catch (RuntimeException restoreFailure) {
+                    e.addSuppressed(restoreFailure);
+                }
+            }
             throw e;
         }
     }
 
-    /** Puts the role and the proxy back to {@code password} after a rotation the caller could not store. */
+    /**
+     * Puts the role and the proxy back to {@code password} after a rotation the caller could not
+     * store. The proxy is only reset once the role is, so a failed role restore never leaves the two
+     * disagreeing; the failure propagates instead.
+     */
     public void restoreMasterPassword(String accountId, String region, String workgroupName,
                                       String masterUsername, String dbName, String password) {
         String backendId = backendId(region, workgroupName);
-        restorePassword(accountId, backendId, masterUsername, dbName, password);
+        containerManager.alterUserPassword(accountId, backendId, masterUsername, password, dbName);
         proxyManager.updateMasterPassword(relayKey(accountId, backendId), password);
-    }
-
-    private void restorePassword(String accountId, String backendId, String masterUsername, String dbName,
-                                 String password) {
-        if (password == null) {
-            return;
-        }
-        try {
-            containerManager.alterUserPassword(accountId, backendId, masterUsername, password, dbName);
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Could not restore the master password of workgroup backend {0}", backendId);
-        }
     }
 
     public TempCredential issueCredential(String accountId, String region, String workgroupName,

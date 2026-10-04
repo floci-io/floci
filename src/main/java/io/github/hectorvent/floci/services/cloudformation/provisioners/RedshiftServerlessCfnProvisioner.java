@@ -144,6 +144,9 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
         }
         if (namespace.getDefaultIamRoleArn() != null) {
             r.getAttributes().put("Namespace.DefaultIamRoleArn", namespace.getDefaultIamRoleArn());
+        } else {
+            // An update carries the prior attributes forward, so a role the template dropped must be removed.
+            r.getAttributes().remove("Namespace.DefaultIamRoleArn");
         }
     }
 

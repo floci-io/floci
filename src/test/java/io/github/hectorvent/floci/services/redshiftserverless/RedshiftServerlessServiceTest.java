@@ -643,6 +643,32 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void aFailedPasswordRestoreDoesNotMaskTheStorageFailure() {
+        service.createNamespace("mask-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("mask-wg", "mask-ns");
+        IllegalStateException storageFailure = new IllegalStateException("disk full");
+        doThrow(storageFailure).when(store).put(eq(REGION + "::mask-ns"), any(Namespace.class));
+        doThrow(new RuntimeException("psql failed")).when(runtime)
+                .restoreMasterPassword(any(), any(), any(), any(), any(), any());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> service.updateNamespace("mask-ns", null, "Changed123", null, null, null, null, REGION));
+
+        assertEquals(storageFailure, thrown);
+    }
+
+    @Test
+    void aNamespaceUpdateThatFailsValidationNeverTouchesTheBackendPassword() {
+        service.createNamespace("order-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("order-wg", "order-ns");
+
+        assertThrows(AwsException.class, () -> service.updateNamespace(
+                "order-ns", null, "Changed123", null, null, null, List.of("bogus"), REGION));
+
+        verify(runtime, never()).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void reconcileNamespaceResetsAnOmittedKmsKeyAndDefaultRole() {
         service.createNamespace("rec-ns", "root", null, null, "custom-key", "arn:aws:iam::000000000000:role/r",
                 null, null, Map.of(), REGION);

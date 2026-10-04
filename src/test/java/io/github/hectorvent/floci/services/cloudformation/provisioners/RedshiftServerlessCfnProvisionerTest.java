@@ -211,6 +211,22 @@ class RedshiftServerlessCfnProvisionerTest {
     }
 
     @Test
+    void updateNamespaceDropsTheDefaultRoleAttributeWhenTheTemplateNoLongerDeclaresIt() {
+        when(service.getNamespace("my-ns", REGION)).thenReturn(namespace("my-ns"));
+        when(service.reconcileNamespace(eq("my-ns"), isNull(), isNull(), isNull(), isNull(), anyList(), anyList(),
+                eq(REGION))).thenReturn(namespace("my-ns"));
+        when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
+        ObjectNode props = mapper.createObjectNode();
+        props.put("NamespaceName", "my-ns");
+        StackResource r = resource(NAMESPACE_TYPE, "my-ns");
+        r.getAttributes().put("Namespace.DefaultIamRoleArn", "arn:aws:iam::000000000000:role/old");
+
+        provisioner.provision(r, props, ctx("my-ns"));
+
+        assertFalse(r.getAttributes().containsKey("Namespace.DefaultIamRoleArn"));
+    }
+
+    @Test
     void createWorkgroupMapsEveryPropertyAndRecordsTheEndpointAttributes() {
         when(service.createWorkgroup(eq("my-wg"), eq("my-ns"), any(WorkgroupSettings.class), anyMap(), eq(REGION)))
                 .thenReturn(workgroup("my-wg", "my-ns"));

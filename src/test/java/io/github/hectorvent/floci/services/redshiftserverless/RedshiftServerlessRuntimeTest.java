@@ -136,6 +136,31 @@ class RedshiftServerlessRuntimeTest {
     }
 
     @Test
+    void aFailedRollbackKeepsTheOriginalProxyFailureAsTheThrownError() {
+        RuntimeException proxyFailure = new RuntimeException("proxy gone");
+        doThrow(proxyFailure).when(proxies).updateMasterPassword(RELAY_KEY, "Changed123");
+        doThrow(new RuntimeException("psql failed")).when(containers)
+                .alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> runtime.changeMasterPassword(
+                ACCOUNT, REGION, "my-wg", "root", "analytics", "Secret123", "Changed123"));
+
+        assertEquals(proxyFailure, thrown);
+        assertEquals(1, thrown.getSuppressed().length);
+    }
+
+    @Test
+    void restoreMasterPasswordLeavesTheProxyAloneWhenTheRoleCannotBeRestored() {
+        doThrow(new RuntimeException("psql failed")).when(containers)
+                .alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics");
+
+        assertThrows(RuntimeException.class,
+                () -> runtime.restoreMasterPassword(ACCOUNT, REGION, "my-wg", "root", "analytics", "Secret123"));
+
+        verify(proxies, never()).updateMasterPassword(any(), any());
+    }
+
+    @Test
     void restoreMasterPasswordResetsTheRoleAndTheProxy() {
         runtime.restoreMasterPassword(ACCOUNT, REGION, "my-wg", "root", "analytics", "Secret123");
 

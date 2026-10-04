@@ -236,11 +236,6 @@ public class RedshiftServerlessService implements Resettable {
                 100, 100, "ValidationException");
     }
 
-    /**
-     * Builds the new state on a copy and stores that, rather than mutating the stored instance.
-     * Reads do not take the monitor this method holds, so an in-place mutation lets a concurrent
-     * GetNamespace or ListNamespaces observe a torn object: some fields updated, some not.
-     */
     public synchronized Namespace updateNamespace(String namespaceName, String adminUsername, String kmsKeyId,
                                                   String defaultIamRoleArn, List<String> iamRoles,
                                                   List<String> logExports, String region) {
@@ -274,6 +269,11 @@ public class RedshiftServerlessService implements Resettable {
                 defaultIamRoleArn, iamRoles, logExports, region, true);
     }
 
+    /**
+     * Builds the new state on a copy and stores that, rather than mutating the stored instance.
+     * Reads do not take the monitor the callers hold, so an in-place mutation lets a concurrent
+     * GetNamespace or ListNamespaces observe a torn object: some fields updated, some not.
+     */
     private Namespace applyNamespaceUpdate(String namespaceName, String adminUsername,
                                            String adminUserPassword, String kmsKeyId,
                                            String defaultIamRoleArn, List<String> iamRoles,
@@ -307,7 +307,13 @@ public class RedshiftServerlessService implements Resettable {
             namespaces.put(key, updated);
         } catch (RuntimeException e) {
             if (rotated) {
-                restoreAdminPassword(current, region);
+                try {
+                    restoreAdminPassword(current, region);
+                } catch (RuntimeException restoreFailure) {
+                    LOG.errorv(restoreFailure, "Could not restore the admin password of namespace {0}; "
+                            + "the backend may reject the stored password", namespaceName);
+                    e.addSuppressed(restoreFailure);
+                }
             }
             throw e;
         }
