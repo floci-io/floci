@@ -58,15 +58,14 @@ final class DurableHistory {
         event.setDetails(Map.of("InvocationCompletedDetails", details));
     }
 
-    static DurableHistoryEvent operationEvent(DurableExecution execution, DurableOperation operation, String eventType,
-                                              long now, Map<String, Object> details) {
+    static void operationEvent(DurableExecution execution, DurableOperation operation, String eventType, long now,
+                               Map<String, Object> details) {
         DurableHistoryEvent event = execution.appendEvent(eventType, now);
         event.setId(operation.getId());
         event.setName(operation.getName());
         event.setSubType(operation.getSubType());
         event.setParentId(operation.getParentId());
         event.setDetails(Map.of(eventType + "Details", details));
-        return event;
     }
 
     static Map<String, Object> payloadWrapper(String payload) {
@@ -87,7 +86,7 @@ final class DurableHistory {
         return wrapper;
     }
 
-    static Map<String, Object> errorMap(DurableErrorObject error) {
+    private static Map<String, Object> errorMap(DurableErrorObject error) {
         Map<String, Object> map = new LinkedHashMap<>();
         if (error.getErrorMessage() != null) {
             map.put("ErrorMessage", error.getErrorMessage());

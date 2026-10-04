@@ -137,7 +137,7 @@ public class DurableExecutionService implements Resettable {
         List<Runnable> effects = new ArrayList<>();
         DurableExecution execution;
         synchronized (startLock(request.accountId(), request.region())) {
-            Optional<DurableExecution> existing = store
+            Optional<DurableExecution> existing = request.executionName() == null ? Optional.empty() : store
                     .scanForAccount(request.accountId(), key -> key.startsWith(request.region() + "/"))
                     .stream()
                     .filter(candidate -> name.equals(candidate.getName())
@@ -154,7 +154,7 @@ public class DurableExecutionService implements Resettable {
             }
             long now = clock.millis();
             execution = newExecution(request, target, name, now);
-            trigger(execution, now, effects);
+            trigger(execution, effects);
             store.putForAccount(request.accountId(), storeKey(execution), execution);
         }
         runEffects(effects);
@@ -181,7 +181,9 @@ public class DurableExecutionService implements Resettable {
 
     /** A non-null but empty {@code statuses} matches nothing, and the page parameters are still checked. */
     public PaginatedResult<DurableExecution> list(ListRequest request) {
-        List<DurableExecution> matching = new ArrayList<>();
+        // Pagination orders by the cursor string, so the cursor carries the direction. Newest first is the default.
+        boolean oldestFirst = request.reverseOrder();
+        List<Cursored<DurableExecution>> matching = new ArrayList<>();
         boolean matchesNothing = request.statuses() != null && request.statuses().isEmpty();
         List<DurableExecution> candidates = matchesNothing ? List.of() : store.scanForAccount(request.accountId(),
                 key -> key.startsWith(request.region() + "/"));
@@ -204,25 +206,24 @@ public class DurableExecutionService implements Resettable {
             if (request.startedBefore() != null && request.startedBefore() <= execution.getStartTimestamp()) {
                 continue;
             }
-            matching.add(execution);
+            matching.add(new Cursored<>(orderedCursor(execution.getStartTimestamp(), oldestFirst) + ":"
+                    + execution.getExecutionId(), execution));
         }
-        // Pagination orders by the cursor string, so the cursor carries the direction. Newest first is the default.
-        boolean oldestFirst = request.reverseOrder();
-        return Pagination.paginate(matching,
-                execution -> orderedCursor(execution.getStartTimestamp(), oldestFirst) + ":" + execution.getExecutionId(),
-                pageSize(request.maxItems()), request.marker(),
-                oldestFirst ? "durable-executions-asc" : "durable-executions-desc", ignored -> invalidMarker());
+        return paginate(matching, pageSize(request.maxItems()), request.marker(),
+                oldestFirst ? "durable-executions-asc" : "durable-executions-desc");
     }
 
     public PaginatedResult<DurableHistoryEvent> history(String executionArn, Integer maxItems, String marker,
                                                         boolean reverseOrder) {
         ArnParts arn = parseArn(executionArn);
-        List<DurableHistoryEvent> events;
+        List<Cursored<DurableHistoryEvent>> events = new ArrayList<>();
         synchronized (lockFor(arn)) {
-            events = new ArrayList<>(load(arn).getHistory());
+            for (DurableHistoryEvent event : load(arn).getHistory()) {
+                events.add(new Cursored<>(orderedCursor(event.getEventId(), !reverseOrder), event));
+            }
         }
-        return Pagination.paginate(events, event -> orderedCursor(event.getEventId(), !reverseOrder), pageSize(maxItems),
-                marker, reverseOrder ? "durable-history-desc" : "durable-history-asc", ignored -> invalidMarker());
+        return paginate(events, pageSize(maxItems), marker,
+                reverseOrder ? "durable-history-desc" : "durable-history-asc");
     }
 
     /** A fixed-width cursor that sorts ascending, or descending when the page runs newest first. */
@@ -242,10 +243,7 @@ public class DurableExecutionService implements Resettable {
             if (!outcome.closed()) {
                 DurableCheckpointApplier.fireDueTimers(execution, now);
             }
-            List<DurableOperation> changed = execution.getOperations().values().stream()
-                    .filter(operation -> operation.getChangeSequence() > execution.getSeenSequence())
-                    .sorted(Comparator.comparingLong(DurableOperation::getChangeSequence))
-                    .toList();
+            List<DurableOperation> changed = unseenOperations(execution);
             String nextToken = null;
             if (outcome.closed()) {
                 closeBookkeeping(execution, now, effects);
@@ -270,14 +268,12 @@ public class DurableExecutionService implements Resettable {
             requireCurrentToken(execution, checkpointToken);
             operations = new ArrayList<>(execution.getOperations().values());
         }
-        List<IndexedOperation> indexed = new ArrayList<>(operations.size());
+        List<Cursored<DurableOperation>> indexed = new ArrayList<>(operations.size());
         for (int i = 0; i < operations.size(); i++) {
-            indexed.add(new IndexedOperation(String.format("%010d", i), operations.get(i)));
+            indexed.add(new Cursored<>(String.format("%010d", i), operations.get(i)));
         }
-        PaginatedResult<IndexedOperation> page = Pagination.paginate(indexed, IndexedOperation::cursor,
-                pageSize(maxItems), marker, "durable-state", ignored -> invalidMarker());
-        return new StatePage(page.items().stream().map(IndexedOperation::operation).toList(),
-                page.nextToken() != null ? page.nextToken() : "");
+        PaginatedResult<DurableOperation> page = paginate(indexed, pageSize(maxItems), marker, "durable-state");
+        return new StatePage(page.items(), page.nextToken() != null ? page.nextToken() : "");
     }
 
     /** Stopping a closed execution changes nothing and reports the time it closed. */
@@ -322,13 +318,13 @@ public class DurableExecutionService implements Resettable {
                     changed = true;
                 } else {
                     if (DurableCheckpointApplier.fireDueTimers(execution, now)) {
-                        trigger(execution, now, effects);
+                        trigger(execution, effects);
                         changed = true;
                     }
                     if (execution.getCurrentInvocationId() == null && execution.getNextInvocationAttemptAt() != null
                             && execution.getNextInvocationAttemptAt() <= now) {
                         execution.setNextInvocationAttemptAt(null);
-                        trigger(execution, now, effects);
+                        trigger(execution, effects);
                         changed = true;
                     }
                 }
@@ -354,11 +350,10 @@ public class DurableExecutionService implements Resettable {
                     continue;
                 }
                 execution.setCurrentInvocationId(null);
-                execution.setCurrentInvocationStartedAt(null);
                 execution.setReinvokeRequested(false);
                 // A crash retry keeps its backoff, and the sweeper relaunches it when it is due.
                 if (execution.getNextInvocationAttemptAt() == null) {
-                    trigger(execution, clock.millis(), effects);
+                    trigger(execution, effects);
                 }
                 save(execution);
                 recovered++;
@@ -392,7 +387,7 @@ public class DurableExecutionService implements Resettable {
 
     // ──────────────────────────── invocation lane ────────────────────────────
 
-    private void trigger(DurableExecution execution, long now, List<Runnable> effects) {
+    private void trigger(DurableExecution execution, List<Runnable> effects) {
         if (execution.getCurrentInvocationId() != null) {
             execution.setReinvokeRequested(true);
             return;
@@ -400,7 +395,6 @@ public class DurableExecutionService implements Resettable {
         String invocationId = UUID.randomUUID().toString();
         execution.setCurrentInvocationId(invocationId);
         execution.setNextInvocationAttemptAt(null);
-        execution.setCurrentInvocationStartedAt(now);
         String accountId = execution.getAccountId();
         String key = storeKey(execution);
         long launchGeneration = generation.get();
@@ -420,11 +414,7 @@ public class DurableExecutionService implements Resettable {
             startedAt = clock.millis();
             String token = DurableTokens.checkpointToken(execution.getExecutionArn(), invocationId,
                     execution.getCheckpointSequence());
-            List<String> updatedOperationIds = execution.getOperations().values().stream()
-                    .filter(operation -> operation.getChangeSequence() > execution.getSeenSequence())
-                    .sorted(Comparator.comparingLong(DurableOperation::getChangeSequence))
-                    .map(DurableOperation::getId)
-                    .toList();
+            List<String> updatedOperationIds = unseenOperations(execution).stream().map(DurableOperation::getId).toList();
             try {
                 target = invoker.resolve(accountId, execution.getRegion(), execution.getFunctionName(),
                         execution.getVersion());
@@ -437,7 +427,6 @@ public class DurableExecutionService implements Resettable {
             }
             // The event carries every operation, so the handler has now seen everything up to here.
             execution.setSeenSequence(execution.getChangeSequence());
-            save(execution);
         }
         DurableInvocationResult result;
         if (target == null) {
@@ -466,7 +455,6 @@ public class DurableExecutionService implements Resettable {
             long endedAt = clock.millis();
             String requestId = result.requestId() != null ? result.requestId() : UUID.randomUUID().toString();
             execution.setCurrentInvocationId(null);
-            execution.setCurrentInvocationStartedAt(null);
             if (execution.isClosed()) {
                 DurableHistory.invocationCompleted(execution, startedAt, endedAt, requestId, null);
             } else if (result.functionError() != null) {
@@ -476,7 +464,7 @@ public class DurableExecutionService implements Resettable {
                 recordHandlerResponse(execution, result.payload(), startedAt, endedAt, requestId, effects);
                 if (!execution.isClosed() && (execution.isReinvokeRequested() || execution.hasUnseenChanges())) {
                     execution.setReinvokeRequested(false);
-                    trigger(execution, endedAt, effects);
+                    trigger(execution, effects);
                 }
             }
             save(execution);
@@ -510,16 +498,14 @@ public class DurableExecutionService implements Resettable {
             close(execution, DurableExecutionStatus.FAILED, null, error, endedAt, effects);
             return;
         }
+        boolean failed = "FAILED".equals(response.status());
+        DurableHistory.invocationCompleted(execution, startedAt, endedAt, requestId, failed ? response.error() : null);
         switch (response.status()) {
-            case "SUCCEEDED" -> {
-                DurableHistory.invocationCompleted(execution, startedAt, endedAt, requestId, null);
-                close(execution, DurableExecutionStatus.SUCCEEDED, response.result(), null, endedAt, effects);
+            case "SUCCEEDED" -> close(execution, DurableExecutionStatus.SUCCEEDED, response.result(), null, endedAt,
+                    effects);
+            case "FAILED" -> close(execution, DurableExecutionStatus.FAILED, null, response.error(), endedAt, effects);
+            default -> {
             }
-            case "FAILED" -> {
-                DurableHistory.invocationCompleted(execution, startedAt, endedAt, requestId, response.error());
-                close(execution, DurableExecutionStatus.FAILED, null, response.error(), endedAt, effects);
-            }
-            default -> DurableHistory.invocationCompleted(execution, startedAt, endedAt, requestId, null);
         }
     }
 
@@ -530,7 +516,7 @@ public class DurableExecutionService implements Resettable {
         }
         return switch (response.status()) {
             case "SUCCEEDED" -> response.error() != null ? "Cannot provide an Error for SUCCEEDED status."
-                    : response.result() != null && utf8Length(response.result()) > execution.getMaxResultBytes()
+                    : DurableCheckpointApplier.utf8Length(response.result()) > execution.getMaxResultBytes()
                     ? "Execution output payload size must be less than or equal to "
                             + execution.getMaxResultBytes() + " bytes." : null;
             case "FAILED" -> response.result() != null ? "Cannot provide a Result for FAILED status." : null;
@@ -572,7 +558,6 @@ public class DurableExecutionService implements Resettable {
         execution.setExecutionTimeoutSeconds(target.executionTimeoutSeconds());
         execution.setRetentionPeriodInDays(target.retentionPeriodInDays());
         execution.setExecutionDeadline(now + target.executionTimeoutSeconds() * 1000L);
-        execution.setSynchronous(request.synchronous());
         execution.setMaxResultBytes(request.synchronous() ? SYNC_PAYLOAD_LIMIT : ASYNC_PAYLOAD_LIMIT);
 
         DurableOperation root = new DurableOperation();
@@ -646,6 +631,13 @@ public class DurableExecutionService implements Resettable {
         return store.getForAccount(arn.accountId(), arn.storeKey())
                 .filter(execution -> execution.getExecutionArn().equals(arn.arn()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", NOT_FOUND, 404));
+    }
+
+    private static List<DurableOperation> unseenOperations(DurableExecution execution) {
+        return execution.getOperations().values().stream()
+                .filter(operation -> operation.getChangeSequence() > execution.getSeenSequence())
+                .sorted(Comparator.comparingLong(DurableOperation::getChangeSequence))
+                .toList();
     }
 
     private static void runEffects(List<Runnable> effects) {
@@ -723,10 +715,6 @@ public class DurableExecutionService implements Resettable {
         return new AwsException("InvalidParameterValueException", "Invalid Marker", 400);
     }
 
-    private static int utf8Length(String value) {
-        return value.getBytes(StandardCharsets.UTF_8).length;
-    }
-
     private DurableErrorObject errorFromLambdaPayload(byte[] payload, String functionError) {
         if (payload != null && payload.length > 0) {
             try {
@@ -751,6 +739,13 @@ public class DurableExecutionService implements Resettable {
         return DurableErrorObject.of("Function invocation failed", functionError);
     }
 
-    private record IndexedOperation(String cursor, DurableOperation operation) {
+    private static <T> PaginatedResult<T> paginate(List<Cursored<T>> items, int pageSize, String marker,
+                                                   String namespace) {
+        PaginatedResult<Cursored<T>> page = Pagination.paginate(items, Cursored::cursor, pageSize, marker, namespace,
+                ignored -> invalidMarker());
+        return new PaginatedResult<>(page.items().stream().map(Cursored::item).toList(), page.nextToken());
+    }
+
+    private record Cursored<T>(String cursor, T item) {
     }
 }

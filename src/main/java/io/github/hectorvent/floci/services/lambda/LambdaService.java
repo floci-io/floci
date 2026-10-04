@@ -1276,25 +1276,26 @@ public class LambdaService implements ResourceProvider {
             finished = durableExecutionService.awaitCompletion(executionArn)
                     .get(MAX_FUNCTION_TIMEOUT_SECONDS + SYNC_DURABLE_GRACE_SECONDS, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
-            return new InvokeResult(200, "Unhandled", DurableWire.functionErrorPayload(DurableErrorObject.of(
+            return unhandledDurableResult(DurableErrorObject.of(
                     "Durable execution " + executionArn + " did not finish within 15 minutes",
-                    "DurableExecution.InvocationTimedOut")), null, requestId);
+                    "DurableExecution.InvocationTimedOut"), requestId);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return new InvokeResult(200, "Unhandled", DurableWire.functionErrorPayload(DurableErrorObject.of(
-                    "Invocation interrupted", "Interrupted")), null, requestId);
+            return unhandledDurableResult(DurableErrorObject.of("Invocation interrupted", "Interrupted"), requestId);
         } catch (ExecutionException e) {
-            return new InvokeResult(200, "Unhandled", DurableWire.functionErrorPayload(DurableErrorObject.of(
-                    e.getCause() != null ? e.getCause().getMessage() : e.getMessage(), "InvocationError")), null,
-                    requestId);
+            return unhandledDurableResult(DurableErrorObject.of(
+                    e.getCause() != null ? e.getCause().getMessage() : e.getMessage(), "InvocationError"), requestId);
         }
         if (finished.getStatus() == DurableExecutionStatus.SUCCEEDED) {
             byte[] body = finished.getResult() == null ? new byte[0]
                     : finished.getResult().getBytes(StandardCharsets.UTF_8);
             return new InvokeResult(200, null, body, null, requestId);
         }
-        return new InvokeResult(200, "Unhandled", DurableWire.functionErrorPayload(finished.getError()), null,
-                requestId);
+        return unhandledDurableResult(finished.getError(), requestId);
+    }
+
+    private static InvokeResult unhandledDurableResult(DurableErrorObject error, String requestId) {
+        return new InvokeResult(200, "Unhandled", DurableWire.functionErrorPayload(error), null, requestId);
     }
 
     /**

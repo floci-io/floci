@@ -118,7 +118,7 @@ final class DurableCheckpointApplier {
         return (int) ((operation.getScheduledEndTimestamp() - operation.getStartTimestamp()) / 1000);
     }
 
-    private static int utf8Length(String value) {
+    static int utf8Length(String value) {
         return value == null ? 0 : value.getBytes(StandardCharsets.UTF_8).length;
     }
 

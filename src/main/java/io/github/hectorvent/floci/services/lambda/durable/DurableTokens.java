@@ -5,8 +5,7 @@ import java.util.Base64;
 import java.util.Optional;
 
 /**
- * Opaque tokens of the durable execution protocol. Both are standard base64, which is the shape
- * AWS documents for CheckpointToken and CallbackId.
+ * The opaque CheckpointToken of the durable execution protocol, standard base64 as AWS documents it.
  */
 final class DurableTokens {
 

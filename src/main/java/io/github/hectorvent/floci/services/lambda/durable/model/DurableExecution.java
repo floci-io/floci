@@ -40,7 +40,6 @@ public class DurableExecution {
     private Long executionDeadline;
     private Long retentionDeadline;
     private int maxResultBytes;
-    private boolean synchronous;
     /** Creation order. The EXECUTION operation is first. */
     private LinkedHashMap<String, DurableOperation> operations = new LinkedHashMap<>();
     private List<DurableHistoryEvent> history = new ArrayList<>();
@@ -49,12 +48,9 @@ public class DurableExecution {
     private long seenSequence;
     private long checkpointSequence;
     private String currentInvocationId;
-    private Long currentInvocationStartedAt;
     private boolean reinvokeRequested;
     private int consecutiveInvocationFailures;
     private Long nextInvocationAttemptAt;
-    private String parentExecutionArn;
-    private String parentOperationId;
 
     public DurableExecution() {
     }
@@ -69,7 +65,7 @@ public class DurableExecution {
         return changeSequence > seenSequence;
     }
 
-    /** True while an operation still waits on a timer, a callback or another function. */
+    /** True while a wait or a step retry is still pending. */
     @JsonIgnore
     public boolean hasPendingOperations() {
         for (DurableOperation operation : operations.values()) {
@@ -166,9 +162,6 @@ public class DurableExecution {
     public int getMaxResultBytes() { return maxResultBytes; }
     public void setMaxResultBytes(int maxResultBytes) { this.maxResultBytes = maxResultBytes; }
 
-    public boolean isSynchronous() { return synchronous; }
-    public void setSynchronous(boolean synchronous) { this.synchronous = synchronous; }
-
     public LinkedHashMap<String, DurableOperation> getOperations() { return operations; }
     public void setOperations(LinkedHashMap<String, DurableOperation> operations) { this.operations = operations; }
 
@@ -187,11 +180,6 @@ public class DurableExecution {
     public String getCurrentInvocationId() { return currentInvocationId; }
     public void setCurrentInvocationId(String currentInvocationId) { this.currentInvocationId = currentInvocationId; }
 
-    public Long getCurrentInvocationStartedAt() { return currentInvocationStartedAt; }
-    public void setCurrentInvocationStartedAt(Long currentInvocationStartedAt) {
-        this.currentInvocationStartedAt = currentInvocationStartedAt;
-    }
-
     public boolean isReinvokeRequested() { return reinvokeRequested; }
     public void setReinvokeRequested(boolean reinvokeRequested) { this.reinvokeRequested = reinvokeRequested; }
 
@@ -204,10 +192,4 @@ public class DurableExecution {
     public void setNextInvocationAttemptAt(Long nextInvocationAttemptAt) {
         this.nextInvocationAttemptAt = nextInvocationAttemptAt;
     }
-
-    public String getParentExecutionArn() { return parentExecutionArn; }
-    public void setParentExecutionArn(String parentExecutionArn) { this.parentExecutionArn = parentExecutionArn; }
-
-    public String getParentOperationId() { return parentOperationId; }
-    public void setParentOperationId(String parentOperationId) { this.parentOperationId = parentOperationId; }
 }
