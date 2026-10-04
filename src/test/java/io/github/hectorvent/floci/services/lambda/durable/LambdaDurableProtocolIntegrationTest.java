@@ -260,6 +260,19 @@ class LambdaDurableProtocolIntegrationTest {
 
         given()
             .urlEncodingEnabled(false)
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=000000000000/20260101/us-west-2/lambda/"
+                    + "aws4_request, SignedHeaders=host, Signature=abc")
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post(DURABLE + "/durable-executions/" + arn + "/stop")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"))
+            .body("message", equalTo("Function not found"));
+
+        given()
+            .urlEncodingEnabled(false)
             .header("Authorization", "AWS4-HMAC-SHA256 Credential=111111111111/20260101/us-east-1/lambda/"
                     + "aws4_request, SignedHeaders=host, Signature=abc")
             .contentType("application/json")

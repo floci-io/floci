@@ -67,9 +67,9 @@ public class DurableExecutionController {
 
     @POST
     @Path("/durable-executions/{arn: .+}/checkpoint")
-    public Response checkpoint(@PathParam("arn") String arn, String body) {
+    public Response checkpoint(@Context HttpHeaders headers, @PathParam("arn") String arn, String body) {
         Map<String, Object> request = readObject(body);
-        DurableExecutionService.CheckpointResult result = service.checkpoint(ownedArn(arn),
+        DurableExecutionService.CheckpointResult result = service.checkpoint(ownedArn(headers, arn),
                 stringMember(request, "CheckpointToken"), DurableWire.parseUpdates(request.get("Updates")));
         ObjectNode response = objectMapper.createObjectNode();
         if (result.checkpointToken() != null) {
@@ -81,23 +81,23 @@ public class DurableExecutionController {
 
     @GET
     @Path("/durable-executions/{arn: .+}/state")
-    public Response getState(@PathParam("arn") String arn,
+    public Response getState(@Context HttpHeaders headers, @PathParam("arn") String arn,
                              @QueryParam("CheckpointToken") String checkpointToken,
                              @QueryParam("Marker") String marker,
                              @QueryParam("MaxItems") String maxItems) {
-        DurableExecutionService.StatePage page = service.getState(ownedArn(arn), checkpointToken, marker,
+        DurableExecutionService.StatePage page = service.getState(ownedArn(headers, arn), checkpointToken, marker,
                 parseMaxItems(maxItems));
         return Response.ok(DurableWire.operations(page.operations(), page.nextMarker())).build();
     }
 
     @GET
     @Path("/durable-executions/{arn: .+}/history")
-    public Response getHistory(@PathParam("arn") String arn,
+    public Response getHistory(@Context HttpHeaders headers, @PathParam("arn") String arn,
                                @QueryParam("IncludeExecutionData") String includeExecutionData,
                                @QueryParam("Marker") String marker,
                                @QueryParam("MaxItems") String maxItems,
                                @QueryParam("ReverseOrder") String reverseOrder) {
-        PaginatedResult<DurableHistoryEvent> page = service.history(ownedArn(arn), parseMaxItems(maxItems), marker,
+        PaginatedResult<DurableHistoryEvent> page = service.history(ownedArn(headers, arn), parseMaxItems(maxItems), marker,
                 Boolean.parseBoolean(reverseOrder));
         boolean includeData = Boolean.parseBoolean(includeExecutionData);
         ObjectNode response = objectMapper.createObjectNode();
@@ -113,13 +113,13 @@ public class DurableExecutionController {
 
     @POST
     @Path("/durable-executions/{arn: .+}/stop")
-    public Response stop(@PathParam("arn") String arn, String body) {
+    public Response stop(@Context HttpHeaders headers, @PathParam("arn") String arn, String body) {
         DurableErrorObject error = body == null || body.isBlank() ? null : DurableWire.parseError(readObject(body));
         if (error != null && error.getErrorMessage() == null && error.getErrorType() == null
                 && error.getErrorData() == null && error.getStackTrace() == null) {
             error = null;
         }
-        DurableExecution execution = service.stop(ownedArn(arn), error);
+        DurableExecution execution = service.stop(ownedArn(headers, arn), error);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("StopTimestamp", execution.getEndTimestamp() / 1000.0);
         return Response.ok(response).build();
@@ -128,10 +128,10 @@ public class DurableExecutionController {
     /** IncludeExecutionData defaults to true here, unlike GetDurableExecutionHistory. */
     @GET
     @Path("/durable-executions/{arn: .+}")
-    public Response getExecution(@PathParam("arn") String arn,
+    public Response getExecution(@Context HttpHeaders headers, @PathParam("arn") String arn,
                                  @QueryParam("IncludeExecutionData") String includeExecutionData) {
         boolean includeData = includeExecutionData == null || Boolean.parseBoolean(includeExecutionData);
-        return Response.ok(DurableWire.execution(service.get(ownedArn(arn)), includeData)).build();
+        return Response.ok(DurableWire.execution(service.get(ownedArn(headers, arn)), includeData)).build();
     }
 
     @GET
@@ -169,10 +169,17 @@ public class DurableExecutionController {
         return Response.ok(response).build();
     }
 
-    /** An execution of another account is not found, as AWS gives no cross-account access to executions. */
-    private String ownedArn(String arn) {
-        if (!DurableExecutionService.parseArn(arn).accountId().equals(regionResolver.getAccountId())) {
+    /**
+     * An execution of another account is not found. One of another region reads as "Function not found",
+     * as AWS answers for an execution ARN of another region.
+     */
+    private String ownedArn(HttpHeaders headers, String arn) {
+        DurableExecutionService.ArnParts parts = DurableExecutionService.parseArn(arn);
+        if (!parts.accountId().equals(regionResolver.getAccountId())) {
             throw new AwsException("ResourceNotFoundException", DurableExecutionService.NOT_FOUND, 404);
+        }
+        if (!parts.region().equals(regionResolver.resolveRegion(headers))) {
+            throw new AwsException("ResourceNotFoundException", "Function not found", 404);
         }
         return arn;
     }
