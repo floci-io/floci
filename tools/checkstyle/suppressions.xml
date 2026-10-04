@@ -11,7 +11,6 @@
     <suppress id="NoVar" files="/floci/core/common/IamEnforcementFilter\.java$"/>
     <suppress id="NoVar" files="/floci/services/apigateway/ApiGatewayService\.java$"/>
     <suppress id="NoVar" files="/floci/services/bedrockruntime/backend/BedrockOpenAiTranslator\.java$"/>
-    <suppress id="NoVar" files="/floci/services/cloudformation/CloudFormationDeletionPolicyIntegrationTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/cloudformation/CloudFormationIntegrationTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/cloudformation/CloudFormationService\.java$"/>
     <suppress id="NoVar" files="/floci/services/cognito/CognitoLambdaTriggersTest\.java$"/>
@@ -25,15 +24,9 @@
     <suppress id="NoVar" files="/floci/services/eks/EksServiceTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/eventbridge/EventBridgeInvoker\.java$"/>
     <suppress id="NoVar" files="/floci/services/eventbridge/EventBridgeService\.java$"/>
-    <suppress id="NoVar" files="/floci/services/glue/schemaregistry/GlueSchemaRegistryServiceTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/glue/schemaregistry/SchemaCompatibilityCheckerTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/iam/StsQueryHandler\.java$"/>
     <suppress id="NoVar" files="/floci/services/lambda/LambdaService\.java$"/>
-    <suppress id="NoVar" files="/floci/services/rds/RdsServiceTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/s3/S3Controller\.java$"/>
     <suppress id="NoVar" files="/floci/services/s3/S3Service\.java$"/>
     <suppress id="NoVar" files="/floci/services/s3/S3ServiceTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/s3/S3VersioningIntegrationTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/scheduler/SchedulerIntegrationTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/stepfunctions/StepFunctionsAwsSdkTaskIntegrationTest\.java$"/>
 </suppressions>
