@@ -20,6 +20,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -30,6 +32,9 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class ResourceArnBuilder {
+
+    private static final Pattern DURABLE_EXECUTION_ARN = Pattern.compile(
+            "arn:[^:/]+:lambda:[^:/]+:\\d{12}:function:[^:/]+:[^:/]+/durable-execution/[^/]+/[^/]+");
 
     /**
      * The IAM actions whose resource this builder can name. Deliberately only the
@@ -221,11 +226,12 @@ public class ResourceArnBuilder {
 
     // ── Lambda ──────────────────────────────────────────────────────────────────
     private String buildLambdaArn(String path, String region, String accountId) {
+        String executionArn = durableExecutionArn(path);
+        if (executionArn != null) {
+            return executionArn;
+        }
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
-        if (name == null) {
-            name = durableExecutionFunctionName(path);
-        }
         if (name == null) return "*";
         // strip qualifier if present
         int colon = name.indexOf(':');
@@ -233,20 +239,15 @@ public class ResourceArnBuilder {
         return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
     }
 
-    /** Durable execution actions are authorized against the function that owns the execution ARN. */
-    private static String durableExecutionFunctionName(String path) {
-        int executions = path.indexOf("/durable-executions/");
+    /** Durable execution actions are authorized against the execution ARN, which carries the version. */
+    private static String durableExecutionArn(String path) {
+        String prefix = "/durable-executions/";
+        int executions = path.indexOf(prefix);
         if (executions < 0) {
             return null;
         }
-        String marker = ":function:";
-        int function = path.indexOf(marker, executions);
-        if (function < 0) {
-            return null;
-        }
-        int start = function + marker.length();
-        int end = path.indexOf(':', start);
-        return end > start ? path.substring(start, end) : null;
+        Matcher matcher = DURABLE_EXECUTION_ARN.matcher(path.substring(executions + prefix.length()));
+        return matcher.lookingAt() ? matcher.group() : null;
     }
 
     // ── SQS ─────────────────────────────────────────────────────────────────────
