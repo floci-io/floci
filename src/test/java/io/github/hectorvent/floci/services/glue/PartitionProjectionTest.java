@@ -426,4 +426,21 @@ class PartitionProjectionTest {
                 "SELECT * FROM audit_events WHERE tenant IN (concat('a', 'b'), 'c')",
                 List.of(injectedTenantTable())));
     }
+
+    @Test
+    void functionNameOrCastTypeMatchingSourceColumnIsNotTakenForAColumnReference() {
+        Table tableWithCollidingCols = table("audit_events", projecting("projection.tenant.type", "injected"),
+                List.of(column("tenant")));
+        tableWithCollidingCols.getStorageDescriptor().setColumns(List.of(
+                column("id"), column("lower"), column("varchar"), column("suffix")));
+
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = lower('ABC')", List.of(tableWithCollidingCols)));
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = CAST(123 AS varchar)", List.of(tableWithCollidingCols)));
+
+        // A column reference inside the function must still be rejected
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE tenant = lower(suffix)", List.of(tableWithCollidingCols)));
+    }
 }

@@ -669,14 +669,24 @@ public final class PartitionProjection {
         }
         for (String col : sourceColumns) {
             Pattern pattern = Pattern.compile("(?<![A-Za-z0-9_$])" + identifierPattern(col)
-                    + "(?![A-Za-z0-9_$])", Pattern.CASE_INSENSITIVE);
-            if (pattern.matcher(expr).find()) {
+                    + "(?![A-Za-z0-9_$])(?!\\s*\\()", Pattern.CASE_INSENSITIVE);
+            Matcher matcher = pattern.matcher(expr);
+            while (matcher.find()) {
+                int matchStart = matcher.start();
+                int b = matchStart - 1;
+                while (b >= 0 && Character.isWhitespace(expr.charAt(b))) {
+                    b--;
+                }
+                if (b >= 1 && expr.regionMatches(true, b - 1, "AS", 0, 2)
+                        && isWordBoundary(expr, b - 1, 2)) {
+                    continue;
+                }
                 return true;
             }
         }
         for (String alias : sourceAliases) {
             Pattern pattern = Pattern.compile("(?<![A-Za-z0-9_$])" + identifierPattern(alias)
-                    + "\\s*\\.\\s*" + IDENTIFIER, Pattern.CASE_INSENSITIVE);
+                    + "\\s*\\.\\s*" + IDENTIFIER + "(?!\\s*\\()", Pattern.CASE_INSENSITIVE);
             if (pattern.matcher(expr).find()) {
                 return true;
             }
