@@ -39,6 +39,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -58,6 +59,8 @@ class AslExecutorLambdaArnTargetTest {
     private static final String FUNCTION_NAME = "worker";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private LambdaExecutorService lambdaExecutor;
+    private LambdaFunctionStore functionStore;
     private AslExecutor executor;
 
     @Inject
@@ -65,8 +68,8 @@ class AslExecutorLambdaArnTargetTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        LambdaExecutorService lambdaExecutor = mock(LambdaExecutorService.class);
-        LambdaFunctionStore functionStore = mock(LambdaFunctionStore.class);
+        lambdaExecutor = mock(LambdaExecutorService.class);
+        functionStore = mock(LambdaFunctionStore.class);
         LambdaFunction home = function(ACCOUNT, REGION);
         LambdaFunction otherRegion = function(ACCOUNT, OTHER_REGION);
         LambdaFunction otherAccount = function(OTHER_ACCOUNT, REGION);
@@ -80,7 +83,11 @@ class AslExecutorLambdaArnTargetTest {
                     .thenReturn(new InvokeResult(200, null, output, null, "request"));
         }
 
-        executor = new AslExecutor(
+        executor = newExecutor(mock(EmulatorConfig.class));
+    }
+
+    private AslExecutor newExecutor(EmulatorConfig config) {
+        return new AslExecutor(
                 lambdaExecutor,
                 new LambdaTargetResolver(functionStore, mock(LambdaAliasStore.class)),
                 mock(DynamoDbFacade.class),
@@ -97,7 +104,7 @@ class AslExecutorLambdaArnTargetTest {
                 null,
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class), mock(EmulatorConfig.class), vertx, null);
+                mock(Instance.class), config, vertx, null);
     }
 
     private static LambdaFunction function(String account, String region) {
@@ -145,6 +152,20 @@ class AslExecutorLambdaArnTargetTest {
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("Lambda.InvalidParameterValueException", execution.getError());
+    }
+
+    @Test
+    void underIamEnforcementAFunctionArnInAnotherAccountIsRefused() {
+        EmulatorConfig enforcing = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(enforcing.services().iam().enforcementEnabled()).thenReturn(true);
+        executor = newExecutor(enforcing);
+
+        Execution execution = run("""
+                {"StartAt": "Call", "States": {"Call": {"Type": "Task", "Resource": "%s", "End": true}}}
+                """.formatted(functionArn(OTHER_ACCOUNT, REGION)));
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Lambda.AccessDeniedException", execution.getError());
     }
 
     private Execution run(String definition) {

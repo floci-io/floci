@@ -1030,6 +1030,11 @@ public class AslExecutor {
         return colon >= 0 ? fn.substring(colon + 1) : null;
     }
 
+    private boolean iamEnforcementEnabled() {
+        return config != null && config.services() != null && config.services().iam() != null
+                && config.services().iam().enforcementEnabled();
+    }
+
     /** {@code accountId} is null for the state machine's own account, the account the execution runs in. */
     private LambdaFunction resolveLambdaFunction(String accountId, String region, String name, String qualifier) {
         try {
@@ -1135,6 +1140,14 @@ public class AslExecutor {
             String region = ref.region() != null ? ref.region() : stateMachineArn.region();
             String accountId = ref.account() == null || ref.account().equals(stateMachineArn.accountId())
                     ? null : ref.account();
+            // Floci evaluates no Lambda resource policy, so under IAM enforcement it answers a
+            // cross-account function as its own Invoke API does: refused.
+            if (accountId != null && iamEnforcementEnabled()) {
+                throw new FailStateException("Lambda.AccessDeniedException",
+                        "User: " + sm.getRoleArn() + " is not authorized to perform: lambda:InvokeFunction"
+                                + " on resource: " + functionRef
+                                + " because no resource-based policy allows the lambda:InvokeFunction action");
+            }
             LambdaFunction fn = resolveLambdaFunction(accountId, region, functionName,
                     extractLambdaQualifier(functionRef));
             if (fn == null) {
