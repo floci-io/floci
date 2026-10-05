@@ -270,9 +270,13 @@ software-token MFA, which is what AWS documents.
 - Only one factor is preferred: preferring one clears the preference of the other, and preferring
   both in one request, or preferring a factor that is off, fails with `InvalidParameterException`.
 - `UserMFASettingList` lists the factors turned on (`EMAIL_OTP`, `SOFTWARE_TOKEN_MFA`), and
-  `PreferredMfaSetting` the preferred one. Both are omitted when empty.
-- In `USER_AUTH`, a user with an MFA factor turned on in an optional-MFA pool is offered only
-  `PASSWORD` and `PASSWORD_SRP`, as AWS documents, so the second factor still follows.
+  `PreferredMfaSetting` the preferred one. Both are omitted when empty. In a pool that requires
+  software-token MFA, a registered authenticator is listed whether or not it was turned on, since
+  every sign-in asks for it.
+- In `USER_AUTH`, a user with software-token MFA turned on in an optional-MFA pool is offered only
+  `PASSWORD` and `PASSWORD_SRP`, as AWS documents for users with MFA, so the second factor still
+  follows. Email MFA does not restrict the choice, because Floci does not send an email MFA code
+  after a password.
 
 SMS and email MFA challenges, and managed-login MFA, are not emulated.
 
