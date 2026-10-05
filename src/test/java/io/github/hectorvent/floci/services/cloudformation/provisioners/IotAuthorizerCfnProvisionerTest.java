@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -506,7 +507,7 @@ class IotAuthorizerCfnProvisionerTest {
         verify(service, never()).describeAuthorizer(anyString(), anyString());
         verify(service, never()).updateAuthorizer(anyString(), any(), anyString());
         assertEquals(arn(generated), resource.getAttributes().get("Arn"));
-        assertEquals("Auth-1a2b3c4d", provisioner.updateCleanupPhysicalId(resource));
+        assertNull(provisioner.updateCleanupPhysicalId(resource), "a stub created nothing, so no delete is owed for its id");
     }
 
     @Test

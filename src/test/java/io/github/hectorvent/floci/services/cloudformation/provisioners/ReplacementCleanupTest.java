@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,6 +48,38 @@ class ReplacementCleanupTest {
         ReplacementCleanup.recordOrphan(r, "subnet-replacement", "AWS::EC2::Subnet", "us-east-1");
 
         assertEquals("subnet-replacement", ReplacementCleanup.cleanupPhysicalId(r), "Retain keeps what a committed replacement displaced, not a failed update's leftovers");
+    }
+
+    @Test
+    void aDispatcherStubIsNeverOwedADelete() {
+        StackResource r = resource("subnet-replacement");
+        List<String> deleted = new ArrayList<>();
+
+        ReplacementCleanup.record(r, stubUpdate(), Map.of("Arn", "arn:aws:stub:::Subnet"));
+
+        String announced = ReplacementCleanup.cleanupPhysicalId(r);
+        ReplacementCleanup.complete(r, (type, id, region) -> deleted.add(id));
+
+        assertEquals(List.of(), deleted, "a stub created nothing, so its id may name an entity the stack never owned");
+        assertNull(announced);
+    }
+
+    @Test
+    void rollingBackAStubMigrationRestoresTheStubAndDeletesTheReplacement() {
+        StackResource r = resource("subnet-replacement");
+        List<String> deleted = new ArrayList<>();
+        ReplacementCleanup.record(r, stubUpdate(), Map.of("Arn", "arn:aws:stub:::Subnet"));
+
+        assertTrue(ReplacementCleanup.rollback(r, (type, id, region) -> deleted.add(id)));
+
+        assertEquals("Subnet-1a2b3c4d", r.getPhysicalId());
+        assertEquals("arn:aws:stub:::Subnet", r.getAttributes().get("Arn"));
+        assertEquals(List.of("subnet-replacement"), deleted);
+        assertFalse(ReplacementCleanup.hasReplacement(r));
+    }
+
+    private static ProvisionContext stubUpdate() {
+        return new ProvisionContext(null, "us-east-1", "000000000000", "stack", "Subnet-1a2b3c4d");
     }
 
     @Test

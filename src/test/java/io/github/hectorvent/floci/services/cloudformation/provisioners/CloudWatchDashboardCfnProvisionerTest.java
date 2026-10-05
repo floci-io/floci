@@ -296,6 +296,32 @@ class CloudWatchDashboardCfnProvisionerTest {
         assertEquals("generated", r.getAttributes().get("FlociDashboardNameMode"));
     }
 
+    /**
+     * A stub migrated without a name keeps the stub's id as the dashboard's name, and the
+     * dispatcher drops the stub Arn, so renaming it later deletes the real dashboard it displaced.
+     */
+    @Test
+    void aDashboardMigratedFromAStubIsOwedItsDeleteWhenALaterUpdateRenamesIt() {
+        CfnResourceDispatcher dispatcher = new CfnResourceDispatcher(MAPPER,
+                new CloudFormationResourceRegistry(List.of(provisioner)), null, null);
+        StackResource migrated = dispatcher.provision("Dashboard", TYPE, props("""
+                {"DashboardBody": "{}"}
+                """), engine, REGION, ACCOUNT_ID, STACK, "Dashboard-1a2b3c4d",
+                Map.of("Arn", "arn:aws:stub:::Dashboard"));
+        assertEquals("CREATE_COMPLETE", migrated.getStatus(), migrated.getStatusReason());
+        assertEquals("Dashboard-1a2b3c4d", migrated.getPhysicalId());
+        dispatcher.clearUpdate(migrated);
+
+        StackResource renamed = dispatcher.provision("Dashboard", TYPE, props("""
+                {"DashboardName": "DashTwo", "DashboardBody": "{}"}
+                """), engine, REGION, ACCOUNT_ID, STACK, migrated.getPhysicalId(), migrated.getAttributes());
+
+        assertEquals("CREATE_COMPLETE", renamed.getStatus(), renamed.getStatusReason());
+        assertEquals("DashTwo", renamed.getPhysicalId());
+        assertEquals("Dashboard-1a2b3c4d", dispatcher.updateCleanupPhysicalId(renamed),
+                "the migrated dashboard is real, so the rename owes its delete");
+    }
+
     @Test
     void moreTagsThanTheSchemaAllowsAreRejected() {
         StringBuilder tags = new StringBuilder();

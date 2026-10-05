@@ -32,6 +32,9 @@ public class CfnResourceDispatcher {
 
     private static final Logger LOG = Logger.getLogger(CfnResourceDispatcher.class);
 
+    /** The prefix of a stub's {@code Arn} attribute: the mark of a resource nothing was created for. */
+    static final String STUB_ARN_PREFIX = "arn:aws:stub:::"; // partition-literal: stub marker for an unowned type, asserted by tests
+
     private final ObjectMapper objectMapper;
     private final CloudFormationResourceRegistry registry;
     private final CfnDynamicReferences dynamicReferences;
@@ -86,6 +89,11 @@ public class CfnResourceDispatcher {
             if (owner != null) {
                 owner.provision(resource, properties,
                         new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
+                // A provisioner that migrated a stub without writing its own Arn would leave the
+                // stub's, and the real resource would read as a stub on its next update.
+                if (isStub(resource.getAttributes())) {
+                    resource.getAttributes().remove("Arn");
+                }
             } else if (!stubUnsupportedResourceTypesAllowed()) {
                 // Before the physical id below is assigned, so the Cloud Control path sees a
                 // resource with none and reports this message rather than a success. On the stack
@@ -106,7 +114,7 @@ public class CfnResourceDispatcher {
                 resource.setStatusReason(unsupportedResourceTypeMessage(resourceType)
                         + " It was stubbed and nothing was created for it.");
                 resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
-                resource.getAttributes().put("Arn", "arn:aws:stub:::" + logicalId); // partition-literal: stub marker for an unowned type, asserted by tests
+                resource.getAttributes().put("Arn", STUB_ARN_PREFIX + logicalId);
             }
             resource.setStatus("CREATE_COMPLETE");
         } catch (Exception e) {
@@ -115,6 +123,12 @@ public class CfnResourceDispatcher {
             resource.setStatusReason(e.getMessage());
         }
         return resource;
+    }
+
+    /** Whether these resource attributes are a dispatcher stub's, which names nothing that exists. */
+    static boolean isStub(Map<String, String> attributes) {
+        String arn = attributes.get("Arn");
+        return arn != null && arn.startsWith(STUB_ARN_PREFIX);
     }
 
     /**

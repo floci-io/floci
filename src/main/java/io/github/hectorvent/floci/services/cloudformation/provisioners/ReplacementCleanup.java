@@ -52,7 +52,8 @@ public final class ReplacementCleanup {
      * physical id. Call after the new entity exists, with the attributes the resource carried
      * before {@code provision} overwrote them: they are what {@link #rollback} puts back. A
      * provision that replaced nothing drops the rollback fields but keeps any entity an earlier
-     * failed rollback left owed a delete.
+     * failed rollback left owed a delete. A dispatcher stub's id is never listed, because a stub
+     * created nothing.
      */
     static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision) {
         ObjectNode cleanup = readOrEmpty(r);
@@ -68,7 +69,9 @@ public final class ReplacementCleanup {
                     priorAttributes.put(key, value);
                 }
             });
-            addDisplaced(cleanup, prior, r.getResourceType(), ctx.region(), true);
+            if (!CfnResourceDispatcher.isStub(attributesBeforeProvision)) {
+                addDisplaced(cleanup, prior, r.getResourceType(), ctx.region(), true);
+            }
         }
         write(r, cleanup);
     }
