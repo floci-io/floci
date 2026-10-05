@@ -305,7 +305,8 @@ public class DurableExecutionService implements Resettable {
 
     /**
      * SendDurableExecutionCallbackSuccess when {@code succeeded}, else SendDurableExecutionCallbackFailure.
-     * The callback's operation completes and the function is invoked again to see it.
+     * The callback's operation completes and the function is invoked again to see it, except for a
+     * failure sent with no body: AWS records it but does not invoke the function.
      */
     public void completeCallback(String callbackId, String accountId, String region, boolean succeeded, String result,
                                  DurableErrorObject error) {
@@ -331,7 +332,9 @@ public class DurableExecutionService implements Resettable {
             }
             DurableHistory.operationEvent(execution, operation, succeeded ? "CallbackSucceeded" : "CallbackFailed",
                     now, details);
-            trigger(execution, effects);
+            if (succeeded || error != null) {
+                trigger(execution, effects);
+            }
             save(execution);
         }
         runEffects(effects);

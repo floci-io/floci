@@ -178,8 +178,9 @@ minutes.
 A callback (`createCallback`, `waitForCallback`) gets a callback id that the
 `SendDurableExecutionCallback*` APIs complete. Its `TimeoutSeconds` and `HeartbeatTimeoutSeconds`
 fail it with `Callback.Timeout` or `Callback.Heartbeat`, and each heartbeat restarts the heartbeat
-timeout. A failure sent without a body fails the callback with no error and invokes the function
-again. AWS records that failure but leaves the execution waiting.
+timeout. A failure sent with an empty request body fails the callback but does not invoke the
+function again, as on AWS, so the execution keeps waiting. The SDKs send `{}` when `Error` is
+omitted, which does invoke it.
 
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.

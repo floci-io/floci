@@ -196,7 +196,7 @@ public class DurableExecutionController {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    /** Without a body the callback fails with no Error. */
+    /** Without a body the callback fails with no Error, and AWS does not invoke the function for it. */
     @POST
     @Path("/durable-execution-callbacks/{callbackId: .+}/fail")
     public Response callbackFail(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,

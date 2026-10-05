@@ -562,6 +562,25 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void aFailureWithoutAnErrorIsRecordedButDoesNotInvokeTheFunction() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            return pending();
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        service.completeCallback(callbackId, ACCOUNT, REGION, false, null, null);
+
+        DurableExecution execution = service.get(arn);
+        assertEquals(1, invoker.events.size());
+        assertEquals(DurableExecutionStatus.RUNNING, execution.getStatus());
+        assertEquals(DurableOperationStatus.FAILED, execution.getOperations().get("c1").getStatus());
+        assertEquals("CallbackFailed", eventTypes(execution).get(eventTypes(execution).size() - 1));
+        assertCallbackClosed(() -> service.completeCallback(callbackId, ACCOUNT, REGION, true, "\"x\"", null));
+    }
+
+    @Test
     void heartbeatsKeepACallbackAliveUntilTheyStop() {
         invoker.script(event -> {
             checkpoint(event, token(event), List.of(callbackStart("c1", 0, 3)));
