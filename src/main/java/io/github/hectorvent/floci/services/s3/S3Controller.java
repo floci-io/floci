@@ -870,6 +870,8 @@ public class S3Controller {
                 return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization);
             }
 
+            rejectUnimplementedPutConditions(ifMatch, ifNoneMatch);
+
             Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
 
             String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
@@ -3405,6 +3407,25 @@ public class S3Controller {
             return preconditionFailedResponse("If-None-Match");
         }
         return null;
+    }
+
+    // S3 implements two conditional PutObject forms: If-None-Match: * (create only) and If-Match
+    // with an ETag (replace only if unchanged). The other two spellings are answered 501 before the
+    // body is decoded or validated, rather than being given a meaning S3 does not have.
+    private static void rejectUnimplementedPutConditions(String ifMatch, String ifNoneMatch) {
+        if ((ifMatch != null && "*".equals(unquotedEntityTag(ifMatch)))
+                || (ifNoneMatch != null && !"*".equals(unquotedEntityTag(ifNoneMatch)))) {
+            throw new AwsException("NotImplemented",
+                    "A header you provided implies functionality that is not implemented.", 501);
+        }
+    }
+
+    private static String unquotedEntityTag(String value) {
+        String trimmed = value.trim();
+        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            return trimmed.substring(1, trimmed.length() - 1);
+        }
+        return trimmed;
     }
 
     private boolean hasPreconditions(String ifMatch, String ifNoneMatch,
