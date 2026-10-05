@@ -2719,6 +2719,7 @@ public class S3Controller {
         appendSseCustomerHeaders(resp, obj);
         appendChecksumHeaders(resp, obj.getChecksum());
         appendLockHeaders(resp, obj);
+        appendExpirationHeader(resp, obj);
     }
 
     // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
@@ -2763,6 +2764,14 @@ public class S3Controller {
             appendChecksumHeaders(resp, obj.getChecksum());
         }
         appendLockHeaders(resp, obj);
+        appendExpirationHeader(resp, obj);
+    }
+
+    private void appendExpirationHeader(Response.ResponseBuilder resp, S3Object obj) {
+        String expiration = s3Service.expirationHeader(obj);
+        if (expiration != null) {
+            resp.header("x-amz-expiration", expiration);
+        }
     }
 
     private void appendSseCustomerHeaders(Response.ResponseBuilder resp, S3Object obj) {

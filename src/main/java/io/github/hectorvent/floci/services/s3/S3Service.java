@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -77,6 +78,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
@@ -1908,7 +1910,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // so a concurrent overwrite cannot land between the check and the delete.
         synchronized (bucket) {
             checkDeletePrecondition(bucketName, key, ifMatch);
-            return deleteObjectLocked(bucket, bucketName, key, versionId, bypassGovernance);
+            return deleteObjectLocked(bucket, bucketName, key, versionId, bypassGovernance, OBJECT_REMOVED_EVENT);
         }
     }
 
@@ -1930,8 +1932,13 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Deletes as DeleteObject does. {@code removalEvent} is the notification event family the
+     * deletion is reported under: {@code ObjectRemoved} for a request, {@code LifecycleExpiration}
+     * when a lifecycle rule expires the object.
+     */
     private S3Object deleteObjectLocked(Bucket bucket, String bucketName, String key,
-                                        String versionId, boolean bypassGovernance) {
+                                        String versionId, boolean bypassGovernance, String removalEvent) {
         if (bucket.isVersioningEnabled() && versionId == null) {
             // Check lock on current latest before placing a delete marker
             objectStore.get(objectKey(bucketName, key)).ifPresent(prev -> {
@@ -1963,7 +1970,7 @@ public class S3Service implements Resettable, ResourceProvider {
             objectStore.put(versionedKey(bucketName, key, markerId), deleteMarker);
             objectStore.put(objectKey(bucketName, key), deleteMarker);
             LOG.debugv("Created delete marker: {0}/{1} v={2}", bucketName, key, markerId);
-            fireNotifications(bucketName, key, "ObjectRemoved:DeleteMarkerCreated", deleteMarker);
+            fireNotifications(bucketName, key, removalEvent + ":DeleteMarkerCreated", deleteMarker);
             return deleteMarker;
         } else if ("null".equals(versionId)) {
             // A null version is stored at the plain object key until a versioned write replaces it.
@@ -1978,7 +1985,7 @@ public class S3Service implements Resettable, ResourceProvider {
             deleteFile(bucketName, key);
             deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
             LOG.debugv("Permanently deleted null version: {0}/{1}", bucketName, key);
-            fireNotifications(bucketName, key, "ObjectRemoved:Delete", null);
+            fireNotifications(bucketName, key, removalEvent + ":Delete", null);
             return existing;
         } else if (versionId != null) {
             // Get the specific version before permanent deletion
@@ -2021,7 +2028,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
             });
             if (toDelete != null) {
-                fireNotifications(bucketName, key, "ObjectRemoved:Delete", toDelete);
+                fireNotifications(bucketName, key, removalEvent + ":Delete", toDelete);
             }
             return toDelete;
         } else {
@@ -2035,7 +2042,7 @@ public class S3Service implements Resettable, ResourceProvider {
             deleteFile(bucketName, key);
             deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
             LOG.debugv("Deleted object: {0}/{1}", bucketName, key);
-            fireNotifications(bucketName, key, "ObjectRemoved:Delete", null);
+            fireNotifications(bucketName, key, removalEvent + ":Delete", null);
             return null;
         }
     }
@@ -4705,6 +4712,208 @@ public class S3Service implements Resettable, ResourceProvider {
         bucketStore.put(bucketName, bucket);
     }
 
+    private static final String OBJECT_REMOVED_EVENT = "ObjectRemoved";
+    private static final String LIFECYCLE_EXPIRATION_EVENT = "LifecycleExpiration";
+
+    /**
+     * The {@code x-amz-expiration} header for an object being returned or just written: the
+     * earliest expiration an enabled rule's Days or Date sets for it, and that rule's id. Null
+     * when no rule applies. Only the current version carries the header.
+     */
+    public String expirationHeader(S3Object object) {
+        if (object == null || object.getBucketName() == null || object.isDeleteMarker() || !object.isLatest()) {
+            return null;
+        }
+        String lifecycle = resolveBucket(object.getBucketName()).map(Bucket::getLifecycleConfiguration).orElse(null);
+        if (lifecycle == null) {
+            return null;
+        }
+        S3LifecycleConfiguration.Expiry expiry = S3LifecycleConfiguration.parse(lifecycle).currentVersionExpiry(
+                object.getKey(), object.getTags(), object.getSize(), object.getLastModified());
+        return expiry == null ? null : expiry.header();
+    }
+
+    /**
+     * Applies the expiration actions of every bucket's lifecycle configuration as they stand at
+     * {@code now}, each bucket in its owning account. S3 runs lifecycle asynchronously, so this is
+     * driven by {@link S3LifecycleSweeper} rather than by requests. A bucket that fails is logged
+     * and retried on the next run without stopping the others.
+     */
+    void applyLifecycleExpiration(Instant now) {
+        for (AccountAwareStorageBackend.AccountEntry<Bucket> entry : bucketsInEveryAccount()) {
+            if (entry.value().getLifecycleConfiguration() == null) {
+                continue;
+            }
+            try {
+                RequestScopes.runAs(entry.accountId(), entry.value().getRegion(),
+                        () -> applyLifecycleExpiration(entry.key(), now));
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "S3 lifecycle sweep failed for bucket {0}; retrying on the next run", entry.key());
+            }
+        }
+    }
+
+    private List<AccountAwareStorageBackend.AccountEntry<Bucket>> bucketsInEveryAccount() {
+        if (bucketStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Bucket> typed = (AccountAwareStorageBackend<Bucket>) aware;
+            return typed.scanAllAccountEntries(bucketName -> true);
+        }
+        List<AccountAwareStorageBackend.AccountEntry<Bucket>> buckets = new ArrayList<>();
+        for (String bucketName : bucketStore.keys()) {
+            bucketStore.get(bucketName).ifPresent(bucket ->
+                    buckets.add(new AccountAwareStorageBackend.AccountEntry<>(null, bucketName, bucket)));
+        }
+        return buckets;
+    }
+
+    /** One key's stored entries: the entry at the plain key, and every versioned entry. */
+    private record KeyHistory(S3Object current, List<S3Object> versions) { }
+
+    /** What a sweep does to one key: permanently delete these versions, then expire the current one or not. */
+    private record LifecyclePlan(List<String> versionsToDelete, boolean expireCurrent) {
+        boolean isEmpty() {
+            return versionsToDelete.isEmpty() && !expireCurrent;
+        }
+    }
+
+    private void applyLifecycleExpiration(String bucketName, Instant now) {
+        Bucket bucket = bucketStore.get(bucketName).orElse(null);
+        if (bucket == null || bucket.getLifecycleConfiguration() == null) {
+            return;
+        }
+        S3LifecycleConfiguration lifecycle = S3LifecycleConfiguration.parse(bucket.getLifecycleConfiguration());
+        if (lifecycle.rules().isEmpty()) {
+            return;
+        }
+        // Planned from an unlocked read, then planned again and applied under the bucket monitor
+        // that PutObject and DeleteObject hold, so a key written since the read is judged as it is now.
+        for (Map.Entry<String, KeyHistory> entry : keyHistories(bucketName).entrySet()) {
+            String key = entry.getKey();
+            if (planLifecycle(lifecycle, key, entry.getValue(), now).isEmpty()) {
+                continue;
+            }
+            synchronized (bucket) {
+                if (bucketStore.get(bucketName).orElse(null) != bucket) {
+                    return;
+                }
+                LifecyclePlan plan = planLifecycle(lifecycle, key, keyHistory(bucketName, key), now);
+                for (String versionId : plan.versionsToDelete()) {
+                    expireByLifecycle(bucket, bucketName, key, versionId);
+                }
+                if (plan.expireCurrent()) {
+                    expireByLifecycle(bucket, bucketName, key, null);
+                }
+            }
+        }
+        for (MultipartUpload upload : listMultipartUploads(bucketName)) {
+            if (upload.getInitiated() == null
+                    || !lifecycle.abortsUpload(upload.getKey(), upload.getInitiated(), now)) {
+                continue;
+            }
+            try {
+                abortMultipartUpload(bucketName, upload.getKey(), upload.getUploadId());
+            } catch (AwsException e) {
+                // Completed or aborted since it was listed: nothing is left to abort.
+                LOG.debugv("Lifecycle skipped upload {0}: {1}", upload.getUploadId(), e.getMessage());
+            }
+        }
+    }
+
+    private Map<String, KeyHistory> keyHistories(String bucketName) {
+        String bucketPrefix = bucketName + "/";
+        Map<String, S3Object> currents = new HashMap<>();
+        Map<String, List<S3Object>> versions = new HashMap<>();
+        for (String storeKey : objectStore.keys()) {
+            if (!storeKey.startsWith(bucketPrefix)) {
+                continue;
+            }
+            S3Object stored = objectStore.get(storeKey).orElse(null);
+            if (stored == null) {
+                continue;
+            }
+            if (storeKey.equals(objectKey(bucketName, stored.getKey()))) {
+                currents.put(stored.getKey(), stored);
+            } else {
+                versions.computeIfAbsent(stored.getKey(), key -> new ArrayList<>()).add(stored);
+            }
+        }
+        Map<String, KeyHistory> histories = new TreeMap<>();
+        currents.forEach((key, current) ->
+                histories.put(key, new KeyHistory(current, versions.getOrDefault(key, List.of()))));
+        return histories;
+    }
+
+    private KeyHistory keyHistory(String bucketName, String key) {
+        String versionPrefix = versionedKey(bucketName, key, "");
+        List<S3Object> versions = objectStore.scan(storeKey -> storeKey.startsWith(versionPrefix)).stream()
+                .filter(version -> key.equals(version.getKey()))
+                .toList();
+        return new KeyHistory(objectStore.get(objectKey(bucketName, key)).orElse(null), versions);
+    }
+
+    /**
+     * Decides which lifecycle actions are due on one key. A noncurrent version has been noncurrent
+     * since its successor, the next newer version, was created. Versions under Object Lock
+     * retention or a legal hold are never planned for deletion.
+     */
+    private LifecyclePlan planLifecycle(S3LifecycleConfiguration lifecycle, String key, KeyHistory history,
+                                        Instant now) {
+        S3Object current = history.current();
+        if (current == null) {
+            return new LifecyclePlan(List.of(), false);
+        }
+        List<S3Object> noncurrent = history.versions().stream()
+                .filter(version -> !Objects.equals(version.getVersionId(), current.getVersionId()))
+                .sorted(Comparator.comparing(S3Object::getLastModified).reversed())
+                .toList();
+        List<String> deletions = new ArrayList<>();
+        Instant successorCreated = current.getLastModified();
+        for (int newer = 0; newer < noncurrent.size(); newer++) {
+            S3Object version = noncurrent.get(newer);
+            if (!lockedAgainstDeletion(version) && lifecycle.expiresNoncurrentVersion(key, version.getTags(),
+                    version.getSize(), successorCreated, newer, now)) {
+                deletions.add(version.getVersionId());
+            }
+            successorCreated = version.getLastModified();
+        }
+        if (current.isDeleteMarker()) {
+            if (current.getVersionId() != null && noncurrent.isEmpty()
+                    && lifecycle.removesExpiredObjectDeleteMarker(key, current.getLastModified(), now)) {
+                deletions.add(current.getVersionId());
+            }
+            return new LifecyclePlan(deletions, false);
+        }
+        S3LifecycleConfiguration.Expiry expiry = lifecycle.currentVersionExpiry(
+                key, current.getTags(), current.getSize(), current.getLastModified());
+        return new LifecyclePlan(deletions, expiry != null && !now.isBefore(expiry.date()));
+    }
+
+    private boolean lockedAgainstDeletion(S3Object version) {
+        try {
+            checkLockProtection(version, false);
+            return false;
+        } catch (AwsException expected) {
+            // Lifecycle cannot bypass retention, so a version DeleteObject would refuse is left alone.
+            return true;
+        }
+    }
+
+    /**
+     * Expires as DeleteObject would, reported as a lifecycle expiration: a null {@code versionId}
+     * expires the current version, a delete marker in a versioning-enabled bucket and a deletion
+     * otherwise, and a version id deletes that version permanently.
+     */
+    private void expireByLifecycle(Bucket bucket, String bucketName, String key, String versionId) {
+        try {
+            deleteObjectLocked(bucket, bucketName, key, versionId, false, LIFECYCLE_EXPIRATION_EVENT);
+            LOG.debugv("Lifecycle expired {0}/{1} v={2}", bucketName, key, versionId);
+        } catch (AwsException e) {
+            // Object Lock protects the object; lifecycle leaves it in place, as on S3.
+            LOG.debugv("Lifecycle left {0}/{1} v={2} in place: {3}", bucketName, key, versionId, e.getMessage());
+        }
+    }
+
     public String getBucketAcl(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
@@ -5484,8 +5693,8 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private static String eventBridgeDeletionType(String eventName) {
         return switch (eventName) {
-            case "ObjectRemoved:Delete" -> "Permanently Deleted";
-            case "ObjectRemoved:DeleteMarkerCreated" -> "Delete Marker Created";
+            case "ObjectRemoved:Delete", "LifecycleExpiration:Delete" -> "Permanently Deleted";
+            case "ObjectRemoved:DeleteMarkerCreated", "LifecycleExpiration:DeleteMarkerCreated" -> "Delete Marker Created";
             default -> null;
         };
     }
