@@ -3212,9 +3212,9 @@ public class ApiGatewayExecuteController {
      * Builds a REQUEST authorizer event in payload format version 2.0.
      * Uses the newer HTTP API-native shape with routeArn, routeKey, rawPath, and requestContext.http.
      */
-    private String buildRequestAuthorizerEventV2(String httpMethod, String path, String routeKey,
-                                                  String apiId, String stageName, String region,
-                                                  HttpHeaders headers, UriInfo uriInfo) {
+    String buildRequestAuthorizerEventV2(String httpMethod, String path, String routeKey,
+                                          String apiId, String stageName, String region,
+                                          HttpHeaders headers, UriInfo uriInfo) {
         // rawPath is by contract the raw, unmodified path, so recover the trailing slash the
         // JAX-RS {proxy} binding stripped. routeArn keeps the normalized path for the same reason
         // methodArn does in the 1.0 shape above.
