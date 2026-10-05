@@ -30,12 +30,14 @@ final class DurableCheckpointApplier {
 
     static final int MAX_OPERATION_PAYLOAD_BYTES = 256 * 1024;
     static final int MAX_ERROR_BYTES = 32 * 1024;
+    static final int MAX_CHAINED_INVOKE_PAYLOAD_BYTES = 1024 * 1024;
     private static final Pattern OPERATION_ID = Pattern.compile("[a-zA-Z0-9-_]{1,64}");
 
     private DurableCheckpointApplier() {
     }
 
-    record Outcome(boolean closed) {
+    /** {@code chainedInvokes} names the CHAINED_INVOKE operations this batch started, for the service to run. */
+    record Outcome(boolean closed, List<String> chainedInvokes) {
     }
 
     static Outcome apply(DurableExecution execution, List<DurableOperationUpdate> updates, long now) {
@@ -45,7 +47,7 @@ final class DurableCheckpointApplier {
             draft.apply(update);
         }
         draft.commit();
-        return new Outcome(draft.closingStatus != null);
+        return new Outcome(draft.closingStatus != null, List.copyOf(draft.chainedInvokes));
     }
 
     /** Completes waits, step retries and callback timeouts whose time has come. The sweeper and every checkpoint call it. */
@@ -156,6 +158,7 @@ final class DurableCheckpointApplier {
         private final long now;
         private final LinkedHashMap<String, DurableOperation> operations = new LinkedHashMap<>();
         private final List<Consumer<DurableExecution>> events = new ArrayList<>();
+        private final List<String> chainedInvokes = new ArrayList<>();
         private long changeSequence;
         private DurableExecutionStatus closingStatus;
         private String closingResult;
@@ -189,7 +192,12 @@ final class DurableCheckpointApplier {
                 }
             }
             requireErrorSize(update);
-            if (utf8Length(update.payload()) > MAX_OPERATION_PAYLOAD_BYTES) {
+            if (update.type() == DurableOperationType.CHAINED_INVOKE) {
+                if (utf8Length(update.payload()) > MAX_CHAINED_INVOKE_PAYLOAD_BYTES) {
+                    throw invalid("CHAINED_INVOKE input payload size must be less than or equal to "
+                            + MAX_CHAINED_INVOKE_PAYLOAD_BYTES + " bytes.");
+                }
+            } else if (utf8Length(update.payload()) > MAX_OPERATION_PAYLOAD_BYTES) {
                 throw invalid(update.type() + " payload size must be less than or equal to "
                         + MAX_OPERATION_PAYLOAD_BYTES + " bytes.");
             }
@@ -198,7 +206,7 @@ final class DurableCheckpointApplier {
                 case STEP -> applyStep(update, existing);
                 case WAIT -> applyWait(update, existing);
                 case CALLBACK -> applyCallback(update, existing);
-                case CHAINED_INVOKE -> throw invalid(update.type() + " operations are not supported yet");
+                case CHAINED_INVOKE -> applyChainedInvoke(update, existing);
                 default -> throw invalid("Unknown operation type.");
             }
         }
@@ -366,6 +374,24 @@ final class DurableCheckpointApplier {
                 }
                 default -> throw invalid("Invalid action for the given operation type.");
             }
+        }
+
+        /** The service resolves and runs the target, and records ChainedInvokeStarted with what it found. */
+        private void applyChainedInvoke(DurableOperationUpdate update, DurableOperation existing) {
+            if (update.action() != DurableOperationAction.START) {
+                throw invalid("Invalid action for the given operation type.");
+            }
+            if (update.chainedFunctionName() == null) {
+                throw invalid("Update for CHAINED_INVOKE operation requires ChainedInvokeOptions.");
+            }
+            if (existing != null) {
+                throw invalid("Cannot start a CHAINED_INVOKE that already exist.");
+            }
+            DurableOperation operation = create(update);
+            operation.setChainedFunctionName(update.chainedFunctionName());
+            operation.setChainedTenantId(update.chainedTenantId());
+            operation.setInputPayload(update.payload());
+            chainedInvokes.add(update.id());
         }
 
         /** Only the function starts a callback. SendDurableExecutionCallback* completes it. */

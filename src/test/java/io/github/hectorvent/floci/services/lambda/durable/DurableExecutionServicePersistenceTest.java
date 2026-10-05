@@ -31,6 +31,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -130,8 +131,47 @@ class DurableExecutionServicePersistenceTest {
         assertEquals(3, after.events.size());
     }
 
+    @Test
+    void aPlainChainedInvokeLostWithTheProcessRunsAgainAfterARestart() {
+        ScriptedInvoker before = new ScriptedInvoker();
+        PersistentStorageFactory firstStorage = new PersistentStorageFactory(directory);
+        // Runs the parent's invocation and drops the chained invoke it starts, as a crash would.
+        int[] launched = {0};
+        DurableExecutionService first = newService(firstStorage, before, task -> {
+            if (launched[0]++ == 0) {
+                task.run();
+            }
+        });
+        before.script((service, event) -> {
+            service.checkpoint(arn(event), token(event), null, List.of(new DurableOperationUpdate("i1", null, null,
+                    DurableOperationType.CHAINED_INVOKE, "ChainedInvoke", DurableOperationAction.START, "{\"n\":1}",
+                    null, null, null, null, null, null, "plain-fn", null)));
+            return "{\"Status\":\"PENDING\"}";
+        });
+        String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
+                false)).getExecutionArn();
+        assertEquals("STARTED", first.get(executionArn).getOperations().get("i1").getStatus().name());
+        firstStorage.flushAll();
+
+        ScriptedInvoker after = new ScriptedInvoker();
+        after.plainOutput = "{\"ran\":true}";
+        DurableExecutionService restarted = newService(new PersistentStorageFactory(directory), after);
+        after.script((service, event) -> {
+            assertEquals("{\"ran\":true}", operation(event, "i1").at("/ChainedInvokeDetails/Result").asText());
+            return "{\"Status\":\"SUCCEEDED\",\"Result\":\"\\\"done\\\"\"}";
+        });
+        restarted.recoverAfterRestart();
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, restarted.get(executionArn).getStatus());
+        assertEquals(List.of("{\"n\":1}"), after.plainPayloads);
+    }
+
     private DurableExecutionService newService(StorageFactory storage, ScriptedInvoker invoker) {
-        DurableExecutionService service = new DurableExecutionService(storage, MAPPER, clock, invoker, Runnable::run,
+        return newService(storage, invoker, Runnable::run);
+    }
+
+    private DurableExecutionService newService(StorageFactory storage, ScriptedInvoker invoker, Executor executor) {
+        DurableExecutionService service = new DurableExecutionService(storage, MAPPER, clock, invoker, executor,
                 Duration.ZERO);
         invoker.service = service;
         return service;
@@ -139,12 +179,12 @@ class DurableExecutionServicePersistenceTest {
 
     private static DurableOperationUpdate update(String id, DurableOperationType type, DurableOperationAction action,
                                                  String payload, Integer waitSeconds) {
-        return new DurableOperationUpdate(id, null, null, type, null, action, payload, null, null, waitSeconds, null, null, null);
+        return new DurableOperationUpdate(id, null, null, type, null, action, payload, null, null, waitSeconds, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
-                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, null);
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, null, null, null);
     }
 
     private static String arn(JsonNode event) {
@@ -172,6 +212,8 @@ class DurableExecutionServicePersistenceTest {
 
         final Deque<Script> scripts = new ArrayDeque<>();
         final List<JsonNode> events = new ArrayList<>();
+        final List<String> plainPayloads = new ArrayList<>();
+        String plainOutput = "null";
         DurableExecutionService service;
 
         void script(Script script) {
@@ -180,12 +222,20 @@ class DurableExecutionServicePersistenceTest {
 
         @Override
         public ResolvedDurableTarget resolve(String accountId, String region, String functionName, String qualifier) {
+            if ("plain-fn".equals(functionName)) {
+                return new ResolvedDurableTarget(accountId, region, functionName,
+                        "arn:aws:lambda:us-east-1:000000000000:function:plain-fn", "$LATEST", false, 0, 0);
+            }
             return new ResolvedDurableTarget(accountId, region, functionName,
                     "arn:aws:lambda:us-east-1:000000000000:function:" + functionName + ":1", "1", true, 3600, 7);
         }
 
         @Override
         public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload) {
+            if (!target.durable()) {
+                plainPayloads.add(new String(payload, StandardCharsets.UTF_8));
+                return new DurableInvocationResult("req", plainOutput.getBytes(StandardCharsets.UTF_8), null);
+            }
             JsonNode event;
             try {
                 event = MAPPER.readTree(payload);

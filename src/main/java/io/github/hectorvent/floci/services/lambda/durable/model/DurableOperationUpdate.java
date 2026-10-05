@@ -16,5 +16,7 @@ public record DurableOperationUpdate(String id,
                                      Integer waitSeconds,
                                      Boolean replayChildren,
                                      Integer callbackTimeoutSeconds,
-                                     Integer callbackHeartbeatTimeoutSeconds) {
+                                     Integer callbackHeartbeatTimeoutSeconds,
+                                     String chainedFunctionName,
+                                     String chainedTenantId) {
 }
