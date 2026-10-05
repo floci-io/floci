@@ -24,6 +24,7 @@ below for what's simplified.
 | `AssociateResourceShare` | Adds resource ARNs and/or principals to an existing share (`POST /associateresourceshare`) |
 | `DisassociateResourceShare` | Removes resource ARNs and/or principals from a share (`POST /disassociateresourceshare`) |
 | `ListPrincipals` | Lists principals associated with visible shares (`POST /listprincipals`) |
+| `ListResourceSharePermissions` | Lists the permissions associated with a share: one default AWS managed permission (`AWSRAMDefaultPermission<Type>`, `AWS_MANAGED`) per distinct resource type in the share; unknown share ARN is `UnknownResourceException` (`POST /listresourcesharepermissions`) |
 | `TagResource` | Adds/overwrites tags on a resource share (`POST /tagresource`) |
 | `UntagResource` | Removes tags by key from a resource share (`POST /untagresource`) |
 | `GetResourceShareInvitations` | Lists invitations received by the caller, filterable by `resourceShareArns`/`resourceShareInvitationArns`. Empty for organization/OU-principal shares, which never get one (`POST /getresourceshareinvitations`) |
@@ -100,7 +101,8 @@ aws --endpoint-url http://localhost:4566 ram accept-resource-share-invitation \
 - `TagResource`/`UntagResource` only support tagging by `resourceShareArn`; tagging an
   individual shared resource via `resourceArn` is not modeled (RAM's `TagResource` accepts
   either, but LZA only tags shares).
-- Permission-related operations are not implemented: `CreatePermission`,
-  `AssociateResourceSharePermission`, `ListPermissions`, and the rest of the permission-version
-  family. Shares created here always use RAM's default managed permission implicitly: there
-  is no explicit permission model to associate or version.
+- Only `ListResourceSharePermissions` of the permission family is implemented; `CreatePermission`,
+  `AssociateResourceSharePermission`, `ListPermissions`, and the permission-version
+  family are not, and `nextToken`/`maxResults` are accepted but ignored. Shares created here
+  always use RAM's default managed permission implicitly: there is no explicit permission model
+  to associate or version.

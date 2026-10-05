@@ -990,6 +990,8 @@ public class ApiGatewayService implements ResourceProvider {
         authorizer.setAuthorizerUri((String) request.get("authorizerUri"));
         authorizer.setIdentitySource((String) request.get("identitySource"));
         authorizer.setAuthorizerResultTtlInSeconds(String.valueOf(request.getOrDefault("authorizerResultTtlInSeconds", "300")));
+        validateRequestAuthorizerIdentitySource(authorizer.getType(), authorizer.getIdentitySource(),
+                authorizer.getAuthorizerResultTtlInSeconds());
         // COGNITO_USER_POOLS authorizers carry the pool ARNs; keep them so get-authorizer reflects them.
         if (request.get("providerARNs") instanceof List<?> arns) {
             List<String> providerArns = new ArrayList<>();
@@ -1065,12 +1067,29 @@ public class ApiGatewayService implements ResourceProvider {
             }
         }
         }
+        validateRequestAuthorizerIdentitySource(authorizer.getType(), newIdentitySource, newTtl);
         authorizer.setName(newName);
         authorizer.setAuthorizerUri(newAuthorizerUri);
         authorizer.setIdentitySource(newIdentitySource);
         authorizer.setAuthorizerResultTtlInSeconds(newTtl);
         authorizerStore.put(authorizerKey(region, apiId, authorizerId), authorizer);
         return authorizer;
+    }
+
+    private static void validateRequestAuthorizerIdentitySource(String type, String identitySource, String ttl) {
+        if (!"REQUEST".equals(type)) {
+            return;
+        }
+        int ttlSeconds;
+        try {
+            ttlSeconds = Integer.parseInt(ttl);
+        } catch (NumberFormatException exception) {
+            throw new AwsException("BadRequestException", "authorizerResultTtlInSeconds must be an integer", 400);
+        }
+        if (ttlSeconds > 0 && (identitySource == null || identitySource.isBlank())) {
+            throw new AwsException("BadRequestException",
+                    "Identity source is required for a REQUEST authorizer when caching is enabled", 400);
+        }
     }
 
     // ──────────────────────────── API Keys ────────────────────────────

@@ -25,7 +25,10 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class MarketplaceAgreementService implements Resettable {
-    private static final String REGION = "us-east-1"; // partition-literal: AWS Marketplace is commercial-only and AWS pins its APIs to these regions
+    // The regions AWS publishes an Agreement endpoint in, across partitions (botocore endpoints.json).
+    private static final Set<String> REGIONS = Set.of(
+            "us-east-1", "us-iso-east-1", "us-isob-east-1", // partition-literal: AWS's endpoint regions
+            "us-isof-south-1", "eusc-de-east-1"); // partition-literal: AWS's endpoint regions
     private static final String CATALOG = "AWSMarketplace";
     private static final Pattern PROPOSAL_ID = Pattern.compile("(at-|ap-)[A-Za-z0-9]+");
     private static final Pattern CLIENT_TOKEN = Pattern.compile("[a-zA-Z0-9-]{1,64}");
@@ -781,8 +784,10 @@ public class MarketplaceAgreementService implements Resettable {
     }
 
     private static void validateRegion(String region) {
-        if (!REGION.equals(region)) {
-            throw validation("AWS Marketplace Agreement API is available only in us-east-1."); // partition-literal: AWS's message text
+        if (region == null || !REGIONS.contains(region)) {
+            throw validation("AWS Marketplace Agreement API is available only in "
+                    + "us-east-1, us-iso-east-1, us-isob-east-1, " // partition-literal: the served regions
+                    + "us-isof-south-1, and eusc-de-east-1."); // partition-literal: the served regions
         }
     }
 

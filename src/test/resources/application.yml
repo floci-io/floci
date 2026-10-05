@@ -151,6 +151,8 @@ floci:
       honour-architectures: false
       zip-max-entries: 100000
       async-retry-delay-seconds: 1
+      durable-sweep-enabled: true
+      durable-sweep-interval-seconds: 1
       # aws-config-path:
       hot-reload:
         enabled: true
@@ -202,6 +204,7 @@ floci:
       proxy-handshake-timeout-millis: 10000
       proxy-backend-connect-timeout-millis: 5000
       proxy-max-connections: 100
+      spectrum-max-rows: 1000000
     rds:
       enabled: true
       mock: false
@@ -338,6 +341,7 @@ floci:
       max-memory-mib: 0
       max-vcpus: 0
       ecr-registry-mirror: true
+      default-storage-class: false
       imds: false
       irsa-signing-key: true
       embedded-dns: true

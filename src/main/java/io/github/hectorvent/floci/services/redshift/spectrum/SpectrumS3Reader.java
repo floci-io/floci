@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
+import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -33,8 +36,6 @@ public final class SpectrumS3Reader {
     private static final String SQLSTATE_INTERNAL = "XX000";
 
     private final S3Service s3Service;
-    // Stored in the schema now so role-aware Spectrum authorization can be added without changing metadata.
-    @SuppressWarnings("unused")
     private final IamService iamService;
 
     public SpectrumS3Reader(S3Service s3Service, IamService iamService) {
@@ -43,26 +44,75 @@ public final class SpectrumS3Reader {
     }
 
     public Stream<SpectrumRow> read(SpectrumExternalSchema schema, SpectrumExternalTable table) {
-        Location location = Location.parse(table.location());
-        try {
-            s3Service.authorizeAnonymousListBucket(location.bucket());
-            List<S3Object> objects = new ArrayList<>();
-            String continuationToken = null;
-            do {
-                S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
-                        location.bucket(), location.key(), "", 1000, continuationToken, null);
-                objects.addAll(result.objects());
-                continuationToken = result.isTruncated() ? result.nextContinuationToken() : null;
-            } while (continuationToken != null);
-            List<String> keys = objects.stream()
-                    .map(S3Object::getKey)
-                    .sorted(Comparator.naturalOrder())
-                    .toList();
-            return StreamSupport.stream(Spliterators.spliteratorUnknownSize(
-                    new RowIterator(location.bucket(), keys.iterator(), table), 0), false);
-        } catch (AwsException exception) {
-            throw mapAwsException(location, exception);
+        // The phase-one interceptor knows only the account and database, not the cluster's roles, so the
+        // role is enforced here without the cluster-association check. The session overload has both.
+        return read(schema, table, schema.iamRoleArn(), null);
+    }
+
+    public Stream<SpectrumRow> read(SpectrumSession session, SpectrumExternalSchema schema,
+                                    SpectrumExternalTable table) {
+        if (session == null || !session.accountId().equals(schema.accountId())
+                || !session.databaseName().equals(table.databaseName())) {
+            throw new SpectrumReadException(SQLSTATE_AUTHORIZATION, "Spectrum session does not match external table");
         }
+        String roleArn = schema.iamRoleArn();
+        if (roleArn != null && !session.iamRoleArns().contains(roleArn)) {
+            throw new SpectrumReadException(SQLSTATE_AUTHORIZATION,
+                    "Spectrum IAM role is not associated with the Redshift cluster");
+        }
+        return read(schema, table, roleArn, session.iamRoleArns());
+    }
+
+    /**
+     * The returned stream owns the role session minted here and releases it on close, so callers
+     * must close it (try-with-resources) even when they stop reading early.
+     */
+    private Stream<SpectrumRow> read(SpectrumExternalSchema schema, SpectrumExternalTable table, String roleArn,
+                                     List<String> associatedRoleArns) {
+        String accountId = schema.accountId();
+        Location location = Location.parse(table.location());
+        RedshiftRoleAccess.RoleSession roleSession = null;
+        try {
+            if (roleArn != null) {
+                roleSession = RedshiftRoleAccess.resolveRoleSession(roleArn, iamService, accountId, associatedRoleArns,
+                        RedshiftRoleAccess.STREAMING_ROLE_SESSION_TTL);
+            }
+            RedshiftRoleAccess.RoleSession session = roleSession;
+            // Account-aware S3 storage resolves the account from the request context, which the
+            // proxy thread does not have; without it the read could hit the default account.
+            List<String> keys = RequestScopes.callAs(accountId, () -> {
+                if (session == null) {
+                    s3Service.authorizeAnonymousListBucket(location.bucket());
+                } else {
+                    RedshiftRoleAccess.authorizeRoleList(s3Service, iamService, session, roleArn, location.bucket(), location.key());
+                }
+                List<S3Object> objects = new ArrayList<>();
+                String continuationToken = null;
+                do {
+                    S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
+                            location.bucket(), location.key(), "", 1000, continuationToken, null);
+                    objects.addAll(result.objects());
+                    continuationToken = result.isTruncated() ? result.nextContinuationToken() : null;
+                } while (continuationToken != null);
+                return objects.stream().map(S3Object::getKey).sorted(Comparator.naturalOrder()).toList();
+            });
+            return StreamSupport.stream(Spliterators.spliteratorUnknownSize(
+                            new RowIterator(accountId, location.bucket(), keys.iterator(), table, roleArn, session), 0), false)
+                    .onClose(() -> RedshiftRoleAccess.releaseRoleSession(session, roleArn, iamService));
+        } catch (S3CopySimulator.S3TransferException exception) {
+            RedshiftRoleAccess.releaseRoleSession(roleSession, roleArn, iamService);
+            throw mapRoleException(exception);
+        } catch (AwsException exception) {
+            RedshiftRoleAccess.releaseRoleSession(roleSession, roleArn, iamService);
+            throw mapAwsException(location, exception);
+        } catch (RuntimeException exception) {
+            RedshiftRoleAccess.releaseRoleSession(roleSession, roleArn, iamService);
+            throw exception;
+        }
+    }
+
+    private static SpectrumReadException mapRoleException(S3CopySimulator.S3TransferException exception) {
+        return new SpectrumReadException(exception.sqlState(), "Unable to read Spectrum data with IAM role", exception);
     }
 
     private SpectrumReadException mapAwsException(Location location, AwsException exception) {
@@ -75,18 +125,25 @@ public final class SpectrumS3Reader {
     }
 
     private final class RowIterator implements Iterator<SpectrumRow> {
+        private final String accountId;
         private final String bucket;
         private final Iterator<String> keys;
         private final SpectrumExternalTable table;
+        private final String roleArn;
+        private final RedshiftRoleAccess.RoleSession roleSession;
         private BufferedReader reader;
         private SpectrumRow next;
         private boolean finished;
         private String currentKey;
 
-        private RowIterator(String bucket, Iterator<String> keys, SpectrumExternalTable table) {
+        private RowIterator(String accountId, String bucket, Iterator<String> keys, SpectrumExternalTable table,
+                            String roleArn, RedshiftRoleAccess.RoleSession roleSession) {
+            this.accountId = accountId;
             this.bucket = bucket;
             this.keys = keys;
             this.table = table;
+            this.roleArn = roleArn;
+            this.roleSession = roleSession;
         }
 
         @Override
@@ -116,8 +173,16 @@ public final class SpectrumS3Reader {
                             return;
                         }
                         currentKey = keys.next();
-                        s3Service.authorizeAnonymousGetObject(bucket, currentKey);
-                        S3Object object = s3Service.getObject(bucket, currentKey);
+                        String key = currentKey;
+                        S3Object object = RequestScopes.callAs(accountId, () -> {
+                            if (roleSession == null) {
+                                s3Service.authorizeAnonymousGetObject(bucket, key);
+                            } else {
+                                RedshiftRoleAccess.authorizeRoleRead(s3Service, iamService, roleSession, roleArn,
+                                        bucket, key);
+                            }
+                            return s3Service.getObject(bucket, key);
+                        });
                         reader = new BufferedReader(new InputStreamReader(
                                 new ByteArrayInputStream(object.getData()), StandardCharsets.UTF_8));
                         skipHeaders();
@@ -134,6 +199,8 @@ public final class SpectrumS3Reader {
                     next = convert(record, table);
                     return;
                 }
+            } catch (S3CopySimulator.S3TransferException exception) {
+                throw mapRoleException(exception);
             } catch (AwsException exception) {
                 throw mapAwsException(new Location(bucket, currentKey), exception);
             } catch (IOException exception) {
@@ -233,7 +300,7 @@ public final class SpectrumS3Reader {
         int value;
         while ((value = reader.read()) != -1) {
             char current = (char) value;
-            if (current == escape && !quoted) {
+            if (current == escape) {
                 record.append(current);
                 int next = reader.read();
                 if (next == -1) {

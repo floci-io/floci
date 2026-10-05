@@ -1353,6 +1353,64 @@ class S3MultipartIntegrationTest {
     }
 
     @Test
+    @Order(38)
+    void uploadPartCopyAnswersBadRangesTheWayS3Does() {
+        given()
+            .body("ABCDEFGHIJ")
+        .when()
+            .put("/" + BUCKET + "/range-source.bin")
+        .then()
+            .statusCode(200);
+        String uploadId = given()
+            .when()
+                .post("/" + BUCKET + "/range-dest.bin?uploads")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/range-source.bin")
+            .header("x-amz-copy-source-range", "2-5")
+        .when()
+            .put("/" + BUCKET + "/range-dest.bin?uploadId=" + uploadId + "&partNumber=1")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidArgument"))
+            .body("Error.Message", startsWith("The x-amz-copy-source-range value must be of the form bytes=first-last"))
+            .body("Error.ArgumentName", equalTo("x-amz-copy-source-range"))
+            .body("Error.ArgumentValue", equalTo("2-5"));
+
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/range-source.bin")
+            .header("x-amz-copy-source-range", "bytes=0-100")
+        .when()
+            .put("/" + BUCKET + "/range-dest.bin?uploadId=" + uploadId + "&partNumber=1")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidArgument"))
+            .body("Error.Message", equalTo("Range specified is not valid for source object of size: 10"))
+            .body("Error.ArgumentName", equalTo("x-amz-copy-source-range"))
+            .body("Error.ArgumentValue", equalTo("bytes=0-100"));
+
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/range-source.bin")
+            .header("x-amz-copy-source-range", "bytes=100-200")
+        .when()
+            .put("/" + BUCKET + "/range-dest.bin?uploadId=" + uploadId + "&partNumber=1")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidRequest"))
+            .body("Error.Message", equalTo("The specified copy range is invalid for the source object size"))
+            .body(not(containsString("<ArgumentName>")));
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "/range-dest.bin?uploadId=" + uploadId)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
     @Order(40)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/copy-of-multipart.bin").then().statusCode(204);
@@ -1369,6 +1427,7 @@ class S3MultipartIntegrationTest {
         given().when().delete("/" + BUCKET + "/checksum-match-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/checksum-type-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/completion-validation.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/range-source.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 

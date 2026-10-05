@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
@@ -287,6 +288,11 @@ class DynamoDbStreamServiceTest {
                 .toList();
     }
 
+    private List<DynamoDbStreamRecord> recordsOf(String streamArn) {
+        String iterator = service.getShardIterator(streamArn, DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        return service.getRecords(iterator, 10).records();
+    }
+
     private static List<String> streamArns(List<StreamDescription> streams) {
         return streams.stream().map(StreamDescription::getStreamArn).toList();
     }
@@ -343,6 +349,53 @@ class DynamoDbStreamServiceTest {
 
         assertEquals("ValidationException", nullSequence.getErrorCode());
         assertEquals("ValidationException", blankSequence.getErrorCode());
+    }
+
+    /**
+     * Two accounts with a same-named table in one region must not share a stream. Before this,
+     * the stream map was keyed by region and table name only, so the second account's
+     * enableStream returned the first account's stream and every record landed on it.
+     */
+    @Test
+    void sameNamedTablesInTwoAccountsStayIsolated() throws Exception {
+        TableDefinition firstAccountTable = new TableDefinition("ViewTypeTable",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                "us-east-1", "000000000000");
+        firstAccountTable.setStreamEnabled(true);
+        TableDefinition otherAccountTable = new TableDefinition("ViewTypeTable",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                "us-east-1", "111111111111");
+        otherAccountTable.setStreamEnabled(true);
+
+        StreamDescription first = service.enableStream("ViewTypeTable", TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        StreamDescription second = service.enableStream(
+                "ViewTypeTable", otherAccountTable.getTableArn(), "NEW_IMAGE", "us-east-1");
+
+        assertNotEquals(first.getStreamArn(), second.getStreamArn());
+        assertEquals(1, service.listStreams("ViewTypeTable", "000000000000", "us-east-1").size());
+        assertEquals(1, service.listStreams("ViewTypeTable", "111111111111", "us-east-1").size());
+
+        JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
+        service.captureEvent("INSERT", null, item, otherAccountTable, "us-east-1");
+
+        List<DynamoDbStreamRecord> secondRecords = recordsOf(second.getStreamArn());
+        assertEquals(1, secondRecords.size());
+        assertEquals("000000000000000000001", secondRecords.get(0).getSequenceNumber());
+
+        assertEquals(0, recordsOf(first.getStreamArn()).size());
+
+        service.captureEvent("INSERT", null, item, firstAccountTable, "us-east-1");
+
+        List<DynamoDbStreamRecord> firstRecords = recordsOf(first.getStreamArn());
+        assertEquals(1, firstRecords.size());
+        // A shared/global counter would number this record 000000000000000000002.
+        assertEquals("000000000000000000001", firstRecords.get(0).getSequenceNumber());
+
+        service.deleteStream(otherAccountTable.getTableArn());
+        assertEquals(0, service.listStreams("ViewTypeTable", "111111111111", "us-east-1").size());
+        assertEquals(1, service.listStreams("ViewTypeTable", "000000000000", "us-east-1").size());
     }
 
 }

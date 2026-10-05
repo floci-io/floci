@@ -26,17 +26,16 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.filterValues;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireFilterKeysAndValues;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMapMemberOrAbsent;
@@ -155,15 +154,7 @@ public class SesIdentityController {
         Map<String, String> filter = stringMapMemberOrAbsent(request, "Filter");
         Integer pageSize = intMemberOrAbsent(request, "PageSize");
         String nextToken = stringMemberOrAbsent(request, "NextToken");
-        Map<String, String> present = new LinkedHashMap<>();
-        if (filter != null) {
-            requireFilterKeysAndValues(filter, IDENTITY_FILTER_KEYS);
-            filter.forEach((key, value) -> {
-                if (value != null) {
-                    present.put(key, value);
-                }
-            });
-        }
+        Map<String, String> present = filterValues(filter, IDENTITY_FILTER_KEYS);
         return emailIdentitiesPage(region, present, pageSize, nextToken);
     }
 

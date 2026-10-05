@@ -71,6 +71,7 @@ class SigningCertificateStateTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 certificates,
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", defaultAccount), false, null);
     }
 
@@ -86,6 +87,7 @@ class SigningCertificateStateTest {
                 new InMemoryStorage<>(), reports, new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 certificates,
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", defaultAccount), false, null);
     }
 

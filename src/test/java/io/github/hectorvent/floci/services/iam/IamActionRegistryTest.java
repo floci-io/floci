@@ -211,6 +211,25 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void durableExecutionRoutesResolveToTheirActions() {
+        String arn = "arn%3Aaws%3Alambda%3Aus-east-1%3A000000000000%3Afunction%3Af%3A%24LATEST"
+                + "%2Fdurable-execution%2Fname%2Fid";
+        String base = "/2025-12-01/durable-executions/" + arn;
+        assertEquals("lambda:CheckpointDurableExecution", lambdaAction("POST", base + "/checkpoint"));
+        assertEquals("lambda:GetDurableExecutionState", lambdaAction("GET", base + "/state"));
+        assertEquals("lambda:GetDurableExecutionHistory", lambdaAction("GET", base + "/history"));
+        assertEquals("lambda:StopDurableExecution", lambdaAction("POST", base + "/stop"));
+        assertEquals("lambda:GetDurableExecution", lambdaAction("GET", base));
+        assertEquals("lambda:ListDurableExecutionsByFunction",
+                lambdaAction("GET", "/2025-12-01/functions/f/durable-executions"));
+    }
+
+    private String lambdaAction(String method, String path) {
+        return registry.resolveRoute("lambda",
+                mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
+    }
+
+    @Test
     void anEncodedSlashStaysInsideItsPathParameter() {
         assertEquals("ses:GetSuppressedDestination", registry.resolveRoute("ses",
                 mockCtx("GET", "/v2/email/suppression/addresses/a%2Fb@example.com", new MultivaluedHashMap<>(),

@@ -10,6 +10,7 @@ import io.apicurio.registry.content.canon.AvroContentCanonicalizer;
 import io.apicurio.registry.content.canon.ContentCanonicalizer;
 import io.apicurio.registry.content.canon.JsonContentCanonicalizer;
 import io.apicurio.registry.content.canon.ProtobufContentCanonicalizer;
+import io.apicurio.registry.rules.RuleViolation;
 import io.apicurio.registry.rules.compatibility.AvroCompatibilityChecker;
 import io.apicurio.registry.rules.compatibility.CompatibilityChecker;
 import io.apicurio.registry.rules.compatibility.CompatibilityDifference;
@@ -194,7 +195,7 @@ public final class SchemaCompatibilityChecker {
         }
         return result.getIncompatibleDifferences().stream()
                 .map(d -> {
-                    var rv = d.asRuleViolation();
+                    RuleViolation rv = d.asRuleViolation();
                     String desc = rv != null ? rv.getDescription() : null;
                     String ctx = rv != null ? rv.getContext() : null;
                     if (desc == null) {

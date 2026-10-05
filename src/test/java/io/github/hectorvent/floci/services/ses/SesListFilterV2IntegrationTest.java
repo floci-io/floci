@@ -12,11 +12,12 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
- * The POST bindings of ListEmailIdentities and ListConfigurationSets that SDKs use since the
- * {@code Filter} member was added, beside the GET bindings older SDKs still send: body parsing, the
- * model's checks on the filter map, and what each list does with a key it does not know. The match
- * rules, the precedence and the token binding are covered by {@code SesIdentityListFilterServiceTest}
- * and {@code SesConfigurationSetListFilterServiceTest}.
+ * The {@code Filter} of ListEmailIdentities, ListConfigurationSets and ListTenants on the wire: the
+ * POST bindings the first two moved to when the member was added, beside the GET bindings older SDKs
+ * still send, body parsing, the model's checks on the filter map, and what each list does with a key
+ * it does not know. The match rules, the precedence and the token binding are covered by
+ * {@code SesIdentityListFilterServiceTest}, {@code SesConfigurationSetListFilterServiceTest} and
+ * {@code SesTenantListFilterServiceTest}.
  */
 @QuarkusTest
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -27,6 +28,7 @@ class SesListFilterV2IntegrationTest {
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION + "/ses/aws4_request";
     private static final String LIST_IDENTITIES = "/v2/email/list-identities";
     private static final String LIST_CONFIGURATION_SETS = "/v2/email/list-configuration-sets";
+    private static final String LIST_TENANTS = "/v2/email/tenants/list";
 
     private boolean created;
 
@@ -41,6 +43,9 @@ class SesListFilterV2IntegrationTest {
         }
         for (String name : new String[] {"Filter-Alpha", "filter-beta", "unrelated"}) {
             send("/v2/email/configuration-sets", "{\"ConfigurationSetName\": \"" + name + "\"}").statusCode(200);
+        }
+        for (String name : new String[] {"Filter-Alpha", "filter-beta", "unrelated"}) {
+            send("/v2/email/tenants", "{\"TenantName\": \"" + name + "\"}").statusCode(200);
         }
         created = true;
     }
@@ -151,6 +156,35 @@ class SesListFilterV2IntegrationTest {
         send(LIST_CONFIGURATION_SETS, "{\"Filter\": {\"CONFIGURATION_SET_NAME_CONTAINS\": 1}}")
                 .statusCode(400)
                 .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    void listTenants_filtersAndPages() {
+        String token = send(LIST_TENANTS, "{\"Filter\": {\"TENANT_NAME_CONTAINS\": \"FILTER\", "
+                + "\"SENDING_STATUS\": \"ENABLED\"}, \"PageSize\": 1}").statusCode(200)
+                .body("Tenants.TenantName", contains("Filter-Alpha"))
+                .extract().path("NextToken");
+        send(LIST_TENANTS, "{\"Filter\": {\"TENANT_NAME_CONTAINS\": \"filter\", \"SENDING_STATUS\": "
+                + "\"ENABLED\"}, \"PageSize\": 1, \"NextToken\": \"" + token + "\"}").statusCode(200)
+                .body("Tenants.TenantName", contains("filter-beta"))
+                .body("NextToken", nullValue());
+        send(LIST_TENANTS, "{\"Filter\": {}}").statusCode(200)
+                .body("Tenants.TenantName", contains("Filter-Alpha", "filter-beta", "unrelated"));
+    }
+
+    @Test
+    void listTenants_refusesAKeyItDoesNotKnow_andAnEmptyValue() {
+        send(LIST_TENANTS, "{\"Filter\": {\"BOGUS\": null}, \"PageSize\": 0}").statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("1 validation error detected: Value at 'filter' failed to satisfy "
+                        + "constraint: Map keys must satisfy constraint: [Member must satisfy enum value set: "
+                        + "[SENDING_STATUS, TENANT_NAME_CONTAINS]]"));
+        send(LIST_TENANTS, "{\"Filter\": {\"SENDING_STATUS\": \"\"}}").statusCode(400)
+                .body("message", equalTo("1 validation error detected: Value at 'filter' failed to satisfy "
+                        + "constraint: Map value must satisfy constraint: "
+                        + "[Member must have length greater than or equal to 1]"));
+        send(LIST_TENANTS, "{\"Filter\": {\"SENDING_STATUS\": \"enabled\"}}").statusCode(400)
+                .body("message", equalTo("Invalid sending status <enabled>."));
     }
 
     private static ValidatableResponse send(String path, String body) {

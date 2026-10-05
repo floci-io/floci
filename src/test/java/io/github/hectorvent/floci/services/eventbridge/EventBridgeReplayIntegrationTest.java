@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.*;
 
 import java.time.Instant;
@@ -318,5 +319,97 @@ class EventBridgeReplayIntegrationTest {
                 .when().post("/")
                 .then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(14)
+    void updateArchiveKeepsTheFieldsTheRequestOmits() {
+        createPartialUpdateArchive("partial-keep-archive");
+
+        updateArchive("""
+                {"ArchiveName": "partial-keep-archive", "Description": "changed"}
+                """);
+
+        describePartialUpdateArchive("partial-keep-archive")
+                .body("Description", equalTo("changed"))
+                .body("EventPattern", equalTo("{\"source\":[\"app.orders\"]}"))
+                .body("RetentionDays", equalTo(5));
+        deletePartialUpdateArchive("partial-keep-archive");
+    }
+
+    @Test
+    @Order(15)
+    void updateArchiveClearsTheDescriptionAndPatternGivenAsEmptyStrings() {
+        createPartialUpdateArchive("partial-clear-archive");
+
+        updateArchive("""
+                {"ArchiveName": "partial-clear-archive", "Description": "", "EventPattern": ""}
+                """);
+
+        describePartialUpdateArchive("partial-clear-archive")
+                .body("$", not(hasKey("Description")))
+                .body("$", not(hasKey("EventPattern")))
+                .body("RetentionDays", equalTo(5));
+        deletePartialUpdateArchive("partial-clear-archive");
+    }
+
+    @Test
+    @Order(16)
+    void updateArchiveSetsAnExplicitZeroRetention() {
+        createPartialUpdateArchive("partial-zero-archive");
+
+        updateArchive("""
+                {"ArchiveName": "partial-zero-archive", "RetentionDays": 0}
+                """);
+
+        describePartialUpdateArchive("partial-zero-archive")
+                .body("Description", equalTo("original"))
+                .body("EventPattern", equalTo("{\"source\":[\"app.orders\"]}"))
+                .body("RetentionDays", equalTo(0));
+        deletePartialUpdateArchive("partial-zero-archive");
+    }
+
+    private static void createPartialUpdateArchive(String name) {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.CreateArchive")
+                .body("""
+                        {
+                          "ArchiveName": "%s",
+                          "EventSourceArn": "%s",
+                          "Description": "original",
+                          "EventPattern": "{\\"source\\":[\\"app.orders\\"]}",
+                          "RetentionDays": 5
+                        }
+                        """.formatted(name, busArn))
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    private static void updateArchive(String body) {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.UpdateArchive")
+                .body(body)
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    private static ValidatableResponse describePartialUpdateArchive(String name) {
+        return given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.DescribeArchive")
+                .body("{\"ArchiveName\":\"" + name + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    private static void deletePartialUpdateArchive(String name) {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.DeleteArchive")
+                .body("{\"ArchiveName\":\"" + name + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
     }
 }

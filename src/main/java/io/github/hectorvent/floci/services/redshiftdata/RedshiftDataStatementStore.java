@@ -116,6 +116,8 @@ class RedshiftDataStatementStore {
         boolean batch;
         String statementName;
         String clusterIdentifier;
+        /** Set instead of {@code clusterIdentifier} for a statement run against a serverless workgroup. */
+        String workgroupName;
         String database;
         String dbUser;
         String resultFormat = "JSON";

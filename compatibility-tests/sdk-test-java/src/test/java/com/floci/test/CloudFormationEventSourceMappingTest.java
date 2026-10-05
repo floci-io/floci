@@ -25,9 +25,8 @@ class CloudFormationEventSourceMappingTest {
     private static final String STACK_NAME = "compat-cfn-esm-stack";
     private static final String FUNC_NAME  = "compat-cfn-esm-func";
     private static final String QUEUE_NAME = "compat-cfn-esm-queue";
-    private static final String ROLE       = "arn:aws:iam::000000000000:role/cfn-lambda-role";
+    private static final String ROLE       = TestFixtures.globalArn("iam", "000000000000", "role/cfn-lambda-role");
     private static final String ACCOUNT    = "000000000000";
-    private static final String REGION     = "us-east-1";
 
     private static final String DDB_STACK_NAME = "compat-cfn-esm-ddb-stack";
     private static final String DDB_FUNC_NAME  = "compat-cfn-esm-ddb-func";
@@ -186,7 +185,7 @@ class CloudFormationEventSourceMappingTest {
         assertThat(esm.bisectBatchOnFunctionError()).isTrue();
         assertThat(esm.destinationConfig()).isNotNull();
         assertThat(esm.destinationConfig().onFailure().destination())
-                .isEqualTo("arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":" + DLQ_NAME);
+                .isEqualTo(TestFixtures.arn("sqs", ACCOUNT, DLQ_NAME));
     }
 
     @Test

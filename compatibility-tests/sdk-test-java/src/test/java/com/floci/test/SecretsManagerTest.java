@@ -251,14 +251,14 @@ class SecretsManagerTest {
             lambda.createFunction(CreateFunctionRequest.builder()
                     .functionName(lambdaName)
                     .runtime(Runtime.fromValue("nodejs20.x"))
-                    .role("arn:aws:iam::000000000000:role/dummy-role")
+                    .role(TestFixtures.globalArn("iam", "000000000000", "role/dummy-role"))
                     .handler("index.handler")
                     .code(FunctionCode.builder().zipFile(SdkBytes.fromByteArray(baos.toByteArray())).build())
                     .build());
 
             RotateSecretResponse rotateResponse = sm.rotateSecret(RotateSecretRequest.builder()
                     .secretId(secretName)
-                    .rotationLambdaARN("arn:aws:lambda:us-east-1:000000000000:function:" + lambdaName)
+                    .rotationLambdaARN(TestFixtures.arn("lambda", "000000000000", "function:" + lambdaName))
                     .rotationRules(RotationRulesType.builder().automaticallyAfterDays(30L).build())
                     .build());
 
@@ -320,7 +320,7 @@ class SecretsManagerTest {
         assertThatThrownBy(() -> sm.createSecret(CreateSecretRequest.builder()
                 .name(kmsSecretName)
                 .secretString("kms-value")
-                .kmsKeyId("arn:aws:kms:us-east-1:000000000000:key/does-not-exist")
+                .kmsKeyId(TestFixtures.arn("kms", "000000000000", "key/does-not-exist"))
                 .build()))
                 .isInstanceOf(InvalidParameterException.class)
                 .hasMessageContaining("You can't access the KMS key");

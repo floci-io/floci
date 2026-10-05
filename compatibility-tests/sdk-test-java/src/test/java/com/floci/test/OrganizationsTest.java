@@ -1,9 +1,6 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.organizations.model.Account;
 import software.amazon.awssdk.services.organizations.model.AccessDeniedException;
@@ -46,16 +43,6 @@ public class OrganizationsTest {
 
     private final OrganizationsClient client = TestFixtures.organizationsClient();
 
-    /** A client whose 12-digit access key id makes Floci treat the caller as that account. */
-    private static OrganizationsClient clientFor(String accountId) {
-        return OrganizationsClient.builder()
-                .endpointOverride(TestFixtures.endpoint())
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(accountId, "test")))
-                .build();
-    }
-
     @Test
     public void testFullLifecycle() {
         // 1. Create the organization.
@@ -68,7 +55,7 @@ public class OrganizationsTest {
         try {
             assertThat(organization.id()).matches("o-[a-z0-9]{10}");
             assertThat(organization.featureSet()).isEqualTo(OrganizationFeatureSet.ALL);
-            assertThat(organization.arn()).startsWith("arn:aws:organizations::");
+            assertThat(organization.arn()).startsWith("arn:" + TestFixtures.partition() + ":organizations::");
             assertThat(managementAccountId).isNotBlank();
 
             assertThat(client.describeOrganization().organization().id()).isEqualTo(organization.id());
@@ -223,7 +210,7 @@ public class OrganizationsTest {
             client.deleteResourcePolicy(r -> { });
 
             // 10. The invitation handshake, driven from both sides.
-            try (OrganizationsClient invitedClient = clientFor(INVITED_ACCOUNT)) {
+            try (OrganizationsClient invitedClient = TestFixtures.organizationsClient(INVITED_ACCOUNT)) {
                 assertThatThrownBy(invitedClient::describeOrganization)
                         .isInstanceOf(AwsOrganizationsNotInUseException.class);
 

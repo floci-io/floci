@@ -46,6 +46,7 @@ import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
 import software.amazon.awssdk.services.budgets.BudgetsClient;
 import software.amazon.awssdk.services.bcmpricingcalculator.BcmPricingCalculatorClient;
 import software.amazon.awssdk.services.timestreaminfluxdb.TimestreamInfluxDbClient;
+import software.amazon.awssdk.services.transfer.TransferClient;
 import software.amazon.awssdk.services.macie2.Macie2Client;
 import software.amazon.awssdk.services.controlcatalog.ControlCatalogClient;
 import software.amazon.awssdk.services.marketplacecatalog.MarketplaceCatalogClient;
@@ -732,6 +733,14 @@ public final class TestFixtures {
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
+    public static TransferClient transferClient() {
+        return TransferClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
                 .build();
     }
 

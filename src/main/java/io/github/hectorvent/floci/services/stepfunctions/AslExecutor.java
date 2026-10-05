@@ -33,6 +33,7 @@ import io.github.hectorvent.floci.services.scheduler.SchedulerController;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.LambdaTargetResolver;
@@ -1029,9 +1030,17 @@ public class AslExecutor {
         return colon >= 0 ? fn.substring(colon + 1) : null;
     }
 
-    private LambdaFunction resolveLambdaFunction(String region, String name, String qualifier) {
+    private boolean iamEnforcementEnabled() {
+        return config != null && config.services() != null && config.services().iam() != null
+                && config.services().iam().enforcementEnabled();
+    }
+
+    /** {@code accountId} is null for the state machine's own account, the account the execution runs in. */
+    private LambdaFunction resolveLambdaFunction(String accountId, String region, String name, String qualifier) {
         try {
-            return targetResolver.resolveInvokeTarget(region, name, qualifier);
+            return accountId == null
+                    ? targetResolver.resolveInvokeTarget(region, name, qualifier)
+                    : targetResolver.resolveInvokeTargetForAccount(accountId, region, name, qualifier);
         } catch (AwsException e) {
             if ("ResourceNotFoundException".equals(e.getErrorCode())) {
                 return null;
@@ -1113,9 +1122,34 @@ public class AslExecutor {
         }
 
         if (functionName != null) {
-            // Extract region from the state machine ARN: arn:<partition>:states:REGION:...
-            String region = extractRegionFromArn(sm.getStateMachineArn());
-            LambdaFunction fn = resolveLambdaFunction(region, functionName, extractLambdaQualifier(functionRef));
+            AwsArnUtils.Arn stateMachineArn = AwsArnUtils.parse(sm.getStateMachineArn());
+            LambdaArnUtils.ResolvedFunctionRef ref;
+            try {
+                ref = LambdaArnUtils.resolve(functionRef);
+            } catch (AwsException e) {
+                throw new FailStateException("Lambda." + e.getErrorCode(), e.getMessage());
+            }
+            // The optimized integration calls Lambda's Invoke in the state machine's region, which
+            // refuses a function ARN from another region. A function ARN otherwise names its own
+            // account and region, never a same-named function of the state machine's.
+            if (optimizedLambdaInvoke && ref.region() != null && !ref.region().equals(stateMachineArn.region())) {
+                throw new FailStateException("Lambda.InvalidParameterValueException",
+                        "Region '" + ref.region() + "' in ARN does not match request region '"
+                                + stateMachineArn.region() + "'");
+            }
+            String region = ref.region() != null ? ref.region() : stateMachineArn.region();
+            String accountId = ref.account() == null || ref.account().equals(stateMachineArn.accountId())
+                    ? null : ref.account();
+            // Floci evaluates no Lambda resource policy, so under IAM enforcement it answers a
+            // cross-account function as its own Invoke API does: refused.
+            if (accountId != null && iamEnforcementEnabled()) {
+                throw new FailStateException("Lambda.AccessDeniedException",
+                        "User: " + sm.getRoleArn() + " is not authorized to perform: lambda:InvokeFunction"
+                                + " on resource: " + functionRef
+                                + " because no resource-based policy allows the lambda:InvokeFunction action");
+            }
+            LambdaFunction fn = resolveLambdaFunction(accountId, region, functionName,
+                    extractLambdaQualifier(functionRef));
             if (fn == null) {
                 // A missing function is a task failure on AWS, so it must stay reachable for
                 // Retry and Catch instead of surfacing as States.Runtime.

@@ -118,11 +118,15 @@ class EksClusterArgsTest {
             "system-reserved",
             "kube-reserved",
             "eviction-hard",
+            "register-with-taints",
             "--provider-id=custom-id",
             "providerId=custom-id",
             "node-labels=topology.kubernetes.io/zone=custom",
             "provider-id+=aws:///custom-id",
-            "node-labels-=zone=custom"
+            "node-labels-=zone=custom",
+            "--register-with-taints=dedicated=gpu:NoSchedule",
+            "registerWithTaints=dedicated=gpu:NoSchedule",
+            "register-with-taints+=dedicated=gpu:NoSchedule"
     })
     void rejectsCollidingKubeletArguments(String collidingFlag) {
         Map<String, String> tags = Map.of("floci:kubelet-arg:" + collidingFlag, "true");

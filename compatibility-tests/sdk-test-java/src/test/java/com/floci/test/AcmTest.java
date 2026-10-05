@@ -106,7 +106,7 @@ class AcmTest {
         arnsToCleanup.add(requestedCertArn);
 
         assertThat(requestedCertArn).isNotNull();
-        assertThat(requestedCertArn).matches("arn:aws:acm:.*:.*:certificate/.*");
+        assertThat(requestedCertArn).matches("arn:" + TestFixtures.partition() + ":acm:.*:.*:certificate/.*");
     }
 
     @Test
@@ -216,7 +216,7 @@ class AcmTest {
         arnsToCleanup.add(importedCertArn);
 
         assertThat(importedCertArn).isNotNull();
-        assertThat(importedCertArn).matches("arn:aws:acm:.*:.*:certificate/.*");
+        assertThat(importedCertArn).matches("arn:" + TestFixtures.partition() + ":acm:.*:.*:certificate/.*");
     }
 
     @Test
@@ -344,7 +344,7 @@ class AcmTest {
     @Order(40)
     @DisplayName("Describe a non-existent certificate throws exception")
     void testDescribeNonExistentCertificate() {
-        String fakeArn = "arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000";
+        String fakeArn = TestFixtures.arn("acm", "000000000000", "certificate/00000000-0000-0000-0000-000000000000");
 
         assertThatThrownBy(() -> acm.describeCertificate(b -> b
                 .certificateArn(fakeArn)))

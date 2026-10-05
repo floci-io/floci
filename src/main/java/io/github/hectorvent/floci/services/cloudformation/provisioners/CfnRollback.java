@@ -79,6 +79,22 @@ public final class CfnRollback {
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
     /**
+     * Holds the description, event pattern and retention an EventBridge archive carried before an
+     * in-place update changed them, so a failed stack update can put them back. Written by
+     * {@code EventsArchiveCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String ARCHIVE_UPDATE_SNAPSHOT_ATTR = "__FlociArchiveUpdateSnapshot";
+
+    /**
+     * Holds the connection, endpoint, method, description and rate limit an EventBridge API
+     * destination carried before an in-place update changed them, so a failed stack update can put
+     * them back. Written by {@code EventsCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String API_DESTINATION_UPDATE_SNAPSHOT_ATTR = "__FlociApiDestinationUpdateSnapshot";
+
+    /**
      * Holds the name, description and endpoint configuration a REST API had before an in-place
      * update patched them, and whether the update also re-applied an OpenAPI document, so a failed
      * stack update can put them back. Written by {@code ApiGatewayRestApiCfnProvisioner} before its
@@ -94,6 +110,21 @@ public final class CfnRollback {
      * after that creation, and spent by its {@code rollbackUpdate}.
      */
     public static final String API_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociApiKeyUpdateSnapshot";
+
+    /**
+     * Holds the name and tags an API Gateway V2 VPC link carried before an in-place update changed
+     * them, so a failed stack update can put them back. Written by {@code ApiGatewayV2CfnProvisioner}
+     * before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String VPC_LINK_UPDATE_SNAPSHOT_ATTR = "__FlociVpcLinkUpdateSnapshot";
+
+    /**
+     * Holds the connection type and id an API Gateway V2 integration carried before an update, and
+     * whether that update also changed another field, so a failed stack update can put the
+     * connection back. Written by {@code ApiGatewayV2CfnProvisioner} before its update call and
+     * spent by its {@code rollbackUpdate}.
+     */
+    public static final String INTEGRATION_CONNECTION_SNAPSHOT_ATTR = "__FlociIntegrationConnectionSnapshot";
 
     /**
      * Holds the complete prior metric filter, identity, name mode and per-address mutation outcomes

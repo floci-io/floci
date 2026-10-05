@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.junit.jupiter.api.Test;
@@ -37,10 +38,12 @@ class RedshiftDataResourceResolverTest {
         return c;
     }
 
+    private final RedshiftServerlessService serverless = mock(RedshiftServerlessService.class);
+
     private RedshiftDataResourceResolver resolver(RedshiftService redshift, SecretsManagerService secrets) {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT);
-        return new RedshiftDataResourceResolver(redshift, secrets, mapper, broker, regionResolver);
+        return new RedshiftDataResourceResolver(redshift, secrets, mapper, broker, regionResolver, serverless);
     }
 
     @Test
@@ -63,14 +66,86 @@ class RedshiftDataResourceResolverTest {
         assertEquals("Secret123", target.password());
     }
 
+    private static RedshiftServerlessService.WorkgroupTarget workgroupTarget() {
+        return new RedshiftServerlessService.WorkgroupTarget(
+                "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", "wg-1",
+                "127.0.0.1", 55433, "analytics", "root", "Secret123", "root");
+    }
+
     @Test
-    void rejectsWorkgroupName() {
+    void resolvesAWorkgroupAsTheNamespaceAdminWhenNoSecretIsGiven() {
+        when(serverless.getWorkgroupTarget("wg-1", REGION)).thenReturn(workgroupTarget());
         ObjectNode req = mapper.createObjectNode();
         req.put("WorkgroupName", "wg-1");
-        req.put("Database", "dev");
-        AwsException e = assertThrows(AwsException.class,
-                () -> resolver(mock(RedshiftService.class), mock(SecretsManagerService.class)).resolve(req, REGION));
-        assertEquals("ValidationException", e.getErrorCode());
+        req.put("Database", "analytics");
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(mock(RedshiftService.class), mock(SecretsManagerService.class)).resolve(req, REGION);
+
+        assertEquals("arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", target.arn());
+        assertEquals("127.0.0.1", target.host());
+        assertEquals(55433, target.port());
+        assertEquals("analytics", target.database());
+        assertEquals("root", target.user());
+        assertEquals("Secret123", target.password());
+    }
+
+    @Test
+    void aWorkgroupWithASecretConnectsWithTheSecretsCredentials() {
+        when(serverless.getWorkgroupTarget("wg-1", REGION)).thenReturn(workgroupTarget());
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        String secretArn = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT + ":secret:wg-creds";
+        SecretVersion version = new SecretVersion();
+        version.setSecretString("{\"username\":\"root\",\"password\":\"Secret123\"}");
+        when(secrets.getSecretValue(eq(secretArn), any(), any(), eq(REGION))).thenReturn(version);
+        ObjectNode req = mapper.createObjectNode();
+        req.put("WorkgroupName", "wg-1");
+        req.put("Database", "analytics");
+        req.put("SecretArn", secretArn);
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(mock(RedshiftService.class), secrets).resolve(req, REGION);
+
+        assertEquals("root", target.user());
+        assertEquals("Secret123", target.password());
+        assertEquals(55433, target.port());
+    }
+
+    @Test
+    void aWorkgroupRejectsAClusterIdentifierAndAWrongDatabase() {
+        when(serverless.getWorkgroupTarget("wg-1", REGION)).thenReturn(workgroupTarget());
+        RedshiftDataResourceResolver resolver = resolver(mock(RedshiftService.class), mock(SecretsManagerService.class));
+
+        ObjectNode both = mapper.createObjectNode();
+        both.put("WorkgroupName", "wg-1");
+        both.put("ClusterIdentifier", "wh");
+        both.put("Database", "analytics");
+        assertEquals("ValidationException", assertThrows(AwsException.class, () -> resolver.resolve(both, REGION))
+                .getErrorCode());
+
+        ObjectNode wrongDatabase = mapper.createObjectNode();
+        wrongDatabase.put("WorkgroupName", "wg-1");
+        wrongDatabase.put("Database", "dev");
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> resolver.resolve(wrongDatabase, REGION)).getErrorCode());
+    }
+
+    @Test
+    void aWorkgroupStillRequiresADatabaseAndPropagatesAMissingWorkgroup() {
+        when(serverless.getWorkgroupTarget("absent-wg", REGION))
+                .thenThrow(new AwsException("ResourceNotFoundException", "no such workgroup", 404));
+        RedshiftDataResourceResolver resolver = resolver(mock(RedshiftService.class), mock(SecretsManagerService.class));
+
+        ObjectNode noDatabase = mapper.createObjectNode();
+        noDatabase.put("WorkgroupName", "wg-1");
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> resolver.resolve(noDatabase, REGION)).getErrorCode());
+
+        ObjectNode absent = mapper.createObjectNode();
+        absent.put("WorkgroupName", "absent-wg");
+        absent.put("Database", "dev");
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> resolver.resolve(absent, REGION)).getErrorCode());
     }
 
     @Test

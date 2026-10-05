@@ -485,7 +485,7 @@ class TlsCertificateHostnameTest {
         X509Certificate cert = parseCertificate(certFile);
         List<String> sans = extractSansFromCertificate(cert);
 
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             String expectedWildcard = "*.dkr.ecr." + region + ".localhost.floci.io";
             assertTrue(TlsConfigSource.DEFAULT_SAN_HOSTNAMES.contains(expectedWildcard),
                     "DEFAULT_SAN_HOSTNAMES missing ECR wildcard for region " + region);

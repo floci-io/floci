@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
@@ -22,6 +24,7 @@ import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.Logging;
+import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import io.github.hectorvent.floci.testutil.LogCapture;
@@ -68,6 +71,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -169,17 +173,17 @@ class EksClusterManagerTest {
     @Test
     void registriesYamlMirrorsEveryRegionHostnameAndThePathStyleForm() {
         String yaml = EksClusterManager.buildRegistriesYaml(
-                "000000000000", AwsRegions.ALL, 4566, "http://floci:4566");
+                "000000000000", AwsRegions.advertised("aws"), 4566, "http://floci:4566");
 
         assertTrue(yaml.startsWith("mirrors:\n"));
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".localhost:4566\":"),
                     "should mirror the " + region + " hostname");
         }
         assertTrue(yaml.contains("\"localhost:4566\":"), "should mirror the path-style form");
         assertFalse(yaml.contains("\"*\""), "must not catch-all public registries");
         long endpoints = yaml.lines().filter(l -> l.contains("- \"http://floci:4566\"")).count();
-        assertEquals(AwsRegions.ALL.size() + 1, endpoints,
+        assertEquals(AwsRegions.advertised("aws").size() + 1, endpoints,
                 "every mirror should point at Floci's in-network data plane");
     }
 
@@ -197,9 +201,9 @@ class EksClusterManagerTest {
     void registriesYamlTlsAliasesPreserveLoopbackMirrorsAndInternalHttpEndpoint() {
         String endpoint = "http://host.docker.internal:4577";
         String yaml = EksClusterManager.buildRegistriesYaml(
-                "111122223333", AwsRegions.ALL, 4577, endpoint, true);
+                "111122223333", AwsRegions.advertised("aws"), 4577, endpoint, true);
 
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost:4577\":"));
             assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost.floci.io:4577\":"));
         }
@@ -211,7 +215,7 @@ class EksClusterManagerTest {
         assertFalse(yaml.contains("ghcr.io"));
         assertFalse(yaml.contains("https://"), "internal pulls still use the HTTP data plane");
         long endpoints = yaml.lines().filter(line -> line.contains("- \"" + endpoint + "\"")).count();
-        assertEquals(2L * (AwsRegions.ALL.size() + 1), endpoints);
+        assertEquals(2L * (AwsRegions.advertised("aws").size() + 1), endpoints);
     }
 
     @Test
@@ -235,6 +239,7 @@ class EksClusterManagerTest {
         List<String> args = EksClusterManager.buildServerArgs(false);
 
         assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
         assertFalse(args.contains("--flannel-backend=none"));
         assertFalse(args.contains("--disable-network-policy"));
         assertFalse(args.contains("--disable-kube-proxy"));
@@ -247,8 +252,27 @@ class EksClusterManagerTest {
         assertTrue(args.contains("--flannel-backend=none"));
         assertTrue(args.contains("--disable-network-policy"));
         assertTrue(args.contains("--disable-kube-proxy"));
-        // Base args must still be present — disableCni only adds flags, never replaces them.
+        // Base args must still be present: disableCni only adds flags, never replaces them.
         assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
+        assertTrue(args.contains("--tls-san=localhost"));
+    }
+
+    @Test
+    void serverArgsRetainLocalStorageWhenDefaultStorageClassEnabled() {
+        List<String> args = EksClusterManager.buildServerArgs(false, true, null, null);
+
+        assertTrue(args.contains("--disable=traefik"));
+        assertFalse(args.contains("--disable=local-storage"));
+        assertTrue(args.contains("--tls-san=localhost"));
+    }
+
+    @Test
+    void serverArgsDisableLocalStorageWhenDefaultStorageClassDisabled() {
+        List<String> args = EksClusterManager.buildServerArgs(false, false, null, null);
+
+        assertTrue(args.contains("--disable=traefik"));
+        assertTrue(args.contains("--disable=local-storage"));
         assertTrue(args.contains("--tls-san=localhost"));
     }
 
@@ -329,7 +353,8 @@ class EksClusterManagerTest {
                 "io.floci.resource-id", "my-cluster",
                 "io.floci.account", "000000000000",
                 "io.floci.region", "us-east-1",
-                "io.floci.eks.node-capacity", "m5.large:unbounded"));
+                "io.floci.eks.node-capacity", "m5.large:unbounded",
+                "io.floci.eks.default-storage-class", "false"));
     }
 
     @ParameterizedTest
@@ -361,6 +386,43 @@ class EksClusterManagerTest {
             verify(builder).withEmbeddedDns();
         } else {
             verify(builder, never()).withEmbeddedDns();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void startClusterDefaultStorageClassFlag(boolean defaultStorageClass) {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().eks().defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+        when(config.services().eks().defaultStorageClass()).thenReturn(defaultStorageClass);
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class, Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.create(any())).thenReturn("container-id");
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                config, new RegionResolver("us-east-1", "000000000000"));
+
+        Cluster cluster = new Cluster();
+        cluster.setName("my-cluster");
+
+        manager.startCluster(cluster);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withCmd(cmdCaptor.capture());
+        List<String> cmd = cmdCaptor.getValue();
+
+        if (defaultStorageClass) {
+            assertFalse(cmd.contains("--disable=local-storage"));
+        } else {
+            assertTrue(cmd.contains("--disable=local-storage"));
         }
     }
 
@@ -459,6 +521,35 @@ class EksClusterManagerTest {
             // The port Docker already holds must not be handed out to another cluster.
             verify(portAllocator).markReserved(6512);
             verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void restoreClusterPreservesPreUpgradeLocalStorageWhenContainerSurvives() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-pre-upgrade")));
+            when(lifecycleManager.adopt("cid-pre-upgrade", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-pre-upgrade", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals(Boolean.TRUE, cluster.getDefaultStorageClass());
+        }
+
+        @Test
+        void restoreClusterPreservesDefaultStorageClassLabelFromSurvivingContainer() {
+            Container container = containerFromJson("{\"Id\":\"cid-new\","
+                    + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                    + "\"io.floci.eks.default-storage-class\":\"false\"}}");
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(container));
+            when(lifecycleManager.adopt("cid-new", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-new", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals(Boolean.FALSE, cluster.getDefaultStorageClass());
         }
 
         @Test
@@ -1814,6 +1905,7 @@ class EksClusterManagerTest {
         private EksOidcService oidcService;
         private RegionResolver regionResolver;
         private EksClusterManager manager;
+        private StorageBackend<String, Nodegroup> nodeGroupStorage;
 
         @BeforeEach
         void setUp() {
@@ -1857,10 +1949,11 @@ class EksClusterManagerTest {
             when(oidcService.newIssuerUrl(anyString())).thenReturn(
                     "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER12345678901234567890");
 
+            nodeGroupStorage = new InMemoryStorage<>();
             manager = new EksClusterManager(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
-                    config, regionResolver, null, oidcService);
+                    config, regionResolver, null, oidcService, null, null, nodeGroupStorage);
         }
 
         @Test
@@ -2210,6 +2303,333 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void nodegroupLabelsAppearOnNode() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("worker-group-1");
+            nodegroup.setCapacityType("ON_DEMAND");
+            nodegroup.setInstanceTypes(List.of("t3.medium"));
+            nodegroup.setLabels(Map.of("environment", "production", "team", "platform"));
+            nodeGroupStorage.put("prod-cluster/worker-group-1", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+
+            assertEquals("us-west-2a", labels.get("topology.kubernetes.io/zone"));
+            assertEquals("us-west-2", labels.get("topology.kubernetes.io/region"));
+            assertEquals("worker-group-1", labels.get("eks.amazonaws.com/nodegroup"));
+            assertEquals("ON_DEMAND", labels.get("eks.amazonaws.com/capacityType"));
+            assertEquals("ami-eks-k3s", labels.get("eks.amazonaws.com/nodegroup-image"));
+            assertEquals("t3.medium", labels.get("node.kubernetes.io/instance-type"));
+            assertEquals("production", labels.get("environment"));
+            assertEquals("platform", labels.get("team"));
+        }
+
+        @Test
+        void nodegroupTaintsAppearWithKubernetesEffectSpelling() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("gpu-group");
+            nodegroup.setTaints(List.of(
+                    Map.of("key", "dedicated", "value", "gpu", "effect", "NO_SCHEDULE"),
+                    Map.of("key", "evict", "value", "true", "effect", "NO_EXECUTE"),
+                    Map.of("key", "spot", "value", "preemptible", "effect", "PREFER_NO_SCHEDULE")
+            ));
+            nodeGroupStorage.put("prod-cluster/gpu-group", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertTrue(cmd.contains("--kubelet-arg=register-with-taints="
+                    + "dedicated=gpu:NoSchedule,evict=true:NoExecute,spot=preemptible:PreferNoSchedule"));
+        }
+
+        @Test
+        void nodegroupCapacityTypeSpot() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("spot-group");
+            nodegroup.setCapacityType("SPOT");
+            nodeGroupStorage.put("prod-cluster/spot-group", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+            assertEquals("SPOT", labels.get("eks.amazonaws.com/capacityType"));
+            assertEquals("spot-group", labels.get("eks.amazonaws.com/nodegroup"));
+        }
+
+        @Test
+        void nodegroupCapacityTypeCapacityBlock() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("block-group");
+            nodegroup.setCapacityType("CAPACITY_BLOCK");
+            nodeGroupStorage.put("prod-cluster/block-group", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+            assertEquals("CAPACITY_BLOCK", labels.get("eks.amazonaws.com/capacityType"));
+            assertEquals("block-group", labels.get("eks.amazonaws.com/nodegroup"));
+        }
+
+        @Test
+        void clusterWithNoNodegroupsProducesSameArgumentsAsBefore() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String expectedAz = manager.deriveClusterNodeAvailabilityZone(cluster, "us-west-2");
+            assertTrue(cmd.contains("--kubelet-arg=node-labels=topology.kubernetes.io/zone=" + expectedAz
+                    + ",topology.kubernetes.io/region=us-west-2"));
+            assertFalse(cmd.stream().anyMatch(arg -> arg.startsWith("--kubelet-arg=register-with-taints=")));
+            assertFalse(cmd.stream().anyMatch(arg -> arg.contains("eks.amazonaws.com/")));
+        }
+
+        @Test
+        void multipleNodegroupsAppliesFirstAndIgnoresLater() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Instant now = Instant.now();
+            Nodegroup first = new Nodegroup();
+            first.setNodegroupName("first-ng");
+            first.setCreatedAt(now.minusSeconds(60));
+            first.setLabels(Map.of("role", "frontend"));
+            first.setTaints(List.of(Map.of("key", "tier", "value", "frontend", "effect", "NO_SCHEDULE")));
+
+            Nodegroup second = new Nodegroup();
+            second.setNodegroupName("second-ng");
+            second.setCreatedAt(now);
+            second.setLabels(Map.of("role", "backend", "secondary", "true"));
+            second.setTaints(List.of(Map.of("key", "tier", "value", "backend", "effect", "NO_SCHEDULE")));
+
+            nodeGroupStorage.put("prod-cluster/second-ng", second);
+            nodeGroupStorage.put("prod-cluster/first-ng", first);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+
+            assertEquals("first-ng", labels.get("eks.amazonaws.com/nodegroup"));
+            assertEquals("frontend", labels.get("role"));
+            assertNull(labels.get("secondary"));
+
+            String taintsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=register-with-taints="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("register-with-taints arg missing"));
+            assertEquals("--kubelet-arg=register-with-taints=tier=frontend:NoSchedule", taintsArg);
+        }
+
+        @Test
+        void topologyLabelsAndProviderIdPreservedWithNodegroup() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("app-workers");
+            nodegroup.setLabels(Map.of("app", "test"));
+            nodeGroupStorage.put("prod-cluster/app-workers", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String expectedProviderId = manager.deriveClusterNodeProviderId(cluster);
+            assertTrue(cmd.contains("--kubelet-arg=provider-id=" + expectedProviderId));
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+            assertEquals("us-west-2a", labels.get("topology.kubernetes.io/zone"));
+            assertEquals("us-west-2", labels.get("topology.kubernetes.io/region"));
+        }
+
+        @Test
+        void userLabelsCannotOverwriteReservedKeys() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("worker-group");
+            nodegroup.setCapacityType("ON_DEMAND");
+            nodegroup.setInstanceTypes(List.of("m5.large"));
+            nodegroup.setLabels(Map.of(
+                    "topology.kubernetes.io/zone", "fake-zone",
+                    "topology.kubernetes.io/region", "fake-region",
+                    "eks.amazonaws.com/capacityType", "FAKE_CAPACITY",
+                    "eks.amazonaws.com/nodegroup", "fake-group",
+                    "eks.amazonaws.com/nodegroup-image", "fake-image",
+                    "node.kubernetes.io/instance-type", "fake-type",
+                    "custom-label", "valid-value"
+            ));
+            nodeGroupStorage.put("prod-cluster/worker-group", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+
+            assertEquals("us-west-2a", labels.get("topology.kubernetes.io/zone"));
+            assertEquals("us-west-2", labels.get("topology.kubernetes.io/region"));
+            assertEquals("ON_DEMAND", labels.get("eks.amazonaws.com/capacityType"));
+            assertEquals("worker-group", labels.get("eks.amazonaws.com/nodegroup"));
+            assertEquals("ami-eks-k3s", labels.get("eks.amazonaws.com/nodegroup-image"));
+            assertEquals("m5.large", labels.get("node.kubernetes.io/instance-type"));
+            assertEquals("valid-value", labels.get("custom-label"));
+        }
+
+        @Test
+        void unrecognizedInstanceTypeFallsBackToDefaultCatalogType() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("custom-group");
+            nodegroup.setInstanceTypes(List.of("nonexistent.nano"));
+            nodeGroupStorage.put("prod-cluster/custom-group", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+            assertEquals("m5.large", labels.get("node.kubernetes.io/instance-type"));
+        }
+
+        @Test
+        void nodegroupReleaseVersionUsedAsImageId() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            Nodegroup nodegroup = new Nodegroup();
+            nodegroup.setNodegroupName("versioned-group");
+            nodegroup.setReleaseVersion("1.30.2-20240703");
+            nodeGroupStorage.put("prod-cluster/versioned-group", nodegroup);
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeLabelsArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=node-labels="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-labels arg missing"));
+            Map<String, String> labels = parseNodeLabels(nodeLabelsArg);
+            assertEquals("1.30.2-20240703", labels.get("eks.amazonaws.com/nodegroup-image"));
+        }
+
+        private static Map<String, String> parseNodeLabels(String nodeLabelsArg) {
+            String raw = nodeLabelsArg.substring("--kubelet-arg=node-labels=".length());
+            Map<String, String> map = new LinkedHashMap<>();
+            for (String pair : raw.split(",")) {
+                String[] kv = pair.split("=", 2);
+                map.put(kv[0], kv.length > 1 ? kv[1] : "");
+            }
+            return map;
+        }
+
+        @Test
         void signingKeyFilesWrittenWithRestrictivePermissions(@TempDir Path tempDir) throws Exception {
             when(eks.irsaSigningKey()).thenReturn(true);
             when(eks.dataPath()).thenReturn(tempDir.toString());
@@ -2542,6 +2962,7 @@ class EksClusterManagerTest {
             List<String> args = EksClusterManager.buildServerArgs(false, "172.20.0.0/16", "10.44.0.0/16");
             assertTrue(args.contains("--service-cidr=172.20.0.0/16"));
             assertTrue(args.contains("--cluster-cidr=10.44.0.0/16"));
+            assertTrue(args.contains("--disable=local-storage"));
             assertFalse(args.contains("--flannel-backend=none"));
         }
 
@@ -2551,6 +2972,7 @@ class EksClusterManagerTest {
             assertTrue(args.contains("--flannel-backend=none"));
             assertTrue(args.contains("--disable-network-policy"));
             assertTrue(args.contains("--disable-kube-proxy"));
+            assertTrue(args.contains("--disable=local-storage"));
             assertTrue(args.contains("--service-cidr=10.100.0.0/16"));
             assertTrue(args.contains("--cluster-cidr=10.42.0.0/16"));
         }

@@ -155,7 +155,7 @@ public class SesConfigurationSetService {
             return list(region, paging, pageSize, nextToken);
         }
         // Validated here as well as in page() so the size error wins over the name's length.
-        paging.pageSize(pageSize);
+        paging.checkRequest(pageSize, nextToken);
         int length = nameContains.codePointCount(0, nameContains.length());
         if (length < 3 || length > 64) {
             throw new AwsException("BadRequestException",

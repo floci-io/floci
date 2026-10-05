@@ -15,6 +15,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -156,21 +158,22 @@ class RetryingTarCopierTest {
     }
 
     @Test
-    void copyStreamedInvokesTheWriterFreshlyPerAttempt() {
+    void copyStreamedInvokesTheWriterFreshlyPerAttempt() throws InterruptedException {
         DockerClient docker = mock(DockerClient.class);
         AtomicInteger calls = new AtomicInteger();
         failingOnce(docker, calls);
-        AtomicInteger writes = new AtomicInteger();
+        CountDownLatch writes = new CountDownLatch(2);
 
         RetryingTarCopier.copyStreamed(docker, "c-1", "/var/task", "fn-code",
                 out -> {
-                    writes.incrementAndGet();
+                    writes.countDown();
                     out.write("x".getBytes(StandardCharsets.UTF_8));
                 },
                 MAX_ATTEMPTS, 0L);
 
         assertEquals(2, calls.get());
-        assertEquals(2, writes.get(), "the tar content must be regenerated for every attempt");
+        // A failed attempt's writer is never joined, so it may still be starting when copyStreamed returns.
+        assertTrue(writes.await(5, TimeUnit.SECONDS), "the tar content must be regenerated for every attempt");
     }
 
     @Test

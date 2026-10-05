@@ -28,6 +28,14 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void isCreateOnly_vpcLinkReplacesOnlyForSubnetsAndSecurityGroups() {
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGatewayV2::VpcLink", "SubnetIds"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGatewayV2::VpcLink", "SecurityGroupIds"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGatewayV2::VpcLink", "Name"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGatewayV2::VpcLink", "Tags"));
+    }
+
+    @Test
     void isCreateOnly_treatsEmptySchemaListAsAuthoritative() {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::RestApi", "Name"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Cognito::UserPool", "UserPoolName"));

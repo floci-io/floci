@@ -31,6 +31,7 @@ import javax.xml.crypto.dsig.spec.XPathFilter2ParameterSpec;
 import javax.xml.crypto.dsig.spec.XPathFilterParameterSpec;
 import javax.xml.crypto.dsig.spec.XPathType;
 import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
@@ -46,6 +47,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -61,6 +63,14 @@ class StsTest {
     private static String allowedRoleArn;
     private static String allowedRoleName;
 
+    // The console sign-on URL a bearer assertion names, per partition (the CDK region facts). A
+    // partition the CDK lists none for keeps the commercial URL, as Floci does.
+    private static final Map<String, String> SAML_SIGN_ON_URLS = Map.of(
+            "aws", "https://signin.aws.amazon.com/saml",
+            "aws-cn", "https://signin.amazonaws.cn/saml",
+            "aws-us-gov", "https://signin.amazonaws-us-gov.com/saml",
+            "aws-iso", "https://signin.c2shome.ic.gov/saml",
+            "aws-iso-b", "https://signin.sc2shome.sgov.gov/saml");
     private static final String OPEN_TRUST_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":\"sts:AssumeRole\"}]}";
 
     @BeforeAll
@@ -433,7 +443,8 @@ class StsTest {
         String xml = "<saml:Assertion xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"" + id
                 + "\" Version=\"2.0\" IssueInstant=\"" + Instant.now() + "\"><saml:Issuer>" + issuer
                 + "</saml:Issuer><saml:Subject><saml:NameID Format=\"persistent\">sdk-test-subject</saml:NameID>"
-                + "<saml:SubjectConfirmation Method=\"urn:oasis:names:tc:SAML:2.0:cm:bearer\"><saml:SubjectConfirmationData Recipient=\"https://signin.aws.amazon.com/saml\" NotOnOrAfter=\""
+                + "<saml:SubjectConfirmation Method=\"urn:oasis:names:tc:SAML:2.0:cm:bearer\">"
+                + "<saml:SubjectConfirmationData Recipient=\"" + samlSignOnUrl() + "\" NotOnOrAfter=\""
                 + expiry + "\"/></saml:SubjectConfirmation></saml:Subject><saml:Conditions NotBefore=\""
                 + Instant.now().minusSeconds(30) + "\" NotOnOrAfter=\"" + expiry
                 + "\"><saml:AudienceRestriction><saml:Audience>urn:amazon:webservices</saml:Audience></saml:AudienceRestriction></saml:Conditions>"
@@ -453,7 +464,7 @@ class StsTest {
                     factory.newSignatureMethod(SignatureMethod.RSA_SHA256, null), List.of(reference));
             factory.newXMLSignature(signedInfo, null)
                     .sign(new DOMSignContext(signingKeys.getPrivate(), assertion));
-            var transformer = TransformerFactory.newInstance().newTransformer();
+            Transformer transformer = TransformerFactory.newInstance().newTransformer();
             transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
             StringWriter output = new StringWriter();
             transformer.transform(new DOMSource(document), new StreamResult(output));
@@ -461,5 +472,9 @@ class StsTest {
         } catch (Exception e) {
             throw new IllegalStateException("Could not create SAML assertion", e);
         }
+    }
+
+    private static String samlSignOnUrl() {
+        return SAML_SIGN_ON_URLS.getOrDefault(TestFixtures.partition(), SAML_SIGN_ON_URLS.get("aws"));
     }
 }

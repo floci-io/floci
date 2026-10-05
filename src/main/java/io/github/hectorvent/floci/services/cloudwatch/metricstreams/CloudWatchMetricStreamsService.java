@@ -177,7 +177,7 @@ public class CloudWatchMetricStreamsService {
                 throw new AwsException("InvalidParameterValue",
                         "Each member of StatisticsConfigurations requires at least one AdditionalStatistics entry.", 400);
             }
-            for (var metric : configuration.getIncludeMetrics()) {
+            for (MetricStreamStatisticsConfiguration.IncludeMetric metric : configuration.getIncludeMetrics()) {
                 if (metric.namespace() == null || metric.namespace().isBlank()
                         || metric.metricName() == null || metric.metricName().isBlank()) {
                     throw new AwsException("MissingParameter",

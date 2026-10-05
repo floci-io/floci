@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -60,6 +61,50 @@ class RedshiftDataServiceTest {
 
     private ObjectNode idOf(String id) {
         return om.createObjectNode().put("Id", id);
+    }
+
+    @Test
+    void aWorkgroupStatementNamesItsWorkgroupAndOmitsTheClusterIdentifier() {
+        ObjectNode request = om.createObjectNode();
+        request.put("Sql", "select 1");
+        request.put("WorkgroupName", "wg-1");
+        request.put("Database", "dev");
+
+        ObjectNode executed = service.executeStatement(request, REGION);
+
+        assertEquals("wg-1", executed.get("WorkgroupName").asText());
+        assertFalse(executed.has("ClusterIdentifier"),
+                "AWS does not return ClusterIdentifier when connecting to a serverless workgroup");
+        ObjectNode described = service.describeStatement(idOf(executed.get("Id").asText()));
+        assertEquals("wg-1", described.get("WorkgroupName").asText());
+        assertFalse(described.has("ClusterIdentifier"));
+    }
+
+    @Test
+    void aClusterStatementKeepsItsNullWorkgroupName() {
+        ObjectNode executed = service.executeStatement(req("select 1"), REGION);
+
+        assertEquals("wh", executed.get("ClusterIdentifier").asText());
+        assertTrue(executed.get("WorkgroupName").isNull());
+        ObjectNode described = service.describeStatement(idOf(executed.get("Id").asText()));
+        assertEquals("wh", described.get("ClusterIdentifier").asText());
+        assertTrue(described.get("WorkgroupName").isNull());
+    }
+
+    @Test
+    void aWorkgroupBatchPassesItsWorkgroupToEverySubStatement() {
+        ObjectNode request = om.createObjectNode();
+        request.putArray("Sqls").add("select 1").add("select 2");
+        request.put("WorkgroupName", "wg-1");
+        request.put("Database", "dev");
+
+        ObjectNode executed = service.batchExecuteStatement(request, REGION);
+
+        ObjectNode described = service.describeStatement(idOf(executed.get("Id").asText()));
+        assertEquals("wg-1", described.get("WorkgroupName").asText());
+        for (JsonNode sub : described.get("SubStatements")) {
+            assertFalse(sub.has("ClusterIdentifier"));
+        }
     }
 
     /**

@@ -384,6 +384,8 @@ floci:
       # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
       # code-volume-populate-concurrency:     # FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY — max concurrent first-time code-volume populates (default max(2, cpus/2), which a CPU-constrained container collapses to 2)
       executor: docker                        # docker | kubernetes (run Lambda environments as pods)
+      durable-sweep-enabled: true             # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_ENABLED - fire durable execution timers (waits, step retries, execution timeouts, retention)
+      durable-sweep-interval-seconds: 1       # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_INTERVAL_SECONDS
       # kubernetes:
       #   namespace: default                  # Namespace Lambda pods are created in
       #   labels:                             # Extra pod labels, key=value entries
@@ -451,6 +453,7 @@ floci:
       proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
       proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
       proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
+      spectrum-max-rows: 1000000                  # FLOCI_SERVICES_REDSHIFT_SPECTRUM_MAX_ROWS; rows loaded per external table per query
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
@@ -692,6 +695,7 @@ floci:
       iam-auth-webhook: true       # validate `aws eks get-token` SigV4 tokens through a k3s webhook
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+      default-storage-class: false # start k3s without its bundled local-path provisioner to match EKS
       imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
       imds-pod-network: false      # route link-local IMDS traffic from ordinary pod network namespaces (requires imds: true)
       irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key

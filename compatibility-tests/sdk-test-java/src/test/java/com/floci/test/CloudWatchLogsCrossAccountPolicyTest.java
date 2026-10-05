@@ -26,12 +26,12 @@ class CloudWatchLogsCrossAccountPolicyTest {
         try (CloudWatchLogsClient logs = TestFixtures.cloudWatchLogsClient()) {
             PutDestinationResponse putDestination = logs.putDestination(request -> request
                     .destinationName(DESTINATION_NAME)
-                    .targetArn("arn:aws:kinesis:us-east-1:000000000000:stream/floci-sdk-logs")
-                    .roleArn("arn:aws:iam::000000000000:role/floci-sdk-logs"));
+                    .targetArn(TestFixtures.arn("kinesis", "000000000000", "stream/floci-sdk-logs"))
+                    .roleArn(TestFixtures.globalArn("iam", "000000000000", "role/floci-sdk-logs")));
 
             assertThat(putDestination.destination()).isNotNull();
             assertThat(putDestination.destination().destinationName()).isEqualTo(DESTINATION_NAME);
-            assertThat(putDestination.destination().arn()).contains(":logs:us-east-1:");
+            assertThat(putDestination.destination().arn()).contains(":logs:" + TestFixtures.region().id() + ":");
 
             logs.putDestinationPolicy(request -> request
                     .destinationName(DESTINATION_NAME)

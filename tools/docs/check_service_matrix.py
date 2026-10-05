@@ -34,6 +34,11 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+try:
+    from tools.docs import regen_action_docs
+except ModuleNotFoundError:
+    import regen_action_docs
+
 import yaml
 
 CATALOG_SOURCE = "src/main/java/io/github/hectorvent/floci/core/common/ResolvedServiceCatalog.java"
@@ -102,6 +107,122 @@ def extract_matrix_slugs(md_source: str) -> set[str]:
     table = md_source[start:end]
     return set(MATRIX_LINK_RE.findall(table))
 
+def extract_matrix_action_counts(md_source: str) -> dict[str, int]:
+    """Extract documented operation counts for base service-doc rows.
+
+    Supports both plain numeric counts and composite counts such as
+    ``61 (+ 3 tagging ...)``.
+    Rows linking to a document anchor are ignored because the linked
+    document may contain multiple distinct action sections.
+    """
+    try:
+        start = md_source.index(MATRIX_HEADING)
+        end = md_source.index(MATRIX_END_HEADING, start)
+    except ValueError:
+        raise ValueError(
+            f"{MATRIX_DOC}: could not find '{MATRIX_HEADING}' ... "
+            f"'{MATRIX_END_HEADING}' (has a heading been renamed or reordered?)"
+        ) from None
+
+    counts: dict[str, int] = {}
+
+    for line in md_source[start:end].splitlines():
+        match = re.match(
+            r"^\|\s*\[[^\]]+\]\(([a-z0-9][a-z0-9\-]*)\.md"
+            r"(#[^)]*)?\)\s*\|.*\|\s*(\d+)"
+            r"(?:\s*\(\+\s*(\d+)[^)]*\))?\s*\|$",
+            line,
+        )
+        if not match:
+            continue
+
+        slug, anchor, base_count, extra_count = match.groups()
+
+        if anchor:
+            continue
+
+        counts.setdefault(slug, int(base_count))
+
+    return counts
+
+
+
+def count_generated_actions(md_source: str) -> int | None:
+    """Count action rows inside a generated action-table marker pair.
+
+    Returns None when the document does not contain a generated action table.
+    """
+    start_marker = "<!-- floci:actions:start -->"
+    end_marker = "<!-- floci:actions:end -->"
+
+    try:
+        start = md_source.index(start_marker) + len(start_marker)
+        end = md_source.index(end_marker, start)
+    except ValueError:
+        return None
+
+    section = md_source[start:end]
+
+    count = 0
+
+    for line in section.splitlines():
+        line = line.strip()
+
+        if not line.startswith("|") or line.count("|") < 3:
+            continue
+
+        # Skip the markdown header/separator rows.
+        if re.match(r"^\|\s*Action\s*\|", line, re.IGNORECASE):
+            continue
+
+        if re.match(r"^\|\s*:?-{3,}", line):
+            continue
+
+        count += 1
+
+    return count
+
+
+def extract_action_counts(repo_root: Path) -> dict[str, int]:
+    """Extract mechanically verifiable action counts.
+    Generated service documents are counted from their generated action-table
+    markers. IAM is a deferred non-tabular document, so its Query switch is
+    parsed directly using the same action parser as regen_action_docs.py.
+    Other services without generated action-table markers are intentionally
+    skipped here because their handlers use non-tabular or mixed dispatch
+    patterns that cannot be counted safely by the generic registry parser.
+    """
+    md_source = (repo_root / MATRIX_DOC).read_text(encoding="utf-8")
+    matrix_counts = extract_matrix_action_counts(md_source)
+
+    counts: dict[str, int] = {}
+
+    # Generated service documents.
+    for slug in matrix_counts:
+        doc_path = repo_root / SERVICES_DIR / f"{slug}.md"
+
+        if not doc_path.exists():
+            continue
+
+        doc_source = doc_path.read_text(encoding="utf-8")
+        generated_count = count_generated_actions(doc_source)
+
+        if generated_count is not None:
+            counts[slug] = generated_count
+
+    # IAM is intentionally non-tabular, so validate it from its handler.
+    iam_source = (
+        repo_root
+        / "src/main/java/io/github/hectorvent/floci/services/iam/IamQueryHandler.java"
+    )
+
+    counts["iam"] = len(
+        regen_action_docs.extract_switch_actions(
+            iam_source.read_text(encoding="utf-8")
+        )
+    )
+
+    return counts
 
 def find_unlinked_pages(services_dir: Path, slugs: set[str], facet_pages: set[str]) -> list[str]:
     """docs/services pages (by slug) that no matrix row links and no facet entry excuses.
@@ -220,11 +341,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    try:
+        matrix_action_counts = extract_matrix_action_counts(md_source)
+        source_action_counts = extract_action_counts(repo_root)
+    except (ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     undocumented, expired_deferred = find_undocumented(
         keys, slugs, aliases, deferred, date.today()
     )
 
     warnings: list[str] = []
+
+    for slug, documented_count in matrix_action_counts.items():
+        source_count = source_action_counts.get(slug)
+        if source_count is None:
+            continue
+        if documented_count != source_count:
+            warnings.append(
+                f"service '{slug}' documents {documented_count} supported operations "
+                f"in {MATRIX_DOC}, but the action source contains {source_count}; "
+                "update the matrix count"
+            )
     for d in expired_deferred:
         warnings.append(
             f"deferred entry '{d.key}' expired on {d.by.isoformat()} ({d.reason}); "

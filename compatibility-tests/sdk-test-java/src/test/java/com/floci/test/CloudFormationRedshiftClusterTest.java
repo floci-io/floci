@@ -110,7 +110,7 @@ class CloudFormationRedshiftClusterTest {
         assertThat(portStr).isNotBlank();
         int port = Integer.parseInt(portStr);
         assertThat(port).isPositive();
-        assertThat(ns).startsWith("arn:aws:redshift:");
+        assertThat(ns).startsWith("arn:" + TestFixtures.partition() + ":redshift:");
 
         String connectHost = "host.docker.internal".equalsIgnoreCase(addr)
                 ? TestFixtures.proxyHost()

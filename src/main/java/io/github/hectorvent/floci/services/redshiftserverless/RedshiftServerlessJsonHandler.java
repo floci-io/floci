@@ -8,7 +8,12 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.services.redshift.RedshiftIamDbUserResolver;
+import io.github.hectorvent.floci.services.redshift.TempCredential;
+import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
+import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
+import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -43,14 +48,21 @@ public class RedshiftServerlessJsonHandler {
 
     private final RedshiftServerlessService service;
     private final ObjectMapper objectMapper;
+    private final RedshiftIamDbUserResolver iamDbUserResolver;
 
     @Inject
-    public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper) {
+    public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper,
+                                         RedshiftIamDbUserResolver iamDbUserResolver) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.iamDbUserResolver = iamDbUserResolver;
     }
 
     public Response handle(String action, JsonNode request, String region) {
+        return handle(action, request, region, null);
+    }
+
+    public Response handle(String action, JsonNode request, String region, String authorizationHeader) {
         LOG.debugv("Redshift Serverless action: {0}", action);
         try {
             return switch (action) {
@@ -59,6 +71,12 @@ public class RedshiftServerlessJsonHandler {
                 case "ListNamespaces" -> handleListNamespaces(request, region);
                 case "UpdateNamespace" -> handleUpdateNamespace(request, region);
                 case "DeleteNamespace" -> handleDeleteNamespace(request, region);
+                case "CreateWorkgroup" -> handleCreateWorkgroup(request, region);
+                case "GetWorkgroup" -> handleGetWorkgroup(request, region);
+                case "ListWorkgroups" -> handleListWorkgroups(request, region);
+                case "UpdateWorkgroup" -> handleUpdateWorkgroup(request, region);
+                case "DeleteWorkgroup" -> handleDeleteWorkgroup(request, region);
+                case "GetCredentials" -> handleGetCredentials(request, region, authorizationHeader);
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
                 case "TagResource" -> handleTagResource(request, region);
                 case "UntagResource" -> handleUntagResource(request, region);
@@ -79,6 +97,7 @@ public class RedshiftServerlessJsonHandler {
         Namespace namespace = service.createNamespace(
                 text(request, "namespaceName"),
                 text(request, "adminUsername"),
+                text(request, "adminUserPassword"),
                 text(request, "dbName"),
                 text(request, "kmsKeyId"),
                 text(request, "defaultIamRoleArn"),
@@ -109,6 +128,7 @@ public class RedshiftServerlessJsonHandler {
         Namespace namespace = service.updateNamespace(
                 text(request, "namespaceName"),
                 text(request, "adminUsername"),
+                text(request, "adminUserPassword"),
                 text(request, "kmsKeyId"),
                 text(request, "defaultIamRoleArn"),
                 parseStringList(request.path("iamRoles"), "iamRoles"),
@@ -119,6 +139,64 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleDeleteNamespace(JsonNode request, String region) {
         return namespaceResponse(service.deleteNamespace(text(request, "namespaceName"), region));
+    }
+
+    private Response handleCreateWorkgroup(JsonNode request, String region) {
+        Workgroup workgroup = service.createWorkgroup(
+                text(request, "workgroupName"),
+                text(request, "namespaceName"),
+                parseWorkgroupSettings(request),
+                parseTagList(request.path("tags"), "tags"),
+                region);
+        return workgroupResponse(workgroup);
+    }
+
+    private Response handleGetWorkgroup(JsonNode request, String region) {
+        return workgroupResponse(service.getWorkgroup(text(request, "workgroupName"), region));
+    }
+
+    private Response handleListWorkgroups(JsonNode request, String region) {
+        PaginatedResult<Workgroup> page = service.listWorkgroups(
+                region, parseMaxResults(request), text(request, "nextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("workgroups");
+        page.items().forEach(workgroup -> items.add(workgroupNode(workgroup)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateWorkgroup(JsonNode request, String region) {
+        return workgroupResponse(service.updateWorkgroup(
+                text(request, "workgroupName"), parseWorkgroupSettings(request), region));
+    }
+
+    private Response handleDeleteWorkgroup(JsonNode request, String region) {
+        return workgroupResponse(service.deleteWorkgroup(text(request, "workgroupName"), region));
+    }
+
+    /**
+     * {@code expiration} and {@code nextRefreshTime} carry no timestamp format trait in the API
+     * model, so they use the awsJson1.1 default of epoch seconds as a JSON number. Floci never
+     * refreshes an authorization early, so the refresh time is the expiry.
+     */
+    private Response handleGetCredentials(JsonNode request, String region, String authorizationHeader) {
+        if (request.hasNonNull("customDomainName")) {
+            throw validation("customDomainName is not supported; use workgroupName.");
+        }
+        TempCredential credential = service.getCredentials(
+                text(request, "workgroupName"),
+                text(request, "dbName"),
+                parseInteger(request, "durationSeconds"),
+                iamDbUserResolver.resolveDbUser(authorizationHeader),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("dbUser", credential.dbUser());
+        response.put("dbPassword", credential.password());
+        response.put("expiration", credential.expiresAt().getEpochSecond());
+        response.put("nextRefreshTime", credential.expiresAt().getEpochSecond());
+        return Response.ok(response).build();
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
@@ -180,6 +258,133 @@ public class RedshiftServerlessJsonHandler {
         ArrayNode logExports = node.putArray("logExports");
         namespace.getLogExports().forEach(logExports::add);
         return node;
+    }
+
+    private Response workgroupResponse(Workgroup workgroup) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("workgroup", workgroupNode(workgroup));
+        return Response.ok(response).build();
+    }
+
+    /**
+     * Members the emulator does not model ({@code workgroupVersion}, {@code patchVersion},
+     * {@code crossAccountVpcs}, the custom domain members and {@code endpoint.vpcEndpoints}) are
+     * omitted rather than invented; all of them are optional in the API model.
+     */
+    private ObjectNode workgroupNode(Workgroup workgroup) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("workgroupName", workgroup.getWorkgroupName());
+        node.put("workgroupId", workgroup.getWorkgroupId());
+        node.put("workgroupArn", workgroup.getWorkgroupArn());
+        node.put("namespaceName", workgroup.getNamespaceName());
+        node.put("status", workgroup.getStatus());
+        if (workgroup.getBaseCapacity() != null) {
+            node.put("baseCapacity", workgroup.getBaseCapacity());
+        }
+        if (workgroup.getMaxCapacity() != null) {
+            node.put("maxCapacity", workgroup.getMaxCapacity());
+        }
+        node.put("enhancedVpcRouting", workgroup.isEnhancedVpcRouting());
+        node.put("publiclyAccessible", workgroup.isPubliclyAccessible());
+        node.put("extraComputeForAutomaticOptimization", workgroup.isExtraComputeForAutomaticOptimization());
+        node.put("port", workgroup.getPort());
+        node.put("ipAddressType", workgroup.getIpAddressType());
+        node.put("trackName", workgroup.getTrackName());
+        if (workgroup.getPendingTrackName() != null) {
+            node.put("pendingTrackName", workgroup.getPendingTrackName());
+        }
+        ArrayNode configParameters = node.putArray("configParameters");
+        for (ConfigParameter parameter : workgroup.getConfigParameters()) {
+            ObjectNode entry = configParameters.addObject();
+            entry.put("parameterKey", parameter.getParameterKey());
+            entry.put("parameterValue", parameter.getParameterValue());
+        }
+        ArrayNode securityGroupIds = node.putArray("securityGroupIds");
+        workgroup.getSecurityGroupIds().forEach(securityGroupIds::add);
+        ArrayNode subnetIds = node.putArray("subnetIds");
+        workgroup.getSubnetIds().forEach(subnetIds::add);
+        PricePerformanceTarget target = workgroup.getPricePerformanceTarget();
+        if (target != null) {
+            ObjectNode targetNode = node.putObject("pricePerformanceTarget");
+            targetNode.put("status", target.getStatus());
+            if (target.getLevel() != null) {
+                targetNode.put("level", target.getLevel());
+            }
+        }
+        if (workgroup.getEndpoint() != null) {
+            ObjectNode endpointNode = node.putObject("endpoint");
+            endpointNode.put("address", workgroup.getEndpoint().getAddress());
+            endpointNode.put("port", workgroup.getEndpoint().getPort());
+        }
+        if (workgroup.getCreationDate() != null) {
+            node.put("creationDate", CREATION_DATE_FORMAT.format(workgroup.getCreationDate()));
+        }
+        return node;
+    }
+
+    private WorkgroupSettings parseWorkgroupSettings(JsonNode request) {
+        return new WorkgroupSettings(
+                parseInteger(request, "baseCapacity"),
+                parseInteger(request, "maxCapacity"),
+                parseBoolean(request, "enhancedVpcRouting"),
+                parseBoolean(request, "publiclyAccessible"),
+                parseBoolean(request, "extraComputeForAutomaticOptimization"),
+                parseConfigParameters(request.path("configParameters")),
+                parseStringList(request.path("securityGroupIds"), "securityGroupIds"),
+                parseStringList(request.path("subnetIds"), "subnetIds"),
+                parseInteger(request, "port"),
+                parsePricePerformanceTarget(request.path("pricePerformanceTarget")),
+                text(request, "ipAddressType"),
+                text(request, "trackName"));
+    }
+
+    private Integer parseInteger(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw validation(field + " must be an integer.");
+        }
+        return node.asInt();
+    }
+
+    private Boolean parseBoolean(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isBoolean()) {
+            throw validation(field + " must be a boolean.");
+        }
+        return node.asBoolean();
+    }
+
+    private List<ConfigParameter> parseConfigParameters(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isArray()) {
+            throw validation("configParameters must be an array of parameters.");
+        }
+        List<ConfigParameter> parameters = new ArrayList<>();
+        for (JsonNode element : node) {
+            if (!element.isObject()) {
+                throw validation("configParameters must contain only parameter objects.");
+            }
+            parameters.add(new ConfigParameter(text(element, "parameterKey"), text(element, "parameterValue")));
+        }
+        return parameters;
+    }
+
+    private PricePerformanceTarget parsePricePerformanceTarget(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isObject()) {
+            throw validation("pricePerformanceTarget must be an object.");
+        }
+        return new PricePerformanceTarget(text(node, "status"), parseInteger(node, "level"));
     }
 
     private Integer parseMaxResults(JsonNode request) {

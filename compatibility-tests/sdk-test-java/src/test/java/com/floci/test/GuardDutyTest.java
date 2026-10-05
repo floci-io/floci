@@ -99,7 +99,7 @@ class GuardDutyTest {
                         .isEqualTo(FindingPublishingFrequency.ONE_HOUR);
 
                 String detectorArn =
-                        "arn:aws:guardduty:us-east-1:000000000000:detector/" + detectorId;
+                        TestFixtures.arn("guardduty", "000000000000", "detector/" + detectorId);
                 guardduty.tagResource(request -> request
                         .resourceArn(detectorArn)
                         .tags(Map.of("team", "security")));

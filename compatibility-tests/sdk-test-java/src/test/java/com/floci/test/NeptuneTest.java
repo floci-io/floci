@@ -83,7 +83,7 @@ class NeptuneTest {
         assertThat(cluster.dbClusterIdentifier()).isEqualTo(CLUSTER_ID);
         assertThat(cluster.engine()).isEqualTo("neptune");
         assertThat(cluster.status()).isEqualTo("available");
-        assertThat(cluster.dbClusterArn()).startsWith("arn:aws:neptune:");
+        assertThat(cluster.dbClusterArn()).startsWith("arn:" + TestFixtures.partition() + ":neptune:");
         assertThat(cluster.port()).isGreaterThan(0);
         assertThat(cluster.storageEncrypted()).isFalse();
         assertThat(cluster.backupRetentionPeriod()).isEqualTo(1);
@@ -158,7 +158,7 @@ class NeptuneTest {
     @Order(6)
     @DisplayName("AddRoleToDBCluster and RemoveRoleFromDBCluster maintain AssociatedRoles")
     void rolesRoundTrip() {
-        String roleArn = "arn:aws:iam::000000000000:role/" + CLUSTER_ID;
+        String roleArn = TestFixtures.globalArn("iam", "000000000000", "role/" + CLUSTER_ID);
 
         neptune.addRoleToDBCluster(AddRoleToDbClusterRequest.builder()
                 .dbClusterIdentifier(CLUSTER_ID).roleArn(roleArn).build());
@@ -221,7 +221,7 @@ class NeptuneTest {
         assertThat(instance.dbInstanceIdentifier()).isEqualTo(INSTANCE_ID);
         assertThat(instance.dbClusterIdentifier()).isEqualTo(CLUSTER_ID);
         assertThat(instance.dbInstanceStatus()).isEqualTo("available");
-        assertThat(instance.dbInstanceArn()).startsWith("arn:aws:neptune:");
+        assertThat(instance.dbInstanceArn()).startsWith("arn:" + TestFixtures.partition() + ":neptune:");
         assertThat(instance.autoMinorVersionUpgrade()).isTrue();
         assertThat(instance.promotionTier()).isZero();
         assertThat(instance.publiclyAccessible()).isFalse();

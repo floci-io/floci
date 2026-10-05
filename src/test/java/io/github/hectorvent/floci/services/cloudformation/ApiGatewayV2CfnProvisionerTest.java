@@ -6,7 +6,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
+import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
+import io.github.hectorvent.floci.services.apigatewayv2.model.VpcLink;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
@@ -14,19 +16,24 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudForm
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -530,10 +537,225 @@ class ApiGatewayV2CfnProvisionerTest {
         verify(apiGatewayV2Service).restoreRoute(REGION, API_ID, oldTwo, List.of());
     }
 
+    @Test
+    void vpcLinkCreatesTheLinkAndPublishesItsId() throws Exception {
+        when(apiGatewayV2Service.createVpcLink(eq(REGION), anyMap())).thenReturn(vpcLink("vl-1", List.of("subnet-a")));
+
+        StackResource link = provisionVpcLink("""
+                {"Name":"my-link","SubnetIds":["subnet-a"],"SecurityGroupIds":["sg-1"],"Tags":{"Env":"test"}}
+                """, null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", link.getStatus());
+        assertEquals("vl-1", link.getPhysicalId());
+        assertEquals("vl-1", link.getAttributes().get("VpcLinkId"));
+        verify(apiGatewayV2Service).createVpcLink(eq(REGION), argThat(req -> "my-link".equals(req.get("name"))
+                && List.of("subnet-a").equals(req.get("subnetIds"))
+                && List.of("sg-1").equals(req.get("securityGroupIds"))
+                && Map.of("Env", "test").equals(req.get("tags"))));
+    }
+
+    @Test
+    void vpcLinkNameChangeUpdatesTheLinkInPlace() throws Exception {
+        VpcLink prior = vpcLink("vl-1", List.of("subnet-a"));
+        prior.setName("old-name");
+        when(apiGatewayV2Service.getVpcLink(REGION, "vl-1")).thenReturn(prior);
+
+        StackResource link = provisionVpcLink("""
+                {"Name":"new-name","SubnetIds":["subnet-a"]}
+                """, "vl-1", Map.of("VpcLinkId", "vl-1"));
+
+        assertEquals("vl-1", link.getPhysicalId());
+        verify(apiGatewayV2Service).updateVpcLink(REGION, "vl-1", Map.of("name", "new-name"));
+        verify(apiGatewayV2Service, never()).createVpcLink(anyString(), anyMap());
+        assertFalse(provisioner.hasReplacementUpdate(link));
+    }
+
+    @Test
+    void vpcLinkSubnetChangeReplacesTheLink() throws Exception {
+        when(apiGatewayV2Service.getVpcLink(REGION, "vl-1")).thenReturn(vpcLink("vl-1", List.of("subnet-a")));
+        when(apiGatewayV2Service.createVpcLink(eq(REGION), anyMap())).thenReturn(vpcLink("vl-2", List.of("subnet-b")));
+
+        StackResource link = provisionVpcLink("""
+                {"Name":"my-link","SubnetIds":["subnet-b"]}
+                """, "vl-1", Map.of("VpcLinkId", "vl-1"));
+
+        assertEquals("vl-2", link.getPhysicalId());
+        assertEquals("vl-2", link.getAttributes().get("VpcLinkId"));
+        verify(apiGatewayV2Service, never()).updateVpcLink(anyString(), anyString(), anyMap());
+        assertTrue(provisioner.hasReplacementUpdate(link), "the displaced link is deleted after the update");
+    }
+
+    @Test
+    void vpcLinkWithoutSubnetIdsFailsBeforeCallingTheService() throws Exception {
+        StackResource link = provisionVpcLink("""
+                {"Name":"my-link"}
+                """, null, Map.of());
+
+        assertEquals("CREATE_FAILED", link.getStatus());
+        assertTrue(link.getStatusReason().contains("requires SubnetIds"), link.getStatusReason());
+        verify(apiGatewayV2Service, never()).createVpcLink(anyString(), anyMap());
+    }
+
+    @Test
+    void rollbackOfAnInPlaceVpcLinkUpdateRestoresNameAndTags() throws Exception {
+        VpcLink prior = vpcLink("vl-1", List.of("subnet-a"));
+        prior.setName("old-name");
+        prior.setTags(new HashMap<>(Map.of("Env", "old")));
+        when(apiGatewayV2Service.getVpcLink(REGION, "vl-1")).thenReturn(prior);
+        when(apiGatewayV2Service.getTags(anyString())).thenReturn(Map.of("Env", "new"));
+        StackResource link = provisionVpcLink("""
+                {"Name":"new-name","SubnetIds":["subnet-a"],"Tags":{"Env":"new"}}
+                """, "vl-1", Map.of("VpcLinkId", "vl-1"));
+
+        assertTrue(provisioner.rollbackUpdate(link));
+
+        verify(apiGatewayV2Service).updateVpcLink(REGION, "vl-1", Map.of("name", "old-name"));
+        verify(apiGatewayV2Service).tagResource("arn:aws:apigateway:us-east-1::/vpclinks/vl-1", Map.of("Env", "old"));
+        assertFalse(link.getAttributes().containsKey("__FlociVpcLinkUpdateSnapshot"));
+    }
+
+    @Test
+    void integrationPassesItsVpcLinkConnection() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY",
+                         "IntegrationUri":"arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/alb/1/2",
+                         "ConnectionType":"VPC_LINK","ConnectionId":"vl-1"}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID),
+                argThat(req -> "VPC_LINK".equals(req.get("connectionType")) && "vl-1".equals(req.get("connectionId"))));
+    }
+
+    @Test
+    void failedInPlaceVpcLinkUpdateRestoresTagsAndSendsOnlyChangedTags() throws Exception {
+        String arn = "arn:aws:apigateway:us-east-1::/vpclinks/vl-1";
+        VpcLink prior = vpcLink("vl-1", List.of("subnet-a"));
+        prior.setName("old-name");
+        prior.setTags(new HashMap<>(Map.of("floci:override-id", "vl-1", "Env", "old")));
+        when(apiGatewayV2Service.getVpcLink(REGION, "vl-1")).thenReturn(prior);
+        when(apiGatewayV2Service.getTags(arn)).thenReturn(
+                Map.of("floci:override-id", "vl-1", "Env", "old"),
+                Map.of("floci:override-id", "vl-1", "Env", "new"));
+        when(apiGatewayV2Service.updateVpcLink(REGION, "vl-1", Map.of("name", "new-name")))
+                .thenThrow(new AwsException("BadRequestException", "rename failed", 400));
+
+        StackResource link = provisionVpcLink("""
+                {"Name":"new-name","SubnetIds":["subnet-a"],"Tags":{"floci:override-id":"vl-1","Env":"new"}}
+                """, "vl-1", Map.of("VpcLinkId", "vl-1"));
+
+        assertTrue(link.getStatus().endsWith("_FAILED"), link.getStatus());
+        verify(apiGatewayV2Service).tagResource(arn, Map.of("Env", "new"));
+        verify(apiGatewayV2Service).tagResource(arn, Map.of("Env", "old"));
+        verify(apiGatewayV2Service).updateVpcLink(REGION, "vl-1", Map.of("name", "old-name"));
+        assertFalse(link.getAttributes().containsKey("__FlociUpdateRollbackFailure"));
+        assertFalse(link.getAttributes().containsKey("__FlociVpcLinkUpdateSnapshot"));
+    }
+
+    @Test
+    void integrationUpdateWithoutConnectionResetsItToInternet() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_COMPLETE"), integration.getStatus());
+        verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "INTERNET", null);
+    }
+
+    @Test
+    void rollbackOfAnIntegrationUpdateRestoresItsConnection() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-2"}
+                """);
+
+        assertTrue(provisioner.rollbackUpdate(integration));
+
+        verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-1");
+        assertFalse(integration.getAttributes().containsKey("__FlociIntegrationConnectionSnapshot"));
+    }
+
+    @Test
+    void rollbackOfAnIntegrationUpdateWithOtherChangesRestoresConnectionButReportsFailure() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://other-backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-2"}
+                """);
+
+        assertFalse(provisioner.rollbackUpdate(integration), "the IntegrationUri change has no rollback");
+
+        verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-1");
+    }
+
+    @Test
+    void failedIntegrationUpdateRestoresItsConnection() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+        when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap()))
+                .thenThrow(new AwsException("NotFoundException", "Integration not found", 404));
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-2"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_FAILED"), integration.getStatus());
+        InOrder order = inOrder(apiGatewayV2Service);
+        order.verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-2");
+        order.verify(apiGatewayV2Service).updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap());
+        order.verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-1");
+        assertFalse(integration.getAttributes().containsKey("__FlociUpdateRollbackFailure"));
+        assertFalse(integration.getAttributes().containsKey("__FlociIntegrationConnectionSnapshot"));
+    }
+
+    private static Integration priorVpcLinkIntegration() {
+        Integration prior = new Integration();
+        prior.setIntegrationId("int-1");
+        prior.setIntegrationType("HTTP_PROXY");
+        prior.setIntegrationUri("http://backend");
+        prior.setPayloadFormatVersion("2.0");
+        prior.setConnectionType("VPC_LINK");
+        prior.setConnectionId("vl-1");
+        return prior;
+    }
+
+    private void stubIntegrationUpdate(Integration prior) {
+        when(apiGatewayV2Service.getIntegration(REGION, API_ID, "int-1")).thenReturn(prior);
+        when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap())).thenReturn(prior);
+        when(apiGatewayV2Service.replaceIntegrationConnection(eq(REGION), eq(API_ID), eq("int-1"), anyString(), any()))
+                .thenReturn(prior);
+    }
+
+    private StackResource provisionIntegration(String properties) throws Exception {
+        return provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree(properties),
+                engine(), REGION, "000000000000", "test-stack", "int-1", Map.of("IntegrationId", "int-1"));
+    }
+
     private StackResource provision(JsonNode properties, String existingPhysicalId,
                                     Map<String, String> existingAttributes) {
         return provisioner.provision("HttpApi", "AWS::ApiGatewayV2::Api", properties, engine(), REGION,
                 "000000000000", "test-stack", existingPhysicalId, existingAttributes);
+    }
+
+    private StackResource provisionVpcLink(String properties, String existingPhysicalId,
+                                           Map<String, String> existingAttributes) throws Exception {
+        return provisioner.provision("VpcLink", "AWS::ApiGatewayV2::VpcLink", mapper.readTree(properties),
+                engine(), REGION, "000000000000", "test-stack", existingPhysicalId, existingAttributes);
+    }
+
+    private static VpcLink vpcLink(String id, List<String> subnetIds) {
+        VpcLink link = new VpcLink();
+        link.setVpcLinkId(id);
+        link.setName("my-link");
+        link.setSubnetIds(subnetIds);
+        return link;
     }
 
     private JsonNode body(String body) throws Exception {
