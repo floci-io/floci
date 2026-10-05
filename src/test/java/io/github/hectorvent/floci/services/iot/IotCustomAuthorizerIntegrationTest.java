@@ -45,9 +45,10 @@ import static org.mockito.Mockito.when;
 
 /**
  * Custom authorizers on the real routes and broker: {@code TestInvokeAuthorizer} on its REST-JSON
- * path, and an MQTT CONNECT over WebSocket admitted or refused by the authorizer's answer the way
- * AWS IoT does it (MQTT 3.1.1 closed without a CONNACK, MQTT 5 answered with reason 135). The
- * function is mocked and decides by the MQTT password; what it received is asserted as the event.
+ * path, and an MQTT CONNECT on the TCP listener or over WebSocket admitted or refused by the
+ * authorizer's answer the way AWS IoT does it (MQTT 3.1.1 closed without a CONNACK, MQTT 5
+ * answered with reason 135). The function is mocked and decides by the MQTT password; what it
+ * received is asserted as the event.
  */
 @QuarkusTest
 @TestProfile(IotMqttWebSocketIntegrationTest.Profile.class)
@@ -225,6 +226,34 @@ class IotCustomAuthorizerIntegrationTest {
         assertEquals(List.of("tls", "mqtt", "http"), keys);
     }
 
+    @Test
+    void mqtt3AllowedConnectOnTheTcpListenerSendsAnMqttOnlyEvent() throws Exception {
+        String clientId = "cauth-tcp-v3-" + System.nanoTime();
+        String username = clientId + "?" + NAME_PARAM + authorizer;
+
+        connectV3(tcp(), clientId, username, "allow", Map.of()).disconnect();
+
+        JsonNode event = takeEvent();
+        assertEquals(List.of("mqtt"), protocols(event));
+        JsonNode protocolData = event.path("protocolData");
+        assertFalse(protocolData.has("http"), protocolData.toString());
+        assertFalse(protocolData.has("tls"), protocolData.toString());
+        assertEquals(username, protocolData.path("mqtt").path("username").asText());
+        assertEquals(base64("allow"), protocolData.path("mqtt").path("password").asText());
+        assertEquals(clientId, protocolData.path("mqtt").path("clientId").asText());
+    }
+
+    @Test
+    void mqtt5RefusedConnectOnTheTcpListenerGetsReasonCode135() throws Exception {
+        String clientId = "cauth-tcp-v5-deny-" + System.nanoTime();
+
+        org.eclipse.paho.mqttv5.common.MqttException refused = assertThrows(org.eclipse.paho.mqttv5.common.MqttException.class,
+                () -> connectV5(tcp(), clientId, clientId + "?" + NAME_PARAM + authorizer, "deny"));
+
+        assertEquals(135, refused.getReasonCode());
+        assertEquals(base64("deny"), takeEvent().path("protocolData").path("mqtt").path("password").asText());
+    }
+
     // Helpers
 
     private MqttClient connectV3(String url, String clientId, String username, String password, Map<String, String> headers)
@@ -273,6 +302,10 @@ class IotCustomAuthorizerIntegrationTest {
 
     private String ws(String query) {
         return "ws://127.0.0.1:" + testHttpPort + "/mqtt" + query;
+    }
+
+    private static String tcp() {
+        return "tcp://127.0.0.1:" + IotMqttWebSocketIntegrationTest.PLAIN_PORT;
     }
 
     private JsonNode takeEvent() throws InterruptedException {
