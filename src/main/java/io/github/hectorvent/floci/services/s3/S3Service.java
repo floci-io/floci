@@ -2256,6 +2256,9 @@ public class S3Service implements Resettable, ResourceProvider {
     // S3 copies at most 5 GiB in one CopyObject; a larger object is copied with UploadPartCopy.
     static final long MAX_COPY_OBJECT_SOURCE_SIZE = 5L * 1024 * 1024 * 1024;
 
+    // The most one part of a multipart upload can hold, per S3's multipart upload limits.
+    static final long MAX_PART_SIZE = 5L * 1024 * 1024 * 1024;
+
     static void requireCopyableSize(S3Object source) {
         if (source.getSize() > MAX_COPY_OBJECT_SOURCE_SIZE) {
             throw new AwsException("InvalidRequest",
@@ -3978,9 +3981,9 @@ public class S3Service implements Resettable, ResourceProvider {
                                   SseCustomerHeaders copySourceSseCustomerHeaders,
                                   SseCustomerHeaders sseCustomerHeaders,
                                   CopySourceConditions copySourceConditions) {
-        byte[] data;
-        // The source is streamed the way GetObject serves it and only the copied range is read, so
-        // the source can be any size.
+        // The source is streamed the way GetObject serves it, and only the copied range is read,
+        // straight into the part the way a streamed UploadPart body is, so neither the source nor
+        // the part has to fit in memory in the disk-backed modes.
         try (ObjectRead read = openObject(sourceBucket, sourceKey, sourceVersionId)) {
             S3Object source = read.object();
             checkCopySourcePreconditions(source, copySourceConditions);
@@ -3989,18 +3992,17 @@ public class S3Service implements Resettable, ResourceProvider {
                     copySourceSseCustomerHeaders.key(),
                     copySourceSseCustomerHeaders.keyMd5());
             CopySourceRange range = CopySourceRange.parse(copySourceRange, source.getSize());
-            if (range.length() > MAX_IN_MEMORY_OBJECT_SIZE) {
-                LOG.warnv("UploadPartCopy of {0} bytes into upload {1} is over the {2} bytes one part can hold in Floci; copy the source in smaller ranges",
-                        range.length(), uploadId, MAX_IN_MEMORY_OBJECT_SIZE);
-                throw new AwsException("EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size.", 400);
+            if (range.length() > MAX_PART_SIZE) {
+                throw new AwsException("EntityTooLarge",
+                        "Your proposed upload exceeds the maximum allowed object size.", 400);
             }
-            data = readRange(read.body(), range);
+            return storePart(destBucket, destKey, uploadId, partNumber,
+                    new CopyRangeInputStream(read.body(), range), UploadChecksums.NONE,
+                    sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5())
+                    .getETag();
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to read the copy source", e);
+            throw new UncheckedIOException("Failed to close the copy source", e);
         }
-
-        return uploadPart(destBucket, destKey, uploadId, partNumber, data,
-                sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5());
     }
 
     /** An inclusive byte range of a copy source. Offsets are longs, since a source can pass 2 GiB. */
@@ -4061,17 +4063,6 @@ public class S3Service implements Resettable, ResourceProvider {
         private static Map<String, Object> argument(String header) {
             return Map.of("ArgumentName", HEADER, "ArgumentValue", header);
         }
-    }
-
-    /** Reads exactly the bytes of {@code range} from {@code body}, skipping the bytes before it. */
-    static byte[] readRange(InputStream body, CopySourceRange range) throws IOException {
-        body.skipNBytes(range.first());
-        byte[] data = body.readNBytes((int) range.length());
-        if (data.length != range.length()) {
-            throw new IOException("Copy source ended " + (range.length() - data.length)
-                    + " bytes before the end of the requested range");
-        }
-        return data;
     }
 
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
