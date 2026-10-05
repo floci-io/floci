@@ -37,6 +37,7 @@ public class UserPool {
     private String mfaConfiguration = "OFF";
     /** Null until SetUserPoolMfaConfig sets it; absent from responses while null, as AWS omits it. */
     private Boolean softwareTokenMfaEnabled;
+    private WebAuthnConfiguration webAuthnConfiguration;
     private Map<String, Object> deviceConfiguration = new HashMap<>();
     private int estimatedNumberOfUsers = 0;
     private Map<String, Object> emailConfiguration = new HashMap<>();
@@ -133,6 +134,11 @@ public class UserPool {
         this.softwareTokenMfaEnabled = softwareTokenMfaEnabled;
     }
     public void setMfaConfiguration(String mfaConfiguration) { this.mfaConfiguration = mfaConfiguration; }
+
+    public WebAuthnConfiguration getWebAuthnConfiguration() { return webAuthnConfiguration; }
+    public void setWebAuthnConfiguration(WebAuthnConfiguration webAuthnConfiguration) {
+        this.webAuthnConfiguration = webAuthnConfiguration;
+    }
 
     public Map<String, Object> getDeviceConfiguration() { return deviceConfiguration; }
     public void setDeviceConfiguration(Map<String, Object> deviceConfiguration) { this.deviceConfiguration = deviceConfiguration; }

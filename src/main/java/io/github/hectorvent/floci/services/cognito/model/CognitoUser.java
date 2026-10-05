@@ -29,6 +29,7 @@ public class CognitoUser {
     private String softwareTokenMfaSecret;
     private String pendingSoftwareTokenMfaSecret;
     private Integer pendingSoftwareTokenMfaAttemptsRemaining;
+    private List<WebAuthnCredential> webAuthnCredentials = new ArrayList<>();
     private String federatedProviderName;
     private String federatedSubject;
 
@@ -104,6 +105,11 @@ public class CognitoUser {
     public Integer getPendingSoftwareTokenMfaAttemptsRemaining() { return pendingSoftwareTokenMfaAttemptsRemaining; }
     public void setPendingSoftwareTokenMfaAttemptsRemaining(Integer attempts) {
         this.pendingSoftwareTokenMfaAttemptsRemaining = attempts;
+    }
+
+    public List<WebAuthnCredential> getWebAuthnCredentials() { return webAuthnCredentials; }
+    public void setWebAuthnCredentials(List<WebAuthnCredential> webAuthnCredentials) {
+        this.webAuthnCredentials = webAuthnCredentials == null ? new ArrayList<>() : new ArrayList<>(webAuthnCredentials);
     }
 
     public String getFederatedProviderName() {

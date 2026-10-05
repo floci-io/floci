@@ -97,7 +97,7 @@ final class CognitoAuthFlowHandler {
      * caller trigger an OTP send without ever starting a flow.
      */
     private record UserAuthSession(String userPoolId, String username, String clientId, String challengeName,
-                                   Instant expiresAt, boolean userExists) {}
+                                   Instant expiresAt, boolean userExists, byte[] webAuthnChallenge) {}
 
     static final class CustomAuthSession {
         final String userPoolId;
@@ -458,6 +458,9 @@ final class CognitoAuthFlowHandler {
         if ("EMAIL_OTP".equals(challengeName) || "SMS_OTP".equals(challengeName)) {
             rejectSimulatedUser(consumeUserAuthSession(pool, client, session, challengeName));
             return handleOtpChallengeResponse(pool, client, challengeName, responses, clientMetadata);
+        }
+        if ("WEB_AUTHN".equals(challengeName)) {
+            return handleWebAuthnChallengeResponse(pool, client, session, responses, clientMetadata);
         }
         if ("NEW_PASSWORD_REQUIRED".equals(challengeName)) {
             String username = responses.get("USERNAME");
@@ -886,8 +889,8 @@ final class CognitoAuthFlowHandler {
      * {@code PASSWORD_SRP} reuse {@link #authenticateWithPassword} and {@link #handleUserSrpAuth}
      * unchanged rather than reverifying the same credential a second way.
      *
-     * <p>Not implemented: {@code WEB_AUTHN} and the {@code ConfirmSignUp} session as a
-     * first-factor shortcut (tracked as follow-ups on the issue this was added for).
+     * <p>Not implemented: the {@code ConfirmSignUp} session as a first-factor shortcut (tracked as a
+     * follow-up on the issue this was added for).
      */
     private Map<String, Object> handleUserAuth(UserPool pool, UserPoolClient client,
                                                 Map<String, String> params, Map<String, String> clientMetadata) {
@@ -982,6 +985,7 @@ final class CognitoAuthFlowHandler {
                     advertised, clientMetadata);
             case "SMS_OTP" -> issueOtpChallenge(pool, client, user, "SMS_OTP", "phone_number", "SMS",
                     advertised, clientMetadata);
+            case "WEB_AUTHN" -> issueWebAuthnChallenge(pool, client, user, advertised, clientMetadata);
             default -> throw new AwsException("InvalidParameterException",
                     challenge + " is not a supported challenge", 400);
         };
@@ -998,6 +1002,68 @@ final class CognitoAuthFlowHandler {
                 service.issueSignInOtp(pool, user, purpose, attributeName, deliveryMedium, customMessage));
         challengeParams.put("USERNAME", user.getUsername());
         return userAuthChallengeResponse(pool, client, user, challengeName, available, challengeParams);
+    }
+
+    /**
+     * Issues a {@code WEB_AUTHN} challenge: {@code CREDENTIAL_REQUEST_OPTIONS} is the
+     * {@code PublicKeyCredentialRequestOptionsJSON} to pass to the browser or platform, allowing the
+     * user's registered passkeys, and its challenge stays with the session.
+     */
+    private Map<String, Object> issueWebAuthnChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
+                                                       List<String> available, Map<String, String> clientMetadata) {
+        firePreAuthentication(pool, client, user, null, clientMetadata, false);
+        byte[] challenge = service.newWebAuthnChallenge();
+        String options;
+        try {
+            options = service.webAuthnRequestOptions(pool, user, challenge,
+                    Duration.ofMinutes(client.getAuthSessionValidity()).toMillis());
+        } catch (AwsException e) {
+            if (!"WebAuthnConfigurationMissingException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("InvalidUserPoolConfigurationException", e.getMessage(), 400);
+        }
+        Map<String, String> challengeParams = new HashMap<>();
+        challengeParams.put("CREDENTIAL_REQUEST_OPTIONS", options);
+        challengeParams.put("USERNAME", user.getUsername());
+        return userAuthChallengeResponse(pool, client, user.getUsername(), "WEB_AUTHN", available, challengeParams,
+                true, challenge);
+    }
+
+    /**
+     * Answers a {@code WEB_AUTHN} challenge: {@code CREDENTIAL} is the {@code AuthenticationResponseJSON}
+     * signed over the session's challenge by one of the user's passkeys. A passkey that verified the user
+     * satisfies MFA in a pool whose {@code WebAuthnConfiguration.FactorConfiguration} is
+     * {@code MULTI_FACTOR_WITH_USER_VERIFICATION}; otherwise the pool's MFA rules apply as after a password.
+     */
+    private Map<String, Object> handleWebAuthnChallengeResponse(UserPool pool, UserPoolClient client, String session,
+                                                                Map<String, String> responses,
+                                                                Map<String, String> clientMetadata) {
+        UserAuthSession state = consumeUserAuthSession(pool, client, session, "WEB_AUTHN");
+        rejectSimulatedUser(state);
+        String username = responses.get("USERNAME");
+        String credential = responses.get("CREDENTIAL");
+        if (username == null || credential == null) {
+            throw new AwsException("InvalidParameterException", "USERNAME and CREDENTIAL are required", 400);
+        }
+        validateSecretHash(client, responses, username);
+        CognitoUser user = service.adminGetUser(pool.getId(), username);
+        if (!user.getUsername().equals(state.username())) {
+            throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
+        }
+        requireSignInEligible(user);
+        boolean userVerified = service.verifyWebAuthnSignIn(pool, user.getUsername(), state.webAuthnChallenge(),
+                credential);
+        user = service.adminGetUser(pool.getId(), user.getUsername());
+        if (userVerified && passkeySatisfiesMfa(pool)) {
+            return authenticationResult(pool, client, user, "TokenGeneration_Authentication", clientMetadata);
+        }
+        return completePrimaryAuth(pool, client, user, "TokenGeneration_Authentication", clientMetadata);
+    }
+
+    private static boolean passkeySatisfiesMfa(UserPool pool) {
+        return pool.getWebAuthnConfiguration() != null
+                && "MULTI_FACTOR_WITH_USER_VERIFICATION".equals(pool.getWebAuthnConfiguration().getFactorConfiguration());
     }
 
     private Map<String, Object> handleOtpChallengeResponse(UserPool pool, UserPoolClient client, String challengeName,
@@ -1031,13 +1097,22 @@ final class CognitoAuthFlowHandler {
                                                             String challengeName, List<String> available,
                                                             Map<String, String> challengeParameters) {
         return userAuthChallengeResponse(pool, client, user.getUsername(), challengeName, available,
-                challengeParameters, true);
+                challengeParameters, true, null);
     }
 
     private Map<String, Object> userAuthChallengeResponse(UserPool pool, UserPoolClient client, String username,
                                                             String challengeName, List<String> available,
                                                             Map<String, String> challengeParameters,
                                                             boolean userExists) {
+        return userAuthChallengeResponse(pool, client, username, challengeName, available, challengeParameters,
+                userExists, null);
+    }
+
+    /** {@code webAuthnChallenge} is the challenge a {@code WEB_AUTHN} answer must sign, kept with the session. */
+    private Map<String, Object> userAuthChallengeResponse(UserPool pool, UserPoolClient client, String username,
+                                                            String challengeName, List<String> available,
+                                                            Map<String, String> challengeParameters,
+                                                            boolean userExists, byte[] webAuthnChallenge) {
         String session = userAuthSessionToken(pool.getId(), client.getClientId());
         synchronized (userAuthSessionLock) {
             Instant issuedAt = clock.instant();
@@ -1052,7 +1127,7 @@ final class CognitoAuthFlowHandler {
                 tokens.remove();
             }
             store.put(session, new UserAuthSession(pool.getId(), username, client.getClientId(),
-                    challengeName, sessionExpiry(client, issuedAt), userExists));
+                    challengeName, sessionExpiry(client, issuedAt), userExists, webAuthnChallenge));
         }
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);
@@ -1153,7 +1228,7 @@ final class CognitoAuthFlowHandler {
      * when it names none: AWS's DescribeUserPool reports {@code ["PASSWORD"]} for a pool created without a
      * sign-in policy. Floci now stores that default too, but a pool it persisted earlier may have none.
      */
-    private static List<String> allowedFirstAuthFactors(UserPool pool) {
+    static List<String> allowedFirstAuthFactors(UserPool pool) {
         Map<String, Object> policies = pool.getPolicies();
         if (policies == null || !(policies.get("SignInPolicy") instanceof Map<?, ?> signInPolicy)
                 || !(signInPolicy.get("AllowedFirstAuthFactors") instanceof List<?> factors) || factors.isEmpty()) {
@@ -1177,6 +1252,10 @@ final class CognitoAuthFlowHandler {
         List<String> available = availableUserAuthChallenges(user);
         List<String> allowed = allowedFirstAuthFactors(pool);
         available.removeIf(challenge -> !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
+        // Where MFA is required, a passkey is a sign-in choice only when it can satisfy MFA itself.
+        if ("ON".equals(pool.getMfaConfiguration()) && !passkeySatisfiesMfa(pool)) {
+            available.remove("WEB_AUTHN");
+        }
         return available;
     }
 
@@ -1197,6 +1276,9 @@ final class CognitoAuthFlowHandler {
                 available.add("SMS_OTP");
             }
         }
+        if (!user.getWebAuthnCredentials().isEmpty()) {
+            available.add("WEB_AUTHN");
+        }
         return available;
     }
 
@@ -1204,7 +1286,7 @@ final class CognitoAuthFlowHandler {
      * The sign-in factors {@code user} has set up, as GetUserAuthFactors reports them, in the
      * {@code AuthFactorType} enum's order. AWS lists what the user holds, not what the pool's
      * {@code AllowedFirstAuthFactors} permits, so neither that policy nor Floci's code-delivery
-     * wiring filters this list. {@code WEB_AUTHN} never appears: Floci stores no passkeys.
+     * wiring filters this list. {@code WEB_AUTHN} appears once the user has registered a passkey.
      */
     List<String> configuredUserAuthFactors(CognitoUser user) {
         List<String> factors = new ArrayList<>();
@@ -1216,6 +1298,9 @@ final class CognitoAuthFlowHandler {
         }
         if (hasVerifiedAttribute(user, "phone_number")) {
             factors.add("SMS_OTP");
+        }
+        if (!user.getWebAuthnCredentials().isEmpty()) {
+            factors.add("WEB_AUTHN");
         }
         if (user.getSoftwareTokenMfaSecret() != null) {
             factors.add("SOFTWARE_TOKEN");

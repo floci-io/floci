@@ -32,6 +32,8 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
+import io.github.hectorvent.floci.services.cognito.model.WebAuthnConfiguration;
+import io.github.hectorvent.floci.services.cognito.model.WebAuthnCredential;
 import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
@@ -151,6 +153,7 @@ public class CognitoService implements ResourceProvider {
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
+    private final CognitoWebAuthn webAuthn;
 
     private static Object[] newUserLockStripes() {
         Object[] stripes = new Object[USER_LOCK_STRIPES];
@@ -304,6 +307,7 @@ public class CognitoService implements ResourceProvider {
         this.messageDispatcher = messageDispatcher;
         this.certificateManager = certificateManager;
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver, clock);
+        this.webAuthn = new CognitoWebAuthn(clock);
     }
 
     // ──────────────────────────── User Pools ────────────────────────────
@@ -685,26 +689,36 @@ public class CognitoService implements ResourceProvider {
         return pool;
     }
 
+    public UserPool setUserPoolMfaConfig(String id, String mfaConfiguration,
+                                         Boolean softwareTokenMfaEnabled,
+                                         boolean otherFactorConfigured) {
+        return setUserPoolMfaConfig(id, mfaConfiguration, softwareTokenMfaEnabled, otherFactorConfigured, null);
+    }
+
     /**
-     * SetUserPoolMfaConfig. Stores the MFA mode and the software-token setting, which is
-     * what GetUserPoolMfaConfig reports back and what the Terraform provider reads to
-     * detect drift on mfa_configuration / software_token_mfa_configuration.
+     * SetUserPoolMfaConfig. Stores the MFA mode, the software-token setting and the passkey
+     * ({@code WebAuthnConfiguration}) settings, which is what GetUserPoolMfaConfig reports back
+     * and what the Terraform provider reads to detect drift on mfa_configuration /
+     * software_token_mfa_configuration / web_authn_configuration.
      *
-     * <p>SMS, email and WebAuthn MFA are accepted and not stored: Floci has no path to
-     * deliver an SMS or email factor, so retaining the config would claim a capability
-     * that does not exist.
-     */
-    /**
+     * <p>SMS and email MFA are accepted and not stored: Floci has no path to deliver an SMS or
+     * email factor, so retaining the config would claim a capability that does not exist.
+     *
      * @param otherFactorConfigured whether EmailMfaConfiguration or SmsMfaConfiguration was
      *     present in the request. Both count towards the factor rules below even though
      *     Floci does not deliver either challenge; WebAuthnConfiguration does not, measured
      *     against the live service, which accepts it alongside OFF and does not accept it
      *     as the sole factor for ON or OPTIONAL.
+     * @param webAuthnConfiguration the request's WebAuthnConfiguration, or null to keep the stored one
      */
     public UserPool setUserPoolMfaConfig(String id, String mfaConfiguration,
                                          Boolean softwareTokenMfaEnabled,
-                                         boolean otherFactorConfigured) {
+                                         boolean otherFactorConfigured,
+                                         WebAuthnConfiguration webAuthnConfiguration) {
         UserPool pool = describeUserPool(id);
+        if (webAuthnConfiguration != null) {
+            validateWebAuthnConfiguration(webAuthnConfiguration);
+        }
         // An absent MfaConfiguration means OFF, not "leave the current mode alone":
         // measured against the live service, which resets a pool that was OPTIONAL back
         // to OFF when the member is omitted.
@@ -738,8 +752,36 @@ public class CognitoService implements ResourceProvider {
         } else if (softwareTokenMfaEnabled != null) {
             pool.setSoftwareTokenMfaEnabled(softwareTokenMfaEnabled);
         }
+        if (webAuthnConfiguration != null) {
+            pool.setWebAuthnConfiguration(webAuthnConfiguration);
+        }
         poolStore.put(id, pool);
         return pool;
+    }
+
+    private static void validateWebAuthnConfiguration(WebAuthnConfiguration configuration) {
+        String relyingPartyId = configuration.getRelyingPartyId();
+        if (relyingPartyId != null && (relyingPartyId.isEmpty() || relyingPartyId.length() > 127)) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value at 'webAuthnConfiguration.relyingPartyId' failed to "
+                            + "satisfy constraint: Member must have length between 1 and 127", 400);
+        }
+        String userVerification = configuration.getUserVerification();
+        if (userVerification != null && !List.of("required", "preferred").contains(userVerification)) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value '" + userVerification + "' at "
+                            + "'webAuthnConfiguration.userVerification' failed to satisfy constraint: Member must "
+                            + "satisfy enum value set: [required, preferred]", 400);
+        }
+        String factorConfiguration = configuration.getFactorConfiguration();
+        if (factorConfiguration != null
+                && !List.of("SINGLE_FACTOR", "MULTI_FACTOR_WITH_USER_VERIFICATION").contains(factorConfiguration)) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value '" + factorConfiguration + "' at "
+                            + "'webAuthnConfiguration.factorConfiguration' failed to satisfy constraint: Member "
+                            + "must satisfy enum value set: [SINGLE_FACTOR, MULTI_FACTOR_WITH_USER_VERIFICATION]",
+                    400);
+        }
     }
 
     public List<UserPool> listUserPools() {
@@ -3237,6 +3279,195 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
+    // ──────────────────────────── Passkeys (WebAuthn) ────────────────────────────
+
+    /** StartWebAuthnRegistration: creation options for the access token's user, whose challenge the app client must answer. */
+    public Map<String, Object> startWebAuthnRegistration(String accessToken) {
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
+        UserPool pool = describeUserPool(token.poolId());
+        requireWebAuthnEnabled(pool);
+        String relyingPartyId = webAuthnRelyingPartyId(pool);
+        CognitoUser user = adminGetUser(token.poolId(), token.username());
+        if (user.getWebAuthnCredentials().size() >= CognitoWebAuthn.MAX_CREDENTIALS_PER_USER) {
+            throw new AwsException("LimitExceededException",
+                    "A user can register at most " + CognitoWebAuthn.MAX_CREDENTIALS_PER_USER + " passkeys.", 400);
+        }
+        String userHandle = user.getAttributes().getOrDefault("sub", user.getUsername());
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("CredentialCreationOptions", webAuthn.startRegistration(pool.getId(), user.getUsername(),
+                userHandle, token.clientId(), relyingPartyId, webAuthnUserVerification(pool),
+                user.getWebAuthnCredentials()));
+        return response;
+    }
+
+    /** CompleteWebAuthnRegistration: verifies the {@code RegistrationResponseJSON} and stores the passkey. */
+    public void completeWebAuthnRegistration(String accessToken, JsonNode credential) {
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
+        if (credential == null || !credential.isObject()) {
+            throw new AwsException("InvalidParameterException", "Credential is required", 400);
+        }
+        UserPool pool = describeUserPool(token.poolId());
+        requireWebAuthnEnabled(pool);
+        WebAuthnCredential registered = webAuthn.completeRegistration(pool.getId(), token.username(),
+                token.clientId(), credential);
+        synchronized (userLock(token.poolId(), token.username())) {
+            CognitoUser user = adminGetUser(token.poolId(), token.username());
+            List<WebAuthnCredential> credentials = user.getWebAuthnCredentials();
+            if (credentials.size() >= CognitoWebAuthn.MAX_CREDENTIALS_PER_USER) {
+                throw new AwsException("LimitExceededException",
+                        "A user can register at most " + CognitoWebAuthn.MAX_CREDENTIALS_PER_USER + " passkeys.",
+                        400);
+            }
+            if (credentials.stream().anyMatch(c -> c.getCredentialId().equals(registered.getCredentialId()))) {
+                throw new AwsException("InvalidParameterException", "This passkey is already registered.", 400);
+            }
+            credentials.add(registered);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(token.poolId(), user.getUsername()), user);
+        }
+    }
+
+    /** ListWebAuthnCredentials: the access token's user's passkeys, a page of at most 20 at a time. */
+    public Map<String, Object> listWebAuthnCredentials(String accessToken, Integer maxResults, String nextToken) {
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
+        if (maxResults != null && (maxResults < 0 || maxResults > CognitoWebAuthn.MAX_CREDENTIALS_PER_USER)) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value '" + maxResults + "' at 'maxResults' failed to satisfy "
+                            + "constraint: Member must have value less than or equal to 20", 400);
+        }
+        int pageSize = maxResults == null || maxResults == 0 ? CognitoWebAuthn.MAX_CREDENTIALS_PER_USER : maxResults;
+        int start = 0;
+        if (nextToken != null) {
+            try {
+                start = Integer.parseInt(new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8));
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidParameterException", "Invalid NextToken", 400);
+            }
+        }
+        List<WebAuthnCredential> credentials = adminGetUser(token.poolId(), token.username()).getWebAuthnCredentials();
+        if (start < 0 || start > credentials.size()) {
+            throw new AwsException("InvalidParameterException", "Invalid NextToken", 400);
+        }
+        int end = Math.min(credentials.size(), start + pageSize);
+        List<Map<String, Object>> page = new ArrayList<>();
+        for (WebAuthnCredential credential : credentials.subList(start, end)) {
+            Map<String, Object> description = new LinkedHashMap<>();
+            if (credential.getAuthenticatorAttachment() != null) {
+                description.put("AuthenticatorAttachment", credential.getAuthenticatorAttachment());
+            }
+            description.put("AuthenticatorTransports", credential.getTransports());
+            description.put("CreatedAt", credential.getCreatedAtMillis() / 1000.0);
+            description.put("CredentialId", credential.getCredentialId());
+            description.put("FriendlyCredentialName", credential.getFriendlyCredentialName());
+            description.put("RelyingPartyId", credential.getRelyingPartyId());
+            page.add(description);
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("Credentials", page);
+        if (end < credentials.size()) {
+            response.put("NextToken", Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString(Integer.toString(end).getBytes(StandardCharsets.UTF_8)));
+        }
+        return response;
+    }
+
+    /** DeleteWebAuthnCredential: removes one of the access token's user's passkeys. */
+    public void deleteWebAuthnCredential(String accessToken, String credentialId) {
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
+        synchronized (userLock(token.poolId(), token.username())) {
+            CognitoUser user = adminGetUser(token.poolId(), token.username());
+            List<WebAuthnCredential> credentials = user.getWebAuthnCredentials();
+            if (!credentials.removeIf(c -> c.getCredentialId().equals(credentialId))) {
+                throw new AwsException("ResourceNotFoundException", "Passkey credential not found", 400);
+            }
+            user.setWebAuthnCredentials(credentials);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(token.poolId(), user.getUsername()), user);
+        }
+    }
+
+    /**
+     * Passkeys are on for a pool whose sign-in policy allows {@code WEB_AUTHN} as a first factor,
+     * which AWS offers in every feature plan but Lite.
+     */
+    private static void requireWebAuthnEnabled(UserPool pool) {
+        if ("LITE".equals(pool.getUserPoolTier())
+                || !CognitoAuthFlowHandler.allowedFirstAuthFactors(pool).contains("WEB_AUTHN")) {
+            throw new AwsException("WebAuthnNotEnabledException",
+                    "Passkey sign-in is not enabled for this user pool. Add WEB_AUTHN to the pool's "
+                            + "SignInPolicy AllowedFirstAuthFactors.", 400);
+        }
+    }
+
+    /**
+     * The relying party ID passkeys are registered for: the configured one, or as AWS defaults it,
+     * the pool's custom domain, then its prefix domain.
+     */
+    String webAuthnRelyingPartyId(UserPool pool) {
+        WebAuthnConfiguration configuration = pool.getWebAuthnConfiguration();
+        if (configuration != null && configuration.getRelyingPartyId() != null) {
+            return configuration.getRelyingPartyId();
+        }
+        List<UserPoolDomain> domains = domainStore.scan(key -> true).stream()
+                .filter(domain -> pool.getId().equals(domain.getUserPoolId()))
+                .toList();
+        for (UserPoolDomain domain : domains) {
+            if (domain.isCustomDomain()) {
+                return domain.getDomain();
+            }
+        }
+        if (!domains.isEmpty()) {
+            String region = AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion());
+            return domains.get(0).getDomain() + ".auth." + region + ".amazoncognito.com";
+        }
+        throw new AwsException("WebAuthnConfigurationMissingException",
+                "The user pool has no relying party ID and no domain to default it to. Set "
+                        + "WebAuthnConfiguration.RelyingPartyId with SetUserPoolMfaConfig.", 400);
+    }
+
+    /** {@code required} or {@code preferred}, the AWS default. */
+    static String webAuthnUserVerification(UserPool pool) {
+        WebAuthnConfiguration configuration = pool.getWebAuthnConfiguration();
+        return configuration != null && configuration.getUserVerification() != null
+                ? configuration.getUserVerification() : "preferred";
+    }
+
+    /** The {@code CREDENTIAL_REQUEST_OPTIONS} of a {@code WEB_AUTHN} challenge for {@code user}. */
+    String webAuthnRequestOptions(UserPool pool, CognitoUser user, byte[] challenge, long timeoutMillis) {
+        return webAuthn.requestOptions(webAuthnRelyingPartyId(pool), webAuthnUserVerification(pool),
+                user.getWebAuthnCredentials(), challenge, timeoutMillis);
+    }
+
+    byte[] newWebAuthnChallenge() {
+        return webAuthn.newChallenge();
+    }
+
+    /**
+     * Verifies a {@code WEB_AUTHN} challenge answer for {@code username} and records the
+     * authenticator's new signature counter. Returns whether the authenticator verified the user.
+     */
+    boolean verifyWebAuthnSignIn(UserPool pool, String username, byte[] challenge, String credentialJson) {
+        CognitoUser user = adminGetUser(pool.getId(), username);
+        CognitoWebAuthn.Assertion assertion = webAuthn.verifyAssertion(webAuthnRelyingPartyId(pool),
+                "required".equals(webAuthnUserVerification(pool)), challenge, user.getWebAuthnCredentials(),
+                credentialJson);
+        synchronized (userLock(pool.getId(), user.getUsername())) {
+            CognitoUser current = adminGetUser(pool.getId(), user.getUsername());
+            for (WebAuthnCredential credential : current.getWebAuthnCredentials()) {
+                if (credential.getCredentialId().equals(assertion.credential().getCredentialId())) {
+                    credential.setSignCount(assertion.signCount());
+                    credential.setUserVerified(credential.isUserVerified() || assertion.userVerified());
+                }
+            }
+            userStore.put(userKey(pool.getId(), current.getUsername()), current);
+        }
+        return assertion.userVerified();
+    }
+
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
@@ -4713,7 +4944,7 @@ public class CognitoService implements ResourceProvider {
         return null;
     }
 
-    record VerifiedAccessToken(String username, String poolId, String subject) {}
+    record VerifiedAccessToken(String username, String poolId, String subject, String clientId) {}
 
     /** Verified JWT details for services that enforce Cognito user-pool authorizers. */
     public record VerifiedApiGatewayToken(String poolId, String tokenUse, Map<String, Object> claims) {}
@@ -4812,7 +5043,7 @@ public class CognitoService implements ResourceProvider {
                 validateTokenNotRevoked(originJti, poolId, "access");
             }
             validateUserNotGloballySignedOut(username, poolId, "access", issuedAt);
-            return new VerifiedAccessToken(username, poolId, subject);
+            return new VerifiedAccessToken(username, poolId, subject, clientId);
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
