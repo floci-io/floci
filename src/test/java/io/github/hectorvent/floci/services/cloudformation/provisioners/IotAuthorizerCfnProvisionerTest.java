@@ -70,11 +70,11 @@ class IotAuthorizerCfnProvisionerTest {
     void setUp() {
         // Like the real engine, AWS::NoValue resolves to an empty string.
         when(engine.resolve(any())).thenAnswer(i -> {
-            JsonNode node = i.getArgument(0);
+            JsonNode node = resolveNode(i.getArgument(0));
             if (node == null || node.isMissingNode() || node.isNull()) {
                 return null;
             }
-            return isNoValue(node) ? "" : node.asText();
+            return node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(i -> resolveNode(i.getArgument(0)));
         when(service.createAuthorizer(anyString(), any(), eq(REGION))).thenAnswer(i -> {
@@ -188,6 +188,19 @@ class IotAuthorizerCfnProvisionerTest {
                 {"authorizerFunctionArn": "%s", "signingDisabled": true}
                 """.formatted(FUNCTION)), REGION);
         assertEquals(arn(name), resource.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void aWhitespaceNameFromAnIntrinsicIsKeptInsteadOfGenerated() {
+        ObjectNode properties = props(null);
+        properties.putObject("AuthorizerName").putArray("Fn::If").add("HasCustomName").add("auth").add(" ");
+
+        StackResource resource = create(properties);
+
+        assertEquals(" ", resource.getPhysicalId());
+        verify(service).createAuthorizer(" ", json("""
+                {"authorizerFunctionArn": "%s"}
+                """.formatted(FUNCTION)), REGION);
     }
 
     @Test

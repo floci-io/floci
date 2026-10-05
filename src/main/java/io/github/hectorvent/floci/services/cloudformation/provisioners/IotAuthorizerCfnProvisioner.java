@@ -129,12 +129,13 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The resolved property, or null when it is absent or an intrinsic resolved to AWS::NoValue,
-     * which the engine yields as an empty string. A literal string is kept as written.
+     * which the engine yields as an empty string. A literal string, and an intrinsic result that is
+     * only whitespace, is kept as written.
      */
     private static String resolvePresent(JsonNode props, String name, ProvisionContext ctx) {
         String value = ctx.resolveOptional(props, name);
         boolean literal = props != null && props.path(name).isTextual();
-        return literal || (value != null && !value.isBlank()) ? value : null;
+        return literal || (value != null && !value.isEmpty()) ? value : null;
     }
 
     private static void putIfPresent(ObjectNode body, String field, String value) {
