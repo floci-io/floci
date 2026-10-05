@@ -196,12 +196,15 @@ public class DurableExecutionController {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    /** Without a body the callback fails with no Error, and AWS does not invoke the function for it. */
+    /**
+     * Without a body the callback fails with no Error, and AWS does not invoke the function for it.
+     * Any other body must be a JSON object.
+     */
     @POST
     @Path("/durable-execution-callbacks/{callbackId: .+}/fail")
     public Response callbackFail(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,
                                  String body) {
-        DurableErrorObject error = body == null || body.isBlank() ? null : DurableWire.parseError(readObject(body));
+        DurableErrorObject error = body == null || body.isEmpty() ? null : parseCallbackError(body);
         // AWS measures the error as compact JSON, whatever spacing the request used.
         if (error != null
                 && MAX_CALLBACK_PAYLOAD_BYTES < DurableCheckpointApplier.utf8Length(DurableWire.error(error).toString())) {
@@ -233,6 +236,20 @@ public class DurableExecutionController {
             throw new AwsException("ResourceNotFoundException", "Function not found", 404);
         }
         return arn;
+    }
+
+    /** AWS answers whitespace, null or broken JSON with a SerializationException that has no message. */
+    private DurableErrorObject parseCallbackError(String body) {
+        Map<String, Object> error;
+        try {
+            error = objectMapper.readValue(body, new TypeReference<Map<String, Object>>() {});
+        } catch (IOException e) {
+            error = null;
+        }
+        if (error == null) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        return DurableWire.parseError(error);
     }
 
     private Map<String, Object> readObject(String body) {
