@@ -26,7 +26,9 @@ import java.util.Set;
  * {@code SigningDisabled} are create-only. An update that keeps both changes the authorizer in
  * place through UpdateAuthorizer, sending only the properties the template declares, so a property
  * dropped from the template keeps its stored value, reconciles the tags, and keeps what it replaces
- * on the resource so a failed stack update can put it back. An update that changes either, or drops
+ * on the resource so a failed stack update can put it back. An in-place update whose tag reconcile
+ * fails puts the authorizer back itself before reporting the failure, because the resource the
+ * stack restores never carried that snapshot. An update that changes either, or drops
  * an explicit name, creates the new authorizer and leaves the displaced one to the
  * {@link ReplacementCleanup} record; a replacement that would keep an explicit name is refused, as
  * CloudFormation refuses it for any custom-named resource. A delete deactivates the authorizer
@@ -109,8 +111,12 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
         if (ctx.reusesPriorEntity(name)) {
             snapshotBeforeUpdate(r, prior, ctx.region());
             authorizer = authorizerService.updateAuthorizer(name, declared, ctx.region());
-            // ponytail: no unwind; tag calls on the authorizer just updated fail only on a concurrent delete.
-            reconcileTags(prior, tags);
+            try {
+                reconcileTags(prior, tags);
+            } catch (RuntimeException failure) {
+                unwind(r, name, failure);
+                throw failure;
+            }
         } else {
             if (signingDisabled != null) {
                 declared.put("signingDisabled", Boolean.parseBoolean(signingDisabled));
@@ -125,6 +131,30 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", authorizer.getAuthorizerArn());
         r.getAttributes().put(NAME_MODE_ATTR, hasExplicitName ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
         ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /**
+     * An in-place update that changed the authorizer and then failed on its tags undoes itself.
+     * CloudFormationService puts the resource the stack held before the attempt back in its place,
+     * and that object never carried the snapshot taken here, so it marks the resource restored and
+     * the rollback walker skips {@link #rollbackUpdate}: without this the stack reports a completed
+     * rollback while the changed authorizer is still live. The stack must report the original
+     * failure, so an unwind that cannot restore is attached to it and recorded as a rollback
+     * failure, which ends the stack in UPDATE_ROLLBACK_FAILED. The unwind repeats the tag calls the
+     * update just made, so it can come back carrying the very exception that interrupted the
+     * update; a throwable cannot be suppressed under itself.
+     */
+    private void unwind(StackResource r, String name, RuntimeException failure) {
+        try {
+            rollbackUpdate(r);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+        } catch (RuntimeException unwindFailure) {
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                    "Could not roll back the update of authorizer " + name + ": " + unwindFailure.getMessage());
+            if (unwindFailure != failure) {
+                failure.addSuppressed(unwindFailure);
+            }
+        }
     }
 
     /**

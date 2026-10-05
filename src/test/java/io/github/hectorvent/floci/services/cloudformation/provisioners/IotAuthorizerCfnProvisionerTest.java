@@ -319,6 +319,54 @@ class IotAuthorizerCfnProvisionerTest {
         assertFalse(resource.getAttributes().containsKey(CfnRollback.AUTHORIZER_UPDATE_SNAPSHOT_ATTR));
     }
 
+    /**
+     * The stack puts back the resource it held before the attempt, which never carried the
+     * snapshot, so an update that failed on its tags restores the authorizer itself.
+     */
+    @Test
+    void anInPlaceUpdateThatFailedOnItsTagsRestoresTheAuthorizer() {
+        StackResource resource = create(props("auth").put("SigningDisabled", true).put("Status", "ACTIVE"));
+        AwsException failure = new AwsException("InternalFailureException", "tags down", 500);
+        doThrow(failure).when(service).tagResource(anyString(), anyMap());
+
+        AwsException thrown = assertThrows(AwsException.class, () -> update(resource, props("auth")
+                .put("SigningDisabled", true).put("Status", "INACTIVE").set("Tags", tags("team", "a"))));
+
+        assertSame(failure, thrown);
+        verify(service).updateAuthorizer("auth", json("""
+                {"authorizerFunctionArn": "%s", "status": "ACTIVE", "enableCachingForHttp": false}
+                """.formatted(FUNCTION)), REGION);
+        assertEquals("ACTIVE", authorizers.get("auth").getStatus());
+        assertEquals("true", resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        assertFalse(resource.getAttributes().containsKey(CfnRollback.AUTHORIZER_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(resource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    /**
+     * A restore that fails too is recorded as a rollback failure and keeps the snapshot, so the
+     * stack ends in UPDATE_ROLLBACK_FAILED while still reporting the update's own failure.
+     */
+    @Test
+    void anUnwindThatCannotRestoreIsReportedAsARollbackFailure() {
+        StackResource resource = create(props("auth").put("SigningDisabled", true).put("Status", "ACTIVE"));
+        AwsException failure = new AwsException("InternalFailureException", "tags down", 500);
+        doThrow(failure).when(service).tagResource(anyString(), anyMap());
+        AwsException restoreFailure = new AwsException("InternalFailureException", "still down", 500);
+        doThrow(restoreFailure).when(service).updateAuthorizer(eq("auth"), eq(json("""
+                {"authorizerFunctionArn": "%s", "status": "ACTIVE", "enableCachingForHttp": false}
+                """.formatted(FUNCTION))), eq(REGION));
+
+        AwsException thrown = assertThrows(AwsException.class, () -> update(resource, props("auth")
+                .put("SigningDisabled", true).put("Status", "INACTIVE").set("Tags", tags("team", "a"))));
+
+        assertSame(failure, thrown);
+        assertEquals(List.of(restoreFailure), List.of(thrown.getSuppressed()));
+        assertEquals("Could not roll back the update of authorizer auth: still down",
+                resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        assertTrue(resource.getAttributes().containsKey(CfnRollback.AUTHORIZER_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(resource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+    }
+
     @Test
     void renamingTheAuthorizerReplacesItAndDeletesTheOldOneOnCommit() {
         StackResource resource = create(props("auth").put("SigningDisabled", true).put("Status", "ACTIVE"));
