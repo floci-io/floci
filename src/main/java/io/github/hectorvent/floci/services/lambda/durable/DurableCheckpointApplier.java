@@ -120,7 +120,7 @@ final class DurableCheckpointApplier {
             DurableOperationUpdate previous = seen.put(update.id(), update);
             if (previous != null && !(previous.action() == DurableOperationAction.START
                     && previous.type() == update.type() && closesInSameBatch(update))) {
-                throw invalid("Cannot checkpoint multiple operations with the same ID.");
+                throw invalid("Cannot update the same operation twice in a single request.");
             }
         }
     }

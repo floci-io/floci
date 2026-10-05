@@ -51,8 +51,9 @@ class DurableCheckpointApplierTest {
     @Test
     void duplicateIdsAreRejectedUnlessAStartIsClosedInTheSameBatch() {
         assertRejected(List.of(stepStart("s1", null), stepStart("s1", null)),
-                "Cannot checkpoint multiple operations with the same ID.");
-        assertRejected(List.of(waitStart("w1"), waitStart("w1")), "Cannot checkpoint multiple operations with the same ID.");
+                "Cannot update the same operation twice in a single request.");
+        assertRejected(List.of(waitStart("w1"), waitStart("w1")),
+                "Cannot update the same operation twice in a single request.");
         DurableExecution execution = execution();
         DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null), update("s1", null,
                 DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1")), NOW);
