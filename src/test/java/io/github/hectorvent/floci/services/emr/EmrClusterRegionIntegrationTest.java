@@ -57,11 +57,15 @@ class EmrClusterRegionIntegrationTest {
         call(OTHER, "ListClusters", "{}")
             .then().statusCode(200)
             .body("Clusters.Id", not(hasItem(clusterId)));
+        call(OTHER, "SetTerminationProtection",
+                "{\"JobFlowIds\":[\"" + clusterId + "\"],\"TerminationProtected\":true}")
+            .then().statusCode(200);
         call(OTHER, "TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
             .then().statusCode(200);
         call(HOME, "DescribeCluster", byId)
             .then().statusCode(200)
-            .body("Cluster.Status.State", equalTo("WAITING"));
+            .body("Cluster.Status.State", equalTo("WAITING"))
+            .body("Cluster.TerminationProtected", equalTo(false));
 
         call(HOME, "TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
             .then().statusCode(200);
