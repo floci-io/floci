@@ -42,9 +42,9 @@ format. Validation runs before pool or client lookup.
 | ListUserPools | Lists local user pools visible in the request region. |
 | UpdateUserPool | Updates mutable user pool settings and persisted user-pool tags. |
 | DeleteUserPool | Deletes a local user pool and everything it owns: users, groups, app clients, resource servers, identity providers, revoked tokens and verification codes. Refused with `InvalidParameterException` while `DeletionProtection` is `ACTIVE` (switch it to `INACTIVE` with `UpdateUserPool` first, as on AWS) or while a domain is still configured. |
-| GetUserPoolMfaConfig | Returns the pool's MFA mode and, once configured, its software-token setting. |
+| GetUserPoolMfaConfig | Returns the pool's MFA mode and, once configured, its software-token and passkey (`WebAuthnConfiguration`) settings. |
 | AddCustomAttributes | Adds 1 to 25 attributes to a user pool's schema, prefixing each name with `custom:`, or `dev:` for a `DeveloperOnlyAttribute`, and rejecting a name the schema already has. |
-| SetUserPoolMfaConfig | Sets `MfaConfiguration` (`OFF`/`ON`/`OPTIONAL`) and `SoftwareTokenMfaConfiguration`. An absent `MfaConfiguration` means `OFF`, and turning MFA off drops the factor configuration with it. Validation follows the live service: `OFF` alongside a software-token, email or SMS factor is rejected, and `ON`/`OPTIONAL` with none of those three is rejected, in both cases on the member being present, not on its `Enabled` value. `WebAuthnConfiguration` sits outside both rules, as it does in AWS. SMS, email and WebAuthn configurations are validated and not stored: Floci cannot deliver those factors, so keeping the config would imply a capability it does not have. |
+| SetUserPoolMfaConfig | Sets `MfaConfiguration` (`OFF`/`ON`/`OPTIONAL`) and `SoftwareTokenMfaConfiguration`. An absent `MfaConfiguration` means `OFF`, and turning MFA off drops the factor configuration with it. Validation follows the live service: `OFF` alongside a software-token, email or SMS factor is rejected, and `ON`/`OPTIONAL` with none of those three is rejected, in both cases on the member being present, not on its `Enabled` value. `WebAuthnConfiguration` sits outside both rules, as it does in AWS, and is stored: see [Passkeys](#passkeys). A request without it keeps the stored one. SMS and email configurations are validated and not stored: Floci cannot deliver those factors, so keeping the config would imply a capability it does not have. |
 
 ### User Pool Tags
 
@@ -203,7 +203,7 @@ further divergences, both deliberate:
 | ConfirmSignUp | Confirms a pending self-service signup. |
 | ResendConfirmationCode | Issues a new sign-up confirmation code to an unconfirmed user, replacing the previous one, and returns where it was sent. |
 | GetUser | Returns attributes for the authenticated access-token user. |
-| GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the email MFA preference set with `SetUserMFAPreference`. `WEB_AUTHN` and SMS or software-token MFA settings are not reported. |
+| GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, `WEB_AUTHN` once the user has registered a passkey, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the email MFA preference set with `SetUserMFAPreference`. SMS and software-token MFA settings are not reported. |
 | GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. |
 | VerifyUserAttribute | Verifies an email or phone_number attribute with its issued verification code. |
 | UpdateUserAttributes | Updates attributes for the authenticated access-token user. |
@@ -212,13 +212,17 @@ further divergences, both deliberate:
 | ChangePassword | Changes the authenticated user's password. |
 | SetUserMFAPreference | Sets the authenticated access-token user's email MFA preference from `EmailMfaSettings`. SMS and software-token settings are accepted but not stored. |
 | GlobalSignOut | Revokes the access, ID and refresh tokens issued to the authenticated access-token user. |
+| StartWebAuthnRegistration | Returns the `CredentialCreationOptions` to register a passkey for the authenticated access-token user. See [Passkeys](#passkeys). |
+| CompleteWebAuthnRegistration | Verifies the `RegistrationResponseJSON` in `Credential` and registers the passkey. |
+| ListWebAuthnCredentials | Lists the authenticated access-token user's passkeys, up to 20 per page. |
+| DeleteWebAuthnCredential | Deletes one of the authenticated access-token user's passkeys. |
 | ForgotPassword | Starts the local forgot-password flow for a user. |
 | ConfirmForgotPassword | Completes the forgot-password flow by setting a replacement password. |
 
 As on AWS, every operation authorized by the user's access token (`GetUser`,
 `GetUserAuthFactors`, `UpdateUserAttributes`, `DeleteUserAttributes`, `DeleteUser`,
 `ChangePassword`, `GetUserAttributeVerificationCode`, `VerifyUserAttribute`,
-`SetUserMFAPreference`, `GlobalSignOut`, and `AssociateSoftwareToken` and
+`SetUserMFAPreference`, `GlobalSignOut`, the four passkey actions, and `AssociateSoftwareToken` and
 `VerifySoftwareToken` with an `AccessToken`)
 requires the token's `scope` to include `aws.cognito.signin.user.admin`. Tokens from
 `InitiateAuth` and the other API sign-in flows always carry it; a token from the OAuth token
@@ -252,6 +256,45 @@ the app client's `AuthSessionValidity` and cannot be replayed after completion.
 This flow currently covers software-token MFA required by a pool. Optional MFA
 preferences, SMS/email MFA challenges, and managed-login MFA are not emulated.
 
+### Passkeys
+
+Passkey (WebAuthn) registration and sign-in follow the
+[Cognito passkey flow](https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-authentication-flow-methods.html#amazon-cognito-user-pools-authentication-flow-methods-passkey).
+Passkeys are on for a pool whose `Policies.SignInPolicy.AllowedFirstAuthFactors` includes
+`WEB_AUTHN`, on any tier but Lite; otherwise the passkey actions fail with
+`WebAuthnNotEnabledException`. `SetUserPoolMfaConfig` sets `WebAuthnConfiguration`:
+
+- `RelyingPartyId`: the relying party ID passkeys are registered for. Without one, Floci uses the
+  pool's custom domain, then its prefix domain (`<prefix>.auth.<region>.amazoncognito.com`), as AWS
+  does, and fails with `WebAuthnConfigurationMissingException` when the pool has neither. For a
+  local page, set it to `localhost`.
+- `UserVerification`: `preferred` (the default) or `required`.
+- `FactorConfiguration`: `MULTI_FACTOR_WITH_USER_VERIFICATION` lets a passkey sign-in that verified
+  the user satisfy MFA; with `SINGLE_FACTOR` or none, a pool that requires MFA does not offer
+  `WEB_AUTHN`.
+
+Registration: `StartWebAuthnRegistration` returns `CredentialCreationOptions` (ES256 and RS256
+keys, a discoverable credential, the user's `sub` as the user handle, the user's existing passkeys
+excluded), and `CompleteWebAuthnRegistration` verifies the browser's `RegistrationResponseJSON`
+with [webauthn4j](https://github.com/webauthn4j/webauthn4j). As in Cognito, attestation is not
+enforced: `none`, `packed` (self or full), `fido-u2f`, `android-key`, `tpm` and `apple` statements
+are accepted once their signature checks out, without a trust check of their certificates. The origin must be the relying party ID or one of its subdomains, over HTTPS, or
+over HTTP as a page served from `localhost` is. Errors follow the API reference:
+`WebAuthnChallengeNotFoundException` (no pending registration, or one older than five minutes),
+`WebAuthnClientMismatchException` (an access token from another app client),
+`WebAuthnOriginNotAllowedException`, `WebAuthnRelyingPartyMismatchException`, and
+`WebAuthnCredentialNotSupportedException` (another algorithm, or no user verification when it is
+required). A user can register 20 passkeys. `FriendlyCredentialName` is `Roaming passkey` for a
+cross-platform authenticator and `Passkey` otherwise: Floci has no catalog of authenticator models
+to name a passkey after.
+
+Sign-in: `USER_AUTH` offers `WEB_AUTHN` to a user with a registered passkey. The `WEB_AUTHN`
+challenge carries `CREDENTIAL_REQUEST_OPTIONS`, the `PublicKeyCredentialRequestOptionsJSON` for
+`navigator.credentials.get()`, and is answered with `RespondToAuthChallenge` (`CREDENTIAL`: the
+`AuthenticationResponseJSON`). Floci checks the signature, the challenge, the origin, the relying
+party ID, user presence, user verification when required, and the signature counter. A failed
+check is `NotAuthorizedException`.
+
 ### User Listing
 
 | Action | Description |
@@ -267,7 +310,7 @@ preferences, SMS/email MFA challenges, and managed-login MFA are not emulated.
 
 `USER_AUTH` is the choice-based flow: with no `PREFERRED_CHALLENGE` it returns
 `ChallengeName=SELECT_CHALLENGE` and an `AvailableChallenges` list drawn from what the user has
-configured (`PASSWORD`, `PASSWORD_SRP`, `EMAIL_OTP`, `SMS_OTP`); with one, it goes straight to that
+configured (`PASSWORD`, `PASSWORD_SRP`, `EMAIL_OTP`, `SMS_OTP`, `WEB_AUTHN`); with one, it goes straight to that
 challenge. The list keeps only the first factors the pool's
 `Policies.SignInPolicy.AllowedFirstAuthFactors` allows: its `PASSWORD` covers both `PASSWORD` and
 `PASSWORD_SRP`, so a pool that allows only `EMAIL_OTP` offers `["EMAIL_OTP"]`, and a user with no
@@ -278,8 +321,8 @@ and puts the default back when its `Policies` has no `SignInPolicy`. A `PREFERRE
 the list, because the policy leaves it out or the user has not set it up, gets `SELECT_CHALLENGE` and
 the list, as on AWS; one that names no challenge Cognito supports fails with
 `InvalidParameterException`. A `SELECT_CHALLENGE` answer outside the list fails with
-`InvalidParameterException`. It requires the user pool's tier to be Essentials or higher. `WEB_AUTHN` and the `ConfirmSignUp` session as a first-factor
-shortcut are not implemented yet.
+`InvalidParameterException`. It requires the user pool's tier to be Essentials or higher. The `ConfirmSignUp` session as a first-factor
+shortcut is not implemented yet.
 
 Any other `AuthFlow` value is rejected with `InvalidParameterException` and no tokens are issued.
 
