@@ -537,6 +537,25 @@ class IotAuthorizerCfnProvisionerTest {
         verify(service, never()).deleteAuthorizer("auth", REGION);
     }
 
+    /** A stub migrated under the stub's own id created that authorizer, so a failed stack update deletes it. */
+    @Test
+    void aFailedStackUpdateDeletesTheAuthorizerAStubMigrationCreatedUnderTheStubId() {
+        StackResource resource = resource();
+        resource.setPhysicalId("Auth-1a2b3c4d");
+        resource.getAttributes().put("Arn", "arn:aws:stub:::Auth");
+        update(resource, props("Auth-1a2b3c4d").put("SigningDisabled", true));
+        verify(service).createAuthorizer(eq("Auth-1a2b3c4d"), any(), eq(REGION));
+        clearInvocations(service);
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+
+        InOrder order = inOrder(service);
+        order.verify(service).updateAuthorizer("Auth-1a2b3c4d", json("{\"status\": \"INACTIVE\"}"), REGION);
+        order.verify(service).deleteAuthorizer("Auth-1a2b3c4d", REGION);
+        assertEquals("Auth-1a2b3c4d", resource.getPhysicalId());
+        assertEquals(Map.of("Arn", "arn:aws:stub:::Auth"), resource.getAttributes());
+    }
+
     @Test
     void deleteDeactivatesThenDeletes() {
         authorizers.put("auth", new IotAuthorizer());

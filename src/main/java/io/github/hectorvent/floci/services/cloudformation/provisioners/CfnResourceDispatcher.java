@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * Routes each CloudFormation resource to the per-service provisioner that owns its type, through
@@ -91,7 +92,8 @@ public class CfnResourceDispatcher {
                         new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
                 // A provisioner that migrated a stub without writing its own Arn would leave the
                 // stub's, and the real resource would read as a stub on its next update.
-                if (isStub(resource.getAttributes())) {
+                String arn = resource.getAttributes().get("Arn");
+                if (arn != null && arn.startsWith(STUB_ARN_PREFIX)) {
                     resource.getAttributes().remove("Arn");
                 }
             } else if (!stubUnsupportedResourceTypesAllowed()) {
@@ -125,10 +127,27 @@ public class CfnResourceDispatcher {
         return resource;
     }
 
-    /** Whether these resource attributes are a dispatcher stub's, which names nothing that exists. */
-    static boolean isStub(Map<String, String> attributes) {
+    /**
+     * Whether this resource is a dispatcher stub, which names nothing that exists: a stub {@code Arn},
+     * the stub's own {@code <LogicalId>-<8 hex>} id and internal {@code __Floci} attributes only.
+     * A real resource an older Floci migrated without dropping the stub's {@code Arn} fails the id
+     * or attribute check, so it does not read as one.
+     */
+    static boolean isStub(String physicalId, Map<String, String> attributes) {
         String arn = attributes.get("Arn");
-        return arn != null && arn.startsWith(STUB_ARN_PREFIX);
+        if (arn == null || !arn.startsWith(STUB_ARN_PREFIX)) {
+            return false;
+        }
+        String logicalId = arn.substring(STUB_ARN_PREFIX.length());
+        if (physicalId == null || !physicalId.matches(Pattern.quote(logicalId) + "-[0-9a-f]{8}")) {
+            return false;
+        }
+        for (String key : attributes.keySet()) {
+            if (!"Arn".equals(key) && !key.startsWith("__Floci")) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

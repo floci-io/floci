@@ -89,6 +89,17 @@ class CfnResourceDispatcherTest {
     }
 
     @Test
+    void aProvisionerThatMigratesAStubAndWritesOtherAttributesStillDropsTheStubArn() {
+        when(registry.forType(TYPE)).thenReturn(Optional.of(provisioner((resource, ctx) ->
+                resource.getAttributes().put("FlociThingNameMode", "generated"))));
+
+        StackResource resource = dispatcher.provision("Dash", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack", "Dash-1a2b3c4d", Map.of("Arn", "arn:aws:stub:::Dash"));
+
+        assertEquals(Map.of("FlociThingNameMode", "generated"), resource.getAttributes());
+    }
+
+    @Test
     void aProvisionerThatMigratesAStubKeepsTheArnItWrites() {
         when(registry.forType(TYPE)).thenReturn(Optional.of(provisioner((resource, ctx) -> {
             resource.setPhysicalId("dash-real");
