@@ -1996,12 +1996,28 @@ public class CognitoService implements ResourceProvider {
                                        String temporaryPassword,
                                        String messageAction,
                                        boolean forceAliasCreation) {
+        return adminCreateUser(userPoolId, username, attributes, temporaryPassword, messageAction,
+                forceAliasCreation, Map.of(), Map.of());
+    }
+
+    /**
+     * AdminCreateUser with the request's {@code ValidationData} and {@code ClientMetadata}, which
+     * reach only the PreSignUp trigger and are never stored.
+     */
+    public CognitoUser adminCreateUser(String userPoolId,
+                                       String username,
+                                       Map<String, String> attributes,
+                                       String temporaryPassword,
+                                       String messageAction,
+                                       boolean forceAliasCreation,
+                                       Map<String, String> validationData,
+                                       Map<String, String> clientMetadata) {
         // Locked on the requested username/alias (not yet resolved to a canonical id, since
         // an alias pool doesn't have one until creation), so two concurrent requests for the
         // same identifier can't both pass the existence/alias check and create duplicates.
         synchronized (userLock(userPoolId, username)) {
             return adminCreateUserUnderUserLock(userPoolId, username, attributes,
-                    temporaryPassword, messageAction, forceAliasCreation);
+                    temporaryPassword, messageAction, forceAliasCreation, validationData, clientMetadata);
         }
     }
 
@@ -2010,7 +2026,9 @@ public class CognitoService implements ResourceProvider {
                                        Map<String, String> attributes,
                                        String temporaryPassword,
                                        String messageAction,
-                                       boolean forceAliasCreation) {
+                                       boolean forceAliasCreation,
+                                       Map<String, String> validationData,
+                                       Map<String, String> clientMetadata) {
         UserPool pool = describeUserPool(userPoolId);
         boolean resend = "RESEND".equalsIgnoreCase(messageAction);
         boolean aliasPool = usesAliasUsernames(pool);
@@ -2044,17 +2062,12 @@ public class CognitoService implements ResourceProvider {
         if (existing != null) {
             boolean existingAliasVerified = aliasAttribute != null
                     && "true".equalsIgnoreCase(existing.getAttributes().get(aliasAttribute + "_verified"));
-            if (existingAliasVerified) {
-                if (!forceAliasCreation) {
-                    throw new AwsException("AliasExistsException",
-                            "An account with the given " + aliasAttribute + " already exists.", 400);
-                }
-                existing.getAttributes().remove(aliasAttribute);
-                existing.getAttributes().put(aliasAttribute + "_verified", "false");
-                existing.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-                userStore.put(userKey(userPoolId, existing.getUsername()), existing);
-            } else {
+            if (!existingAliasVerified) {
                 throw new AwsException("UsernameExistsException", "User already exists", 400);
+            }
+            if (!forceAliasCreation) {
+                throw new AwsException("AliasExistsException",
+                        "An account with the given " + aliasAttribute + " already exists.", 400);
             }
         }
 
@@ -2079,6 +2092,17 @@ public class CognitoService implements ResourceProvider {
             updateUserPassword(user, temporaryPassword);
             user.setTemporaryPassword(true);
             user.setUserStatus("FORCE_CHANGE_PASSWORD");
+        }
+
+        // Before anything is stored, so a trigger that refuses the user leaves the pool unchanged,
+        // including the alias a ForceAliasCreation request would move.
+        authFlowHandler.firePreSignUpForAdminCreateUser(pool, user, validationData, clientMetadata);
+
+        if (existing != null) {
+            existing.getAttributes().remove(aliasAttribute);
+            existing.getAttributes().put(aliasAttribute + "_verified", "false");
+            existing.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(userPoolId, existing.getUsername()), existing);
         }
 
         userStore.put(userKey(userPoolId, canonicalUsername), user);
