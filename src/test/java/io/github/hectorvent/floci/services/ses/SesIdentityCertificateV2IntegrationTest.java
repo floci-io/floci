@@ -1,11 +1,8 @@
 package io.github.hectorvent.floci.services.ses;
 
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
-import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -30,33 +27,54 @@ class SesIdentityCertificateV2IntegrationTest {
     private static final String MISSING_CERT_ARN =
             "arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000";
 
-    @Inject
-    CertificateGenerator certificateGenerator;
-
     @BeforeAll
     static void configure() {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
     @Test
-    void associatedCertificatesAreListedWithTheirStatus() {
+    void matchingCertificateOnAVerifiedIdentityIsActive() {
+        String identity = "smime-active@floci.test";
+        createIdentity(identity);
+        String certificateArn = importCertificate(identity);
+        associate(identity, null, certificateArn).then().statusCode(200).body(equalTo("{}"));
+
+        Response list = list("{\"EmailIdentity\":\"" + identity + "\"}");
+        list.then().statusCode(200)
+                .body("Certificates.FromAddress", equalTo(List.of(identity)))
+                .body("Certificates[0].Status", equalTo("ACTIVE"))
+                .body("Certificates[0].CertificateArn", equalTo(certificateArn))
+                .body("NextToken", nullValue());
+        double expiry = list.jsonPath().getDouble("Certificates[0].CertificateExpiryTime");
+        assertTrue(expiry > 0, "CertificateExpiryTime is epoch seconds");
+    }
+
+    @Test
+    void rsa1024CertificateImportedThroughAcmIsFailed() {
+        String identity = "smime-rsa1024@floci.test";
+        createIdentity(identity);
+        String certificateArn = importCertificate(SmimeTestCertificates.rsa(identity, 1024));
+        associate(identity, null, certificateArn).then().statusCode(200);
+
+        list("{\"EmailIdentity\":\"" + identity + "\"}").then().statusCode(200)
+                .body("Certificates.Status", equalTo(List.of("FAILED")))
+                .body("Certificates[0]", not(hasKey("CertificateExpiryTime")));
+    }
+
+    @Test
+    void unverifiedDomainListsEveryAssociationAsFailedAndPages() {
         String domain = "smime-list.floci.test";
         createIdentity(domain);
         String certificateArn = importCertificate("alice@" + domain);
 
-        associate(domain, "bob@" + domain, MISSING_CERT_ARN).then().statusCode(200).body(equalTo("{}"));
+        associate(domain, "bob@" + domain, MISSING_CERT_ARN).then().statusCode(200);
         associate(domain, "alice@" + domain, certificateArn).then().statusCode(200);
 
-        Response list = list("{\"EmailIdentity\":\"" + domain + "\"}");
-        list.then().statusCode(200)
+        list("{\"EmailIdentity\":\"" + domain + "\"}").then().statusCode(200)
                 .body("Certificates.FromAddress", equalTo(List.of("alice@" + domain, "bob@" + domain)))
-                .body("Certificates[0].Status", equalTo("ACTIVE"))
-                .body("Certificates[0].CertificateArn", equalTo(certificateArn))
-                .body("Certificates[1].Status", equalTo("FAILED"))
-                .body("Certificates[1]", not(hasKey("CertificateExpiryTime")))
+                .body("Certificates.Status", equalTo(List.of("FAILED", "FAILED")))
+                .body("Certificates[0]", not(hasKey("CertificateExpiryTime")))
                 .body("NextToken", nullValue());
-        double expiry = list.jsonPath().getDouble("Certificates[0].CertificateExpiryTime");
-        assertTrue(expiry > 0, "CertificateExpiryTime is epoch seconds");
 
         Response firstPage = list("{\"EmailIdentity\":\"" + domain + "\",\"PageSize\":1}");
         String token = firstPage.jsonPath().getString("NextToken");
@@ -177,11 +195,13 @@ class SesIdentityCertificateV2IntegrationTest {
                 .body(body).when().post("/v2/email/identity/certificates/list");
     }
 
-    private String importCertificate(String commonName) {
-        CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateSelfSignedCertificate(
-                commonName, List.of(), KeyAlgorithm.RSA_2048);
-        String certJson = generated.certificatePem().replace("\r\n", "\n").replace("\n", "\\n");
-        String keyJson = generated.privateKeyPem().replace("\r\n", "\n").replace("\n", "\\n");
+    private static String importCertificate(String email) {
+        return importCertificate(SmimeTestCertificates.rsa(email, 2048));
+    }
+
+    private static String importCertificate(SmimeTestCertificates.Pem pem) {
+        String certJson = pem.certificate().replace("\r\n", "\n").replace("\n", "\\n");
+        String keyJson = pem.privateKey().replace("\r\n", "\n").replace("\n", "\\n");
         return given().header("X-Amz-Target", "CertificateManager.ImportCertificate")
                 .header("Authorization", ACM_AUTH)
                 .contentType("application/x-amz-json-1.1")

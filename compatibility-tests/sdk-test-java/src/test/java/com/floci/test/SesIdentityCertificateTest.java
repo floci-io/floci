@@ -26,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * SDK compatibility test for the S/MIME identity certificate operations:
+ * SDK compatibility test for the S/MIME identity certificate operations on a verified domain identity:
  * {@code associateEmailIdentityCertificate}, {@code listEmailIdentityCertificates} (including the
  * {@code CertificateExpiryTime} timestamp an ACTIVE entry carries) and
  * {@code disassociateEmailIdentityCertificate}, plus the {@code deleteEmailIdentity} guard.
@@ -46,8 +46,8 @@ class SesIdentityCertificateTest {
     static void setup() throws Exception {
         sesV2 = TestFixtures.sesV2Client();
         acm = TestFixtures.acmClient();
-        sesV2.createEmailIdentity(b -> b.emailIdentity(DOMAIN));
-        byte[][] certAndKey = generateSelfSignedCert();
+        TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, DOMAIN);
+        byte[][] certAndKey = generateSelfSignedCert("alice@" + DOMAIN);
         certificateArn = acm.importCertificate(b -> b
                 .certificate(SdkBytes.fromByteArray(certAndKey[0]))
                 .privateKey(SdkBytes.fromByteArray(certAndKey[1]))).certificateArn();
@@ -148,13 +148,14 @@ class SesIdentityCertificateTest {
         sesV2.deleteEmailIdentity(b -> b.emailIdentity(DOMAIN));
     }
 
-    private static byte[][] generateSelfSignedCert() throws Exception {
+    private static byte[][] generateSelfSignedCert(String email) throws Exception {
         Path keyFile = Files.createTempFile("smime-key", ".pem");
         Path certFile = Files.createTempFile("smime-cert", ".pem");
         try {
             ProcessBuilder pb = new ProcessBuilder("openssl", "req", "-x509", "-newkey", "rsa:2048",
                     "-keyout", keyFile.toString(), "-out", certFile.toString(),
-                    "-days", "365", "-nodes", "-subj", "/CN=alice@" + DOMAIN);
+                    "-days", "365", "-nodes", "-subj", "/CN=" + email,
+                    "-addext", "subjectAltName=email:" + email);
             pb.redirectErrorStream(true);
             Process p = pb.start();
             p.getInputStream().readAllBytes();

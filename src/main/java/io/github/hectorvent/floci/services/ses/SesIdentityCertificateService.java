@@ -3,32 +3,47 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
+import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.IdentityCertificate;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.security.AlgorithmParameters;
+import java.security.GeneralSecurityException;
+import java.security.PublicKey;
+import java.security.cert.CertificateParsingException;
+import java.security.cert.X509Certificate;
+import java.security.interfaces.ECPublicKey;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.ECGenParameterSpec;
+import java.security.spec.ECParameterSpec;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
  * S/MIME certificate associations of email identities (Associate/Disassociate/ListEmailIdentityCertificates).
  * Floci stores them and never signs mail. Messages and precedence follow real SES (probed 2026-10-04):
  * the request members are checked before the identity is looked up, and the certificate itself is
- * not checked when it is associated. The status is Floci's own rule, since SES never reported
- * ACTIVE in the probe: an association is ACTIVE while its ARN names an issued, unexpired
- * certificate in Floci's ACM, and FAILED otherwise.
+ * not checked when it is associated. The status applies the SES Developer Guide's certificate
+ * requirements when the list is read: an association is ACTIVE while its identity is verified and
+ * its ARN names an issued, currently valid certificate in Floci's ACM, with an allowed key and an
+ * RFC822Name SAN equal to the From address, and FAILED otherwise.
  */
 @ApplicationScoped
 public class SesIdentityCertificateService {
@@ -37,6 +52,10 @@ public class SesIdentityCertificateService {
 
     static final String STATUS_ACTIVE = "ACTIVE";
     static final String STATUS_FAILED = "FAILED";
+
+    private static final int RFC822_NAME = 1;
+    private static final Set<Integer> RSA_SIGNING_KEY_SIZES = Set.of(2048, 3072, 4096);
+    private static final List<String> EC_SIGNING_CURVES = List.of("secp256r1", "secp384r1", "secp521r1");
 
     private static final Pattern CERTIFICATE_ARN =
             Pattern.compile("arn:[\\w+=/,.@-]+:[\\w+=/,.@-]+:[\\w+=/,.@-]*:[0-9]+:certificate/[\\w+=,.@-]+");
@@ -125,7 +144,8 @@ public class SesIdentityCertificateService {
         List<IdentityCertificate> associations = store.scan(k -> k.startsWith(identityPrefix(region, emailIdentity)));
         PaginatedResult<IdentityCertificate> page = paging.page(region, emailIdentity, associations,
                 c -> c.fromAddress().toLowerCase(Locale.ROOT), pageSize, nextToken);
-        List<Entry> entries = page.items().stream().map(c -> entry(c, region)).toList();
+        boolean identityVerified = isVerified(emailIdentity, region);
+        List<Entry> entries = page.items().stream().map(c -> entry(c, identityVerified, region)).toList();
         return new PaginatedResult<>(entries, page.nextToken());
     }
 
@@ -146,8 +166,15 @@ public class SesIdentityCertificateService {
         }
     }
 
-    private Entry entry(IdentityCertificate association, String region) {
-        Certificate certificate = usableCertificate(association.certificateArn(), region);
+    private boolean isVerified(String emailIdentity, String region) {
+        Identity identity = identityService.getIdentityVerificationAttributes(emailIdentity, region);
+        return identity != null && "Success".equals(identity.getVerificationStatus());
+    }
+
+    private Entry entry(IdentityCertificate association, boolean identityVerified, String region) {
+        Certificate certificate = identityVerified
+                ? usableCertificate(association.certificateArn(), association.fromAddress(), region)
+                : null;
         if (certificate == null) {
             return new Entry(association.fromAddress(), STATUS_FAILED, association.certificateArn(), null);
         }
@@ -155,7 +182,7 @@ public class SesIdentityCertificateService {
                 certificate.getNotAfter());
     }
 
-    private Certificate usableCertificate(String certificateArn, String region) {
+    private Certificate usableCertificate(String certificateArn, String fromAddress, String region) {
         Certificate certificate;
         try {
             certificate = acmService.getCertificate(certificateArn, region);
@@ -171,11 +198,80 @@ public class SesIdentityCertificateService {
         if (!certificateArn.equals(certificate.getArn()) || certificate.getStatus() != CertificateStatus.ISSUED) {
             return null;
         }
+        Instant now = Instant.now(clock);
+        Instant notBefore = certificate.getNotBefore();
         Instant notAfter = certificate.getNotAfter();
-        if (notAfter != null && !notAfter.isAfter(Instant.now(clock))) {
+        if ((notBefore != null && notBefore.isAfter(now)) || (notAfter != null && !notAfter.isAfter(now))) {
+            return null;
+        }
+        X509Certificate x509 = parse(certificate);
+        if (x509 == null || !isSigningKey(x509.getPublicKey())
+                || !emailSubjectAlternativeNames(x509).contains(fromAddress)) {
             return null;
         }
         return certificate;
+    }
+
+    private static X509Certificate parse(Certificate certificate) {
+        if (certificate.getCertificateBody() == null) {
+            return null;
+        }
+        try {
+            return Pem.parseCertificate(certificate.getCertificateBody());
+        } catch (CertificateMaterialException e) {
+            LOG.debugv(e, "Certificate {0} could not be parsed, so its association is FAILED", certificate.getArn());
+            return null;
+        }
+    }
+
+    /**
+     * Read from the key itself: ACM's stored KeyAlgorithm folds every RSA size and EC curve it does
+     * not name into RSA_2048 or EC_prime256v1.
+     */
+    private static boolean isSigningKey(PublicKey key) {
+        if (key instanceof RSAPublicKey rsa) {
+            return RSA_SIGNING_KEY_SIZES.contains(rsa.getModulus().bitLength());
+        }
+        if (key instanceof ECPublicKey ec) {
+            ECParameterSpec params = ec.getParams();
+            for (String curve : EC_SIGNING_CURVES) {
+                ECParameterSpec named = namedCurve(curve);
+                if (named != null && named.getCurve().equals(params.getCurve())
+                        && named.getGenerator().equals(params.getGenerator())
+                        && named.getOrder().equals(params.getOrder())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static ECParameterSpec namedCurve(String name) {
+        try {
+            AlgorithmParameters parameters = AlgorithmParameters.getInstance("EC");
+            parameters.init(new ECGenParameterSpec(name));
+            return parameters.getParameterSpec(ECParameterSpec.class);
+        } catch (GeneralSecurityException e) {
+            LOG.warnv(e, "EC curve {0} is unavailable, so no key on it counts as a signing key", name);
+            return null;
+        }
+    }
+
+    private static List<String> emailSubjectAlternativeNames(X509Certificate x509) {
+        try {
+            Collection<List<?>> names = x509.getSubjectAlternativeNames();
+            if (names == null) {
+                return List.of();
+            }
+            return names.stream()
+                    .filter(name -> Integer.valueOf(RFC822_NAME).equals(name.get(0)))
+                    .map(name -> (String) name.get(1))
+                    .toList();
+        } catch (CertificateParsingException e) {
+            LOG.debugv(e, "The SAN of {0} could not be read, so it names no sender",
+                    x509.getSubjectX500Principal().getName());
+            return List.of();
+        }
     }
 
     private void requireIdentity(String emailIdentity, String region) {

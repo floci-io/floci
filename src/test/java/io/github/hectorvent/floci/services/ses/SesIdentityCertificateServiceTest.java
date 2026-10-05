@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
+import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.IdentityCertificate;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,6 +43,10 @@ class SesIdentityCertificateServiceTest {
     private static final String OTHER_CERT_ARN =
             "arn:aws:acm:us-east-1:000000000000:certificate/99999999-2222-3333-4444-555555555555";
 
+    // A SAN of alice@example.com, matching the sender most tests associate.
+    private static final SmimeTestCertificates.Pem ALICE_CERTIFICATE =
+            SmimeTestCertificates.rsa("alice@example.com", 2048);
+
     private final MutableClock clock = new MutableClock();
     private SesIdentityService identityService;
     private AcmService acmService;
@@ -50,7 +55,7 @@ class SesIdentityCertificateServiceTest {
     @BeforeEach
     void setUp() {
         identityService = new SesIdentityService(new InMemoryStorage<>(), null, Clock.systemUTC());
-        identityService.verifyDomainIdentity(DOMAIN, REGION);
+        markVerified(identityService.verifyDomainIdentity(DOMAIN, REGION));
         identityService.verifyEmailIdentity("alice@example.org", REGION);
         acmService = mock(AcmService.class);
         when(acmService.getCertificate(anyString(), anyString())).thenAnswer(invocation -> {
@@ -159,6 +164,64 @@ class SesIdentityCertificateServiceTest {
         certificate.setNotAfter(clock.instant().plusSeconds(60));
         certificate.setStatus(CertificateStatus.PENDING_VALIDATION);
         assertEquals("FAILED", service.list(DOMAIN, null, null, REGION).items().getFirst().status());
+    }
+
+    @Test
+    void list_certificateNeedsAnAllowedKey() {
+        Certificate certificate = certificate(CERT_ARN, CertificateStatus.ISSUED, clock.instant().plusSeconds(3600));
+        when(acmService.getCertificate(eq(CERT_ARN), eq(REGION))).thenReturn(certificate);
+        service.associate(DOMAIN, "alice@example.com", CERT_ARN, REGION);
+
+        // ACM records RSA-1536 as RSA_2048 and Ed25519 as RSA_2048, so the key itself has to be read.
+        for (SmimeTestCertificates.Pem refused : List.of(SmimeTestCertificates.rsa("alice@example.com", 1024),
+                SmimeTestCertificates.rsa("alice@example.com", 1536),
+                SmimeTestCertificates.ed25519("alice@example.com"))) {
+            certificate.setCertificateBody(refused.certificate());
+            assertEquals("FAILED", service.list(DOMAIN, null, null, REGION).items().getFirst().status());
+        }
+        for (SmimeTestCertificates.Pem allowed : List.of(SmimeTestCertificates.rsa("alice@example.com", 3072),
+                SmimeTestCertificates.ec("alice@example.com", "secp256r1"),
+                SmimeTestCertificates.ec("alice@example.com", "secp521r1"))) {
+            certificate.setCertificateBody(allowed.certificate());
+            assertEquals("ACTIVE", service.list(DOMAIN, null, null, REGION).items().getFirst().status());
+        }
+    }
+
+    @Test
+    void list_certificateNotYetValidIsFailed() {
+        Certificate certificate = certificate(CERT_ARN, CertificateStatus.ISSUED, clock.instant().plusSeconds(3600));
+        certificate.setNotBefore(clock.instant().plusSeconds(60));
+        when(acmService.getCertificate(eq(CERT_ARN), eq(REGION))).thenReturn(certificate);
+        service.associate(DOMAIN, "alice@example.com", CERT_ARN, REGION);
+
+        assertEquals("FAILED", service.list(DOMAIN, null, null, REGION).items().getFirst().status());
+
+        clock.advance(Duration.ofSeconds(60));
+        assertEquals("ACTIVE", service.list(DOMAIN, null, null, REGION).items().getFirst().status());
+    }
+
+    @Test
+    void list_certificateSanMustNameTheFromAddressExactly() {
+        when(acmService.getCertificate(eq(CERT_ARN), eq(REGION)))
+                .thenReturn(certificate(CERT_ARN, CertificateStatus.ISSUED, clock.instant().plusSeconds(3600)));
+        service.associate(DOMAIN, "Alice@example.com", CERT_ARN, REGION);
+        service.associate(DOMAIN, "bob@example.com", CERT_ARN, REGION);
+
+        assertEquals(List.of("FAILED", "FAILED"), statuses(service.list(DOMAIN, null, null, REGION)));
+    }
+
+    @Test
+    void list_unverifiedIdentityIsFailed() {
+        Identity pending = identityService.verifyDomainIdentity("pending.example.com", REGION);
+        Certificate certificate = certificate(CERT_ARN, CertificateStatus.ISSUED, clock.instant().plusSeconds(3600));
+        certificate.setCertificateBody(SmimeTestCertificates.rsa("alice@pending.example.com", 2048).certificate());
+        when(acmService.getCertificate(eq(CERT_ARN), eq(REGION))).thenReturn(certificate);
+        service.associate("pending.example.com", "alice@pending.example.com", CERT_ARN, REGION);
+
+        assertEquals(List.of("FAILED"), statuses(service.list("pending.example.com", null, null, REGION)));
+
+        markVerified(pending);
+        assertEquals(List.of("ACTIVE"), statuses(service.list("pending.example.com", null, null, REGION)));
     }
 
     @Test
@@ -272,12 +335,22 @@ class SesIdentityCertificateServiceTest {
         return new SesIdentityCertificateService(store, identityService, acmService, clock);
     }
 
+    private void markVerified(Identity identity) {
+        identity.setVerificationStatus("Success");
+        identityService.save(identity, REGION);
+    }
+
     private static Certificate certificate(String arn, CertificateStatus status, Instant notAfter) {
         Certificate certificate = new Certificate();
         certificate.setArn(arn);
         certificate.setStatus(status);
         certificate.setNotAfter(notAfter);
+        certificate.setCertificateBody(ALICE_CERTIFICATE.certificate());
         return certificate;
+    }
+
+    private static List<String> statuses(PaginatedResult<SesIdentityCertificateService.Entry> page) {
+        return page.items().stream().map(SesIdentityCertificateService.Entry::status).toList();
     }
 
     private static List<String> fromAddresses(PaginatedResult<SesIdentityCertificateService.Entry> page) {
