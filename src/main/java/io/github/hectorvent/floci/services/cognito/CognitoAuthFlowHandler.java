@@ -1182,9 +1182,10 @@ final class CognitoAuthFlowHandler {
         List<String> available = availableUserAuthChallenges(user);
         List<String> allowed = allowedFirstAuthFactors(pool);
         available.removeIf(challenge -> !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
-        // Where MFA is optional, a user who has turned on an MFA factor signs in with a password only,
-        // so that the second factor still follows.
-        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && !CognitoService.userMfaSettingList(user).isEmpty()) {
+        // Where MFA is optional, AWS lets a user who has turned on an MFA factor sign in with a password
+        // only, so that the second factor still follows. Floci asks for software-token codes, not for
+        // email or SMS ones, so only that factor restricts the choice here.
+        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && CognitoService.softwareTokenMfaEnabled(user)) {
             available.removeIf(challenge -> !"PASSWORD".equals(challenge) && !"PASSWORD_SRP".equals(challenge));
         }
         return available;

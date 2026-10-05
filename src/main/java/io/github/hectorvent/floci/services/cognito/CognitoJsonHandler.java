@@ -649,7 +649,7 @@ public class CognitoJsonHandler {
             attr.put("Value", v);
         });
         Map<String, Object> mfaSettings = new LinkedHashMap<>();
-        CognitoService.putMfaSettings(mfaSettings, user);
+        CognitoService.putMfaSettings(mfaSettings, service.describeUserPool(request.path("UserPoolId").asText()), user);
         response.setAll(objectMapper.<ObjectNode>valueToTree(mfaSettings));
         return Response.ok(response).build();
     }

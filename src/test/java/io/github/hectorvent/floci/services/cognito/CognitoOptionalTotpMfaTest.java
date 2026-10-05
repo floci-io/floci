@@ -88,8 +88,8 @@ class CognitoOptionalTotpMfaTest {
 
         assertNotNull(passwordLogin().get("AuthenticationResult"));
         CognitoUser user = service.adminGetUser(pool.getId(), USERNAME);
-        assertTrue(CognitoService.userMfaSettingList(user).isEmpty());
-        assertNull(CognitoService.preferredMfaSetting(user));
+        assertTrue(mfaSettingList(user).isEmpty());
+        assertNull(preferredMfaSetting(user));
     }
 
     @Test
@@ -163,12 +163,12 @@ class CognitoOptionalTotpMfaTest {
         service.adminSetUserMFAPreference(pool.getId(), USERNAME, new MfaSettingsUpdate(true, true),
                 MfaSettingsUpdate.NONE);
         CognitoUser emailPreferred = service.adminGetUser(pool.getId(), USERNAME);
-        assertEquals("EMAIL_OTP", CognitoService.preferredMfaSetting(emailPreferred));
+        assertEquals("EMAIL_OTP", preferredMfaSetting(emailPreferred));
 
         service.adminSetUserMFAPreference(pool.getId(), USERNAME, MfaSettingsUpdate.NONE, TOTP_PREFERRED);
         CognitoUser totpPreferred = service.adminGetUser(pool.getId(), USERNAME);
-        assertEquals("SOFTWARE_TOKEN_MFA", CognitoService.preferredMfaSetting(totpPreferred));
-        assertEquals(List.of("EMAIL_OTP", "SOFTWARE_TOKEN_MFA"), CognitoService.userMfaSettingList(totpPreferred));
+        assertEquals("SOFTWARE_TOKEN_MFA", preferredMfaSetting(totpPreferred));
+        assertEquals(List.of("EMAIL_OTP", "SOFTWARE_TOKEN_MFA"), mfaSettingList(totpPreferred));
         assertTrue(totpPreferred.getEmailMfaSettings().isEnabled());
         assertFalse(totpPreferred.getEmailMfaSettings().isPreferredMfa());
 
@@ -176,7 +176,7 @@ class CognitoOptionalTotpMfaTest {
                 pool.getId(), USERNAME, new MfaSettingsUpdate(true, true), TOTP_PREFERRED));
         assertEquals("InvalidParameterException", both.getErrorCode());
         assertEquals("SOFTWARE_TOKEN_MFA",
-                CognitoService.preferredMfaSetting(service.adminGetUser(pool.getId(), USERNAME)));
+                preferredMfaSetting(service.adminGetUser(pool.getId(), USERNAME)));
     }
 
     @Test
@@ -200,8 +200,8 @@ class CognitoOptionalTotpMfaTest {
                 Map.of("USERNAME", USERNAME));
 
         CognitoUser user = service.adminGetUser(pool.getId(), USERNAME);
-        assertEquals(List.of("SOFTWARE_TOKEN_MFA"), CognitoService.userMfaSettingList(user));
-        assertEquals("SOFTWARE_TOKEN_MFA", CognitoService.preferredMfaSetting(user));
+        assertEquals(List.of("SOFTWARE_TOKEN_MFA"), mfaSettingList(user));
+        assertEquals("SOFTWARE_TOKEN_MFA", preferredMfaSetting(user));
 
         service.setUserPoolMfaConfig(pool.getId(), "OPTIONAL", true, false);
         assertEquals("SOFTWARE_TOKEN_MFA", passwordLogin().get("ChallengeName"));
@@ -215,8 +215,34 @@ class CognitoOptionalTotpMfaTest {
         ObjectMapper mapper = new ObjectMapper();
         CognitoUser restored = mapper.readValue(
                 mapper.writeValueAsBytes(service.adminGetUser(pool.getId(), USERNAME)), CognitoUser.class);
-        assertEquals(List.of("SOFTWARE_TOKEN_MFA"), CognitoService.userMfaSettingList(restored));
-        assertEquals("SOFTWARE_TOKEN_MFA", CognitoService.preferredMfaSetting(restored));
+        assertEquals(List.of("SOFTWARE_TOKEN_MFA"), mfaSettingList(restored));
+        assertEquals("SOFTWARE_TOKEN_MFA", preferredMfaSetting(restored));
+    }
+
+    @Test
+    void requiredPoolReportsTheAuthenticatorItAsksFor() {
+        service.setUserPoolMfaConfig(pool.getId(), "OFF", null, false);
+        String accessToken = accessToken();
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false);
+        String secret = (String) service.associateSoftwareToken(accessToken, null).get("SecretCode");
+        service.verifySoftwareToken(accessToken, null, CognitoTotp.code(secret, clock.instant()));
+
+        assertEquals("SOFTWARE_TOKEN_MFA", passwordLogin().get("ChallengeName"));
+        CognitoUser user = service.adminGetUser(pool.getId(), USERNAME);
+        assertEquals(List.of("SOFTWARE_TOKEN_MFA"), mfaSettingList(user));
+        assertNull(preferredMfaSetting(user));
+
+        service.setUserPoolMfaConfig(pool.getId(), "OPTIONAL", true, false);
+        assertTrue(mfaSettingList(user).isEmpty());
+        assertNotNull(passwordLogin().get("AuthenticationResult"));
+    }
+
+    private List<String> mfaSettingList(CognitoUser user) {
+        return CognitoService.userMfaSettingList(service.describeUserPool(pool.getId()), user);
+    }
+
+    private String preferredMfaSetting(CognitoUser user) {
+        return CognitoService.preferredMfaSetting(service.describeUserPool(pool.getId()), user);
     }
 
     private String registerAuthenticator() {

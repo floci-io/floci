@@ -27,8 +27,8 @@ import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
-import io.github.hectorvent.floci.services.cognito.model.SoftwareTokenMfaSettings;
 import io.github.hectorvent.floci.services.cognito.model.RevokedTokenInfo;
+import io.github.hectorvent.floci.services.cognito.model.SoftwareTokenMfaSettings;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
@@ -3387,7 +3387,7 @@ public class CognitoService implements ResourceProvider {
         List<Map<String, String>> attrs = new ArrayList<>();
         user.getAttributes().forEach((k, v) -> attrs.add(Map.of("Name", k, "Value", v)));
         result.put("UserAttributes", attrs);
-        putMfaSettings(result, user);
+        putMfaSettings(result, describeUserPool(token.poolId()), user);
         return result;
     }
 
@@ -3415,7 +3415,7 @@ public class CognitoService implements ResourceProvider {
         if (!factors.isEmpty()) {
             result.put("ConfiguredUserAuthFactors", factors);
         }
-        putMfaSettings(result, user);
+        putMfaSettings(result, describeUserPool(token.poolId()), user);
         return result;
     }
 
@@ -5577,7 +5577,7 @@ public class CognitoService implements ResourceProvider {
             SoftwareTokenMfaSettings settings = user.getSoftwareTokenMfaSettings() != null
                     ? user.getSoftwareTokenMfaSettings() : new SoftwareTokenMfaSettings();
             settings.setEnabled(true);
-            if (preferredMfaSetting(user) == null) {
+            if (preferredMfaSetting(describeUserPool(poolId), user) == null) {
                 settings.setPreferredMfa(true);
             }
             user.setSoftwareTokenMfaSettings(settings);
@@ -5588,43 +5588,57 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * {@code UserMFASettingList}: the MFA factors activated for the user, in the order the API
-     * reference lists them. Software-token MFA counts once the user has a verified authenticator.
+     * reference lists them. Software-token MFA counts once the user has a verified authenticator
+     * that is turned on, or that a pool requiring software-token MFA asks for at every sign-in.
      */
-    static List<String> userMfaSettingList(CognitoUser user) {
+    static List<String> userMfaSettingList(UserPool pool, CognitoUser user) {
         List<String> factors = new ArrayList<>();
         if (user.getEmailMfaSettings() != null && user.getEmailMfaSettings().isEnabled()) {
             factors.add("EMAIL_OTP");
         }
-        if (softwareTokenMfaEnabled(user)) {
+        if (softwareTokenMfaActive(pool, user)) {
             factors.add("SOFTWARE_TOKEN_MFA");
         }
         return factors;
     }
 
     /** {@code PreferredMfaSetting}: the user's preferred MFA factor, or null when none is. */
-    static @Nullable String preferredMfaSetting(CognitoUser user) {
+    static @Nullable String preferredMfaSetting(UserPool pool, CognitoUser user) {
         EmailMfaSettings email = user.getEmailMfaSettings();
         if (email != null && email.isEnabled() && email.isPreferredMfa()) {
             return "EMAIL_OTP";
         }
-        if (softwareTokenMfaEnabled(user) && user.getSoftwareTokenMfaSettings().isPreferredMfa()) {
+        SoftwareTokenMfaSettings token = user.getSoftwareTokenMfaSettings();
+        if (token != null && token.isPreferredMfa() && softwareTokenMfaActive(pool, user)) {
             return "SOFTWARE_TOKEN_MFA";
         }
         return null;
     }
 
+    /** Whether the user has turned on software-token MFA for a verified authenticator. */
     static boolean softwareTokenMfaEnabled(CognitoUser user) {
         SoftwareTokenMfaSettings settings = user.getSoftwareTokenMfaSettings();
         return settings != null && settings.isEnabled() && user.getSoftwareTokenMfaSecret() != null;
     }
 
+    /**
+     * Whether software-token MFA is active for the user: turned on, or required. A pool that requires
+     * software-token MFA asks for a registered authenticator at every sign-in, whether or not it was
+     * turned on, and AWS lets users there choose only which factor is preferred.
+     */
+    private static boolean softwareTokenMfaActive(UserPool pool, CognitoUser user) {
+        return softwareTokenMfaEnabled(user)
+                || (user.getSoftwareTokenMfaSecret() != null && "ON".equals(pool.getMfaConfiguration())
+                        && Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled()));
+    }
+
     /** Adds {@code UserMFASettingList} and {@code PreferredMfaSetting} to a user response, when set. */
-    static void putMfaSettings(Map<String, Object> response, CognitoUser user) {
-        String preferred = preferredMfaSetting(user);
+    static void putMfaSettings(Map<String, Object> response, UserPool pool, CognitoUser user) {
+        String preferred = preferredMfaSetting(pool, user);
         if (preferred != null) {
             response.put("PreferredMfaSetting", preferred);
         }
-        List<String> factors = userMfaSettingList(user);
+        List<String> factors = userMfaSettingList(pool, user);
         if (!factors.isEmpty()) {
             response.put("UserMFASettingList", factors);
         }

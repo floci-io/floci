@@ -121,6 +121,14 @@ class CognitoOptionalTotpMfaIntegrationTest {
                 .then().statusCode(200)
                 .body("AvailableChallenges", contains("PASSWORD", "PASSWORD_SRP", "EMAIL_OTP"));
 
+        // Floci sends no email MFA code after a password, so email MFA alone keeps the email code choice.
+        cognitoJson("SetUserMFAPreference", """
+                {"AccessToken":"%s","EmailMfaSettings":{"Enabled":true}}
+                """.formatted(accessToken));
+        cognitoAction("InitiateAuth", userAuthRequest)
+                .then().statusCode(200)
+                .body("AvailableChallenges", contains("PASSWORD", "PASSWORD_SRP", "EMAIL_OTP"));
+
         String secret = cognitoJson("AssociateSoftwareToken", accessTokenBody(accessToken))
                 .path("SecretCode").asText();
         cognitoJson("VerifySoftwareToken", """
