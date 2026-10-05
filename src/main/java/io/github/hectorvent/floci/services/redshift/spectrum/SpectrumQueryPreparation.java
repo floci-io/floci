@@ -8,14 +8,18 @@ import io.github.hectorvent.floci.services.glue.model.Table;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SpectrumQueryPreparation {
@@ -28,7 +32,20 @@ public class SpectrumQueryPreparation {
     private final Map<BackendSql, List<ExternalSchemaBinding>> pendingBindings = new ConcurrentHashMap<>();
     private final Map<Object, List<StagedGlueTable>> stagedGlueTables = new ConcurrentHashMap<>();
 
+    private final Map<Object, List<Savepoint>> savepoints = new ConcurrentHashMap<>();
+
+    private static final Pattern SAVEPOINT = Pattern.compile(
+            "^\\s*SAVEPOINT\\s+(\\S+?)\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ROLLBACK_TO_SAVEPOINT = Pattern.compile(
+            "^\\s*ROLLBACK\\s+(?:WORK\\s+|TRANSACTION\\s+)?TO\\s+(?:SAVEPOINT\\s+)?(\\S+?)\\s*;?\\s*$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern RELEASE_SAVEPOINT = Pattern.compile(
+            "^\\s*RELEASE\\s+(?:SAVEPOINT\\s+)?(\\S+?)\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
+
     private record StagedGlueTable(String accountId, String database, String table) { }
+
+    /** A savepoint and how many Glue tables the transaction had staged when it was taken. */
+    private record Savepoint(String name, int stagedTables) { }
 
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
                                     ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata) {
@@ -68,6 +85,9 @@ public class SpectrumQueryPreparation {
     }
 
     private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend) {
+        if (session.inTransaction()) {
+            trackSavepoints(sql, backend);
+        }
         Optional<ExternalStatement> statement = parser.parse(sql);
         if (statement.orElse(null) instanceof ExternalStatement.CreateSchema schema) {
             return createSchema(schema, session, backend);
@@ -190,6 +210,7 @@ public class SpectrumQueryPreparation {
         }
         if (committed) {
             stagedGlueTables.remove(backend.transactionScope());
+            savepoints.remove(backend.transactionScope());
         } else {
             undoStagedGlueTables(backend);
         }
@@ -204,11 +225,71 @@ public class SpectrumQueryPreparation {
         materializer.finishCycle(backend);
     }
 
-    private void undoStagedGlueTables(BackendSql backend) {
-        List<StagedGlueTable> staged = stagedGlueTables.remove(backend.transactionScope());
-        if (staged == null) {
+    private void trackSavepoints(String sql, BackendSql backend) {
+        Matcher savepoint = SAVEPOINT.matcher(sql);
+        if (savepoint.matches()) {
+            Object scope = backend.transactionScope();
+            List<StagedGlueTable> staged = stagedGlueTables.get(scope);
+            savepoints.computeIfAbsent(scope, ignored -> new CopyOnWriteArrayList<>())
+                    .add(new Savepoint(savepointName(savepoint.group(1)), staged == null ? 0 : staged.size()));
             return;
         }
+        Matcher rollback = ROLLBACK_TO_SAVEPOINT.matcher(sql);
+        if (rollback.matches()) {
+            rollbackToSavepoint(backend.transactionScope(), savepointName(rollback.group(1)));
+            return;
+        }
+        Matcher release = RELEASE_SAVEPOINT.matcher(sql);
+        if (release.matches()) {
+            List<Savepoint> marks = savepoints.get(backend.transactionScope());
+            int index = marks == null ? -1 : lastIndexOf(marks, savepointName(release.group(1)));
+            if (index >= 0) {
+                marks.subList(index, marks.size()).clear();
+            }
+        }
+    }
+
+    /** ROLLBACK TO SAVEPOINT undoes the Glue tables created after it while the transaction stays open. */
+    private void rollbackToSavepoint(Object scope, String name) {
+        List<Savepoint> marks = savepoints.get(scope);
+        int index = marks == null ? -1 : lastIndexOf(marks, name);
+        if (index < 0) {
+            return;
+        }
+        int keep = marks.get(index).stagedTables();
+        marks.subList(index + 1, marks.size()).clear();
+        List<StagedGlueTable> staged = stagedGlueTables.get(scope);
+        if (staged == null || staged.size() <= keep) {
+            return;
+        }
+        List<StagedGlueTable> undone = new ArrayList<>(staged.subList(keep, staged.size()));
+        staged.subList(keep, staged.size()).clear();
+        deleteGlueTables(undone);
+    }
+
+    private static int lastIndexOf(List<Savepoint> marks, String name) {
+        for (int i = marks.size() - 1; i >= 0; i--) {
+            if (marks.get(i).name().equals(name)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static String savepointName(String raw) {
+        return raw.replace("\"", "").toLowerCase(Locale.ROOT);
+    }
+
+    private void undoStagedGlueTables(BackendSql backend) {
+        Object scope = backend.transactionScope();
+        savepoints.remove(scope);
+        List<StagedGlueTable> staged = stagedGlueTables.remove(scope);
+        if (staged != null) {
+            deleteGlueTables(staged);
+        }
+    }
+
+    private void deleteGlueTables(List<StagedGlueTable> staged) {
         for (StagedGlueTable table : staged) {
             try {
                 RequestScopes.runAs(table.accountId(), () -> glue.deleteTable(table.database(), table.table()));

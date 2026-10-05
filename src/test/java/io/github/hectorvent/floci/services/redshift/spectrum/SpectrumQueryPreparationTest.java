@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.net.Socket;
 import java.util.List;
 import java.util.Optional;
 
@@ -132,6 +133,40 @@ class SpectrumQueryPreparationTest {
         verify(glue, never()).deleteTable(anyString(), anyString());
         preparation.finishCycle(backend);
         verify(glue).deleteTable("analytics", "sales");
+    }
+
+    @Test
+    void glueTableIsUndoneThroughAnotherSessionOnTheSameSocket() {
+        Socket socket = new Socket();
+        PostgresBackendSession creating = new PostgresBackendSession(socket);
+        PostgresExtendedBackendSession rollingBack = new PostgresExtendedBackendSession(socket);
+        assertTrue(preparation.prepare(CREATE_SALES, TRANSACTION, creating));
+        preparation.finishCycle(rollingBack);
+        verify(glue).deleteTable("analytics", "sales");
+    }
+
+    @Test
+    void rollbackToSavepointUndoesOnlyTablesCreatedAfterIt() {
+        preparation.prepare("SAVEPOINT before_sales", TRANSACTION, backend);
+        preparation.prepare(CREATE_SALES, TRANSACTION, backend);
+        preparation.prepare("SAVEPOINT after_sales", TRANSACTION, backend);
+        preparation.prepare(CREATE_SALES.replace("lake.sales", "lake.events"), TRANSACTION, backend);
+        preparation.prepare("ROLLBACK TO SAVEPOINT after_sales", TRANSACTION, backend);
+        verify(glue).deleteTable("analytics", "events");
+        verify(glue, never()).deleteTable("analytics", "sales");
+        preparation.prepare("ROLLBACK TO before_sales;", TRANSACTION, backend);
+        verify(glue).deleteTable("analytics", "sales");
+        preparation.finishCycle(backend, true);
+        verify(glue, times(2)).deleteTable(anyString(), anyString());
+    }
+
+    @Test
+    void releasedSavepointCanNoLongerBeRolledBackTo() {
+        preparation.prepare("SAVEPOINT s1", TRANSACTION, backend);
+        preparation.prepare(CREATE_SALES, TRANSACTION, backend);
+        preparation.prepare("RELEASE SAVEPOINT s1", TRANSACTION, backend);
+        preparation.prepare("ROLLBACK TO SAVEPOINT s1", TRANSACTION, backend);
+        verify(glue, never()).deleteTable(anyString(), anyString());
     }
 
     @Test
