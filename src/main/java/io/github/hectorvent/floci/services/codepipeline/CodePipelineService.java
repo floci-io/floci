@@ -1010,8 +1010,7 @@ public class CodePipelineService {
         trigger.put("triggerDetail", target.getPipelineExecutionId());
         rollback.setTrigger(trigger);
         if (!persistExecutionIfSlotAvailable(rollback)) {
-            throw new AwsException("ConcurrentPipelineExecutionsLimitExceededException",
-                    "The pipeline has reached the limit for concurrent pipeline executions", 400);
+            throw pipelineBusy();
         }
         applyExecutionMode(rollback);
         eventPublisher.pipelineStateChange(rollback, "STARTED");

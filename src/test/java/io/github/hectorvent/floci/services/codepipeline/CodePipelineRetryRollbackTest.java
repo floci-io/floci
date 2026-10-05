@@ -381,6 +381,38 @@ class CodePipelineRetryRollbackTest {
         awaitStatus("orphaned", rollbackId, "Failed");
     }
 
+    // Catches: RollbackStage answering a full pipeline with ConcurrentPipelineExecutionsLimitExceededException,
+    // which the RollbackStage API does not model; AWS reports a busy pipeline as ConflictException.
+    @Test
+    void rollbackStageReportsConflictWhenNoExecutionSlotIsFree() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        service.shutdown();
+        service = newService(storage, lambdaService);
+        ObjectNode parallel = declaration("full", sourceStage(), lambdaStage("Deploy"));
+        parallel.put("pipelineType", "V2").put("executionMode", "PARALLEL");
+        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", parallel), REGION, ACCOUNT);
+        String firstId = startExecution("full");
+        awaitStatus("full", firstId, "Succeeded");
+
+        for (int i = 0; i < 50; i++) {
+            CodePipelineExecution active = new CodePipelineExecution();
+            active.setAccountId(ACCOUNT);
+            active.setRegion(REGION);
+            active.setPipelineName("full");
+            active.setPipelineExecutionId("active-" + i);
+            active.setStatus("InProgress");
+            storage.executions().putForAccount(ACCOUNT, REGION + ":full:active-" + i, active);
+        }
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "full")
+                                .put("stageName", "Deploy")
+                                .put("targetPipelineExecutionId", firstId),
+                        REGION, ACCOUNT));
+        assertEquals("ConflictException", error.getErrorCode());
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private void lambdaReturns(String functionError) {
