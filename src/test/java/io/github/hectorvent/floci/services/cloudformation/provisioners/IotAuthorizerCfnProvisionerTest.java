@@ -183,12 +183,25 @@ class IotAuthorizerCfnProvisionerTest {
                 new ProvisionContext(engine, REGION, ACCOUNT, "stack".repeat(30)));
 
         String name = resource.getPhysicalId();
-        assertTrue(name.length() <= 128, name);
-        assertTrue(name.matches("[\\w=,@-]+"), name);
+        assertTrue(name.matches("Auth_[A-Za-z0-9]{12}"), name);
         verify(service).createAuthorizer(name, json("""
                 {"authorizerFunctionArn": "%s", "signingDisabled": true}
                 """.formatted(FUNCTION)), REGION);
         assertEquals(arn(name), resource.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void aLongLogicalIdIsCutSoTheGeneratedNameFitsTheIotLimit() {
+        StackResource resource = resource();
+        String logicalId = "Auth".repeat(50);
+        resource.setLogicalId(logicalId);
+        provisioner.provision(resource, props(null).put("SigningDisabled", true),
+                new ProvisionContext(engine, REGION, ACCOUNT, STACK));
+
+        String name = resource.getPhysicalId();
+        assertTrue(name.length() <= 128, name);
+        assertTrue(name.matches("[A-Za-z0-9]+_[A-Za-z0-9]{12}"), name);
+        assertTrue(logicalId.startsWith(name.substring(0, name.length() - 13)), name);
     }
 
     @Test
@@ -419,7 +432,7 @@ class IotAuthorizerCfnProvisionerTest {
 
         String replacement = resource.getPhysicalId();
         assertNotEquals(original, replacement);
-        assertTrue(replacement.startsWith(STACK + "-Auth-"), replacement);
+        assertTrue(replacement.matches("Auth_[A-Za-z0-9]{12}"), replacement);
         verify(service).createAuthorizer(replacement, json("""
                 {"authorizerFunctionArn": "%s", "signingDisabled": false, "tokenKeyName": "tok",
                  "tokenSigningPublicKeys": {"k1": "%s"}}
@@ -452,7 +465,7 @@ class IotAuthorizerCfnProvisionerTest {
         update(resource, props(null).put("SigningDisabled", true));
 
         String generated = resource.getPhysicalId();
-        assertTrue(generated.startsWith(STACK + "-Auth-"), generated);
+        assertTrue(generated.matches("Auth_[A-Za-z0-9]{12}"), generated);
         verify(service).createAuthorizer(eq(generated), any(), eq(REGION));
         assertEquals("auth", provisioner.updateCleanupPhysicalId(resource));
     }
@@ -502,7 +515,7 @@ class IotAuthorizerCfnProvisionerTest {
         update(resource, props(null).put("SigningDisabled", true));
 
         String generated = resource.getPhysicalId();
-        assertTrue(generated.startsWith(STACK + "-Auth-"), generated);
+        assertTrue(generated.matches("Auth_[A-Za-z0-9]{12}"), generated);
         verify(service).createAuthorizer(eq(generated), any(), eq(REGION));
         verify(service, never()).describeAuthorizer(anyString(), anyString());
         verify(service, never()).updateAuthorizer(anyString(), any(), anyString());

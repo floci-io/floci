@@ -109,7 +109,7 @@ class CloudFormationIotAuthorizerIntegrationTest {
         Map<String, Object> properties = properties(null);
         String stack = createStack(template(properties));
         String original = output(awaitStatus(stack, "CREATE_COMPLETE"), "AuthRef");
-        assertTrue(original.startsWith(stack + "-Auth-") && original.matches("[\\w=,@-]{1,128}"), original);
+        assertTrue(original.matches("Auth_[A-Za-z0-9]{12}"), original);
         assertEquals("INACTIVE", describe(original).getString("status"), "no Status creates it INACTIVE");
 
         String key = rsaPublicKey();

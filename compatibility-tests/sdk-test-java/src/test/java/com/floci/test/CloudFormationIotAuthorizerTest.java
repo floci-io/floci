@@ -287,7 +287,8 @@ class CloudFormationIotAuthorizerTest {
     }
 
     private static void assertGeneratedName(String name) {
-        assertThat(name).isNotEmpty().contains("Auth").matches("[\\w=,@-]+").hasSizeLessThanOrEqualTo(128);
+        assertThat(name).as("CloudFormation names an unnamed authorizer <LogicalId>_<12 alphanumerics>")
+                .matches("Auth_[A-Za-z0-9]{12}");
     }
 
     private void createStack(String template) throws InterruptedException {

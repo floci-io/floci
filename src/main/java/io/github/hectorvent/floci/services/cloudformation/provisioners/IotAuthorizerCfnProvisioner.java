@@ -15,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Provisions {@code AWS::IoT::Authorizer}. Things, policies and topic rules belong to
@@ -194,8 +195,8 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
      * The template's name when it gives one; otherwise the generated name the authorizer already
      * has, unless the previous name was explicit or signing changed, since either replaces the
      * authorizer on AWS, or the prior resource names no authorizer; and a fresh generated name
-     * otherwise. Stack names and logical ids only hold characters the IoT name rule allows, and the
-     * generator truncates to its limit.
+     * otherwise. Logical ids only hold characters the IoT name rule allows, and the generator
+     * truncates to its limit.
      */
     private static String physicalName(StackResource r, ProvisionContext ctx, String explicitName,
                                        boolean updatesAuthorizer, boolean signingChanged) {
@@ -207,7 +208,15 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
         if (updatesAuthorizer && !explicitNameRemoved && !signingChanged) {
             return ctx.priorPhysicalId();
         }
-        return ctx.generatePhysicalName(r.getLogicalId(), NAME_MAX_LENGTH, false);
+        return generatedName(r.getLogicalId());
+    }
+
+    /** CloudFormation names an unnamed authorizer {@code <LogicalId>_<12 chars>}, with no stack prefix. */
+    private static String generatedName(String logicalId) {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        int prefixMax = NAME_MAX_LENGTH - 1 - suffix.length();
+        String prefix = logicalId.length() > prefixMax ? logicalId.substring(0, prefixMax) : logicalId;
+        return prefix + "_" + suffix;
     }
 
     private void reconcileTags(IotAuthorizer authorizer, Map<String, String> desired) {
