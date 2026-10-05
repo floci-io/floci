@@ -1153,7 +1153,7 @@ final class CognitoAuthFlowHandler {
      * when it names none: AWS's DescribeUserPool reports {@code ["PASSWORD"]} for a pool created without a
      * sign-in policy. Floci now stores that default too, but a pool it persisted earlier may have none.
      */
-    private static List<String> allowedFirstAuthFactors(UserPool pool) {
+    static List<String> allowedFirstAuthFactors(UserPool pool) {
         Map<String, Object> policies = pool.getPolicies();
         if (policies == null || !(policies.get("SignInPolicy") instanceof Map<?, ?> signInPolicy)
                 || !(signInPolicy.get("AllowedFirstAuthFactors") instanceof List<?> factors) || factors.isEmpty()) {

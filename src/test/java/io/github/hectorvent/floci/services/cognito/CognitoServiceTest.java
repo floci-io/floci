@@ -5539,7 +5539,10 @@ class CognitoServiceTest {
 
     @Test
     void getUserAuthFactors_userWithoutPassword_omitsPasswordFactor() {
-        UserPool pool = service.createUserPool(Map.of("PoolName", "PasswordlessPool"), "us-east-1");
+        // AdminCreateUser leaves a user without a password only where passwordless sign-in is offered.
+        UserPool pool = service.createUserPool(Map.of("PoolName", "PasswordlessPool",
+                "Policies", Map.of("SignInPolicy", Map.of("AllowedFirstAuthFactors", List.of("PASSWORD", "EMAIL_OTP")))),
+                "us-east-1");
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "c", false, false, List.of(), List.of());
         CognitoUser user = service.adminCreateUser(pool.getId(), "bob",
@@ -5555,7 +5558,9 @@ class CognitoServiceTest {
 
     @Test
     void getUserAuthFactors_userWithNoFactors_returnsOnlyUsername() {
-        UserPool pool = service.createUserPool(Map.of("PoolName", "NoFactorPool"), "us-east-1");
+        UserPool pool = service.createUserPool(Map.of("PoolName", "NoFactorPool",
+                "Policies", Map.of("SignInPolicy", Map.of("AllowedFirstAuthFactors", List.of("PASSWORD", "EMAIL_OTP")))),
+                "us-east-1");
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "c", false, false, List.of(), List.of());
         CognitoUser user = service.adminCreateUser(pool.getId(), "carol",
@@ -6229,5 +6234,133 @@ class CognitoServiceTest {
         int pad = (4 - segment.length() % 4) % 4;
         segment += "=".repeat(pad);
         return new String(Base64.getUrlDecoder().decode(segment), StandardCharsets.UTF_8);
+    }
+
+    @Nested
+    class AdminCreateUserInvitation {
+
+        private CognitoService svc;
+        private CognitoMessageDispatcher messageDispatcher;
+
+        @BeforeEach
+        void setUpMessaging() {
+            messageDispatcher = mock(CognitoMessageDispatcher.class);
+            svc = new CognitoService(
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    "http://localhost:4566",
+                    regionResolver,
+                    null,
+                    acmService,
+                    mock(VerificationCodeService.class),
+                    messageDispatcher,
+                    mock(TlsCertificateManager.class)
+            );
+        }
+
+        private String sentPassword() {
+            ArgumentCaptor<String> password = ArgumentCaptor.forClass(String.class);
+            verify(messageDispatcher).dispatchInvitation(any(), any(), password.capture(), any());
+            return password.getValue();
+        }
+
+        @Test
+        void withoutTemporaryPassword_generatesOneThatMeetsThePasswordPolicy() {
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", "GeneratedPasswordPool",
+                    "Policies", Map.of("PasswordPolicy", Map.of(
+                            "MinimumLength", 14,
+                            "RequireUppercase", true,
+                            "RequireLowercase", true,
+                            "RequireNumbers", true,
+                            "RequireSymbols", true))), "us-east-1");
+
+            CognitoUser user = svc.adminCreateUser(pool.getId(), "alice",
+                    Map.of("email", "alice@example.com"), null, null, false, List.of("EMAIL"));
+
+            assertEquals("FORCE_CHANGE_PASSWORD", user.getUserStatus());
+            assertNotNull(user.getPasswordHash());
+            String password = sentPassword();
+            assertTrue(password.length() >= 14, password);
+            assertTrue(password.chars().anyMatch(Character::isUpperCase), password);
+            assertTrue(password.chars().anyMatch(Character::isLowerCase), password);
+            assertTrue(password.chars().anyMatch(Character::isDigit), password);
+            assertTrue(password.chars().anyMatch(c -> !Character.isLetterOrDigit(c)), password);
+            // The pool's own policy check accepts the generated password.
+            assertDoesNotThrow(() -> svc.adminSetUserPassword(pool.getId(), "alice", password, false));
+        }
+
+        @Test
+        void withoutMessageAction_sendsTheInvitationThroughTheRequestedMediums() {
+            UserPool pool = svc.createUserPool(Map.of("PoolName", "InvitePool"), "us-east-1");
+
+            CognitoUser user = svc.adminCreateUser(pool.getId(), "alice",
+                    Map.of("email", "alice@example.com"), "Temp1234!", null, false, List.of("EMAIL"));
+
+            verify(messageDispatcher).dispatchInvitation(any(), eq(user), eq("Temp1234!"), eq(List.of("EMAIL")));
+        }
+
+        @Test
+        void suppress_sendsNoInvitationButStillGeneratesAPassword() {
+            UserPool pool = svc.createUserPool(Map.of("PoolName", "SuppressPool"), "us-east-1");
+
+            CognitoUser user = svc.adminCreateUser(pool.getId(), "alice",
+                    Map.of("email", "alice@example.com"), null, "SUPPRESS", false, List.of("EMAIL"));
+
+            assertEquals("FORCE_CHANGE_PASSWORD", user.getUserStatus());
+            assertNotNull(user.getPasswordHash());
+            verify(messageDispatcher, never()).dispatchInvitation(any(), any(), any(), any());
+        }
+
+        @Test
+        void passwordlessPool_withoutTemporaryPassword_createsAConfirmedUserWithoutAPassword() {
+            UserPool pool = svc.createUserPool(Map.of(
+                    "PoolName", "PasswordlessInvitePool",
+                    "Policies", Map.of("SignInPolicy", Map.of("AllowedFirstAuthFactors",
+                            List.of("PASSWORD", "EMAIL_OTP")))), "us-east-1");
+
+            CognitoUser user = svc.adminCreateUser(pool.getId(), "alice",
+                    Map.of("email", "alice@example.com"), null, null, false, List.of("EMAIL"));
+
+            assertEquals("CONFIRMED", user.getUserStatus());
+            assertNull(user.getPasswordHash());
+            assertNull(sentPassword());
+        }
+
+        @Test
+        void resend_givesANewTemporaryPasswordAndSendsTheInvitationAgain() {
+            UserPool pool = svc.createUserPool(Map.of("PoolName", "ResendPool"), "us-east-1");
+            CognitoUser created = svc.adminCreateUser(pool.getId(), "alice",
+                    Map.of("email", "alice@example.com"), "Temp1234!", "SUPPRESS", false, List.of("EMAIL"));
+            String firstHash = created.getPasswordHash();
+
+            CognitoUser resent = svc.adminCreateUser(pool.getId(), "alice",
+                    Map.of(), null, "RESEND", false, List.of("EMAIL"));
+
+            String password = sentPassword();
+            assertNotEquals("Temp1234!", password);
+            assertNotEquals(firstHash, resent.getPasswordHash());
+            assertEquals("FORCE_CHANGE_PASSWORD", resent.getUserStatus());
+        }
+
+        @Test
+        void failedInvitationDelivery_isCodeDeliveryFailureAndCreatesNoUser() {
+            UserPool pool = svc.createUserPool(Map.of("PoolName", "FailedDeliveryPool"), "us-east-1");
+            doThrow(new RuntimeException("SES down"))
+                    .when(messageDispatcher).dispatchInvitation(any(), any(), any(), any());
+
+            AwsException failure = assertThrows(AwsException.class, () -> svc.adminCreateUser(pool.getId(),
+                    "alice", Map.of("email", "alice@example.com"), null, null, false, List.of("EMAIL")));
+
+            assertEquals("CodeDeliveryFailureException", failure.getErrorCode());
+            AwsException lookup = assertThrows(AwsException.class, () -> svc.adminGetUser(pool.getId(), "alice"));
+            assertEquals("UserNotFoundException", lookup.getErrorCode());
+        }
     }
 }

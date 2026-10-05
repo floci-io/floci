@@ -30,6 +30,12 @@ public final class CognitoMessageDispatcher {
     private static final String DEFAULT_SMS_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_FROM = "no-reply@verificationemail.com";
     private static final String CODE_PLACEHOLDER = "{####}";
+    // AdminCreateUser invitation defaults, used when the pool's
+    // AdminCreateUserConfig.InviteMessageTemplate leaves a field out.
+    private static final String DEFAULT_INVITE_SUBJECT = "Your temporary password";
+    private static final String DEFAULT_INVITE_MESSAGE = "Your username is {username} and temporary password is {####}.";
+    private static final String DEFAULT_PASSWORDLESS_INVITE_MESSAGE = "Your username is {username}.";
+    private static final String USERNAME_PLACEHOLDER = "{username}";
 
     private final SesService ses;
     private final SnsService sns;
@@ -93,6 +99,59 @@ public final class CognitoMessageDispatcher {
                 );
             }
         }
+    }
+
+    /**
+     * Sends the AdminCreateUser invitation through each of {@code deliveryMediums} (AWS's default
+     * is {@code SMS}) that the user has an {@code email} or {@code phone_number} for. The text comes
+     * from the pool's {@code AdminCreateUserConfig.InviteMessageTemplate}, or AWS's default, with
+     * {@code {username}} and {@code {####}} (the temporary password) filled in.
+     *
+     * <p>{@code temporaryPassword} is {@code null} for a user created without a password. As on
+     * AWS, a message whose template has no {@code {####}} is not delivered to a user who has a
+     * password, since it could not tell them the password.</p>
+     */
+    @SuppressWarnings("unchecked")
+    public void dispatchInvitation(UserPool pool, CognitoUser user, String temporaryPassword,
+                                   List<String> deliveryMediums) {
+        Map<String, Object> config = pool.getAdminCreateUserConfig();
+        Map<String, Object> template = config != null && config.get("InviteMessageTemplate") instanceof Map<?, ?> t
+            ? (Map<String, Object>) t : Map.of();
+        String defaultMessage = temporaryPassword == null ? DEFAULT_PASSWORDLESS_INVITE_MESSAGE : DEFAULT_INVITE_MESSAGE;
+        String email = user.getAttributes().get("email");
+        String phone = user.getAttributes().get("phone_number");
+        List<String> mediums = deliveryMediums == null || deliveryMediums.isEmpty() ? List.of("SMS") : deliveryMediums;
+        String region = AwsArnUtils.regionOrDefault(pool.getArn(), defaultRegion);
+
+        if (mediums.stream().anyMatch("EMAIL"::equalsIgnoreCase) && email != null) {
+            String body = renderInvitation(stringOr(template.get("EmailMessage"), defaultMessage),
+                user.getUsername(), temporaryPassword);
+            if (body != null) {
+                ses.sendEmail(SendEmailRequest.builder()
+                    .source(DEFAULT_FROM)
+                    .toAddresses(List.of(email))
+                    .region(region)
+                    .content(new EmailContent.Simple(stringOr(template.get("EmailSubject"), DEFAULT_INVITE_SUBJECT),
+                        body, null, List.of()))
+                    .build());
+            }
+        }
+        if (mediums.stream().anyMatch("SMS"::equalsIgnoreCase) && phone != null) {
+            String body = renderInvitation(stringOr(template.get("SMSMessage"), defaultMessage),
+                user.getUsername(), temporaryPassword);
+            if (body != null) {
+                sns.publish(null, null, phone, body, null, null, region);
+            }
+        }
+    }
+
+    /** The invitation text, or {@code null} when it cannot carry the user's temporary password. */
+    private static String renderInvitation(String template, String username, String temporaryPassword) {
+        if (temporaryPassword != null && !template.contains(CODE_PLACEHOLDER)) {
+            return null;
+        }
+        String rendered = template.replace(USERNAME_PLACEHOLDER, username);
+        return temporaryPassword == null ? rendered : rendered.replace(CODE_PLACEHOLDER, temporaryPassword);
     }
 
     /**

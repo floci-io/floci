@@ -721,6 +721,90 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void adminCreateUserEmailsAnInvitationWithAWorkingTemporaryPassword() throws Exception {
+        String invitePoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "InvitationPool" }
+                """).path("UserPool").path("Id").asText();
+        String inviteClientId = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "invitation-client",
+                  "ExplicitAuthFlows": ["ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+                }
+                """.formatted(invitePoolId)).path("UserPoolClient").path("ClientId").asText();
+        String invitee = "invited+" + UUID.randomUUID() + "@example.com";
+
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [{ "Name": "email", "Value": "%s" }],
+                  "DesiredDeliveryMediums": ["EMAIL"]
+                }
+                """.formatted(invitePoolId, invitee, invitee))
+                .then()
+                .statusCode(200)
+                .body("User.UserStatus", equalTo("FORCE_CHANGE_PASSWORD"));
+
+        JsonNode messages = OBJECT_MAPPER.readTree(given()
+                .queryParam("email", invitee)
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .extract()
+                .asString()).path("messages");
+        assertEquals(1, messages.size());
+        assertEquals("Your temporary password", messages.get(0).path("Subject").asText());
+        String body = messages.get(0).path("Body").path("text_part").asText();
+        Matcher invitation = Pattern.compile("^Your username is (\\S+) and temporary password is (\\S+)\\.$")
+                .matcher(body);
+        assertTrue(invitation.find(), body);
+        assertEquals(invitee, invitation.group(1));
+
+        cognitoAction("AdminInitiateAuth", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientId": "%s",
+                  "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(invitePoolId, inviteClientId, invitee, invitation.group(2)))
+                .then()
+                .statusCode(200)
+                .body("ChallengeName", equalTo("NEW_PASSWORD_REQUIRED"));
+    }
+
+    @Test
+    void adminCreateUserWithSuppressSendsNoInvitation() throws Exception {
+        String suppressPoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "SuppressedInvitationPool" }
+                """).path("UserPool").path("Id").asText();
+        String invitee = "suppressed+" + UUID.randomUUID() + "@example.com";
+
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [{ "Name": "email", "Value": "%s" }],
+                  "DesiredDeliveryMediums": ["EMAIL"],
+                  "MessageAction": "SUPPRESS"
+                }
+                """.formatted(suppressPoolId, invitee, invitee))
+                .then()
+                .statusCode(200)
+                .body("User.UserStatus", equalTo("FORCE_CHANGE_PASSWORD"));
+
+        given()
+                .queryParam("email", invitee)
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body("messages", hasSize(0));
+    }
+
+    @Test
     void resendConfirmationCodeReplacesTheSignUpCode() throws Exception {
         given().delete("/_aws/ses").then().statusCode(200);
 

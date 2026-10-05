@@ -601,6 +601,8 @@ public class CognitoJsonHandler {
                 : request.path("TemporaryPassword").asText(null);
         String messageAction = request.path("MessageAction").isMissingNode() ? null
                 : request.path("MessageAction").asText(null);
+        List<String> desiredDeliveryMediums = new ArrayList<>();
+        request.path("DesiredDeliveryMediums").forEach(m -> desiredDeliveryMediums.add(m.asText()));
 
         CognitoUser user = service.adminCreateUser(
                 request.path("UserPoolId").asText(),
@@ -608,7 +610,8 @@ public class CognitoJsonHandler {
                 attrs,
                 tempPassword,
                 messageAction,
-                request.path("ForceAliasCreation").asBoolean(false)
+                request.path("ForceAliasCreation").asBoolean(false),
+                desiredDeliveryMediums
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("User", userToNode(user));

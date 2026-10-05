@@ -76,9 +76,9 @@ public class CognitoUserPoolUserCfnProvisioner implements CfnResourceProvisioner
         for (JsonNode attribute : resolved.path("UserAttributes")) {
             userAttributes.put(attribute.path("Name").asText(), attribute.path("Value").asText());
         }
-        // DesiredDeliveryMediums, ValidationData and ClientMetadata only reach a message transport
-        // or a Lambda trigger, neither of which AdminCreateUser drives here, so they only take part
-        // in the createOnly record.
+        // DesiredDeliveryMediums, ValidationData and ClientMetadata are not passed on: the invitation
+        // goes to AdminCreateUser's default medium, SMS, and no Lambda trigger is driven here. They
+        // only take part in the createOnly record.
         String name = customNamed ? username : ctx.generatePhysicalName(r.getLogicalId(), 128, false);
         String messageAction = text(resolved, "MessageAction");
         if ("RESEND".equalsIgnoreCase(messageAction)) {
