@@ -145,6 +145,18 @@ class S3ConditionalWriteIntegrationTest {
         .when()
             .put("/" + bucket + "/object.txt")
         .then());
+
+        // A truncated aws-chunked body is 400 IncompleteBody without the header.
+        assertNotImplemented(given()
+            .header("If-Match", "*")
+            .header("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+            .header("Content-Encoding", "aws-chunked")
+            .body("5\r\nhello\r\n")
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then());
+
+        given().when().get("/" + bucket + "/object.txt").then().statusCode(404);
     }
 
     @Test
