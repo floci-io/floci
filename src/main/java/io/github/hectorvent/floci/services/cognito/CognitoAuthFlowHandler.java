@@ -71,6 +71,7 @@ final class CognitoAuthFlowHandler {
     private final ConcurrentHashMap<String, SrpSession> srpSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CustomAuthToken> customAuthSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, TotpSession> totpSessions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, MfaSession> mfaSessions = new ConcurrentHashMap<>();
     /**
      * Guards both USER_AUTH session maps and nothing else: no storage I/O or Lambda trigger runs under it,
      * so one user's sign-in cannot hold up another's. The code store redeems sign-in codes, once, outside it.
@@ -90,6 +91,14 @@ final class CognitoAuthFlowHandler {
                                TotpPhase phase, Map<String, String> clientMetadata,
                                String triggerSource, Instant expiresAt, String secret,
                                AtomicInteger failedAttempts) {}
+
+    /**
+     * A pending SMS_MFA, email MFA (EMAIL_OTP) or SELECT_MFA_TYPE challenge after a first factor.
+     * {@code choices} holds SELECT_MFA_TYPE's MFAS_CAN_CHOOSE.
+     */
+    private record MfaSession(String userPoolId, String username, String clientId, String challengeName,
+                              List<String> choices, Map<String, String> clientMetadata, String triggerSource,
+                              Instant expiresAt) {}
 
     /**
      * Correlates a USER_AUTH challenge response back to the InitiateAuth/RespondToAuthChallenge
@@ -459,6 +468,17 @@ final class CognitoAuthFlowHandler {
         if ("PASSWORD_SRP".equals(challengeName)) {
             rejectSimulatedUser(consumeUserAuthSession(pool, client, session, "PASSWORD_SRP"));
             return handleUserSrpAuth(pool, client, responses, clientMetadata);
+        }
+        if ("SMS_MFA".equals(challengeName)) {
+            return handleMessageMfaChallenge(pool, client, "SMS_MFA", session, responses, clientMetadata);
+        }
+        // EMAIL_OTP names both the email MFA challenge and USER_AUTH's email first factor; the session tells them apart.
+        if (("EMAIL_OTP".equals(challengeName) || "EMAIL_MFA".equals(challengeName))
+                && session != null && mfaSessions.containsKey(session)) {
+            return handleMessageMfaChallenge(pool, client, "EMAIL_OTP", session, responses, clientMetadata);
+        }
+        if ("SELECT_MFA_TYPE".equals(challengeName)) {
+            return handleSelectMfaType(pool, client, session, responses, clientMetadata);
         }
         if ("EMAIL_OTP".equals(challengeName) || "SMS_OTP".equals(challengeName)) {
             rejectSimulatedUser(consumeUserAuthSession(pool, client, session, challengeName));
@@ -1183,9 +1203,8 @@ final class CognitoAuthFlowHandler {
         List<String> allowed = allowedFirstAuthFactors(pool);
         available.removeIf(challenge -> !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
         // Where MFA is optional, AWS lets a user who has turned on an MFA factor sign in with a password
-        // only, so that the second factor still follows. Floci asks for software-token codes, not for
-        // email or SMS ones, so only that factor restricts the choice here.
-        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && CognitoService.softwareTokenMfaEnabled(user)) {
+        // only, so that the second factor still follows.
+        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && !mfaFactors(pool, user).isEmpty()) {
             available.removeIf(challenge -> !"PASSWORD".equals(challenge) && !"PASSWORD_SRP".equals(challenge));
         }
         return available;
@@ -1928,28 +1947,104 @@ final class CognitoAuthFlowHandler {
     }
 
     /**
-     * Ends a successful first factor with tokens, or with the MFA challenge the pool and user call for.
-     * A pool that requires MFA asks for the user's authenticator, or sets one up when the user has none.
-     * Where MFA is optional, only a user who has turned on software-token MFA with SetUserMFAPreference
-     * is asked for a code. AWS keeps accepting a registered authenticator after the pool stops offering
-     * software-token MFA, so the optional case does not look at the pool's software-token setting.
+     * Ends a successful first factor with tokens, or with the MFA challenge the pool and user call for:
+     * the user's preferred factor, the only one, or SELECT_MFA_TYPE between several. A pool that requires
+     * MFA sets up an authenticator for a user with no factor it can use, when it offers software-token MFA.
      */
     private Map<String, Object> completePrimaryAuth(UserPool pool, UserPoolClient client, CognitoUser user,
                                                      String triggerSource, Map<String, String> clientMetadata) {
-        TotpPhase phase;
-        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && CognitoService.softwareTokenMfaEnabled(user)) {
-            phase = TotpPhase.CODE_REQUIRED;
-        } else if ("ON".equals(pool.getMfaConfiguration()) && Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled())) {
-            phase = user.getSoftwareTokenMfaSecret() == null ? TotpPhase.SETUP : TotpPhase.CODE_REQUIRED;
-        } else {
+        String mode = pool.getMfaConfiguration();
+        if (!"ON".equals(mode) && !"OPTIONAL".equals(mode)) {
             return authenticationResult(pool, client, user, triggerSource, clientMetadata);
         }
+        Map<String, String> metadata = clientMetadata == null ? Map.of() : Map.copyOf(clientMetadata);
+        List<String> factors = mfaFactors(pool, user);
+        if (factors.isEmpty()) {
+            if ("ON".equals(mode) && Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled())) {
+                return totpChallenge(pool, client, user, TotpPhase.SETUP, triggerSource, metadata);
+            }
+            return authenticationResult(pool, client, user, triggerSource, clientMetadata);
+        }
+        String preferred = CognitoService.preferredMfaSetting(pool, user);
+        if (preferred != null && factors.contains(preferred)) {
+            return startMfaChallenge(pool, client, user, preferred, triggerSource, metadata);
+        }
+        if (factors.size() == 1) {
+            return startMfaChallenge(pool, client, user, factors.get(0), triggerSource, metadata);
+        }
+        return selectMfaTypeChallenge(pool, client, user, factors, triggerSource, metadata);
+    }
+
+    /**
+     * The MFA factors a sign-in by {@code user} can be asked for, in the order SELECT_MFA_TYPE lists them.
+     * Where MFA is optional, a factor counts once the user has turned it on with SetUserMFAPreference.
+     * Where it is required, every factor the pool offers and the user can receive counts, since AWS lets
+     * users of such a pool choose only which one is preferred. An SMS or email factor needs the pool's
+     * SmsMfaConfiguration or EmailMfaConfiguration and the user's phone number or email address.
+     */
+    private List<String> mfaFactors(UserPool pool, CognitoUser user) {
+        boolean required = "ON".equals(pool.getMfaConfiguration());
+        boolean messaging = service.verificationServicesConfigured();
+        List<String> factors = new ArrayList<>();
+        if (messaging && pool.getSmsMfaConfiguration() != null && user.getAttributes().get("phone_number") != null
+                && (required || (user.getSmsMfaSettings() != null && user.getSmsMfaSettings().isEnabled()))) {
+            factors.add("SMS_MFA");
+        }
+        if (required ? CognitoService.softwareTokenMfaActive(pool, user) : CognitoService.softwareTokenMfaEnabled(user)) {
+            factors.add("SOFTWARE_TOKEN_MFA");
+        }
+        if (messaging && pool.getEmailMfaConfiguration() != null && user.getAttributes().get("email") != null
+                && (required || (user.getEmailMfaSettings() != null && user.getEmailMfaSettings().isEnabled()))) {
+            factors.add("EMAIL_OTP");
+        }
+        return factors;
+    }
+
+    private Map<String, Object> startMfaChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
+                                                  String factor, String triggerSource,
+                                                  Map<String, String> metadata) {
+        if ("SOFTWARE_TOKEN_MFA".equals(factor)) {
+            return totpChallenge(pool, client, user, TotpPhase.CODE_REQUIRED, triggerSource, metadata);
+        }
+        boolean sms = "SMS_MFA".equals(factor);
+        Map<String, Object> customMessage = fireCustomMessage(pool, client, user, "CustomMessage_Authentication");
+        Map<String, String> parameters = new HashMap<>(service.issueMfaCode(pool, user,
+                sms ? VerificationCode.Purpose.SMS_MFA : VerificationCode.Purpose.EMAIL_MFA,
+                sms ? "phone_number" : "email", sms ? "SMS" : "EMAIL", customMessage));
+        parameters.put("USERNAME", user.getUsername());
+        Map<String, Object> result = new HashMap<>();
+        result.put("ChallengeName", factor);
+        result.put("Session", issueMfaSession(pool, client, user, factor, List.of(), triggerSource, metadata));
+        result.put("ChallengeParameters", parameters);
+        return result;
+    }
+
+    private Map<String, Object> selectMfaTypeChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
+                                                       List<String> factors, String triggerSource,
+                                                       Map<String, String> metadata) {
+        Map<String, String> parameters = new HashMap<>();
+        parameters.put("USERNAME", user.getUsername());
+        try {
+            parameters.put("MFAS_CAN_CHOOSE", MAPPER.writeValueAsString(factors));
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InternalErrorException", "Failed to list the MFA choices", 500);
+        }
+        Map<String, Object> result = new HashMap<>();
+        result.put("ChallengeName", "SELECT_MFA_TYPE");
+        result.put("Session", issueMfaSession(pool, client, user, "SELECT_MFA_TYPE", factors, triggerSource,
+                metadata));
+        result.put("ChallengeParameters", parameters);
+        return result;
+    }
+
+    private Map<String, Object> totpChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
+                                              TotpPhase phase, String triggerSource, Map<String, String> metadata) {
         String challengeName = phase == TotpPhase.SETUP ? "MFA_SETUP" : "SOFTWARE_TOKEN_MFA";
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);
         result.put("Session", issueTotpSession(pool.getId(), user.getUsername(), client.getClientId(),
-                phase, clientMetadata == null ? Map.of() : Map.copyOf(clientMetadata), triggerSource,
-                sessionExpiry(client, clock.instant()), user.getSoftwareTokenMfaSecret()));
+                phase, metadata, triggerSource, sessionExpiry(client, clock.instant()),
+                user.getSoftwareTokenMfaSecret()));
         Map<String, String> parameters = new HashMap<>();
         parameters.put("USERNAME", user.getUsername());
         if (phase == TotpPhase.SETUP) {
@@ -1957,6 +2052,89 @@ final class CognitoAuthFlowHandler {
         }
         result.put("ChallengeParameters", parameters);
         return result;
+    }
+
+    private String issueMfaSession(UserPool pool, UserPoolClient client, CognitoUser user, String challengeName,
+                                   List<String> choices, String triggerSource, Map<String, String> metadata) {
+        purgeExpired(mfaSessions, MfaSession::expiresAt);
+        String token = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
+        mfaSessions.put(token, new MfaSession(pool.getId(), user.getUsername(), client.getClientId(), challengeName,
+                List.copyOf(choices), metadata, triggerSource, sessionExpiry(client, clock.instant())));
+        return token;
+    }
+
+    private MfaSession requireMfaSession(UserPool pool, UserPoolClient client, String session,
+                                         String challengeName, Map<String, String> responses) {
+        MfaSession state = session == null ? null : mfaSessions.get(session);
+        if (state == null || !challengeName.equals(state.challengeName())) {
+            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+        if (sessionExpired(state.expiresAt())) {
+            mfaSessions.remove(session, state);
+            throw sessionExpiredException();
+        }
+        if (!pool.getId().equals(state.userPoolId()) || !client.getClientId().equals(state.clientId())) {
+            throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
+        }
+        String username = responses.get("USERNAME");
+        if (username == null || !username.equals(state.username())) {
+            throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
+        }
+        validateSecretHash(client, responses, username);
+        return state;
+    }
+
+    /**
+     * Answers an SMS_MFA or email (EMAIL_OTP) MFA challenge with the code sent for it. A wrong code
+     * leaves the session for another try, until the code itself stops working. The phone number or
+     * email address the code went to counts as verified afterwards, as on AWS.
+     */
+    private Map<String, Object> handleMessageMfaChallenge(UserPool pool, UserPoolClient client, String challengeName,
+                                                          String session, Map<String, String> responses,
+                                                          Map<String, String> clientMetadata) {
+        MfaSession state = requireMfaSession(pool, client, session, challengeName, responses);
+        boolean sms = "SMS_MFA".equals(challengeName);
+        String code = sms ? responses.get("SMS_MFA_CODE")
+                : responses.getOrDefault("EMAIL_OTP_CODE", responses.get("EMAIL_MFA_CODE"));
+        if (code == null) {
+            throw new AwsException("InvalidParameterException",
+                    "USERNAME and " + (sms ? "SMS_MFA_CODE" : "EMAIL_OTP_CODE") + " are required", 400);
+        }
+        CognitoUser user = service.adminGetUser(pool.getId(), state.username());
+        requireSignInEligible(user);
+        service.consumeSignInOtp(pool.getId(), user.getUsername(),
+                sms ? VerificationCode.Purpose.SMS_MFA : VerificationCode.Purpose.EMAIL_MFA, code);
+        if (!mfaSessions.remove(session, state)) {
+            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+        service.markAttributeVerified(pool.getId(), user.getUsername(), sms ? "phone_number" : "email");
+        user = service.adminGetUser(pool.getId(), user.getUsername());
+        Map<String, String> metadata = clientMetadata != null && !clientMetadata.isEmpty()
+                ? clientMetadata : state.clientMetadata();
+        return authenticationResult(pool, client, user, state.triggerSource(), metadata);
+    }
+
+    /** Answers SELECT_MFA_TYPE: {@code ANSWER} names one of {@code MFAS_CAN_CHOOSE}, whose challenge follows. */
+    private Map<String, Object> handleSelectMfaType(UserPool pool, UserPoolClient client, String session,
+                                                    Map<String, String> responses,
+                                                    Map<String, String> clientMetadata) {
+        MfaSession state = requireMfaSession(pool, client, session, "SELECT_MFA_TYPE", responses);
+        String answer = responses.get("ANSWER");
+        if ("EMAIL_MFA".equals(answer)) {
+            answer = "EMAIL_OTP";
+        }
+        if (answer == null || !state.choices().contains(answer)) {
+            throw new AwsException("InvalidParameterException",
+                    "ANSWER must be one of " + state.choices(), 400);
+        }
+        if (!mfaSessions.remove(session, state)) {
+            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+        CognitoUser user = service.adminGetUser(pool.getId(), state.username());
+        requireSignInEligible(user);
+        Map<String, String> metadata = clientMetadata != null && !clientMetadata.isEmpty()
+                ? Map.copyOf(clientMetadata) : state.clientMetadata();
+        return startMfaChallenge(pool, client, user, answer, state.triggerSource(), metadata);
     }
 
     private Map<String, Object> authenticationResult(UserPool pool, UserPoolClient client, CognitoUser user,

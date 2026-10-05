@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
 import io.github.hectorvent.floci.services.sns.SnsService;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -68,10 +69,13 @@ public final class CognitoMessageDispatcher {
 
         for (String medium : mediums) {
             if ("EMAIL".equalsIgnoreCase(medium) && email != null) {
+                // An email MFA code uses the pool's EmailMfaConfiguration rather than the verification template.
+                Map<String, Object> emailTemplate = purpose == VerificationCode.Purpose.EMAIL_MFA
+                        ? emailMfaTemplate(pool) : template;
                 String subject = stringOrNull(customMessageResponse, "emailSubject");
-                if (subject == null) subject = stringOr(template.get("EmailSubject"), DEFAULT_EMAIL_SUBJECT);
+                if (subject == null) subject = stringOr(emailTemplate.get("EmailSubject"), DEFAULT_EMAIL_SUBJECT);
                 String rawBody = stringOrNull(customMessageResponse, "emailMessage");
-                if (rawBody == null) rawBody = stringOr(template.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
+                if (rawBody == null) rawBody = stringOr(emailTemplate.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
                 String body = renderTemplate(rawBody, code);
                 ses.sendEmail(SendEmailRequest.builder()
                     .source(DEFAULT_FROM)
@@ -93,6 +97,22 @@ public final class CognitoMessageDispatcher {
                 );
             }
         }
+    }
+
+    /** The pool's EmailMfaConfiguration as an email template ({@code Subject}, {@code Message}). */
+    private static Map<String, Object> emailMfaTemplate(UserPool pool) {
+        Map<String, Object> configuration = pool.getEmailMfaConfiguration();
+        if (configuration == null) {
+            return Map.of();
+        }
+        Map<String, Object> template = new HashMap<>();
+        if (configuration.get("Subject") != null) {
+            template.put("EmailSubject", configuration.get("Subject"));
+        }
+        if (configuration.get("Message") != null) {
+            template.put("EmailMessage", configuration.get("Message"));
+        }
+        return template;
     }
 
     /**
