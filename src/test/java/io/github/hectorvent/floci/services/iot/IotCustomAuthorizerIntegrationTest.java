@@ -127,6 +127,15 @@ class IotCustomAuthorizerIntegrationTest {
     }
 
     @Test
+    void aTestInvokeBodyWithTrailingContentIsAnInvalidRequest() {
+        given().contentType("application/json").body("{\"mqttContext\": {}} trailing")
+        .when().post("/authorizer/" + authorizer + "/test")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-ErrorType", "InvalidRequestException");
+    }
+
+    @Test
     void mqtt3AllowedConnectSendsTheWebSocketEventWithTheUsernameVerbatim() throws Exception {
         String clientId = "cauth-v3-" + System.nanoTime();
         String username = clientId + "?" + NAME_PARAM + authorizer;

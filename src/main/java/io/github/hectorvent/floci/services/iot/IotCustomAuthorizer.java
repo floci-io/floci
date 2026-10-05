@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.iot;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -49,6 +51,7 @@ public class IotCustomAuthorizer {
     private final IotAuthorizerService authorizers;
     private final LambdaService lambdaService;
     private final ObjectMapper objectMapper;
+    private final ObjectReader strictReader;
     private final RegionResolver regionResolver;
 
     /**
@@ -65,6 +68,7 @@ public class IotCustomAuthorizer {
         this.authorizers = authorizers;
         this.lambdaService = lambdaService;
         this.objectMapper = objectMapper;
+        this.strictReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.regionResolver = regionResolver;
     }
 
@@ -244,7 +248,7 @@ public class IotCustomAuthorizer {
 
     private JsonNode readJson(byte[] json) {
         try {
-            JsonNode node = objectMapper.readTree(json);
+            JsonNode node = strictReader.readTree(json);
             return node == null ? MissingNode.getInstance() : node;
         } catch (IOException | IllegalArgumentException ignored) {
             // Not JSON: the checks that follow report the answer the way AWS does.

@@ -213,6 +213,8 @@ class IotCustomAuthorizerTest {
         "{\"isAuthenticated\": false, \"principalId\": \"p1\"}|policyDocuments failed to satisfy constraint: List of policies cannot be null.",
         "{\"isAuthenticated\": true, \"principalId\": \"p1\", \"policyDocuments\": [\"this is not json\"]}"
                 + "|policyDocuments failed to satisfy constraint: Policy document is Malformed: Invalid policy syntax.",
+        "{\"isAuthenticated\": true, \"principalId\": \"p1\", \"policyDocuments\": [\"{} {}\"]}"
+                + "|policyDocuments failed to satisfy constraint: Policy document is Malformed: Invalid policy syntax.",
         "{\"isAuthenticated\": true, \"principalId\": \"p1\", \"policyDocuments\": [\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"]}"
                 + "|policyDocuments failed to satisfy constraint: Number of policies allowed cannot exceed 10",
         "{\"isAuthenticated\": true, \"principalId\": \"p1\", \"policyDocuments\": [{}], \"refreshAfterInSeconds\": 299}"
@@ -225,7 +227,8 @@ class IotCustomAuthorizerTest {
                 + "|86401 at disconnectAfterInSeconds" + TTL_CONSTRAINT,
         "{\"isAuthenticated\": true, \"principalId\": \"p1\", \"policyDocuments\": [{}], \"refreshAfterInSeconds\": 10, \"disconnectAfterInSeconds\": 10}"
                 + "|10 at refreshAfterInSeconds" + TTL_CONSTRAINT,
-        "not json|Lambda invocation result is in invalid format"
+        "not json|Lambda invocation result is in invalid format",
+        "{\"isAuthenticated\": true, \"principalId\": \"p1\", \"policyDocuments\": []} junk|Lambda invocation result is in invalid format"
     })
     void anInvalidAnswerIsAnInvalidResponseInAwsOrderAndWording(String invalidAnswer, String message) {
         answer = invalidAnswer;

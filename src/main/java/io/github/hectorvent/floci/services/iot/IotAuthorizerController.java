@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -38,6 +40,7 @@ public class IotAuthorizerController {
     private final IotCustomAuthorizer customAuthorizer;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final ObjectReader strictReader;
 
     @Inject
     public IotAuthorizerController(IotAuthorizerService authorizerService, IotCustomAuthorizer customAuthorizer,
@@ -46,6 +49,7 @@ public class IotAuthorizerController {
         this.customAuthorizer = customAuthorizer;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.strictReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
 
     @POST
@@ -149,7 +153,7 @@ public class IotAuthorizerController {
 
     private JsonNode readJson(String body) {
         try {
-            return objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            return strictReader.readTree(body == null || body.isBlank() ? "{}" : body);
         } catch (JsonProcessingException e) {
             throw new AwsException("InvalidRequestException", e.getMessage(), 400);
         }
