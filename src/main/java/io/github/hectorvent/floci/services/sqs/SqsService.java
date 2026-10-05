@@ -791,11 +791,13 @@ public class SqsService implements Resettable, ResourceProvider {
         return filtered;
     }
 
-    String resolveCurrentSenderId() {
-        return resolveCurrentSenderId(null);
-    }
-
-    String resolveCurrentSenderId(String queueUrl) {
+    /**
+     * Resolves the principal of the in-flight request. Only the SQS protocol handlers may call this,
+     * because only there is the request scope known to belong to a real SendMessage caller. Internal
+     * producers (SNS, S3 notifications, EventBridge...) run on someone else's request thread and must
+     * not inherit that identity: they pass an explicit senderId or get the queue owner by default.
+     */
+    public String resolveCallerSenderId(String queueUrl) {
         if (requestContextInstance != null) {
             try {
                 RequestContext ctx = requestContextInstance.get();
@@ -865,7 +867,7 @@ public class SqsService implements Resettable, ResourceProvider {
         }
 
         int queueDelaySeconds = parseNonNegativeSecondsAttribute(queue.getAttributes().get("DelaySeconds"));
-        String effectiveSenderId = senderId != null ? senderId : resolveCurrentSenderId(queueUrl);
+        String effectiveSenderId = senderId != null ? senderId : senderIdFor(queueUrl);
 
         // Resolve the effective delay:
         //   - FIFO queues only support queue-level DelaySeconds per AWS SQS,
@@ -1921,11 +1923,9 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * SQS reports SenderId as the principal that called SendMessage. Floci
-     * has no per-call IAM context, so it falls back to the account that owns
-     * the queue (parsed from the queue URL when present), otherwise the
-     * account from the current request context, otherwise the configured
-     * default account.
+     * Default SenderId for messages with no caller principal (internal producers such as SNS,
+     * S3 notifications or EventBridge): the account that owns the queue (parsed from the queue
+     * URL when present), otherwise the configured default account.
      */
     public String senderIdFor(String queueUrl) {
         String fromUrl = accountFromQueueUrl(normalizeQueueUrl(queueUrl));

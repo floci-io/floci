@@ -2401,9 +2401,29 @@ class SqsServiceTest {
         SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
                 requestContextInstance, iamService);
         Queue queue = service.createQueue("sender-id-queue", null, region);
+
+        assertEquals("AIDAUSER123", service.resolveCallerSenderId(queue.getQueueUrl()));
+    }
+
+    @Test
+    void sendMessageWithoutExplicitSenderIdIgnoresRequestScopeCaller() {
+        String region = "us-east-1";
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        RequestContext requestContext = new RequestContext();
+        requestContext.setAccessKeyId("AKIAIOSFODNN7EXAMPLE");
+        requestContext.setAccountId("123456789012");
+        when(requestContextInstance.get()).thenReturn(requestContext);
+
+        IamService iamService = mock(IamService.class);
+        when(iamService.resolveCallerUserId(eq("AKIAIOSFODNN7EXAMPLE"), any())).thenReturn(Optional.of("AIDAUSER123"));
+
+        SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
+                requestContextInstance, iamService);
+        Queue queue = service.createQueue("internal-producer-queue", null, region);
         Message message = service.sendMessage(queue.getQueueUrl(), "hello", 0, region);
 
-        assertEquals("AIDAUSER123", message.getSenderId());
+        assertEquals(service.senderIdFor(queue.getQueueUrl()), message.getSenderId());
     }
 
     @Test
@@ -2422,9 +2442,8 @@ class SqsServiceTest {
         SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
                 requestContextInstance, iamService);
         Queue queue = service.createQueue("sender-id-fallback-queue", null, region);
-        Message message = service.sendMessage(queue.getQueueUrl(), "hello", 0, region);
 
-        assertEquals("123456789012", message.getSenderId());
+        assertEquals("123456789012", service.resolveCallerSenderId(queue.getQueueUrl()));
     }
 
     @Test

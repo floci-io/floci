@@ -224,7 +224,8 @@ public class SqsJsonHandler {
                 .path("AWSTraceHeader").path("StringValue").asText(null);
 
         Message msg = sqsService.sendMessage(queueUrl, messageBody, delaySeconds,
-                messageGroupId, messageDeduplicationId, messageAttributes, awsTraceHeader, region);
+                messageGroupId, messageDeduplicationId, messageAttributes, awsTraceHeader,
+                sqsService.resolveCallerSenderId(queueUrl), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("MessageId", msg.getMessageId());
@@ -410,12 +411,13 @@ public class SqsJsonHandler {
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
 
+        String senderId = sqsService.resolveCallerSenderId(queueUrl);
         for (ParsedEntry parsed : parsedEntries) {
                 String id = parsed.id();
                 try {
                     Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                             parsed.groupId(), parsed.dedupId(), parsed.attributes(),
-                            parsed.awsTraceHeader(), region);
+                            parsed.awsTraceHeader(), senderId, region);
                     ObjectNode success = objectMapper.createObjectNode();
                     success.put("Id", id);
                     success.put("MessageId", msg.getMessageId());

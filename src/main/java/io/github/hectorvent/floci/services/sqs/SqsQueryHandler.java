@@ -250,7 +250,8 @@ public class SqsQueryHandler {
         }
 
         Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId,
-                messageDeduplicationId, messageAttributes, awsTraceHeader, region);
+                messageDeduplicationId, messageAttributes, awsTraceHeader,
+                sqsService.resolveCallerSenderId(queueUrl), region);
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("MessageId", msg.getMessageId())
@@ -404,12 +405,13 @@ public class SqsQueryHandler {
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
 
+        String senderId = sqsService.resolveCallerSenderId(queueUrl);
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
                 Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
-                        parsed.awsTraceHeader(), region);
+                        parsed.awsTraceHeader(), senderId, region);
                 xml.start("SendMessageBatchResultEntry")
                    .elem("Id", id)
                    .elem("MessageId", msg.getMessageId())
