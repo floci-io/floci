@@ -31,8 +31,11 @@ import java.util.Set;
  * stack restores never carried that snapshot. An update that changes either, or drops
  * an explicit name, creates the new authorizer and leaves the displaced one to the
  * {@link ReplacementCleanup} record; a replacement that would keep an explicit name is refused, as
- * CloudFormation refuses it for any custom-named resource. A delete deactivates the authorizer
- * first, because the API refuses to delete an ACTIVE one.
+ * CloudFormation refuses it for any custom-named resource. Declaring the generated name as an
+ * explicit name is refused the same way, because adding the create-only name is a replacement that
+ * would keep it. A stack created before this provisioner existed holds the dispatcher's stub, which
+ * names no authorizer, so its first update creates the authorizer as a first deploy would. A delete
+ * deactivates the authorizer first, because the API refuses to delete an ACTIVE one.
  */
 @ApplicationScoped
 public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
@@ -95,20 +98,24 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
         }
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
 
-        IotAuthorizer prior = ctx.isUpdate()
+        // A stack from before this type had a provisioner holds the dispatcher's stub here, which
+        // names no authorizer and never recorded a name mode, so the authorizer is created as on a first deploy.
+        boolean updatesAuthorizer = ctx.isUpdate() && attributesBefore.containsKey(NAME_MODE_ATTR);
+        IotAuthorizer prior = updatesAuthorizer
                 ? authorizerService.describeAuthorizer(ctx.priorPhysicalId(), ctx.region())
                 : null;
         // ponytail: compared with the stored flag, so an absent SigningDisabled reads as its API default false.
         boolean signingChanged = prior != null && prior.isSigningDisabled() != Boolean.parseBoolean(signingDisabled);
-        if (signingChanged && hasExplicitName && explicitName.equals(ctx.priorPhysicalId())) {
+        boolean nameWasGenerated = NAME_MODE_GENERATED.equals(attributesBefore.get(NAME_MODE_ATTR));
+        if ((signingChanged || nameWasGenerated) && hasExplicitName && explicitName.equals(ctx.priorPhysicalId())) {
             throw new AwsException("ValidationError",
                     "CloudFormation cannot update a stack when a custom-named resource requires "
                             + "replacing. Rename " + explicitName + " and update the stack again.", 400);
         }
-        String name = physicalName(r, ctx, explicitName, signingChanged);
+        String name = physicalName(r, ctx, explicitName, updatesAuthorizer, signingChanged);
 
         IotAuthorizer authorizer;
-        if (ctx.reusesPriorEntity(name)) {
+        if (updatesAuthorizer && ctx.reusesPriorEntity(name)) {
             snapshotBeforeUpdate(r, prior, ctx.region());
             authorizer = authorizerService.updateAuthorizer(name, declared, ctx.region());
             try {
@@ -177,17 +184,18 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The template's name when it gives one; otherwise the generated name the authorizer already
      * has, unless the previous name was explicit or signing changed, since either replaces the
-     * authorizer on AWS; and a fresh generated name failing both. Stack names and logical ids
-     * only hold characters the IoT name rule allows, and the generator truncates to its limit.
+     * authorizer on AWS, or the prior resource names no authorizer; and a fresh generated name
+     * otherwise. Stack names and logical ids only hold characters the IoT name rule allows, and the
+     * generator truncates to its limit.
      */
     private static String physicalName(StackResource r, ProvisionContext ctx, String explicitName,
-                                       boolean signingChanged) {
+                                       boolean updatesAuthorizer, boolean signingChanged) {
         if (explicitName != null) {
             return explicitName;
         }
         boolean explicitNameRemoved = ctx.isUpdate()
                 && NAME_MODE_EXPLICIT.equals(r.getAttributes().get(NAME_MODE_ATTR));
-        if (ctx.isUpdate() && !explicitNameRemoved && !signingChanged) {
+        if (updatesAuthorizer && !explicitNameRemoved && !signingChanged) {
             return ctx.priorPhysicalId();
         }
         return ctx.generatePhysicalName(r.getLogicalId(), NAME_MAX_LENGTH, false);

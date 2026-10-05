@@ -459,6 +459,54 @@ class IotAuthorizerCfnProvisionerTest {
         assertFalse(provisioner.hasReplacementUpdate(resource));
     }
 
+    /** Adding the generated name explicitly replaces the authorizer under the same name, which is refused. */
+    @Test
+    void declaringTheGeneratedNameExplicitlyIsRefusedBeforeAnyChange() {
+        StackResource resource = create(props(null).put("SigningDisabled", true));
+        String generated = resource.getPhysicalId();
+        clearInvocations(service);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> update(resource, props(generated).put("SigningDisabled", true)));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename " + generated + " and update the stack again.", error.getMessage());
+        verify(service, never()).createAuthorizer(anyString(), any(), anyString());
+        verify(service, never()).updateAuthorizer(anyString(), any(), anyString());
+    }
+
+    /** A stack from before this provisioner holds the dispatcher's stub, which names no authorizer. */
+    @Test
+    void updatingADispatcherStubCreatesTheAuthorizerUnderAGeneratedName() {
+        StackResource resource = resource();
+        resource.setPhysicalId("Auth-1a2b3c4d");
+        resource.getAttributes().put("Arn", "arn:aws:stub:::Auth");
+
+        update(resource, props(null).put("SigningDisabled", true));
+
+        String generated = resource.getPhysicalId();
+        assertTrue(generated.startsWith(STACK + "-Auth-"), generated);
+        verify(service).createAuthorizer(eq(generated), any(), eq(REGION));
+        verify(service, never()).describeAuthorizer(anyString(), anyString());
+        verify(service, never()).updateAuthorizer(anyString(), any(), anyString());
+        assertEquals(arn(generated), resource.getAttributes().get("Arn"));
+        assertEquals("Auth-1a2b3c4d", provisioner.updateCleanupPhysicalId(resource));
+    }
+
+    @Test
+    void updatingADispatcherStubWithAnExplicitNameCreatesThatAuthorizer() {
+        StackResource resource = resource();
+        resource.setPhysicalId("Auth-1a2b3c4d");
+        resource.getAttributes().put("Arn", "arn:aws:stub:::Auth");
+
+        update(resource, props("auth").put("SigningDisabled", true));
+
+        assertEquals("auth", resource.getPhysicalId());
+        verify(service).createAuthorizer(eq("auth"), any(), eq(REGION));
+        verify(service, never()).describeAuthorizer(anyString(), anyString());
+    }
+
     @Test
     void aFailedStackUpdateDeletesTheReplacementAndRestoresThePriorAuthorizer() {
         StackResource resource = create(props("auth").put("SigningDisabled", true));
