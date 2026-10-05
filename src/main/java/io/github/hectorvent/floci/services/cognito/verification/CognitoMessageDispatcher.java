@@ -73,7 +73,7 @@ public final class CognitoMessageDispatcher {
                 String rawBody = stringOrNull(customMessageResponse, "emailMessage");
                 if (rawBody == null) rawBody = stringOr(template.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
                 String body = renderTemplate(rawBody, code);
-                ses.sendEmail(SendEmailRequest.builder()
+                ses.sendServiceEmail(SendEmailRequest.builder()
                     .source(DEFAULT_FROM)
                     .toAddresses(List.of(email))
                     .region(region)

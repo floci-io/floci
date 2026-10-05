@@ -6,9 +6,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import software.amazon.awssdk.services.sesv2.SesV2Client;
+import software.amazon.awssdk.services.sesv2.model.AlreadyExistsException;
 import software.amazon.awssdk.services.sesv2.model.Body;
 import software.amazon.awssdk.services.sesv2.model.Content;
 import software.amazon.awssdk.services.sesv2.model.CreateContactListRequest;
+import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteContactListRequest;
 import software.amazon.awssdk.services.sesv2.model.Destination;
 import software.amazon.awssdk.services.sesv2.model.EmailContent;
@@ -54,6 +56,11 @@ class SesListManagementOptionsTest {
                         .description("weekly digest")
                         .build())
                 .build());
+        try {
+            sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder().emailIdentity(FROM).build());
+        } catch (AlreadyExistsException expected) {
+            // Another suite already verified this shared sender, which is all a send needs.
+        }
     }
 
     @AfterAll

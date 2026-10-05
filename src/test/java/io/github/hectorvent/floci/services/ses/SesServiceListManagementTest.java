@@ -52,6 +52,7 @@ class SesServiceListManagementTest {
         contactStore = builder.contactStore();
         service = builder.build();
         contacts = builder.contactService();
+        builder.identityService().verifyEmailIdentity(FROM, REGION);
 
         // Sports defaults OPT_IN, Promos defaults OPT_OUT.
         contacts.createContactList(LIST, "desc", List.of(

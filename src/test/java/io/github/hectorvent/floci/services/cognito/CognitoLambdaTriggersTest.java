@@ -152,7 +152,7 @@ class CognitoLambdaTriggersTest {
 
     private static void assertVerificationEmail(SesService ses, String to, String subject, String body) {
         ArgumentCaptor<SendEmailRequest> captor = ArgumentCaptor.forClass(SendEmailRequest.class);
-        verify(ses).sendEmail(captor.capture());
+        verify(ses).sendServiceEmail(captor.capture());
         SendEmailRequest sent = captor.getValue();
         assertEquals(SendEmailRequest.builder()
                 .source(sent.source())

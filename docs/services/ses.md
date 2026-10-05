@@ -272,7 +272,8 @@ curl $AWS_ENDPOINT_URL/_aws/ses
 
 ## Current Behavior
 
-- Identity verification succeeds immediately; no real DNS or inbox verification flow is required.
+- An email address identity is verified as soon as it is created; no inbox verification flow is required. A domain identity stays `Pending` until its DKIM CNAME records exist in a Route 53 hosted zone in Floci, then becomes `Success`.
+- `SendEmail`, `SendRawEmail` and `SendTemplatedEmail`, and v2 `SendEmail`, require a verified sender, as on AWS ([SendEmail](https://docs.aws.amazon.com/ses/latest/APIReference/API_SendEmail.html)): the `Source` or `FromEmailAddress` (for a raw message without one, its `From` header) must be a verified email address identity or an address in a verified domain identity. An unverified sender fails with `MessageRejected` ("Email address is not verified. The following identities failed the check in region US-EAST-1: ...") and nothing is captured or relayed. The bulk sends do not check the sender. The verification emails Cognito sends from its own address are not affected.
 - `SendEmail` stores the text body or the HTML body as the captured message body.
 - `SetIdentityNotificationTopic` publishes to the configured topic on a Bounce/Complaint/Delivery event (triggered via the mailbox simulator addresses or the suppression list), independent of any configuration set. The payload uses the legacy format (`notificationType`, no `mail.tags`, headers only when `SetIdentityHeadersInNotificationsEnabled` is on).
 - Identity (sending authorization) policies are stored and returned as metadata: the policy document, the per-identity limit of 20, and the create/update/delete error shapes match AWS, but Floci does not evaluate policy authorization (Principal-account existence, Resource-ARN match) or gate sending on it.

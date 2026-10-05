@@ -12,7 +12,6 @@ import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.AlreadyExistsException;
 import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
-import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateTenantRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateTenantResponse;
 import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetRequest;
@@ -73,7 +72,8 @@ class SesTenantTest {
     @BeforeAll
     static void setup() {
         sesV2 = TestFixtures.sesV2Client();
-        sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder().emailIdentity(IDENTITY).build());
+        // Verified, so tenantSend_gatesOnAssociations can send from an address under it.
+        TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, IDENTITY);
         sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSetName(CONFIG_SET).build());
         sesV2.putSuppressedDestination(r -> r.emailAddress(ACCOUNT_ADDR)

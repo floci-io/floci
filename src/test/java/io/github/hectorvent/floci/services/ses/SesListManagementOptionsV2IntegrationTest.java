@@ -26,6 +26,15 @@ class SesListManagementOptionsV2IntegrationTest {
 
     @Test
     @Order(0)
+    void setup_verifySender() {
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
+                .formParam("Action", "VerifyEmailIdentity")
+                .formParam("EmailAddress", FROM)
+        .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    @Order(0)
     void setup_contactList() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("""

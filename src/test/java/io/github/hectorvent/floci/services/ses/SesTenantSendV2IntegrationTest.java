@@ -56,8 +56,8 @@ class SesTenantSendV2IntegrationTest {
     void setup_tenantAndResources() {
         v2().body("{\"TenantName\":\"" + TENANT + "\"}")
                 .when().post("/v2/email/tenants").then().statusCode(200);
-        v2().body("{\"EmailIdentity\":\"" + DOMAIN + "\"}")
-                .when().post("/v2/email/identities").then().statusCode(200);
+        // Verified, so the addresses under it may send once the tenant gate lets them through.
+        SesDomainIdentityTestHelper.createVerified(DOMAIN, AUTH);
         v2().body("{\"ConfigurationSetName\":\"" + CONFIG_SET + "\"}")
                 .when().post("/v2/email/configuration-sets").then().statusCode(200);
         v2().body("{\"TemplateName\":\"" + TEMPLATE + "\",\"TemplateContent\":{\"Subject\":\"s\",\"Text\":\"t\"}}")

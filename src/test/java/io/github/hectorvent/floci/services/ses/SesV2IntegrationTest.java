@@ -1002,6 +1002,17 @@ class SesV2IntegrationTest {
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
             .body("""
+                {"EmailIdentity": "raw-from@floci.test"}
+                """)
+        .when()
+            .post("/v2/email/identities")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
                 {
                     "Destination": {"ToAddresses": ["r@example.com"]},
                     "Content": {"Raw": {"Data": "From: raw-from@floci.test\\r\\nTo: r@example.com\\r\\nSubject: s\\r\\n\\r\\nbody"}}
@@ -1304,17 +1315,19 @@ class SesV2IntegrationTest {
     void inspectionEndpoint_returnsEmailsFromAllRegions() {
         given().delete("/_aws/ses").then().statusCode(200);
 
-        // Create identity usable in both regions (domain covers all addresses)
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
-            .body("""
-                {"EmailIdentity": "example.com"}
-                """)
-        .when()
-            .post("/v2/email/identities")
-        .then()
-            .statusCode(200);
+        // Identities are regional, so the sender is verified in each region it sends from.
+        for (String region : List.of("us-east-1", "ap-northeast-1")) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region + "/email/aws4_request")
+                .formParam("Action", "VerifyEmailIdentity")
+                .formParam("EmailAddress", "multi@example.com")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
 
         // Send from us-east-1
         given()
