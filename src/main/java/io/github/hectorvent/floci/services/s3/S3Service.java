@@ -1005,7 +1005,9 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private String normalizeEntityTag(String value) {
+    // Package-private so S3Controller's 501 guard for unimplemented PutObject conditions reads
+    // If-Match and If-None-Match exactly as checkWritePreconditions does after it.
+    static String normalizeEntityTag(String value) {
         String normalized = value == null ? "" : value.trim();
         if (normalized.length() >= 2 && normalized.startsWith("\"") && normalized.endsWith("\"")) {
             normalized = normalized.substring(1, normalized.length() - 1);

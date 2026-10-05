@@ -3426,19 +3426,11 @@ public class S3Controller {
     private static boolean anyEntityTag(String headerValue, Predicate<String> test) {
         // A limit of -1 keeps empty members, so a header of only commas is still judged.
         for (String candidate : headerValue.split(",", -1)) {
-            if (test.test(unquotedEntityTag(candidate))) {
+            if (test.test(S3Service.normalizeEntityTag(candidate))) {
                 return true;
             }
         }
         return false;
-    }
-
-    private static String unquotedEntityTag(String value) {
-        String trimmed = value.trim();
-        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-            return trimmed.substring(1, trimmed.length() - 1);
-        }
-        return trimmed;
     }
 
     private boolean hasPreconditions(String ifMatch, String ifNoneMatch,
