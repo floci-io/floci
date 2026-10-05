@@ -247,6 +247,21 @@ class IotAuthorizerCfnProvisionerTest {
     }
 
     @Test
+    void aWhitespaceCachingFlagFromAnIntrinsicIsRefusedRatherThanReadAsFalse() {
+        StackResource resource = create(props("auth").put("SigningDisabled", true).put("EnableCachingForHttp", true));
+        clearInvocations(service);
+        ObjectNode properties = props("auth").put("SigningDisabled", true);
+        properties.putObject("EnableCachingForHttp").putArray("Fn::If").add("Cache").add(true).add(" ");
+
+        AwsException error = assertThrows(AwsException.class, () -> update(resource, properties));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("AWS::IoT::Authorizer EnableCachingForHttp must be true or false, got  ", error.getMessage());
+        verify(service, never()).updateAuthorizer(anyString(), any(), anyString());
+        assertTrue(authorizers.get("auth").isEnableCachingForHttp());
+    }
+
+    @Test
     void inPlaceUpdateResendsTheDeclaredTokenProperties() {
         StackResource resource = create(props("auth").put("TokenKeyName", "tok").set("TokenSigningPublicKeys", keys()));
         clearInvocations(service);

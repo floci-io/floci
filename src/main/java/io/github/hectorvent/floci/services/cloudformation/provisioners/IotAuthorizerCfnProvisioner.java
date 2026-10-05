@@ -76,11 +76,11 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
         }
         String explicitName = resolvePresent(props, "AuthorizerName", ctx);
         boolean hasExplicitName = explicitName != null;
-        String signingDisabled = resolvePresent(props, "SigningDisabled", ctx);
+        String signingDisabled = resolveBoolean(props, "SigningDisabled", ctx);
         ObjectNode declared = MAPPER.createObjectNode().put("authorizerFunctionArn", functionArn);
         putIfPresent(declared, "status", resolvePresent(props, "Status", ctx));
         putIfPresent(declared, "tokenKeyName", resolvePresent(props, "TokenKeyName", ctx));
-        String caching = resolvePresent(props, "EnableCachingForHttp", ctx);
+        String caching = resolveBoolean(props, "EnableCachingForHttp", ctx);
         if (caching != null) {
             declared.put("enableCachingForHttp", Boolean.parseBoolean(caching));
         }
@@ -173,6 +173,15 @@ public class IotAuthorizerCfnProvisioner implements CfnResourceProvisioner {
         String value = ctx.resolveOptional(props, name);
         boolean literal = props != null && props.path(name).isTextual();
         return literal || (value != null && !value.isEmpty()) ? value : null;
+    }
+
+    /** A present boolean property, refused unless it is true or false rather than read as false. */
+    private static String resolveBoolean(JsonNode props, String name, ProvisionContext ctx) {
+        String value = resolvePresent(props, name, ctx);
+        if (value != null && !"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value)) {
+            throw new AwsException("ValidationError", TYPE + " " + name + " must be true or false, got " + value, 400);
+        }
+        return value;
     }
 
     private static void putIfPresent(ObjectNode body, String field, String value) {
