@@ -182,7 +182,7 @@ further divergences, both deliberate:
 | Action | Description |
 |--------|-------------|
 | AdminCreateUser | Creates or resends setup for a user in a user pool. Creating a user invokes the pre sign-up trigger with triggerSource `PreSignUp_AdminCreateUser`, the request's `ValidationData` and `ClientMetadata`, and `callerContext.clientId` `CLIENT_ID_NOT_APPLICABLE`. A trigger error refuses the user with `UserLambdaValidationException`, and its `autoConfirmUser`, `autoVerifyEmail` and `autoVerifyPhone` are ignored, as on AWS. |
-| AdminGetUser | Returns a user's stored attributes and status. |
+| AdminGetUser | Returns a user's stored attributes and status, and the MFA settings (`UserMFASettingList`, `PreferredMfaSetting`) once any is turned on. |
 | AdminDeleteUser | Deletes a user from a user pool. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | AdminSetUserPassword | Sets a user's password and permanent-password status. |
 | AdminUpdateUserAttributes | Updates attributes for a user in a user pool. |
@@ -191,7 +191,7 @@ further divergences, both deliberate:
 | AdminDisableUser | Disables a user, who can no longer sign in. Tokens already issued keep working, where AWS revokes the user's access tokens. |
 | AdminEnableUser | Re-enables a disabled user. |
 | AdminResetUserPassword | Clears a user's password and sets the status to `RESET_REQUIRED`, so sign-in fails with `PasswordResetRequiredException`. Floci sends no reset code: finish with `ForgotPassword` and `ConfirmForgotPassword`, or `AdminSetUserPassword`. Refused when the pool's account recovery is `admin_only`. |
-| AdminSetUserMFAPreference | Sets a user's email MFA preference from `EmailMfaSettings`. SMS and software-token settings are accepted but not stored. |
+| AdminSetUserMFAPreference | Sets a user's email and software-token MFA preferences from `EmailMfaSettings` and `SoftwareTokenMfaSettings`. SMS settings are accepted but not stored. See [MFA preferences](#mfa-preferences). |
 | AdminUserGlobalSignOut | Revokes the access, ID and refresh tokens issued to a user. |
 | AdminLinkProviderForUser | Links an external IdP identity to an existing user's `identities` attribute. |
 
@@ -202,15 +202,15 @@ further divergences, both deliberate:
 | SignUp | Creates a self-service user for an app client. |
 | ConfirmSignUp | Confirms a pending self-service signup. |
 | ResendConfirmationCode | Issues a new sign-up confirmation code to an unconfirmed user, replacing the previous one, and returns where it was sent. |
-| GetUser | Returns attributes for the authenticated access-token user. |
-| GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the email MFA preference set with `SetUserMFAPreference`. `WEB_AUTHN` and SMS or software-token MFA settings are not reported. |
+| GetUser | Returns attributes for the authenticated access-token user, and the MFA settings (`UserMFASettingList`, `PreferredMfaSetting`) once any is turned on. |
+| GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the email and software-token MFA preferences set with `SetUserMFAPreference`. `WEB_AUTHN` and SMS MFA settings are not reported. |
 | GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. |
 | VerifyUserAttribute | Verifies an email or phone_number attribute with its issued verification code. |
 | UpdateUserAttributes | Updates attributes for the authenticated access-token user. |
 | DeleteUserAttributes | Deletes the named attributes from the authenticated access-token user. |
 | DeleteUser | Deletes the authenticated access-token user and removes them from their groups. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | ChangePassword | Changes the authenticated user's password. |
-| SetUserMFAPreference | Sets the authenticated access-token user's email MFA preference from `EmailMfaSettings`. SMS and software-token settings are accepted but not stored. |
+| SetUserMFAPreference | Sets the authenticated access-token user's email and software-token MFA preferences from `EmailMfaSettings` and `SoftwareTokenMfaSettings`. SMS settings are accepted but not stored. See [MFA preferences](#mfa-preferences). |
 | GlobalSignOut | Revokes the access, ID and refresh tokens issued to the authenticated access-token user. |
 | ForgotPassword | Starts the local forgot-password flow for a user. |
 | ConfirmForgotPassword | Completes the forgot-password flow by setting a replacement password. |
@@ -238,7 +238,7 @@ which a pre token generation trigger leaves when it suppresses every scope.
 | GetTokensFromRefreshToken | Issues new access and ID tokens from a refresh token. A client's `RefreshTokenRotation` setting is stored but not applied, so no new refresh token is issued. |
 | RevokeToken | Revokes a refresh token. The client must have token revocation enabled and, when it has a secret, present it. Only refresh tokens can be revoked. |
 | AssociateSoftwareToken | Creates a TOTP secret for a user identified by an MFA setup session or access token. |
-| VerifySoftwareToken | Verifies the TOTP code and enables the user's software token. |
+| VerifySoftwareToken | Verifies the TOTP code and registers the user's authenticator. |
 
 With `MfaConfiguration=ON` and software-token MFA enabled, a successful password or SRP
 first factor returns `MFA_SETUP` instead of tokens for a user without a verified token.
@@ -249,8 +249,32 @@ requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Both token-management action
 also accept an access token for an already authenticated user. Sessions expire with
 the app client's `AuthSessionValidity` and cannot be replayed after completion.
 
-This flow currently covers software-token MFA required by a pool. Optional MFA
-preferences, SMS/email MFA challenges, and managed-login MFA are not emulated.
+Completing `MFA_SETUP` turns software-token MFA on for the user and, when no other factor is
+preferred, makes it the preferred one, so `GetUser` and `AdminGetUser` report it.
+
+#### MFA preferences
+
+With `MfaConfiguration=OPTIONAL`, a verified authenticator alone does not change sign-in: as on
+AWS, the user is asked for a code only once software-token MFA is turned on with
+`SetUserMFAPreference` or `AdminSetUserMFAPreference` (`SoftwareTokenMfaSettings.Enabled`). From
+then on a successful password or SRP first factor, through `USER_PASSWORD_AUTH`,
+`ADMIN_USER_PASSWORD_AUTH`, `USER_SRP_AUTH` or the `PASSWORD` and `PASSWORD_SRP` challenges of
+`USER_AUTH`, returns `SOFTWARE_TOKEN_MFA`, answered with `RespondToAuthChallenge` or
+`AdminRespondToAuthChallenge`. Turning it off again signs the user in without a challenge. The
+challenge follows the user's registered authenticator even when the pool later stops offering
+software-token MFA, which is what AWS documents.
+
+- Turning software-token MFA on for a user without a verified authenticator fails with
+  `InvalidParameterException` (`User does not have delivery config set to turn on
+  SOFTWARE_TOKEN_MFA`). Turning a factor off is always accepted and drops its preference.
+- Only one factor is preferred: preferring one clears the preference of the other, and preferring
+  both in one request, or preferring a factor that is off, fails with `InvalidParameterException`.
+- `UserMFASettingList` lists the factors turned on (`EMAIL_OTP`, `SOFTWARE_TOKEN_MFA`), and
+  `PreferredMfaSetting` the preferred one. Both are omitted when empty.
+- In `USER_AUTH`, a user with an MFA factor turned on in an optional-MFA pool is offered only
+  `PASSWORD` and `PASSWORD_SRP`, as AWS documents, so the second factor still follows.
+
+SMS and email MFA challenges, and managed-login MFA, are not emulated.
 
 ### User Listing
 
