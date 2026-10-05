@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -13,6 +14,7 @@ import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Lists and lookups of resources stored for every region return only the request region's. Each
@@ -211,6 +213,63 @@ class RegionScopedListsIntegrationTest {
             .when().post("/").then().statusCode(200)
             .body("UserPool.Id", equalTo(poolId));
 
+        given().header("Authorization", auth(HOME, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DeleteUserPool")
+                .contentType(COGNITO_JSON).body("{\"UserPoolId\": \"" + poolId + "\"}")
+            .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void cognitoTagsAndDomainsStayInTheirPoolsRegion() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        JsonPath pool = given().header("Authorization", auth(HOME, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPool")
+                .contentType(COGNITO_JSON).body("{\"PoolName\": \"region-tags-" + suffix + "\"}")
+            .when().post("/").then().statusCode(200)
+            .extract().jsonPath();
+        String poolId = pool.getString("UserPool.Id");
+        String poolArn = pool.getString("UserPool.Arn");
+        String domain = "region-domain-" + suffix;
+        given().header("Authorization", auth(HOME, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPoolDomain")
+                .contentType(COGNITO_JSON)
+                .body("{\"UserPoolId\": \"" + poolId + "\", \"Domain\": \"" + domain + "\"}")
+            .when().post("/").then().statusCode(200);
+
+        // Another region cannot read or change the pool's tags, or describe its domain.
+        given().header("Authorization", auth(OTHER, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.TagResource")
+                .contentType(COGNITO_JSON)
+                .body("{\"ResourceArn\": \"" + poolArn + "\", \"Tags\": {\"team\": \"other\"}}")
+            .when().post("/").then().statusCode(400)
+            .body("__type", endsWith("ResourceNotFoundException"));
+        given().header("Authorization", auth(OTHER, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.ListTagsForResource")
+                .contentType(COGNITO_JSON).body("{\"ResourceArn\": \"" + poolArn + "\"}")
+            .when().post("/").then().statusCode(400)
+            .body("__type", endsWith("ResourceNotFoundException"));
+        given().header("Authorization", auth(OTHER, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolDomain")
+                .contentType(COGNITO_JSON).body("{\"Domain\": \"" + domain + "\"}")
+            .when().post("/").then().statusCode(404)
+            .body("__type", endsWith("ResourceNotFoundException"));
+
+        given().header("Authorization", auth(HOME, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.ListTagsForResource")
+                .contentType(COGNITO_JSON).body("{\"ResourceArn\": \"" + poolArn + "\"}")
+            .when().post("/").then().statusCode(200)
+            .body("Tags.team", nullValue());
+        given().header("Authorization", auth(HOME, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolDomain")
+                .contentType(COGNITO_JSON).body("{\"Domain\": \"" + domain + "\"}")
+            .when().post("/").then().statusCode(200)
+            .body("DomainDescription.UserPoolId", equalTo(poolId));
+
+        given().header("Authorization", auth(HOME, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DeleteUserPoolDomain")
+                .contentType(COGNITO_JSON)
+                .body("{\"UserPoolId\": \"" + poolId + "\", \"Domain\": \"" + domain + "\"}")
+            .when().post("/").then().statusCode(200);
         given().header("Authorization", auth(HOME, "cognito-idp"))
                 .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DeleteUserPool")
                 .contentType(COGNITO_JSON).body("{\"UserPoolId\": \"" + poolId + "\"}")

@@ -46,6 +46,16 @@ public class CognitoJsonHandler {
         if (region != null && request.hasNonNull("UserPoolId") && !"UpdateAuthEventFeedback".equals(action)) {
             service.requireUserPoolInRegion(request.path("UserPoolId").asText(), region);
         }
+        // The tag operations name the pool by ARN, and a domain is looked up by its name.
+        if (region != null) {
+            switch (action) {
+                case "TagResource", "UntagResource", "ListTagsForResource" ->
+                        service.requireUserPoolArnInRegion(request.path("ResourceArn").asText(), region);
+                case "DescribeUserPoolDomain" ->
+                        service.requireUserPoolDomainInRegion(request.path("Domain").asText(), region);
+                default -> { }
+            }
+        }
         return switch (action) {
             case "CreateUserPool" -> handleCreateUserPool(request, region);
             case "DescribeUserPool" -> handleDescribeUserPool(request);

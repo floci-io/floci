@@ -765,6 +765,27 @@ public class CognitoService implements ResourceProvider {
         });
     }
 
+    /** {@link #requireUserPoolInRegion} for an operation that names the pool by its ARN, as tagging does. */
+    public void requireUserPoolArnInRegion(String resourceArn, String region) {
+        requireUserPoolInRegion(extractUserPoolIdFromArn(resourceArn), region);
+    }
+
+    /**
+     * Refuses a domain whose user pool lives in another region, as the same not found an unknown
+     * domain gets: domains are stored by name alone, but a domain belongs to its pool's region.
+     */
+    public void requireUserPoolDomainInRegion(String domain, String region) {
+        if (domain == null || domain.isBlank()) {
+            return;
+        }
+        domainStore.get(domain).map(UserPoolDomain::getUserPoolId).flatMap(poolStore::get).ifPresent(pool -> {
+            String poolRegion = poolRegion(pool);
+            if (poolRegion != null && !poolRegion.equals(region)) {
+                throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+            }
+        });
+    }
+
     /** Pools are stored by id for every region; the region comes from the pool ARN, else the id prefix. */
     private static String poolRegion(UserPool pool) {
         if (pool.getArn() != null && AwsArnUtils.isArn(pool.getArn())) {
