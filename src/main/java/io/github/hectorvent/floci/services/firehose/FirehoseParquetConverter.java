@@ -390,7 +390,7 @@ public class FirehoseParquetConverter {
         String runId = UUID.randomUUID().toString();
         String parquetKey = "firehose-staging/" + stream.getDeliveryStreamName() + "/" + runId + ".parquet";
         String stagingKey = "firehose-staging/" + stream.getDeliveryStreamName() + "/" + runId + ".ndjson";
-        ensureStagingBucket();
+        ensureStagingBucket(stream);
 
         // Straight to bytes: a default converting batch buffers 128 MiB, and going
         // through a StringBuilder and a String would hold two more copies of it.
@@ -516,9 +516,10 @@ public class FirehoseParquetConverter {
         return errorKey;
     }
 
-    private void ensureStagingBucket() {
+    private void ensureStagingBucket(DeliveryStreamDescription stream) {
         try {
-            s3Service.createBucket(stagingBucket, regionResolver.getDefaultRegion());
+            s3Service.createBucket(stagingBucket,
+                    AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion()));
         } catch (AwsException e) {
             if (!"BucketAlreadyOwnedByYou".equals(e.getErrorCode())
                     && !"BucketAlreadyExists".equals(e.getErrorCode())) {

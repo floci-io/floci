@@ -249,6 +249,17 @@ class FirehoseServiceTest {
     }
 
     @Test
+    void aMissingDestinationBucketIsCreatedInTheStreamsRegion() {
+        firehoseService.createDeliveryStream("eu-west-1", "000000000000", "eu-stream", null, List.of(), null, null);
+        firehoseService.putRecord("000000000000", "eu-west-1", "eu-stream",
+                new Record("one".getBytes(StandardCharsets.UTF_8)));
+
+        firehoseService.flush("000000000000", "eu-west-1", "eu-stream");
+
+        verify(s3Service).createBucket("floci-firehose-results", "eu-west-1");
+    }
+
+    @Test
     void sameNameIsIndependentForEachAccountRegionDimension() {
         List<String[]> owners = List.of(
                 new String[] {"111111111111", "us-east-1"},
