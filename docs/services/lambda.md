@@ -185,6 +185,9 @@ omitted, which does invoke it.
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.
 
+`SendDurableExecutionCallbackSuccess` takes a result of up to 1 MB. The API reference names 256 KB,
+but AWS accepts 1 MB and rejects one byte more.
+
 The public `public.ecr.aws/lambda` images do not bundle the SDK that the managed runtimes carry.
 Add `aws-durable-execution-sdk-python` or `@aws/durable-execution-sdk-js` to your deployment
 package.
