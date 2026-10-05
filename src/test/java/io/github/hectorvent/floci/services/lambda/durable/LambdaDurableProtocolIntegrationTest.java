@@ -364,6 +364,18 @@ class LambdaDurableProtocolIntegrationTest {
             .body("message", equalTo("1 validation error detected: Value at 'result' failed to satisfy constraint: "
                     + "Member must have length less than or equal to 1048576"));
 
+        String oversizedError = "{\"ErrorType\":\"Big\",\"ErrorMessage\":\"" + "m".repeat(1024 * 1024) + "\"}";
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body(oversizedError)
+        .when()
+            .post(DURABLE + "/durable-execution-callbacks/" + encodedId + "/fail")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", equalTo("Error object size must be less than or equal to 1048576 bytes."));
+
         given()
             .urlEncodingEnabled(false)
             .contentType("application/octet-stream")

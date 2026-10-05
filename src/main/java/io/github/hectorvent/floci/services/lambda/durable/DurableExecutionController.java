@@ -54,7 +54,7 @@ public class DurableExecutionController {
 
     /** Valid Statuses filters for a state Floci never puts an execution in. */
     private static final Set<String> UNMODELLED_STATUSES = Set.of("PAUSED", "PAUSING", "DELETING");
-    private static final int MAX_CALLBACK_RESULT_BYTES = 1024 * 1024;
+    private static final int MAX_CALLBACK_PAYLOAD_BYTES = 1024 * 1024;
 
     private final DurableExecutionService service;
     private final LambdaService lambdaService;
@@ -185,9 +185,9 @@ public class DurableExecutionController {
     @Path("/durable-execution-callbacks/{callbackId: .+}/succeed")
     public Response callbackSucceed(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,
                                     byte[] body) {
-        if (body != null && MAX_CALLBACK_RESULT_BYTES < body.length) {
+        if (body != null && MAX_CALLBACK_PAYLOAD_BYTES < body.length) {
             throw new AwsException("ValidationException", "1 validation error detected: Value at 'result' failed to "
-                    + "satisfy constraint: Member must have length less than or equal to " + MAX_CALLBACK_RESULT_BYTES,
+                    + "satisfy constraint: Member must have length less than or equal to " + MAX_CALLBACK_PAYLOAD_BYTES,
                     400);
         }
         String result = body == null || body.length == 0 ? null : new String(body, StandardCharsets.UTF_8);
@@ -202,6 +202,12 @@ public class DurableExecutionController {
     public Response callbackFail(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,
                                  String body) {
         DurableErrorObject error = body == null || body.isBlank() ? null : DurableWire.parseError(readObject(body));
+        // AWS measures the error as compact JSON, whatever spacing the request used.
+        if (error != null
+                && MAX_CALLBACK_PAYLOAD_BYTES < DurableCheckpointApplier.utf8Length(DurableWire.error(error).toString())) {
+            throw new AwsException("InvalidParameterValueException", "Error object size must be less than or equal to "
+                    + MAX_CALLBACK_PAYLOAD_BYTES + " bytes.", 400);
+        }
         service.completeCallback(callbackId, regionResolver.getAccountId(), regionResolver.resolveRegion(headers), false,
                 null, error);
         return Response.ok(objectMapper.createObjectNode()).build();
