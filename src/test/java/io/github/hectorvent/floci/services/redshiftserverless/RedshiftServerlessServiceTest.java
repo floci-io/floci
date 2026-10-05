@@ -6,23 +6,37 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.redshift.TempCredential;
+import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
+import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
+import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -33,6 +47,10 @@ class RedshiftServerlessServiceTest {
 
     private RedshiftServerlessService service;
     private AccountAwareStorageBackend<Namespace> store;
+    private AccountAwareStorageBackend<Workgroup> workgroupStore;
+    private RedshiftServerlessEndpoints endpoints;
+    private RedshiftServerlessRuntime runtime;
+    private int nextPort;
 
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -45,13 +63,24 @@ class RedshiftServerlessServiceTest {
         store = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-namespaces.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) store);
+        workgroupStore = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-workgroups.json"),
+                any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) workgroupStore);
 
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.buildArn(eq("redshift-serverless"), any(String.class), any(String.class)))
                 .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
                         + invocation.getArgument(1, String.class) + ":" + ACCOUNT_ID + ":"
                         + invocation.getArgument(2, String.class));
-        service = new RedshiftServerlessService(storageFactory, regionResolver);
+        nextPort = 7100;
+        endpoints = mock(RedshiftServerlessEndpoints.class);
+        when(endpoints.allocate()).thenAnswer(invocation -> new Endpoint("localhost", nextPort++));
+        runtime = mock(RedshiftServerlessRuntime.class);
+        when(runtime.generatePassword()).thenReturn("Generated123");
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
+        service = new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime);
     }
 
     @Test
@@ -300,7 +329,483 @@ class RedshiftServerlessServiceTest {
         assertEquals(Map.of("env", "dev"), original.getTags());
     }
 
+    @Test
+    void createWorkgroupAppliesAwsDefaultsAndAllocatesAnEndpoint() {
+        create("wg-ns");
+
+        Workgroup workgroup = createWorkgroup("wg-one", "wg-ns");
+
+        assertEquals("AVAILABLE", workgroup.getStatus());
+        assertEquals("wg-ns", workgroup.getNamespaceName());
+        assertEquals(128, workgroup.getBaseCapacity());
+        assertEquals(5439, workgroup.getPort());
+        assertEquals("ipv4", workgroup.getIpAddressType());
+        assertEquals("current", workgroup.getTrackName());
+        assertEquals("DISABLED", workgroup.getPricePerformanceTarget().getStatus());
+        assertEquals("localhost", workgroup.getEndpoint().getAddress());
+        assertEquals(7100, workgroup.getEndpoint().getPort());
+        assertEquals("arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/" + workgroup.getWorkgroupId(),
+                workgroup.getWorkgroupArn());
+        assertEquals(workgroup.getWorkgroupId(), UUID.fromString(workgroup.getWorkgroupId()).toString());
+        assertEquals("wg-one", service.getWorkgroup("wg-one", REGION).getWorkgroupName());
+    }
+
+    @Test
+    void createWorkgroupRequiresAnExistingNamespace() {
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-orphan", "absent-ns")).getErrorCode());
+    }
+
+    @Test
+    void aNamespaceHasAtMostOneWorkgroupAndWorkgroupNamesAreUnique() {
+        create("one-ns");
+        create("two-ns");
+        createWorkgroup("wg-first", "one-ns");
+
+        assertEquals("ConflictException", assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-second", "one-ns")).getErrorCode());
+        assertEquals("ConflictException", assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-first", "two-ns")).getErrorCode());
+    }
+
+    @Test
+    void workgroupNamesAndSettingsAreValidated() {
+        create("valid-ns");
+        for (String name : List.of("ab", "Upper-Case", "has_underscore")) {
+            assertEquals("ValidationException", assertThrows(AwsException.class,
+                    () -> createWorkgroup(name, "valid-ns")).getErrorCode(), name);
+        }
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.createWorkgroup("bad-port", "valid-ns", settings(5000, null, null, null), null, REGION))
+                .getErrorCode());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.createWorkgroup("bad-ip", "valid-ns", settings(null, "ipv6", null, null), null, REGION))
+                .getErrorCode());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.createWorkgroup("bad-target", "valid-ns",
+                        settings(null, null, new PricePerformanceTarget("MAYBE", null), null), null, REGION))
+                .getErrorCode());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.createWorkgroup("bad-level", "valid-ns",
+                        settings(null, null, new PricePerformanceTarget("ENABLED", 101), null), null, REGION))
+                .getErrorCode());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.createWorkgroup("bad-track", "valid-ns", settings(null, null, null, "no-dashes"), null, REGION))
+                .getErrorCode());
+        assertTrue(service.listWorkgroups(REGION, null, null).items().isEmpty(),
+                "a rejected create must leave nothing behind");
+    }
+
+    @Test
+    void acceptedPortsIncludeBothDocumentedRanges() {
+        create("ports-ns");
+        create("ports-two-ns");
+        assertEquals(5431, service.createWorkgroup("low-port", "ports-ns",
+                settings(5431, null, null, null), null, REGION).getPort());
+        assertEquals(8215, service.createWorkgroup("high-port", "ports-two-ns",
+                settings(8215, null, null, null), null, REGION).getPort());
+    }
+
+    @Test
+    void getAndDeleteRejectAnUnknownWorkgroup() {
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.getWorkgroup("absent-wg", REGION)).getErrorCode());
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.deleteWorkgroup("absent-wg", REGION)).getErrorCode());
+    }
+
+    @Test
+    void updateWorkgroupAppliesOnlySuppliedFieldsAndRecordsAPendingTrack() {
+        create("upd-ns");
+        service.createWorkgroup("upd-wg", "upd-ns", new WorkgroupSettings(32, 64, null, true, null,
+                List.of(new ConfigParameter("datestyle", "ISO, MDY")), List.of("sg-1"), List.of("subnet-1"),
+                null, null, null, null), null, REGION);
+
+        Workgroup updated = service.updateWorkgroup("upd-wg", new WorkgroupSettings(null, 128, null, null, null,
+                null, null, null, null, null, null, "trailing"), REGION);
+
+        assertEquals(32, updated.getBaseCapacity());
+        assertEquals(128, updated.getMaxCapacity());
+        assertTrue(updated.isPubliclyAccessible());
+        assertEquals("datestyle", updated.getConfigParameters().get(0).getParameterKey());
+        assertEquals(List.of("sg-1"), updated.getSecurityGroupIds());
+        assertEquals("current", updated.getTrackName());
+        assertEquals("trailing", updated.getPendingTrackName());
+
+        Workgroup reverted = service.updateWorkgroup("upd-wg", new WorkgroupSettings(null, null, null, null, null,
+                null, null, null, null, null, null, "current"), REGION);
+        assertNull(reverted.getPendingTrackName());
+    }
+
+    @Test
+    void updateStoresACopySoAReaderNeverSeesAHalfAppliedWorkgroupChange() {
+        create("copy-wg-ns");
+        createWorkgroup("copy-wg", "copy-wg-ns");
+        Workgroup before = service.getWorkgroup("copy-wg", REGION);
+
+        service.updateWorkgroup("copy-wg", new WorkgroupSettings(64, null, null, null, null,
+                null, null, null, null, null, null, null), REGION);
+
+        assertNotSame(before, service.getWorkgroup("copy-wg", REGION));
+        assertEquals(128, before.getBaseCapacity());
+        assertEquals(64, service.getWorkgroup("copy-wg", REGION).getBaseCapacity());
+    }
+
+    @Test
+    void deleteWorkgroupReportsDeletingReleasesTheEndpointAndFreesTheNamespace() {
+        create("del-wg-ns");
+        Workgroup created = createWorkgroup("del-wg", "del-wg-ns");
+
+        Workgroup deleted = service.deleteWorkgroup("del-wg", REGION);
+
+        assertEquals("DELETING", deleted.getStatus());
+        verify(endpoints).release(created.getEndpoint());
+        assertThrows(AwsException.class, () -> service.getWorkgroup("del-wg", REGION));
+        createWorkgroup("del-wg-again", "del-wg-ns");
+    }
+
+    @Test
+    void deleteNamespaceIsRejectedWhileAWorkgroupIsAttached() {
+        create("attached-ns");
+        createWorkgroup("attached-wg", "attached-ns");
+
+        assertEquals("ConflictException", assertThrows(AwsException.class,
+                () -> service.deleteNamespace("attached-ns", REGION)).getErrorCode());
+        assertEquals("attached-ns", service.getNamespace("attached-ns", REGION).getNamespaceName());
+
+        service.deleteWorkgroup("attached-wg", REGION);
+        assertEquals("DELETING", service.deleteNamespace("attached-ns", REGION).getStatus());
+    }
+
+    @Test
+    void listWorkgroupsIsScopedToTheRegionAndPaginates() {
+        create("list-a-ns");
+        create("list-b-ns");
+        service.createNamespace("list-w-ns", "admin", null, null, null, null, null, Map.of(), "us-west-2");
+        createWorkgroup("alpha-wg", "list-a-ns");
+        createWorkgroup("beta-wg", "list-b-ns");
+        service.createWorkgroup("gamma-wg", "list-w-ns", emptySettings(), null, "us-west-2");
+
+        assertEquals(List.of("alpha-wg", "beta-wg"),
+                service.listWorkgroups(REGION, null, null).items().stream().map(Workgroup::getWorkgroupName).toList());
+        PaginatedResult<Workgroup> firstPage = service.listWorkgroups(REGION, 1, null);
+        assertEquals(List.of("alpha-wg"), firstPage.items().stream().map(Workgroup::getWorkgroupName).toList());
+        assertEquals(List.of("beta-wg"), service.listWorkgroups(REGION, 1, firstPage.nextToken()).items().stream()
+                .map(Workgroup::getWorkgroupName).toList());
+    }
+
+    @Test
+    void workgroupTagsAreManagedThroughTheWorkgroupArn() {
+        create("tag-wg-ns");
+        Workgroup created = service.createWorkgroup("tag-wg", "tag-wg-ns", emptySettings(),
+                Map.of("env", "dev"), REGION);
+        String arn = created.getWorkgroupArn();
+
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(arn, REGION));
+        service.tagResource(arn, Map.of("team", "data"), REGION);
+        assertEquals(Map.of("env", "dev", "team", "data"), service.listTagsForResource(arn, REGION));
+        service.untagResource(arn, List.of("env"), REGION);
+        assertEquals(Map.of("team", "data"), service.listTagsForResource(arn, REGION));
+
+        // The namespace's own tags are a separate set.
+        assertTrue(service.listTagsForResource(service.getNamespace("tag-wg-ns", REGION).getNamespaceArn(), REGION)
+                .isEmpty());
+        verify(workgroupStore, atLeastOnce()).put(eq(REGION + "::tag-wg"), any(Workgroup.class));
+    }
+
+    @Test
+    void clearRemovesWorkgroupsAndReleasesTheirEndpoints() {
+        create("clear-wg-ns");
+        Workgroup created = createWorkgroup("clear-wg", "clear-wg-ns");
+
+        service.clear();
+
+        assertTrue(service.listWorkgroups(REGION, null, null).items().isEmpty());
+        verify(endpoints).release(created.getEndpoint());
+    }
+
+    @Test
+    void createWorkgroupStartsTheRuntimeWithTheNamespaceAdminAndRecordsWhereItListens() {
+        service.createNamespace("rt-ns", "root", "Secret123", "analytics", null, null, null, null, Map.of(), REGION);
+
+        Workgroup workgroup = createWorkgroup("rt-wg", "rt-ns");
+
+        verify(runtime).start(eq(ACCOUNT_ID), eq(REGION), eq("rt-wg"), eq("root"), eq("Secret123"),
+                eq("analytics"), eq(workgroup.getEndpoint()), eq(false), any());
+        Workgroup stored = service.getWorkgroup("rt-wg", REGION);
+        assertEquals("127.0.0.1", stored.getRuntimeHost());
+        assertEquals(55432, stored.getRuntimePort());
+        assertEquals("root", stored.getMasterUsername());
+    }
+
+    @Test
+    void aNamespaceWithoutAPasswordGetsAGeneratedOneThatIsKeptForTheBackend() {
+        service.createNamespace("gen-ns", null, null, null, null, null, null, Map.of(), REGION);
+
+        createWorkgroup("gen-wg", "gen-ns");
+
+        verify(runtime).start(eq(ACCOUNT_ID), eq(REGION), eq("gen-wg"), eq("admin"), eq("Generated123"),
+                eq("dev"), any(Endpoint.class), eq(false), any());
+        assertEquals("Generated123", store.get(REGION + "::gen-ns").orElseThrow().getAdminUserPassword());
+    }
+
+    @Test
+    void theAdminSupplierHandedToTheRuntimeTracksTheNamespaceAsItChanges() {
+        service.createNamespace("sup-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("sup-wg", "sup-ns");
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Supplier<Optional<RedshiftServerlessRuntime.AdminCredentials>>> supplier =
+                ArgumentCaptor.forClass(Supplier.class);
+        verify(runtime).start(any(), any(), any(), any(), any(), any(), any(), anyBoolean(), supplier.capture());
+
+        assertEquals(new RedshiftServerlessRuntime.AdminCredentials("root", "Secret123"),
+                supplier.getValue().get().orElseThrow());
+        service.updateNamespace("sup-ns", "renamed", "Changed123", null, null, null, null, REGION);
+
+        assertEquals(new RedshiftServerlessRuntime.AdminCredentials("renamed", "Changed123"),
+                supplier.getValue().get().orElseThrow());
+    }
+
+    @Test
+    void aRuntimeThatFailsToStartLeavesNoWorkgroupAndReleasesTheEndpoint() {
+        create("fail-ns");
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenThrow(new AwsException("InternalFailure", "Failed to start container", 500));
+
+        assertThrows(AwsException.class, () -> createWorkgroup("fail-wg", "fail-ns"));
+
+        assertTrue(service.listWorkgroups(REGION, null, null).items().isEmpty());
+        verify(endpoints).release(any(Endpoint.class));
+    }
+
+    @Test
+    void aFailedPersistAfterTheRuntimeStartedStopsTheRuntimeAndReleasesTheEndpoint() {
+        create("persist-ns");
+        doThrow(new IllegalStateException("disk full")).when(workgroupStore)
+                .put(eq(REGION + "::persist-wg"), any(Workgroup.class));
+
+        assertThrows(IllegalStateException.class, () -> createWorkgroup("persist-wg", "persist-ns"));
+
+        verify(runtime).stop(ACCOUNT_ID, REGION, "persist-wg");
+        verify(endpoints).release(any(Endpoint.class));
+    }
+
+    @Test
+    void deleteWorkgroupStopsTheRuntimeFirstAndKeepsTheWorkgroupWhenThatFails() {
+        create("stop-ns");
+        createWorkgroup("stop-wg", "stop-ns");
+        doThrow(new RuntimeException("listener would not close")).when(runtime).stop(ACCOUNT_ID, REGION, "stop-wg");
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.deleteWorkgroup("stop-wg", REGION));
+
+        assertEquals("InternalServerException", failure.getErrorCode());
+        assertEquals("stop-wg", service.getWorkgroup("stop-wg", REGION).getWorkgroupName());
+        verify(endpoints, never()).release(any(Endpoint.class));
+    }
+
+    @Test
+    void changingTheAdminPasswordReachesTheRunningBackendBeforeItIsStored() {
+        service.createNamespace("pw-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("pw-wg", "pw-ns");
+
+        service.updateNamespace("pw-ns", null, "Changed123", null, null, null, null, REGION);
+
+        verify(runtime).changeMasterPassword(ACCOUNT_ID, REGION, "pw-wg", "root", "dev", "Secret123", "Changed123");
+        assertEquals("Changed123", store.get(REGION + "::pw-ns").orElseThrow().getAdminUserPassword());
+    }
+
+    @Test
+    void aPasswordTheBackendRefusesLeavesTheNamespaceUnchangedAndIsAValidationError() {
+        service.createNamespace("bad-pw-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("bad-pw-wg", "bad-pw-ns");
+        doThrow(new AwsException("InvalidParameterValue", "too short", 400)).when(runtime)
+                .changeMasterPassword(any(), any(), any(), any(), any(), any(), eq("short"));
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> service.updateNamespace("bad-pw-ns", null, "short", null, null, null, null, REGION));
+
+        assertEquals("ValidationException", rejected.getErrorCode());
+        assertEquals("Secret123", store.get(REGION + "::bad-pw-ns").orElseThrow().getAdminUserPassword());
+    }
+
+    @Test
+    void aNamespaceThatCannotBeStoredPutsTheBackendPasswordBack() {
+        service.createNamespace("undo-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("undo-wg", "undo-ns");
+        doThrow(new IllegalStateException("disk full")).when(store)
+                .put(eq(REGION + "::undo-ns"), any(Namespace.class));
+
+        assertThrows(IllegalStateException.class,
+                () -> service.updateNamespace("undo-ns", null, "Changed123", null, null, null, null, REGION));
+
+        verify(runtime).restoreMasterPassword(ACCOUNT_ID, REGION, "undo-wg", "root", "dev", "Secret123");
+    }
+
+    @Test
+    void aFailedPasswordRestoreDoesNotMaskTheStorageFailure() {
+        service.createNamespace("mask-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("mask-wg", "mask-ns");
+        IllegalStateException storageFailure = new IllegalStateException("disk full");
+        doThrow(storageFailure).when(store).put(eq(REGION + "::mask-ns"), any(Namespace.class));
+        doThrow(new RuntimeException("psql failed")).when(runtime)
+                .restoreMasterPassword(any(), any(), any(), any(), any(), any());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> service.updateNamespace("mask-ns", null, "Changed123", null, null, null, null, REGION));
+
+        assertEquals(storageFailure, thrown);
+    }
+
+    @Test
+    void aNamespaceUpdateThatFailsValidationNeverTouchesTheBackendPassword() {
+        service.createNamespace("order-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("order-wg", "order-ns");
+
+        assertThrows(AwsException.class, () -> service.updateNamespace(
+                "order-ns", null, "Changed123", null, null, null, List.of("bogus"), REGION));
+
+        verify(runtime, never()).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void reconcileNamespaceResetsAnOmittedKmsKeyAndDefaultRole() {
+        service.createNamespace("rec-ns", "root", null, null, "custom-key", "arn:aws:iam::000000000000:role/r",
+                null, null, Map.of(), REGION);
+
+        Namespace reconciled = service.reconcileNamespace("rec-ns", null, null, null, null, null, null, REGION);
+
+        assertEquals(RedshiftServerlessService.AWS_OWNED_KMS_KEY, reconciled.getKmsKeyId());
+        assertNull(reconciled.getDefaultIamRoleArn());
+    }
+
+    @Test
+    void updateNamespaceKeepsAnOmittedKmsKeyAndDefaultRole() {
+        service.createNamespace("keep-ns", "root", null, null, "custom-key", "arn:aws:iam::000000000000:role/r",
+                null, null, Map.of(), REGION);
+
+        Namespace updated = service.updateNamespace("keep-ns", null, null, null, null, null, null, REGION);
+
+        assertEquals("custom-key", updated.getKmsKeyId());
+        assertEquals("arn:aws:iam::000000000000:role/r", updated.getDefaultIamRoleArn());
+    }
+
+    @Test
+    void clearKeepsTheEndpointReservedWhenTheRuntimeCannotBeStopped() {
+        create("hold-ns");
+        Workgroup created = createWorkgroup("hold-wg", "hold-ns");
+        doThrow(new RuntimeException("listener still bound")).when(runtime).stop(ACCOUNT_ID, REGION, "hold-wg");
+
+        service.clear();
+
+        verify(endpoints, never()).release(created.getEndpoint());
+    }
+
+    @Test
+    void anAdminPasswordChangeWithNoWorkgroupJustStoresIt() {
+        service.createNamespace("solo-ns", "root", null, null, null, null, null, null, Map.of(), REGION);
+
+        service.updateNamespace("solo-ns", null, "Changed123", null, null, null, null, REGION);
+
+        verify(runtime, never()).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
+        assertEquals("Changed123", store.get(REGION + "::solo-ns").orElseThrow().getAdminUserPassword());
+    }
+
+    @Test
+    void getCredentialsMintsForTheDbUserWithTheDocumentedDurations() {
+        create("cred-ns");
+        createWorkgroup("cred-wg", "cred-ns");
+        TempCredential minted = new TempCredential("IAM:alice", "pw", Instant.parse("2026-10-03T00:15:00Z"), List.of());
+        when(runtime.issueCredential(ACCOUNT_ID, REGION, "cred-wg", "IAM:alice", 900)).thenReturn(minted);
+        when(runtime.issueCredential(ACCOUNT_ID, REGION, "cred-wg", "IAM:alice", 3600)).thenReturn(minted);
+
+        assertEquals(minted, service.getCredentials("cred-wg", null, null, "IAM:alice", REGION));
+        assertEquals(minted, service.getCredentials("cred-wg", "dev", 3600, "IAM:alice", REGION));
+        for (int bad : new int[] {899, 3601}) {
+            assertEquals("ValidationException", assertThrows(AwsException.class,
+                    () -> service.getCredentials("cred-wg", null, bad, "IAM:alice", REGION)).getErrorCode());
+        }
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.getCredentials("cred-wg", "other", null, "IAM:alice", REGION)).getErrorCode());
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.getCredentials("absent-wg", null, null, "IAM:alice", REGION)).getErrorCode());
+    }
+
+    @Test
+    void aWorkgroupTargetResolvesByNameOrArnAndNeedsALiveRuntime() {
+        service.createNamespace("tgt-ns", "root", "Secret123", "analytics", null, null, null, null, Map.of(), REGION);
+        Workgroup created = createWorkgroup("tgt-wg", "tgt-ns");
+
+        for (String reference : List.of("tgt-wg", created.getWorkgroupArn())) {
+            RedshiftServerlessService.WorkgroupTarget target = service.getWorkgroupTarget(reference, REGION);
+            assertEquals(created.getWorkgroupArn(), target.arn());
+            assertEquals("127.0.0.1", target.host());
+            assertEquals(55432, target.port());
+            assertEquals("analytics", target.database());
+            assertEquals("root", target.masterUsername());
+            assertEquals("Secret123", target.masterPassword());
+        }
+        String absentArn = "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID
+                + ":workgroup/00000000-0000-0000-0000-000000000000";
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.getWorkgroupTarget(absentArn, REGION)).getErrorCode());
+
+        Workgroup dead = new Workgroup(service.getWorkgroup("tgt-wg", REGION));
+        dead.setRuntimeHost(null);
+        dead.setRuntimePort(0);
+        workgroupStore.put(REGION + "::tgt-wg", dead);
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.getWorkgroupTarget("tgt-wg", REGION)).getErrorCode());
+    }
+
+    @Test
+    void startupRestoresEachWorkgroupRuntimeAndClearsTheOnesItCannotRestore() {
+        service.createNamespace("rec-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        service.createNamespace("rec-bad-ns", "root", "Secret123", null, null, null, null, null, Map.of(), REGION);
+        createWorkgroup("rec-wg", "rec-ns");
+        createWorkgroup("rec-bad-wg", "rec-bad-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runtime.start(any(String.class), any(String.class), eq("rec-bad-wg"), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), eq(true), any()))
+                .thenThrow(new AwsException("InternalFailure", "no container", 500));
+        when(runtime.start(any(String.class), any(String.class), eq("rec-wg"), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), eq(true), any()))
+                .thenReturn(new RedshiftServerlessRuntime.Backend("10.0.0.9", 6000));
+
+        service.onStart(null);
+
+        assertEquals("10.0.0.9", service.getWorkgroup("rec-wg", REGION).getRuntimeHost());
+        assertEquals(6000, service.getWorkgroup("rec-wg", REGION).getRuntimePort());
+        assertNull(service.getWorkgroup("rec-bad-wg", REGION).getRuntimeHost());
+        assertEquals(0, service.getWorkgroup("rec-bad-wg", REGION).getRuntimePort());
+        assertEquals("AVAILABLE", service.getWorkgroup("rec-bad-wg", REGION).getStatus());
+    }
+
+    @Test
+    void clearStopsEveryRuntime() {
+        create("clr-ns");
+        createWorkgroup("clr-wg", "clr-ns");
+
+        service.clear();
+
+        verify(runtime).stop(ACCOUNT_ID, REGION, "clr-wg");
+    }
+
     private Namespace create(String namespaceName) {
         return service.createNamespace(namespaceName, "admin", null, null, null, null, null, Map.of(), REGION);
+    }
+
+    private Workgroup createWorkgroup(String workgroupName, String namespaceName) {
+        return service.createWorkgroup(workgroupName, namespaceName, emptySettings(), null, REGION);
+    }
+
+    private static WorkgroupSettings emptySettings() {
+        return new WorkgroupSettings(null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    private static WorkgroupSettings settings(Integer port, String ipAddressType, PricePerformanceTarget target,
+                                              String trackName) {
+        return new WorkgroupSettings(null, null, null, null, null, null, null, null, port, target,
+                ipAddressType, trackName);
     }
 }

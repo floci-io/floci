@@ -224,7 +224,7 @@ public class SesQueryHandler {
     private Response handleGetIdentityVerificationAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
 
-        var xml = new XmlBuilder().start("VerificationAttributes");
+        XmlBuilder xml = new XmlBuilder().start("VerificationAttributes");
         for (String identityValue : identities) {
             Identity identity =
                     identityService.getIdentityVerificationAttributes(identityValue, region);
@@ -306,7 +306,7 @@ public class SesQueryHandler {
     }
 
     private Response handleGetSendQuota(String region) {
-        var xml = new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .elem("Max24HourSend", "200.0")
                 .elem("MaxSendRate", "1.0")
                 .elem("SentLast24Hours",
@@ -316,7 +316,7 @@ public class SesQueryHandler {
 
     private Response handleGetSendStatistics(String region) {
         long sentCount = sentEmailService.countInRegion(region);
-        var xml = new XmlBuilder().start("SendDataPoints");
+        XmlBuilder xml = new XmlBuilder().start("SendDataPoints");
         if (sentCount > 0) {
             xml.start("member")
                .elem("DeliveryAttempts", String.valueOf(sentCount))
@@ -344,7 +344,7 @@ public class SesQueryHandler {
 
     private Response handleListVerifiedEmailAddresses(String region) {
         List<String> emails = identityService.getVerifiedEmailAddresses(region);
-        var xml = new XmlBuilder().start("VerifiedEmailAddresses");
+        XmlBuilder xml = new XmlBuilder().start("VerifiedEmailAddresses");
         for (String email : emails) {
             xml.elem("member", email);
         }
@@ -370,7 +370,7 @@ public class SesQueryHandler {
     private Response handleGetIdentityNotificationAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
 
-        var xml = new XmlBuilder().start("NotificationAttributes");
+        XmlBuilder xml = new XmlBuilder().start("NotificationAttributes");
         for (String identityValue : identities) {
             Identity identity =
                     identityService.getIdentityNotificationAttributes(identityValue, region);
@@ -400,7 +400,7 @@ public class SesQueryHandler {
     private Response handleGetIdentityDkimAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
 
-        var xml = new XmlBuilder().start("DkimAttributes");
+        XmlBuilder xml = new XmlBuilder().start("DkimAttributes");
         for (String identityValue : identities) {
             Identity identity =
                     identityService.getIdentityVerificationAttributes(identityValue, region);
@@ -442,7 +442,7 @@ public class SesQueryHandler {
     private Response handleVerifyDomainDkim(MultivaluedMap<String, String> params, String region) {
         String domain = getParam(params, "Domain");
         List<String> tokens = identityService.verifyDomainDkim(domain, region);
-        var xml = new XmlBuilder().start("DkimTokens");
+        XmlBuilder xml = new XmlBuilder().start("DkimTokens");
         for (String token : tokens) {
             xml.elem("member", token);
         }
@@ -496,7 +496,7 @@ public class SesQueryHandler {
 
     private Response handleGetIdentityMailFromDomainAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
-        var xml = new XmlBuilder().start("MailFromDomainAttributes");
+        XmlBuilder xml = new XmlBuilder().start("MailFromDomainAttributes");
         for (String identityValue : identities) {
             Identity identity = identityService.getMailFromAttributes(identityValue, region);
             xml.start("entry");
@@ -529,7 +529,7 @@ public class SesQueryHandler {
         String identity = requireParam(params, "Identity");
         List<String> names = extractMembers(params, "PolicyNames");
         Map<String, String> policies = policyService.getIdentityPolicies(identity, names, region);
-        var xml = new XmlBuilder().start("Policies");
+        XmlBuilder xml = new XmlBuilder().start("Policies");
         policies.forEach((name, doc) -> xml.start("entry").elem("key", name).elem("value", doc).end("entry"));
         xml.end("Policies");
         return Response.ok(AwsQueryResponse.envelope("GetIdentityPolicies", AwsNamespaces.SES, xml.build())).build();
@@ -537,7 +537,7 @@ public class SesQueryHandler {
 
     private Response handleListIdentityPolicies(MultivaluedMap<String, String> params, String region) {
         String identity = requireParam(params, "Identity");
-        var xml = new XmlBuilder().start("PolicyNames");
+        XmlBuilder xml = new XmlBuilder().start("PolicyNames");
         for (String name : policyService.listIdentityPolicyNames(identity, region)) {
             xml.elem("member", name);
         }
@@ -569,7 +569,7 @@ public class SesQueryHandler {
     private Response handleGetTemplate(MultivaluedMap<String, String> params, String region) {
         String templateName = getParam(params, "TemplateName");
         EmailTemplate template = templateService.getTemplate(templateName, region);
-        var xml = new XmlBuilder().start("Template")
+        XmlBuilder xml = new XmlBuilder().start("Template")
                 .elem("TemplateName", template.getTemplateName());
         if (template.getSubject() != null) {
             xml.elem("SubjectPart", template.getSubject());
@@ -1448,7 +1448,7 @@ public class SesQueryHandler {
     private static final java.util.Map<String, String> INTERNAL_EVENT_TYPE_TO_V1;
     static {
         java.util.Map<String, String> reverse = new java.util.HashMap<>();
-        for (var e : V1_EVENT_TYPE_TO_INTERNAL.entrySet()) {
+        for (Map.Entry<String, String> e : V1_EVENT_TYPE_TO_INTERNAL.entrySet()) {
             reverse.put(e.getValue(), e.getKey());
         }
         INTERNAL_EVENT_TYPE_TO_V1 = java.util.Map.copyOf(reverse);

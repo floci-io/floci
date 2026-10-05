@@ -77,6 +77,10 @@ opened and no traffic is forwarded. Only the control plane and health checking a
 - An Auto Scaling group that names Classic load balancers in `LoadBalancerNames` has its instances
   registered and deregistered automatically, so a Terraform `min_elb_capacity` wait can be
   satisfied.
+- A listener's `SSLCertificateId` must name an existing certificate: an IAM server certificate ARN
+  or an ACM certificate ARN. `CreateLoadBalancer` and `CreateLoadBalancerListeners` reject a
+  missing one with `CertificateNotFound`. An IAM server certificate a listener references cannot
+  be deleted: `DeleteServerCertificate` returns `DeleteConflict` until the listener is removed.
 
 ## Configuration
 

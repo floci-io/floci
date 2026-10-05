@@ -1,0 +1,120 @@
+package com.floci.test;
+
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.services.lambda.LambdaClient;
+import software.amazon.awssdk.services.lambda.model.*;
+import software.amazon.awssdk.services.lambda.model.Runtime;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * Lambda durable functions through the AWS SDK for Java v2: the Invoke extensions and the
+ * durable execution APIs, whose execution ARN travels percent-encoded in the request path.
+ */
+@DisplayName("Lambda durable functions")
+class LambdaDurableFunctionsTest {
+
+    private static final String ROLE = "arn:aws:iam::000000000000:role/lambda-role";
+    private static final String FN = TestFixtures.uniqueName("fn-durable-exec");
+
+    private static LambdaClient lambda;
+
+    @BeforeAll
+    static void setup() {
+        lambda = TestFixtures.lambdaClient();
+    }
+
+    @AfterAll
+    static void cleanup() {
+        if (lambda != null) {
+            try {
+                lambda.deleteFunction(DeleteFunctionRequest.builder().functionName(FN).build());
+            } catch (Exception ignored) {
+                // Cleanup only. A failed delete must not hide the test result.
+            }
+            lambda.close();
+        }
+    }
+
+    @Test
+    @DisplayName("a durable execution runs to completion and is readable through the execution APIs")
+    void durableExecutionRunsAndIsReadable() {
+        Assumptions.assumeTrue(TestFixtures.isLambdaDispatchAvailable(),
+                "skipping: Lambda dispatch (Docker) not available in this environment");
+
+        CreateFunctionResponse created = lambda.createFunction(CreateFunctionRequest.builder()
+                .functionName(FN)
+                .runtime(Runtime.PYTHON3_14)
+                .role(ROLE)
+                .handler("lambda_function.handler")
+                .timeout(30)
+                .publish(true)
+                .durableConfig(DurableConfig.builder().executionTimeout(120).retentionPeriodInDays(1).build())
+                .code(FunctionCode.builder().zipFile(SdkBytes.fromByteArray(LambdaUtils.durablePythonZip())).build())
+                .build());
+        assertThat(created.version()).isEqualTo("1");
+
+        InvokeResponse invoked = lambda.invoke(InvokeRequest.builder()
+                .functionName(FN + ":1")
+                .durableExecutionName("compat-sync")
+                .payload(SdkBytes.fromUtf8String("{\"wait\": 2}"))
+                .build());
+        assertThat(invoked.statusCode()).isEqualTo(200);
+        assertThat(invoked.functionError()).isNull();
+        assertThat(invoked.payload().asUtf8String()).contains("\"done\": true");
+        String arn = invoked.durableExecutionArn();
+        assertThat(arn).contains(":function:" + FN + ":1/durable-execution/compat-sync/");
+
+        GetDurableExecutionResponse execution = lambda.getDurableExecution(GetDurableExecutionRequest.builder()
+                .durableExecutionArn(arn)
+                .includeExecutionData(true)
+                .build());
+        assertThat(execution.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
+        assertThat(execution.durableExecutionName()).isEqualTo("compat-sync");
+        assertThat(execution.version()).isEqualTo("1");
+        assertThat(execution.inputPayload()).isEqualTo("{\"wait\": 2}");
+        assertThat(execution.result()).contains("\"done\": true");
+        assertThat(execution.durableConfig().executionTimeout()).isEqualTo(120);
+
+        ListDurableExecutionsByFunctionResponse listed = lambda.listDurableExecutionsByFunction(
+                ListDurableExecutionsByFunctionRequest.builder().functionName(FN).qualifier("1").build());
+        assertThat(listed.durableExecutions()).extracting(Execution::durableExecutionArn).containsExactly(arn);
+        assertThat(listed.durableExecutions().get(0).status()).isEqualTo(ExecutionStatus.SUCCEEDED);
+
+        GetDurableExecutionHistoryResponse history = lambda.getDurableExecutionHistory(
+                GetDurableExecutionHistoryRequest.builder().durableExecutionArn(arn).includeExecutionData(true).build());
+        assertThat(history.events()).extracting(Event::eventType)
+                .startsWith(EventType.EXECUTION_STARTED)
+                .contains(EventType.STEP_SUCCEEDED, EventType.WAIT_STARTED, EventType.WAIT_SUCCEEDED,
+                        EventType.INVOCATION_COMPLETED)
+                .endsWith(EventType.EXECUTION_SUCCEEDED);
+        assertThat(history.events().get(0).executionStartedDetails().input().payload()).isEqualTo("{\"wait\": 2}");
+
+        StopDurableExecutionResponse stopped = lambda.stopDurableExecution(StopDurableExecutionRequest.builder()
+                .durableExecutionArn(arn)
+                .build());
+        assertThat(stopped.stopTimestamp())
+                .as("stopping a finished execution reports the time it finished")
+                .isEqualTo(execution.endTimestamp());
+
+        assertThatThrownBy(() -> lambda.invoke(InvokeRequest.builder()
+                .functionName(FN + ":1")
+                .durableExecutionName("compat-sync")
+                .payload(SdkBytes.fromUtf8String("{\"wait\": 3}"))
+                .build()))
+                .isInstanceOf(DurableExecutionAlreadyStartedException.class);
+
+        assertThatThrownBy(() -> lambda.invoke(InvokeRequest.builder()
+                .functionName(FN)
+                .payload(SdkBytes.fromUtf8String("{}"))
+                .build()))
+                .isInstanceOf(InvalidParameterValueException.class)
+                .hasMessageContaining("You cannot invoke a durable function using an unqualified ARN.");
+    }
+}

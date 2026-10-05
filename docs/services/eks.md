@@ -209,13 +209,14 @@ The supported component prefixes correspond to k3s server argument flags:
 
 Floci manages a specific set of flags required for container networking, IAM authentication, audit logging, and topology emulation. Passing a conflicting value or modifier (such as `+=` or `-=`) for any of these flags causes `CreateCluster` to reject the request with `InvalidParameterException` (HTTP 400).
 
-Floci manages the following 16 flags:
+Floci manages the following 17 flags:
 - Kubelet:
   - `provider-id`: manages EC2 worker node identity.
-  - `node-labels`: manages topology zones and instance types.
+  - `node-labels`: manages topology zones, instance types, and nodegroup labels. Nodegroup labels merge directly into this managed argument rather than through the passthrough.
   - `system-reserved`: manages memory and CPU reservations.
   - `kube-reserved`: manages kubelet resource allocations.
   - `eviction-hard`: manages memory pressure thresholds.
+  - `register-with-taints`: manages worker node taints configured on managed nodegroups.
 - API server:
   - `authentication-token-webhook-config-file`: manages worker IAM authentication.
   - `authentication-token-webhook-version`: token webhook protocol version.
@@ -346,12 +347,37 @@ When a node group specifies a `launchTemplate`, Floci resolves the launch templa
 - **Failure handling**: If any user data script exits with a non-zero status or times out (30-minute limit), the node group status is set to `CREATE_FAILED` and `health.issues` is populated with code `NodeCreationFailure`, the failure message, and the node group name in `resourceIds`.
 - **Differences from EC2**: Scripts run inside the existing shared k3s container rather than an isolated VM instance. Other launch template settings (AMI, instance type, block device mappings, network interfaces) remain metadata-only and do not alter container provisioning.
 
+### Nodegroup labels, taints and capacity type
+
+When managed nodegroups are defined for a cluster, Floci applies their labels and taints to the Kubernetes worker node at startup via `--kubelet-arg` flags.
+
+#### Applied labels
+Floci configures `--kubelet-arg=node-labels=...` with the following entries:
+- Standard topology labels: `topology.kubernetes.io/region` and `topology.kubernetes.io/zone`.
+- Instance type: `node.kubernetes.io/instance-type` (sourced from the nodegroup's first configured instance type, or defaulting to `m5.large`).
+- EKS system labels:
+  - `eks.amazonaws.com/nodegroup=<nodegroupName>`
+  - `eks.amazonaws.com/capacityType=<ON_DEMAND|SPOT|CAPACITY_BLOCK>` (defaults to `ON_DEMAND` when omitted)
+  - `eks.amazonaws.com/nodegroup-image=<imageId>` (sourced from `releaseVersion`, launch template AMI, or defaulting to `ami-eks-k3s`)
+- User-defined labels: all key-value pairs specified in the nodegroup's `labels` map, excluding reserved system keys (`topology.kubernetes.io/*`, `eks.amazonaws.com/*`, and `node.kubernetes.io/instance-type`).
+
+#### Applied taints
+Floci configures `--kubelet-arg=register-with-taints=...` using the taints specified on the nodegroup. Each taint is formatted as `key=value:effect` (or `key:effect` if value is omitted or empty). AWS taint effects are mapped to standard Kubernetes casing:
+- `NO_SCHEDULE` maps to `NoSchedule`
+- `NO_EXECUTE` maps to `NoExecute`
+- `PREFER_NO_SCHEDULE` maps to `PreferNoSchedule`
+
+#### Single shared node mapping
+Floci runs one k3s container per cluster. The worker node reflects the metadata of the first active nodegroup (ordered by `createdAt` ascending, then `nodegroupName`). If additional nodegroups are created on the same cluster, Floci logs a warning that only the first nodegroup provides node metadata to the shared node.
+
+#### Timing and post-start nodegroups
+Kubelet flags are fixed when the cluster container starts. For nodegroups created while the cluster is already running, metadata is recorded in the EKS store and Floci logs an informational message that labels and taints are not applied to the running node. Surviving cluster containers are adopted as-is without rebuilding kubelet flags on restore.
+
 ### Metadata only inputs
 
 The remaining structured inputs are recorded as metadata:
 
 - `remoteAccess` does not open SSH access, and the referenced key pair and security groups are not wired up.
-- `taints` are not applied to Kubernetes nodes, so pods are not repelled from them.
 - `nodeRepairConfig` starts no repair loop, and `warmPoolConfig` pre-initializes no instances.
 
 The value of storing them is state fidelity: infrastructure tools read `DescribeNodegroup` back and compare it against their declared configuration. Dropping `launchTemplate` in particular made the OpenTofu AWS provider see a node group with no launch template where one was declared, which is a `ForceNew` difference and caused a destroy and recreate on every plan.
@@ -510,6 +536,14 @@ Floci derives the availability zone from the cluster region (for example, `<regi
 
 The node name, the instance ID in `spec.providerID`, and the synthetic EC2 instance (`InstanceId` and `PrivateDnsName`) all describe the same instance. This enables controllers that reconcile nodes against EC2 (such as CSI drivers) to look up the node instance via `DescribeInstances`.
 
+#### Storage classes
+
+Stock Amazon EKS clusters historically define a default `gp2` StorageClass pointing to the legacy in-tree `kubernetes.io/aws-ebs` plugin, but run no active storage provisioner without the EBS CSI driver. Unqualified PersistentVolumeClaims remain `Pending` on EKS because nothing can provision them. Floci matches this behavior by disabling k3s's bundled `local-path` provisioner and StorageClass, preventing unqualified claims from silently binding to the node filesystem.
+
+Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass.
+
+For local testing workflows that rely on automatic volume binding without a CSI driver, set `floci.services.eks.default-storage-class: true` (or `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS=true`) to retain k3s's bundled `local-path` provisioner and default StorageClass.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -528,6 +562,8 @@ The node name, the instance ID in `spec.providerID`, and the synthetic EC2 insta
 | `FLOCI_SERVICES_EKS_ENDPOINT_MODE` | `host` | `describe-cluster` endpoint: `host` (`localhost:<hostPort>`) or `network` (container DNS) |
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
+| `FLOCI_SERVICES_EKS_DISABLE_CNI` | `false` | Start k3s without bundled flannel, network policy, and kube-proxy so an external CNI can take over |
+| `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS` | `false` | Retain k3s bundled local-path provisioner and default StorageClass (default false matches EKS with no default class) |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
 | `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `true` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true` |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |

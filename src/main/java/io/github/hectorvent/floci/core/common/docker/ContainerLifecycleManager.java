@@ -1317,8 +1317,8 @@ public class ContainerLifecycleManager {
     private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort, String preferredNetwork) {
         if (!containerDetector.isRunningInContainer()) {
             // Native mode: use localhost and the bound host port
-            var bindings = inspect.getNetworkSettings().getPorts().getBindings();
-            var binding = bindings.get(ExposedPort.tcp(containerPort));
+            Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
+            Ports.Binding[] binding = bindings.get(ExposedPort.tcp(containerPort));
 
             if (binding != null && binding.length > 0) {
                 int hostPort = Integer.parseInt(binding[0].getHostPortSpec());
@@ -1343,7 +1343,7 @@ public class ContainerLifecycleManager {
     }
 
     private String resolveContainerIp(InspectContainerResponse inspect, String preferredNetwork) {
-        var networks = inspect.getNetworkSettings().getNetworks();
+        Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
         if (networks != null) {
             // Prefer the configured network so that when the container is on both
             // bridge (default) and the service network, we return the right IP.

@@ -1920,19 +1920,18 @@ public class S3Service implements Resettable, ResourceProvider {
                         S3Object newLatest = remaining.stream()
                                 .max(Comparator.comparing(S3Object::getLastModified))
                                 .orElseThrow();
+                        // The promoted version's body becomes current before its metadata is
+                        // published, the order storeObjectInternal writes in, so a concurrent GET
+                        // never pairs the promoted version with the deleted version's bytes.
+                        // Delete markers have no versioned file.
+                        if (!newLatest.isDeleteMarker()) {
+                            promoteVersionedFile(bucketName, key, newLatest.getVersionId());
+                        }
                         newLatest.setLatest(true);
                         objectStore.put(versionedKey(bucketName, key, newLatest.getVersionId()), newLatest);
                         objectStore.put(latestKey, newLatest);
-                        // Delete markers have no versioned file — readVersionedFile throws in persistent mode.
                         if (newLatest.isDeleteMarker()) {
                             deleteFile(bucketName, key);
-                        } else {
-                            byte[] promotedData = readVersionedFile(bucketName, key, newLatest.getVersionId());
-                            if (promotedData != null) {
-                                writeFile(bucketName, key, promotedData);
-                            } else {
-                                deleteFile(bucketName, key);
-                            }
                         }
                     }
                 }
@@ -5763,10 +5762,6 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private byte[] readVersionedFile(String bucketName, String key, String versionId) {
-        return readVersionedFile(ownerId(), bucketName, key, versionId);
-    }
-
     private byte[] readVersionedFile(String accountId, String bucketName, String key, String versionId) {
         if (inMemory) {
             return memoryDataStore.get(physicalVersionedKey(accountId, bucketName, key, versionId));
@@ -5850,9 +5845,9 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * Gives {@code target} the file already stored at {@code source} through a hard link, so a
-     * versioned multipart object is kept once instead of being copied under the bucket lock.
-     * Sharing the file is safe because no object file is ever modified in place: every write
+     * Gives {@code target} the file already stored at {@code source} through a hard link, so a body
+     * a versioned object already has on disk is shared instead of being copied under the bucket
+     * lock. Sharing the file is safe because no object file is ever modified in place: every write
      * replaces its path with a rename, which leaves the file under the other name untouched.
      * A filesystem without hard links gets a copy instead.
      */
@@ -5872,9 +5867,27 @@ public class S3Service implements Resettable, ResourceProvider {
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to link S3 object file into place", e);
         } finally {
-            deleteQuietly(tmp, "temporary link of a versioned multipart object that was not published");
+            deleteQuietly(tmp, "temporary link of an S3 object file that was not put in place");
             lock.unlock();
         }
+    }
+
+    /**
+     * Makes the stored body of {@code versionId} the key's current body without reading it, so a
+     * version of any size can be promoted: on disk the current file becomes a hard link to the
+     * version's file, and in memory both entries share the version's array.
+     */
+    private void promoteVersionedFile(String bucketName, String key, String versionId) {
+        if (inMemory) {
+            byte[] data = memoryDataStore.get(physicalVersionedKey(bucketName, key, versionId));
+            if (data != null) {
+                memoryDataStore.put(physicalKey(bucketName, key), data);
+            } else {
+                deleteFile(bucketName, key);
+            }
+            return;
+        }
+        linkIntoPlace(resolveVersionedPathForRead(bucketName, key, versionId), resolveObjectPath(bucketName, key));
     }
 
     private byte[] readFile(String bucketName, String key) {

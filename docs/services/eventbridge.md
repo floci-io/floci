@@ -39,6 +39,11 @@
 | `UpdateConnection` | Update connection description, auth type, or auth parameters |
 | `DeleteConnection` | Delete a connection |
 | `ListConnections` | List connections, optionally filtered by name prefix or state |
+| `CreateApiDestination` | Create an HTTP or HTTPS API destination for EventBridge targets |
+| `DescribeApiDestination` | Get API destination details including endpoint, HTTP method, and rate limit |
+| `UpdateApiDestination` | Update API destination endpoint, HTTP method, connection, or rate limit |
+| `DeleteApiDestination` | Delete an API destination |
+| `ListApiDestinations` | List API destinations, optionally filtered by name prefix or connection ARN |
 | `StartReplay` | - |
 | `DescribeReplay` | - |
 | `CancelReplay` | - |
@@ -138,6 +143,54 @@ role, as documented by AWS.
 The value must be between 1 and 1600 characters when supplied. Floci stores
 the role as configuration; target delivery does not assume it or enforce its
 IAM policies.
+
+## API Destination Targets
+
+A matching rule can send events directly to HTTP or HTTPS endpoints via API destinations. An API destination pairs an HTTP endpoint URL and HTTP method with an EventBridge Connection for authentication (API key, basic auth, or OAuth client credentials).
+
+```bash
+# 1. Create a connection with API key auth
+aws events create-connection \
+  --name webhook-auth \
+  --authorization-type API_KEY \
+  --auth-parameters '{"ApiKeyAuthParameters":{"ApiKeyName":"x-api-key","ApiKeyValue":"secret123"}}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# 2. Create an API destination
+aws events create-api-destination \
+  --name webhook-dest \
+  --connection-arn "arn:aws:events:us-east-1:000000000000:connection/webhook-auth" \
+  --invocation-endpoint "https://api.example.com/events/*" \
+  --http-method POST \
+  --invocation-rate-limit-per-second 10 \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# 3. Add the API destination as a target with path and query parameters
+aws events put-targets \
+  --rule order-placed-rule \
+  --event-bus-name my-bus \
+  --targets '[{
+    "Id": "post-to-webhook",
+    "Arn": "arn:aws:events:us-east-1:000000000000:api-destination/webhook-dest",
+    "HttpParameters": {
+      "PathParameterValues": ["orders"],
+      "QueryStringParameters": {"version": "v1"},
+      "HeaderParameters": {"X-Custom-Header": "eventbridge"}
+    }
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+- `InvocationEndpoint` must be an `http` or `https` URL.
+- Path parameter wildcards (`*`) in the path of `InvocationEndpoint` are substituted in order by `PathParameterValues`. Each value is percent-encoded as a single path segment, and a `*` in the host or query is never substituted.
+- Query string and header parameters from both the Connection and the Target are merged and forwarded on the outgoing HTTP request. Connection `BodyParameters` are merged into the event body when it is a JSON object.
+- `OAUTH_CLIENT_CREDENTIALS` connections run the RFC 6749 client-credentials exchange against `AuthorizationEndpoint` for each delivery: the client ID and secret go in a `Basic` `Authorization` header, the body is form-encoded `grant_type=client_credentials` plus any `BodyParameters`, and the returned `access_token` is sent as `Authorization: <token_type> <access_token>`. Tokens are not cached.
+- If the connection is missing, or its authorization cannot be obtained, the delivery is dropped instead of being sent unauthenticated.
+- Requests to link-local and AWS metadata endpoints (such as `169.254.0.0/16`) are blocked for SSRF protection, including for the OAuth endpoint. The host is resolved once for the check and again when the request is sent, so DNS rebinding is not fully prevented.
+- A delivery that fails with a connection error, HTTP 429 or HTTP 5xx is retried and dead-lettered like any other target (see Target Retry and Dead-Letter Queues). Any other failure is permanent and goes straight to the dead-letter queue: another non-2xx response, an invalid or blocked URL, a missing connection, or an OAuth token request that fails.
+- `InvocationRateLimitPerSecond` is enforced per destination with a one-second window. An event over the limit is treated as throttled and retried with backoff.
+- A destination or connection ARN taken before the resource was deleted and recreated under the same name no longer resolves.
+- `ListApiDestinations` supports `Limit` (1 to 100) and `NextToken`.
 
 ## Target Retry and Dead-Letter Queues
 

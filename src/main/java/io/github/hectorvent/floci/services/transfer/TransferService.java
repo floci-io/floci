@@ -294,6 +294,21 @@ public class TransferService {
         return key;
     }
 
+    /**
+     * Puts back a key exactly as it was, keeping its id and import date, so a CloudFormation rollback
+     * does not hand callers a new id for a key they already hold. A key already present is left alone.
+     */
+    public void restoreSshPublicKey(String serverId, String userName, SshPublicKey key) {
+        User user = getUser(serverId, userName);
+        List<SshPublicKey> keys = new ArrayList<>(user.getSshPublicKeys() != null ? user.getSshPublicKeys() : List.of());
+        if (keys.stream().anyMatch(k -> k.getSshPublicKeyId().equals(key.getSshPublicKeyId()))) {
+            return;
+        }
+        keys.add(key);
+        user.setSshPublicKeys(keys);
+        putUser(user);
+    }
+
     public void deleteSshPublicKey(String serverId, String userName, String sshPublicKeyId) {
         User user = getUser(serverId, userName);
         List<SshPublicKey> keys = new ArrayList<>(user.getSshPublicKeys() != null ? user.getSshPublicKeys() : List.of());

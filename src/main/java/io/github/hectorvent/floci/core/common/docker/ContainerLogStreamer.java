@@ -290,7 +290,7 @@ public class ContainerLogStreamer {
         private static final ScheduledExecutorService CLOSE_DRAIN_SCHEDULER = closeDrainScheduler();
 
         private static ScheduledExecutorService closeDrainScheduler() {
-            var scheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
+            ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
                 Thread thread = new Thread(runnable, "floci-container-log-close");
                 thread.setDaemon(true);
                 return thread;

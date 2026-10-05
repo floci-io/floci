@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -21,6 +23,8 @@ public class ServerCertificate {
     private String serverCertificateId;
     private String path = "/";
     private String arn;
+    /** ARNs the certificate carried before a rename or move, which a referrer may still hold. */
+    private List<String> formerArns = new ArrayList<>();
     private String certificateBody;
     /** PEM private key. Never echoed back: no AWS reader returns it once uploaded. */
     private String privateKey;
@@ -45,6 +49,10 @@ public class ServerCertificate {
     public void setPath(String path) { this.path = path; }
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
+    public List<String> getFormerArns() { return formerArns; }
+    public void setFormerArns(List<String> formerArns) {
+        this.formerArns = formerArns == null ? new ArrayList<>() : new ArrayList<>(formerArns);
+    }
     public String getCertificateBody() { return certificateBody; }
     public void setCertificateBody(String certificateBody) { this.certificateBody = certificateBody; }
     public String getPrivateKey() { return privateKey; }

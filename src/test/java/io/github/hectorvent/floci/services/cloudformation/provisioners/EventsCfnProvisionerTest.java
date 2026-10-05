@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
+import io.github.hectorvent.floci.services.eventbridge.model.HttpParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import org.junit.jupiter.api.Test;
@@ -355,5 +357,180 @@ class EventsCfnProvisionerTest {
         ArgumentCaptor<List<Target>> put = ArgumentCaptor.forClass(List.class);
         verify(events, times(n)).putTargets(eq("orders"), any(), put.capture(), anyString());
         return put.getAllValues().stream().map(call -> call.stream().map(Target::getId).toList()).toList();
+    }
+
+    // ── ApiDestination provisioning and deleting ──────────────────────────────
+
+    @Test
+    void provisionApiDestinationCreatesResource() {
+        ApiDestination destination = new ApiDestination(
+                "orders-dest",
+                "arn:aws:events:us-east-1:000000000000:api-destination/orders-dest/12345678",
+                "arn:aws:events:us-east-1:000000000000:connection/conn/111",
+                "https://api.example.com/orders",
+                "POST",
+                10,
+                "Orders destination");
+        when(events.createApiDestination(eq("orders-dest"), eq("Orders destination"),
+                eq("arn:aws:events:us-east-1:000000000000:connection/conn/111"),
+                eq("https://api.example.com/orders"), eq("POST"), eq(10), eq(REGION)))
+                .thenReturn(destination);
+
+        StackResource r = resource("AWS::Events::ApiDestination", "MyDestination");
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "orders-dest")
+                .put("ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/conn/111")
+                .put("InvocationEndpoint", "https://api.example.com/orders")
+                .put("HttpMethod", "POST")
+                .put("InvocationRateLimitPerSecond", 10)
+                .put("Description", "Orders destination");
+
+        provisioner.provision(r, props, ctx(null));
+
+        assertEquals("orders-dest", r.getPhysicalId());
+        assertEquals("arn:aws:events:us-east-1:000000000000:api-destination/orders-dest/12345678",
+                r.getAttributes().get("Arn"));
+        assertEquals("arn:aws:events:us-east-1:000000000000:api-destination/orders-dest",
+                r.getAttributes().get("ArnForPolicy"));
+        assertEquals("orders-dest", r.getAttributes().get("Name"));
+    }
+
+    @Test
+    void provisionApiDestinationUpdatesResource() {
+        ApiDestination destination = new ApiDestination(
+                "orders-dest",
+                "arn:aws:events:us-east-1:000000000000:api-destination/orders-dest/12345678",
+                "arn:aws:events:us-east-1:000000000000:connection/conn/222",
+                "https://api.example.com/v2/orders",
+                "PUT",
+                20,
+                "Updated destination");
+        when(events.updateApiDestination(eq("orders-dest"), eq("Updated destination"),
+                eq("arn:aws:events:us-east-1:000000000000:connection/conn/222"),
+                eq("https://api.example.com/v2/orders"), eq("PUT"), eq(20), eq(REGION)))
+                .thenReturn(destination);
+        when(events.describeApiDestination("orders-dest", REGION)).thenReturn(priorApiDestination());
+
+        StackResource r = resource("AWS::Events::ApiDestination", "MyDestination");
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "orders-dest")
+                .put("ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/conn/222")
+                .put("InvocationEndpoint", "https://api.example.com/v2/orders")
+                .put("HttpMethod", "PUT")
+                .put("InvocationRateLimitPerSecond", 20)
+                .put("Description", "Updated destination");
+
+        provisioner.provision(r, props, ctx("orders-dest"));
+
+        verify(events).updateApiDestination(eq("orders-dest"), any(), any(), any(), any(), any(), eq(REGION));
+        assertEquals("orders-dest", r.getPhysicalId());
+    }
+
+    private static ApiDestination priorApiDestination() {
+        return new ApiDestination(
+                "orders-dest",
+                "arn:aws:events:us-east-1:000000000000:api-destination/orders-dest/12345678",
+                "arn:aws:events:us-east-1:000000000000:connection/conn/111",
+                "https://api.example.com/v1/orders",
+                "POST",
+                null,
+                "Original destination");
+    }
+
+    private StackResource updatedApiDestination() {
+        when(events.describeApiDestination("orders-dest", REGION)).thenReturn(priorApiDestination());
+        when(events.updateApiDestination(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(priorApiDestination());
+        StackResource r = resource("AWS::Events::ApiDestination", "MyDestination");
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "orders-dest")
+                .put("ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/conn/222")
+                .put("InvocationEndpoint", "https://api.example.com/v2/orders")
+                .put("HttpMethod", "PUT")
+                .put("InvocationRateLimitPerSecond", 20);
+        provisioner.provision(r, props, ctx("orders-dest"));
+        return r;
+    }
+
+    @Test
+    void aRollbackPutsBackTheApiDestinationTheUpdateChanged() {
+        StackResource r = updatedApiDestination();
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(events).restoreApiDestination("orders-dest", "Original destination",
+                "arn:aws:events:us-east-1:000000000000:connection/conn/111",
+                "https://api.example.com/v1/orders", "POST", null, REGION);
+        assertFalse(provisioner.rollbackUpdate(r), "the snapshot is spent once restored");
+    }
+
+    @Test
+    void anApiDestinationCreateTakesNoSnapshotToRollBack() {
+        StackResource r = resource("AWS::Events::ApiDestination", "MyDestination");
+        when(events.createApiDestination(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(priorApiDestination());
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "orders-dest")
+                .put("ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/conn/111")
+                .put("InvocationEndpoint", "https://api.example.com/v1/orders")
+                .put("HttpMethod", "POST");
+        provisioner.provision(r, props, ctx(null));
+
+        assertFalse(provisioner.rollbackUpdate(r));
+        verify(events, never()).restoreApiDestination(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aRuleTargetKeepsItsHttpParameters() {
+        stubPutRule();
+        when(events.listTargetsByRule(anyString(), any(), anyString())).thenReturn(List.of());
+        ObjectNode destinationTarget = target("dest",
+                "arn:aws:events:us-east-1:000000000000:api-destination/orders-dest/12345678");
+        ObjectNode httpParameters = destinationTarget.putObject("HttpParameters");
+        httpParameters.putArray("PathParameterValues").add("orders");
+        httpParameters.putObject("HeaderParameters").put("x-tenant", "alpha");
+        httpParameters.putObject("QueryStringParameters").put("version", "v1");
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        props.putArray("Targets").add(destinationTarget);
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx("orders"));
+
+        ArgumentCaptor<List<Target>> put = ArgumentCaptor.forClass(List.class);
+        verify(events).putTargets(eq("orders"), any(), put.capture(), anyString());
+        HttpParameters stored = put.getValue().get(0).getHttpParameters();
+        assertEquals(List.of("orders"), stored.getPathParameterValues());
+        assertEquals("alpha", stored.getHeaderParameters().get("x-tenant"));
+        assertEquals("v1", stored.getQueryStringParameters().get("version"));
+    }
+
+    @Test
+    void provisionApiDestinationRejectsNameChangeOnUpdate() {
+        StackResource r = resource("AWS::Events::ApiDestination", "MyDestination");
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "new-name")
+                .put("ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/conn/111")
+                .put("InvocationEndpoint", "https://api.example.com/orders")
+                .put("HttpMethod", "POST");
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, ctx("old-name")));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("requires resource replacement"));
+    }
+
+    @Test
+    void deleteApiDestinationCallsService() {
+        provisioner.delete("AWS::Events::ApiDestination", "orders-dest", REGION);
+        verify(events).deleteApiDestination("orders-dest", REGION);
+    }
+
+    @Test
+    void deleteApiDestinationIgnoresAlreadyDeleted() {
+        doThrow(new AwsException("ResourceNotFoundException", "Not found", 400))
+                .when(events).deleteApiDestination("orders-dest", REGION);
+
+        provisioner.delete("AWS::Events::ApiDestination", "orders-dest", REGION);
+        verify(events).deleteApiDestination("orders-dest", REGION);
     }
 }

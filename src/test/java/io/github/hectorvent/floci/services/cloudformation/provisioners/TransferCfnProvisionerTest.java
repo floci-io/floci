@@ -6,9 +6,14 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.transfer.TransferService;
+import io.github.hectorvent.floci.services.transfer.model.HomeDirectoryMapping;
 import io.github.hectorvent.floci.services.transfer.model.Server;
+import io.github.hectorvent.floci.services.transfer.model.SshPublicKey;
+import io.github.hectorvent.floci.services.transfer.model.User;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -16,9 +21,12 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -26,6 +34,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class TransferCfnProvisionerTest {
+
+    private static final String SERVER_ID = "s-12345678901234567";
 
     private final TransferService transfer = mock(TransferService.class);
     private final TransferCfnProvisioner provisioner = new TransferCfnProvisioner(transfer);
@@ -281,6 +291,243 @@ class TransferCfnProvisionerTest {
 
         assertEquals("ValidationError", failure.getErrorCode());
         verify(transfer, never()).deleteServer(any());
+    }
+
+    @Test
+    void userCreateRecordsArnRefAndExactAttributes() throws Exception {
+        User user = user("alice");
+        when(transfer.createUser("s-12345678901234567", "us-east-1", "alice", "role-arn", "/b/home", null,
+                List.of(), Map.of())).thenReturn(user);
+        StackResource resource = userResource();
+
+        provisioner.provision(resource, mapper.readTree("""
+                {"ServerId":"s-12345678901234567","UserName":"alice","Role":"role-arn","HomeDirectory":"/b/home",
+                 "SshPublicKeys":["ssh-rsa AAAA"]}"""), context(null));
+
+        assertEquals(user.getArn(), resource.getPhysicalId());
+        assertEquals(Map.of("Arn", user.getArn(),
+                "__FlociTransferServerTemplateTagKeys", "[]",
+                "__FlociTransferUserTemplateSshKeys", "[\"ssh-rsa AAAA\"]"), resource.getAttributes());
+        verify(transfer).importSshPublicKey("s-12345678901234567", "alice", "ssh-rsa AAAA");
+    }
+
+    @Test
+    void userUpdateWithSameKeyUpdatesInPlace() throws Exception {
+        User user = user("alice");
+        when(transfer.getUser(SERVER_ID, "alice")).thenReturn(user);
+        when(transfer.listTagsForResource(user.getArn())).thenReturn(Map.of());
+        when(transfer.updateUser(eq(SERVER_ID), eq("alice"), eq("role-2"), eq("/"), eq("PATH"), any()))
+                .thenReturn(user);
+        StackResource resource = userResource();
+
+        provisioner.provision(resource, mapper.readTree(
+                "{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"alice\",\"Role\":\"role-2\"}"),
+                context(user.getArn()));
+
+        assertEquals(user.getArn(), resource.getPhysicalId());
+        verify(transfer, never()).createUser(any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userUpdateClearsHomeDirectoryMappingsRemovedFromTemplate() throws Exception {
+        User user = user("alice");
+        user.setHomeDirectoryType("LOGICAL");
+        user.setHomeDirectoryMappings(List.of(new HomeDirectoryMapping("/a", "/b/a")));
+        when(transfer.getUser(SERVER_ID, "alice")).thenReturn(user);
+        when(transfer.listTagsForResource(user.getArn())).thenReturn(Map.of());
+        when(transfer.updateUser(any(), any(), any(), any(), any(), any())).thenReturn(user);
+
+        provisioner.provision(userResource(), mapper.readTree(
+                "{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"alice\",\"Role\":\"role-2\"}"),
+                context(user.getArn()));
+
+        verify(transfer).updateUser(SERVER_ID, "alice", "role-2", "/", "PATH", List.of());
+    }
+
+    @Test
+    void userUpdateKeepsSshKeysAddedOutsideTheStack() throws Exception {
+        User user = user("alice");
+        user.setSshPublicKeys(List.of(new SshPublicKey("key-managed", "ssh-rsa OLD", null),
+                new SshPublicKey("key-manual", "ssh-rsa MANUAL", null)));
+        when(transfer.getUser(SERVER_ID, "alice")).thenReturn(user);
+        when(transfer.listTagsForResource(user.getArn())).thenReturn(Map.of());
+        when(transfer.updateUser(any(), any(), any(), any(), any(), any())).thenReturn(user);
+        StackResource resource = userResource();
+        resource.getAttributes().put("__FlociTransferUserTemplateSshKeys", "[\"ssh-rsa OLD\"]");
+
+        provisioner.provision(resource, mapper.readTree(
+                "{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"alice\",\"Role\":\"r\","
+                        + "\"SshPublicKeys\":[\"ssh-rsa NEW\"]}"), context(user.getArn()));
+
+        verify(transfer).deleteSshPublicKey(SERVER_ID, "alice", "key-managed");
+        verify(transfer, never()).deleteSshPublicKey(SERVER_ID, "alice", "key-manual");
+        verify(transfer).importSshPublicKey(SERVER_ID, "alice", "ssh-rsa NEW");
+        assertEquals("[\"ssh-rsa NEW\"]", resource.getAttributes().get("__FlociTransferUserTemplateSshKeys"));
+    }
+
+    @Test
+    void userUpdateWithoutPriorKeyRecordDeletesNoKeys() throws Exception {
+        User user = user("alice");
+        user.setSshPublicKeys(List.of(new SshPublicKey("key-1", "ssh-rsa ANY", null)));
+        when(transfer.getUser(SERVER_ID, "alice")).thenReturn(user);
+        when(transfer.listTagsForResource(user.getArn())).thenReturn(Map.of());
+        when(transfer.updateUser(any(), any(), any(), any(), any(), any())).thenReturn(user);
+
+        provisioner.provision(userResource(), mapper.readTree(
+                "{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"alice\",\"Role\":\"r\"}"),
+                context(user.getArn()));
+
+        verify(transfer, never()).deleteSshPublicKey(any(), any(), any());
+    }
+
+    @Test
+    void userCreateRemovesUserWhenKeyImportFails() throws Exception {
+        User user = user("alice");
+        when(transfer.createUser(eq(SERVER_ID), eq("us-east-1"), eq("alice"), eq("r"), any(), any(), any(),
+                any())).thenReturn(user);
+        AwsException importFailure = new AwsException("InvalidRequestException", "bad key", 400);
+        when(transfer.importSshPublicKey(SERVER_ID, "alice", "ssh-rsa BAD")).thenThrow(importFailure);
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(userResource(),
+                mapper.readTree("{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"alice\","
+                        + "\"Role\":\"r\",\"SshPublicKeys\":[\"ssh-rsa BAD\"]}"), context(null)));
+
+        assertSame(importFailure, failure);
+        verify(transfer).deleteUser(SERVER_ID, "alice");
+    }
+
+    @Test
+    void userCreateKeepsOriginalErrorWhenCleanupFails() throws Exception {
+        User user = user("alice");
+        when(transfer.createUser(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(user);
+        AwsException importFailure = new AwsException("InvalidRequestException", "bad key", 400);
+        when(transfer.importSshPublicKey(any(), any(), any())).thenThrow(importFailure);
+        AwsException cleanupFailure = new AwsException("InternalFailure", "boom", 500);
+        doThrow(cleanupFailure).when(transfer).deleteUser(SERVER_ID, "alice");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(userResource(),
+                mapper.readTree("{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"alice\","
+                        + "\"Role\":\"r\",\"SshPublicKeys\":[\"ssh-rsa BAD\"]}"), context(null)));
+
+        assertSame(importFailure, failure);
+        assertEquals(cleanupFailure, failure.getSuppressed()[0]);
+    }
+
+    @Test
+    void userRollbackHookRestoresPriorStateAfterLaterResourceFails() throws Exception {
+        User user = user("alice");
+        user.setRole("role-1");
+        user.setHomeDirectory("/b/old");
+        user.setHomeDirectoryType("LOGICAL");
+        user.setHomeDirectoryMappings(List.of(new HomeDirectoryMapping("/a", "/b/a")));
+        Instant imported = Instant.parse("2026-01-02T03:04:05Z");
+        user.setSshPublicKeys(List.of(new SshPublicKey("key-old", "ssh-rsa OLD", imported)));
+        when(transfer.getUser(SERVER_ID, "alice")).thenReturn(user);
+        when(transfer.listTagsForResource(user.getArn())).thenReturn(Map.of("env", "old"));
+        User updated = user("alice");
+        updated.setSshPublicKeys(List.of(new SshPublicKey("key-new", "ssh-rsa NEW", null),
+                new SshPublicKey("key-outside", "ssh-rsa OUTSIDE", null)));
+        when(transfer.updateUser(any(), any(), any(), any(), any(), any())).thenReturn(updated);
+        StackResource resource = userResource();
+        resource.getAttributes().put("__FlociTransferUserTemplateSshKeys", "[\"ssh-rsa OLD\"]");
+        resource.getAttributes().put("__FlociTransferServerTemplateTagKeys", "[\"env\"]");
+
+        provisioner.provision(resource, mapper.readTree(
+                "{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"alice\",\"Role\":\"role-2\","
+                        + "\"SshPublicKeys\":[\"ssh-rsa NEW\"],\"Tags\":[{\"Key\":\"team\",\"Value\":\"x\"}]}"),
+                context(user.getArn()));
+        assertTrue(provisioner.rollbackUpdate(resource));
+
+        ArgumentCaptor<List<HomeDirectoryMapping>> restored = ArgumentCaptor.forClass(List.class);
+        verify(transfer).updateUser(eq(SERVER_ID), eq("alice"), eq("role-1"), eq("/b/old"), eq("LOGICAL"),
+                restored.capture());
+        assertEquals("/a", restored.getValue().get(0).getEntry());
+        verify(transfer, atLeastOnce()).deleteSshPublicKey(SERVER_ID, "alice", "key-new");
+        verify(transfer, never()).deleteSshPublicKey(SERVER_ID, "alice", "key-outside");
+        verify(transfer, never()).importSshPublicKey(SERVER_ID, "alice", "ssh-rsa OLD");
+        ArgumentCaptor<SshPublicKey> restoredKey = ArgumentCaptor.forClass(SshPublicKey.class);
+        verify(transfer).restoreSshPublicKey(eq(SERVER_ID), eq("alice"), restoredKey.capture());
+        assertEquals("key-old", restoredKey.getValue().getSshPublicKeyId());
+        assertEquals("ssh-rsa OLD", restoredKey.getValue().getSshPublicKeyBody());
+        assertEquals(imported, restoredKey.getValue().getDateImported());
+        verify(transfer).untagResource(user.getArn(), List.of("team"));
+        assertNull(resource.getAttributes().get("__FlociTransferUserUpdateSnapshot"));
+        assertEquals("[\"ssh-rsa OLD\"]", resource.getAttributes().get("__FlociTransferUserTemplateSshKeys"));
+        assertEquals("[\"env\"]", resource.getAttributes().get("__FlociTransferServerTemplateTagKeys"));
+    }
+
+    @Test
+    void userUpdateFailureRestoresPriorStateEagerly() throws Exception {
+        User user = user("alice");
+        user.setRole("role-1");
+        user.setHomeDirectory("/");
+        user.setHomeDirectoryType("PATH");
+        when(transfer.getUser(SERVER_ID, "alice")).thenReturn(user);
+        when(transfer.listTagsForResource(user.getArn())).thenReturn(Map.of());
+        when(transfer.updateUser(any(), any(), any(), any(), any(), any())).thenReturn(user);
+        doThrow(new AwsException("InvalidRequestException", "tag rejected", 400))
+                .when(transfer).tagResource(user.getArn(), Map.of("new", "v"));
+        StackResource resource = userResource();
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource, mapper.readTree(
+                "{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"alice\",\"Role\":\"role-2\","
+                        + "\"Tags\":[{\"Key\":\"new\",\"Value\":\"v\"}]}"), context(user.getArn())));
+
+        verify(transfer).updateUser(eq(SERVER_ID), eq("alice"), eq("role-1"), eq("/"), eq("PATH"), any());
+        assertEquals("true", resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+    }
+
+    @Test
+    void userUserNameChangeCreatesReplacement() throws Exception {
+        User replacement = user("bob");
+        when(transfer.createUser("s-12345678901234567", "us-east-1", "bob", "role-arn", null, null, List.of(),
+                Map.of())).thenReturn(replacement);
+        StackResource resource = userResource();
+
+        provisioner.provision(resource, mapper.readTree(
+                "{\"ServerId\":\"s-12345678901234567\",\"UserName\":\"bob\",\"Role\":\"role-arn\"}"),
+                context(user("alice").getArn()));
+
+        assertEquals(replacement.getArn(), resource.getPhysicalId());
+        verify(transfer, never()).updateUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userRejectsUnsupportedPropertyAndMissingRole() throws Exception {
+        assertThrows(AwsException.class, () -> provisioner.provision(userResource(), mapper.readTree(
+                "{\"ServerId\":\"s-1\",\"UserName\":\"a\",\"Role\":\"r\",\"Policy\":\"{}\"}"), context(null)));
+        assertThrows(AwsException.class, () -> provisioner.provision(userResource(), mapper.readTree(
+                "{\"ServerId\":\"s-1\",\"UserName\":\"a\"}"), context(null)));
+    }
+
+    @Test
+    void userDeleteToleratesAlreadyGoneOnly() {
+        User user = user("alice");
+        provisioner.delete("AWS::Transfer::User", user.getArn(), "us-east-1");
+        verify(transfer).deleteUser("s-12345678901234567", "alice");
+
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(transfer).deleteUser("s-12345678901234567", "alice");
+        provisioner.delete("AWS::Transfer::User", user.getArn(), "us-east-1");
+
+        doThrow(new AwsException("InternalServiceError", "boom", 500))
+                .when(transfer).deleteUser("s-12345678901234567", "alice");
+        assertThrows(AwsException.class,
+                () -> provisioner.delete("AWS::Transfer::User", user.getArn(), "us-east-1"));
+    }
+
+    private StackResource userResource() {
+        StackResource resource = new StackResource();
+        resource.setLogicalId("User");
+        resource.setResourceType("AWS::Transfer::User");
+        return resource;
+    }
+
+    private User user(String name) {
+        User user = new User();
+        user.setUserName(name);
+        user.setArn("arn:aws:transfer:us-east-1:000000000000:user/s-12345678901234567/" + name);
+        return user;
     }
 
     private ProvisionContext context(String priorId) {
