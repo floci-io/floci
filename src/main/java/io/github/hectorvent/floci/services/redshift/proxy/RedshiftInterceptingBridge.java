@@ -76,6 +76,7 @@ public class RedshiftInterceptingBridge {
     private volatile boolean pumpBetweenMessages = true;
     private volatile boolean pumpFinished = false;
     private boolean extendedSpectrumError;
+    private boolean rolledBackInCycle;
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService) {
         this(client, backend, s3Service, iamService, null);
@@ -218,8 +219,7 @@ public class RedshiftInterceptingBridge {
             if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Handled) {
                 coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
                 write(client.getOutputStream(), commandComplete("CREATE EXTERNAL\0"));
-                write(client.getOutputStream(), readyForQuery('I'));
-                coordinator.onBackendFrame('Z', new byte[]{'I'});
+                reportLocalReady();
                 return;
             }
             if (intercepted && decision[0] instanceof SpectrumInterceptor.Decision.Rewritten rewritten) {
@@ -669,8 +669,14 @@ public class RedshiftInterceptingBridge {
     private void writeSimpleSpectrumError(RuntimeException exception) throws IOException {
         coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
         write(client.getOutputStream(), errorResponse(spectrumSqlState(exception), exception.getMessage()));
-        write(client.getOutputStream(), readyForQuery('I'));
-        coordinator.onBackendFrame('Z', new byte[]{'I'});
+        reportLocalReady();
+    }
+
+    /** A query answered locally never reaches the backend, so its transaction state must be reported unchanged. */
+    private void reportLocalReady() throws IOException {
+        char status = coordinator.lastReadyStatus();
+        write(client.getOutputStream(), readyForQuery(status));
+        coordinator.onBackendFrame('Z', new byte[]{(byte) status});
     }
 
     private void writeParseSpectrumError(RuntimeException exception) throws IOException {
@@ -785,11 +791,24 @@ public class RedshiftInterceptingBridge {
             // Publish or drop pending preparation state before the coordinator reports the backend idle,
             // so the next preparation already sees a schema bound by a committed CREATE EXTERNAL SCHEMA.
             if (spectrumInterceptor != null && spectrumInterceptor.preparation() != null) {
-                if (type == 'E' || type == 'C' && "ROLLBACK\0".equals(new String(body, StandardCharsets.UTF_8))) {
+                if (type == 'E') {
                     spectrumInterceptor.preparation().finishCycle(relationalBackend);
                 }
+                if (type == 'C' && "ROLLBACK\0".equals(new String(body, StandardCharsets.UTF_8))) {
+                    // Loads are dropped on every rollback; bindings and Glue tables only once ReadyForQuery
+                    // reports the transaction closed, because ROLLBACK TO SAVEPOINT keeps it open.
+                    rolledBackInCycle = true;
+                    spectrumInterceptor.preparation().discardPendingLoads(relationalBackend);
+                }
                 if (type == 'Z' && body.length > 0 && body[0] == 'I') {
-                    spectrumInterceptor.preparation().finishCycle(relationalBackend, true);
+                    if (rolledBackInCycle) {
+                        spectrumInterceptor.preparation().finishCycle(relationalBackend);
+                    } else {
+                        spectrumInterceptor.preparation().finishCycle(relationalBackend, true);
+                    }
+                }
+                if (type == 'Z') {
+                    rolledBackInCycle = false;
                 }
             }
             if (type == 'E') {

@@ -219,15 +219,25 @@ final class BackendResponseCoordinator {
         }
     }
 
-    /** Tracks transaction boundaries as the tag arrives, so a statement pipelined after COMMIT sees them. */
+    /**
+     * Tracks transaction boundaries as the tag arrives, so a statement pipelined after COMMIT sees them. The
+     * ROLLBACK tag is also sent for ROLLBACK TO SAVEPOINT, which leaves the transaction open, so only the
+     * ReadyForQuery status can say that a rollback ended it.
+     */
     private void updateStatusFromCommandTag(String tag) {
-        switch (tag) {
-            case "BEGIN\0" -> lastReadyStatus = 'T';
-            case "COMMIT\0", "END\0", "ROLLBACK\0" -> {
-                lastReadyStatus = 'I';
-                session.transactionEnded();
+        boolean transactionEnded = switch (tag) {
+            case "BEGIN\0" -> {
+                lastReadyStatus = 'T';
+                yield false;
             }
-            default -> { }
+            case "COMMIT\0", "END\0" -> {
+                lastReadyStatus = 'I';
+                yield true;
+            }
+            default -> false;
+        };
+        if (transactionEnded) {
+            session.transactionEnded();
         }
     }
 

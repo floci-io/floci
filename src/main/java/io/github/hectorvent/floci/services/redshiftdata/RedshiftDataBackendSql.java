@@ -18,6 +18,11 @@ final class RedshiftDataBackendSql implements BackendSql {
     }
 
     @Override
+    public Object transactionScope() {
+        return connection;
+    }
+
+    @Override
     public void execute(String sql) {
         try (Statement statement = connection.createStatement()) {
             statement.execute(sql);

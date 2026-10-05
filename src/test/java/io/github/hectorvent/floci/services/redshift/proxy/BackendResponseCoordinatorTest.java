@@ -21,6 +21,8 @@ class BackendResponseCoordinatorTest {
         coordinator.onBackendFrame('C', new byte[]{'B', 'E', 'G', 'I', 'N', 0});
         assertEquals('T', coordinator.lastReadyStatus());
         coordinator.onBackendFrame('C', new byte[]{'R', 'O', 'L', 'L', 'B', 'A', 'C', 'K', 0});
+        assertEquals('T', coordinator.lastReadyStatus());
+        coordinator.onBackendFrame('Z', new byte[]{'I'});
         assertEquals('I', coordinator.lastReadyStatus());
     }
 

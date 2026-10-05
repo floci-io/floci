@@ -27,6 +27,7 @@ class SpectrumQueryPreparationTest {
         registry = mock(ExternalCatalogRegistry.class);
         materializer = mock(ExternalTableMaterializer.class);
         backend = mock(BackendSql.class);
+        when(backend.transactionScope()).thenReturn(backend);
         when(registry.list(SESSION.accountId(), SESSION.clusterKey(), "dev")).thenReturn(List.of(BINDING));
         when(materializer.ensureCurrent(any(), any(), any(), anyString()))
                 .thenReturn(ExternalTableMaterializer.Outcome.CURRENT);
@@ -118,6 +119,42 @@ class SpectrumQueryPreparationTest {
         preparation.finishCycle(backend);
         preparation.finishCycle(backend, true);
         verify(registry, never()).bind(any());
+    }
+
+    private static final SpectrumSession TRANSACTION = new SpectrumSession(SESSION.accountId(), SESSION.clusterKey(),
+            "dev", List.of(), true);
+    private static final String CREATE_SALES =
+            "CREATE EXTERNAL TABLE lake.sales (id INTEGER) STORED AS TEXTFILE LOCATION 's3://bucket/'";
+
+    @Test
+    void glueTableCreatedInRolledBackTransactionIsDeleted() {
+        assertTrue(preparation.prepare(CREATE_SALES, TRANSACTION, backend));
+        verify(glue, never()).deleteTable(anyString(), anyString());
+        preparation.finishCycle(backend);
+        verify(glue).deleteTable("analytics", "sales");
+    }
+
+    @Test
+    void glueTableCreatedInCommittedTransactionIsKept() {
+        assertTrue(preparation.prepare(CREATE_SALES, TRANSACTION, backend));
+        preparation.finishCycle(backend, true);
+        preparation.finishCycle(backend);
+        verify(glue, never()).deleteTable(anyString(), anyString());
+    }
+
+    @Test
+    void glueTableCreatedOutsideTransactionIsNeverUndone() {
+        assertTrue(preparation.prepare(CREATE_SALES, SESSION, backend));
+        preparation.finishCycle(backend);
+        verify(glue, never()).deleteTable(anyString(), anyString());
+    }
+
+    @Test
+    void discardingLoadsKeepsStagedGlueTables() {
+        assertTrue(preparation.prepare(CREATE_SALES, TRANSACTION, backend));
+        preparation.discardPendingLoads(backend);
+        verify(materializer).finishCycle(backend);
+        verify(glue, never()).deleteTable(anyString(), anyString());
     }
 
     @Test

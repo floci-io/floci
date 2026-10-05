@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Table;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
@@ -25,6 +26,9 @@ public class SpectrumQueryPreparation {
     private final GlueService glue;
     private final ExternalMetadataWriter metadata;
     private final Map<BackendSql, List<ExternalSchemaBinding>> pendingBindings = new ConcurrentHashMap<>();
+    private final Map<Object, List<StagedGlueTable>> stagedGlueTables = new ConcurrentHashMap<>();
+
+    private record StagedGlueTable(String accountId, String database, String table) { }
 
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
                                     ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata) {
@@ -71,7 +75,12 @@ public class SpectrumQueryPreparation {
         Map<String, ExternalSchemaBinding> bindings = bindings(session);
         if (statement.orElse(null) instanceof ExternalStatement.CreateTable table && bindings.containsKey(table.schemaName())) {
             ExternalSchemaBinding binding = bindings.get(table.schemaName());
-            glue.createTable(binding.glueDatabase(), GlueTableBuilder.toGlueTable(table));
+            Table glueTable = GlueTableBuilder.toGlueTable(table);
+            glue.createTable(binding.glueDatabase(), glueTable);
+            if (session.inTransaction()) {
+                stagedGlueTables.computeIfAbsent(backend.transactionScope(), ignored -> new CopyOnWriteArrayList<>())
+                        .add(new StagedGlueTable(session.accountId(), binding.glueDatabase(), glueTable.getName()));
+            }
             metadata.refresh(backend, session.accountId(), binding);
             return true;
         }
@@ -167,8 +176,10 @@ public class SpectrumQueryPreparation {
         pendingBindings.computeIfAbsent(backend, ignored -> new CopyOnWriteArrayList<>()).add(binding);
     }
 
+    /** The transaction rolled back: drop everything staged for it, including the Glue tables it created. */
     public void finishCycle(BackendSql backend) {
         pendingBindings.remove(backend);
+        undoStagedGlueTables(backend);
         materializer.finishCycle(backend);
     }
 
@@ -177,7 +188,34 @@ public class SpectrumQueryPreparation {
         if (committed && completed != null) {
             completed.forEach(registry::bind);
         }
+        if (committed) {
+            stagedGlueTables.remove(backend.transactionScope());
+        } else {
+            undoStagedGlueTables(backend);
+        }
         materializer.finishCycle(backend, committed);
+    }
+
+    /**
+     * A rollback to a savepoint leaves the transaction open, so only the loads are dropped: they may have been
+     * made after the savepoint, and their fingerprints would no longer match the backend tables.
+     */
+    public void discardPendingLoads(BackendSql backend) {
+        materializer.finishCycle(backend);
+    }
+
+    private void undoStagedGlueTables(BackendSql backend) {
+        List<StagedGlueTable> staged = stagedGlueTables.remove(backend.transactionScope());
+        if (staged == null) {
+            return;
+        }
+        for (StagedGlueTable table : staged) {
+            try {
+                RequestScopes.runAs(table.accountId(), () -> glue.deleteTable(table.database(), table.table()));
+            } catch (AwsException exception) {
+                LOG.warnv(exception, "Could not undo Glue table {0}.{1} after a rollback", table.database(), table.table());
+            }
+        }
     }
 
     private static String quote(String identifier) {

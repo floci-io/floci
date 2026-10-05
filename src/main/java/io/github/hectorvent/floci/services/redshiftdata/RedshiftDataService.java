@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
+import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
@@ -339,44 +340,57 @@ public class RedshiftDataService implements Resettable {
 
         long totalDuration = 0;
         try (Connection connection = connectionFactory.open(target)) {
-            connection.setAutoCommit(false);
-            boolean failed = false;
-            for (int n = 0; n < sqls.size(); n++) {
-                RedshiftDataStatementStore.StoredStatement sub = new RedshiftDataStatementStore.StoredStatement();
-                sub.id = parent.id + ":" + (n + 1);
-                sub.sql = sqls.get(n);
-                sub.sqls = List.of(sqls.get(n));
-                sub.clusterIdentifier = parent.clusterIdentifier;
-                sub.workgroupName = parent.workgroupName;
-                sub.database = parent.database;
-                sub.dbUser = parent.dbUser;
-                sub.resultFormat = parent.resultFormat;
-                Instant now = Instant.now();
-                sub.createdAt = now;
-                sub.updatedAt = now;
-                try {
-                    runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum());
-                } catch (SQLException e) {
-                    sub.status = RedshiftDataStatementStore.Status.FAILED;
-                    sub.error = e.getMessage();
+            BackendSql batchBackend = new RedshiftDataBackendSql(connection);
+            boolean committed = false;
+            try {
+                connection.setAutoCommit(false);
+                boolean failed = false;
+                for (int n = 0; n < sqls.size(); n++) {
+                    RedshiftDataStatementStore.StoredStatement sub = new RedshiftDataStatementStore.StoredStatement();
+                    sub.id = parent.id + ":" + (n + 1);
+                    sub.sql = sqls.get(n);
+                    sub.sqls = List.of(sqls.get(n));
+                    sub.clusterIdentifier = parent.clusterIdentifier;
+                    sub.workgroupName = parent.workgroupName;
+                    sub.database = parent.database;
+                    sub.dbUser = parent.dbUser;
+                    sub.resultFormat = parent.resultFormat;
+                    Instant now = Instant.now();
+                    sub.createdAt = now;
+                    sub.updatedAt = now;
+                    try {
+                        runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum());
+                    } catch (SQLException e) {
+                        sub.status = RedshiftDataStatementStore.Status.FAILED;
+                        sub.error = e.getMessage();
+                        sub.updatedAt = Instant.now();
+                        parent.subStatements.add(sub);
+                        store.put(sub);
+                        totalDuration += sub.durationNanos;
+                        parent.status = RedshiftDataStatementStore.Status.FAILED;
+                        parent.error = e.getMessage();
+                        connection.rollback();
+                        failed = true;
+                        break;
+                    }
                     sub.updatedAt = Instant.now();
                     parent.subStatements.add(sub);
                     store.put(sub);
                     totalDuration += sub.durationNanos;
-                    parent.status = RedshiftDataStatementStore.Status.FAILED;
-                    parent.error = e.getMessage();
-                    connection.rollback();
-                    failed = true;
-                    break;
                 }
-                sub.updatedAt = Instant.now();
-                parent.subStatements.add(sub);
-                store.put(sub);
-                totalDuration += sub.durationNanos;
-            }
-            if (!failed) {
-                connection.commit();
-                parent.status = RedshiftDataStatementStore.Status.FINISHED;
+                if (!failed) {
+                    connection.commit();
+                    committed = true;
+                    parent.status = RedshiftDataStatementStore.Status.FINISHED;
+                }
+            } finally {
+                if (preparation != null) {
+                    if (committed) {
+                        preparation.finishCycle(batchBackend, true);
+                    } else {
+                        preparation.finishCycle(batchBackend);
+                    }
+                }
             }
         } catch (SQLException e) {
             parent.status = RedshiftDataStatementStore.Status.FAILED;

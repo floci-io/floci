@@ -7,6 +7,11 @@ public interface BackendSql {
         return true;
     }
 
+    /** Identity of the transaction this backend runs in, so work staged by one statement can be undone by a later one. */
+    default Object transactionScope() {
+        return this;
+    }
+
     void execute(String sql);
     long copyIn(String copySql, InputStream data);
 }
