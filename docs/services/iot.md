@@ -100,6 +100,7 @@ Current limitations:
 - An accepting MQTT 5 `CONNACK` carries no properties.
 - The MQTT over TLS listener (8883) authenticates by device certificate only.
 - On a connection, the authorizer is looked up in Floci's default account and region.
+- The MQTT password reaches the function as the broker decodes it, as UTF-8 text, so password bytes that are not valid UTF-8 arrive altered. The broker library, Vert.x MQTT, exposes the password only as a string.
 
 ## MQTT Broker
 
