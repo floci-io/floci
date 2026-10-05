@@ -60,7 +60,7 @@ class LambdaExecutionRoleCredentialsTest {
         assertNotNull(caller);
         assertEquals(java.util.List.of(POLICY), caller.identityPolicies());
         assertEquals(
-                "arn:aws:sts::000000000000:assumed-role/LambdaExecutionRole/floci-session",
+                "arn:aws:sts::000000000000:assumed-role/LambdaExecutionRole/function",
                 iamService.resolveCallerArn(session.accessKeyId()).orElseThrow());
     }
 

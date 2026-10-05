@@ -88,7 +88,7 @@ public class LambdaExecutionRoleCredentials {
         String assumedRoleId = role.get().getRoleId() != null ? role.get().getRoleId() + ":" + functionName : null;
         iamService.registerLambdaExecutionRoleSession(
                 functionAccountId, credentials.accessKeyId(), credentials.secretAccessKey(),
-                credentials.sessionToken(), roleArn, null, assumedRoleId);
+                credentials.sessionToken(), roleArn, functionName, assumedRoleId);
         return Optional.of(credentials);
     }
 
