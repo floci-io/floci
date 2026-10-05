@@ -506,7 +506,7 @@ public class CognitoOAuthController {
             UserPool pool = cognitoService.describeUserPool(consumedCode.userPoolId());
             CognitoUser user = cognitoService.adminGetUser(consumedCode.userPoolId(), consumedCode.userId());
             Map<String, Object> authentication = cognitoService.generateAuthResultForHostedAuth(user, pool, client,
-                    nonceClaim(consumedCode.nonce()), consumedCode.scopes());
+                    nonceClaim(consumedCode.nonce()), consumedCode.scopes(), consumedCode.authTime());
             ObjectNode body = objectMapper.createObjectNode();
             body.put("access_token", (String) authentication.get("AccessToken"));
             // Minted only for a grant with openid; AWS leaves the field out otherwise.

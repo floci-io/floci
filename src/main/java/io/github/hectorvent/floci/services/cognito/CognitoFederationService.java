@@ -97,10 +97,11 @@ public class CognitoFederationService {
         String issuer = optionalText(claims, "iss");
         CognitoUser user = cognitoService.provisionFederatedUser(transaction.userPoolId(), provider,
                 subject, issuer, mapAttributes(provider, claims));
+        Instant signedInAt = clock.instant();
         CognitoAuthorizationCode authorizationCode = new CognitoAuthorizationCode(
                 transaction.userPoolId(), transaction.clientId(), user.getUsername(), transaction.redirectUri(),
                 transaction.scopes(), transaction.nonce(), transaction.codeChallenge(),
-                clock.instant().plus(AUTHORIZATION_CODE_LIFETIME));
+                signedInAt, signedInAt.plus(AUTHORIZATION_CODE_LIFETIME));
         return stateStore.putAuthorizationCode(authorizationCode);
     }
 

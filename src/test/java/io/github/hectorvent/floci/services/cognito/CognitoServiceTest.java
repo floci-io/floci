@@ -36,6 +36,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -43,6 +45,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -4352,15 +4355,17 @@ class CognitoServiceTest {
         String refreshToken = (String) auth.get("RefreshToken");
 
         assertNotNull(refreshToken);
-        // Should be parseable as base64 structured token: 5 payload fields + trailing HMAC signature
+        // Should be parseable as base64 structured token: a marker, 6 payload fields + trailing HMAC signature
         String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
-        String[] parts = decoded.split("\\|", 6);
-        assertEquals(6, parts.length, "Refresh token should encode 5 pipe-separated fields plus a signature");
-        assertEquals(pool.getId(), parts[0]);
-        assertEquals("alice", parts[1]);
-        assertEquals(client.getClientId(), parts[2]);
-        assertFalse(parts[3].isBlank(), "Refresh token should encode its issued-at timestamp");
-        assertFalse(parts[5].isBlank(), "Refresh token should encode a signature");
+        String[] parts = decoded.split("\\|", 8);
+        assertEquals(8, parts.length, "Refresh token should encode a marker and 6 pipe-separated fields plus a signature");
+        assertEquals("v2", parts[0], "Refresh token should lead with the marker of a token that carries auth_time");
+        assertEquals(pool.getId(), parts[1]);
+        assertEquals("alice", parts[2]);
+        assertEquals(client.getClientId(), parts[3]);
+        assertFalse(parts[4].isBlank(), "Refresh token should encode its issued-at timestamp");
+        assertFalse(parts[6].isBlank(), "Refresh token should encode the user's auth_time");
+        assertFalse(parts[7].isBlank(), "Refresh token should encode a signature");
     }
 
     @Test
@@ -4389,6 +4394,68 @@ class CognitoServiceTest {
 
         assertThrows(AwsException.class, () ->
                 service.getTokensFromRefreshToken(client.getClientId(), "not-a-valid-refresh-token"));
+    }
+
+    // =========================================================================
+    // Issue #5146: refreshed tokens keep the auth_time of the sign-in
+    // =========================================================================
+
+    /** AWS: "Refreshing a token doesn't reset the auth_time claim." Neither refresh operation does. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshedTokensKeepTheAuthTimeOfTheSignIn() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        Instant signedIn = Instant.now().minus(Duration.ofMinutes(30)).truncatedTo(ChronoUnit.SECONDS);
+        String refreshToken = (String) service.generateAuthResultForHostedAuth(service.adminGetUser(pool.getId(), "alice"),
+                pool, client, null, List.of(), signedIn).get("RefreshToken");
+
+        Map<String, Object> viaInitiateAuth = (Map<String, Object>) service.initiateAuth(client.getClientId(),
+                "REFRESH_TOKEN_AUTH", Map.of("REFRESH_TOKEN", refreshToken)).get("AuthenticationResult");
+        Map<String, Object> viaGetTokens = (Map<String, Object>) service.getTokensFromRefreshToken(
+                client.getClientId(), refreshToken).get("AuthenticationResult");
+
+        for (Map<String, Object> refreshed : List.of(viaInitiateAuth, viaGetTokens)) {
+            assertEquals(signedIn.getEpochSecond(), authTime(refreshed.get("IdToken")));
+            assertEquals(signedIn.getEpochSecond(), authTime(refreshed.get("AccessToken")));
+        }
+    }
+
+    /** A refresh token minted before refresh tokens carried auth_time still refreshes, with the time it was issued. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aRefreshTokenWithoutAuthTimeRefreshesWithTheTimeItWasIssued() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        long issuedAtMillis = System.currentTimeMillis() - Duration.ofMinutes(10).toMillis();
+        String refreshToken = signRawRefreshToken(pool, pool.getId() + "|alice|" + client.getClientId() + "|"
+                + issuedAtMillis + "|" + UUID.randomUUID());
+
+        Map<String, Object> refreshed = (Map<String, Object>) service.getTokensFromRefreshToken(
+                client.getClientId(), refreshToken).get("AuthenticationResult");
+
+        assertEquals(issuedAtMillis / 1000L, authTime(refreshed.get("IdToken")));
+        assertEquals(issuedAtMillis / 1000L, authTime(refreshed.get("AccessToken")));
+    }
+
+    /**
+     * A username can contain '|', which shifts the fields of a refresh token without auth_time into the
+     * places of one with it. This one, minted for "alice|evil", would then refresh alice's tokens.
+     */
+    @Test
+    void aRefreshTokenWithoutAuthTimeIsNeverReadAsOneWithIt() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        String refreshToken = signRawRefreshToken(pool, pool.getId() + "|alice|evil|" + client.getClientId() + "|"
+                + System.currentTimeMillis() + "|" + UUID.randomUUID());
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), refreshToken));
+        assertEquals("NotAuthorizedException", e.getErrorCode());
+    }
+
+    private static long authTime(Object token) throws Exception {
+        return MAPPER.readTree(jwtPayload((String) token)).path("auth_time").asLong();
     }
 
     // =========================================================================
@@ -4569,9 +4636,10 @@ class CognitoServiceTest {
                 Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
         String refreshToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult")).get("RefreshToken");
 
-        // Swap the embedded pool id for a different real pool; the signature was computed over poolA's id.
+        // Swap the embedded pool id, after the auth_time marker, for a different real pool; the signature
+        // was computed over poolA's id.
         String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
-        String tampered = decoded.replaceFirst("^" + poolA.getId() + "\\|", poolB.getId() + "|");
+        String tampered = decoded.replaceFirst("^v2\\|" + poolA.getId() + "\\|", "v2|" + poolB.getId() + "|");
         String tamperedToken = Base64.getEncoder().withoutPadding().encodeToString(tampered.getBytes(StandardCharsets.UTF_8));
 
         AwsException exception = assertThrows(AwsException.class, () ->

@@ -125,7 +125,7 @@ class CognitoFederationStateStoreTest {
     @Test
     void findSession_returnsStoredUnexpiredSessionUntilDeleted() {
         CognitoFederationStateStore store = storeAt(NOW);
-        CognitoManagedLoginSession session = new CognitoManagedLoginSession("pool-id", "user", NOW.plusSeconds(60));
+        CognitoManagedLoginSession session = new CognitoManagedLoginSession("pool-id", "user", NOW, NOW.plusSeconds(60));
 
         String sessionId = store.putSession(session);
 
@@ -139,7 +139,7 @@ class CognitoFederationStateStoreTest {
     void findSession_expiredSessionReturnsEmptyAndIsRemoved() throws ReflectiveOperationException {
         MutableClock clock = new MutableClock(NOW);
         CognitoFederationStateStore store = new CognitoFederationStateStore(clock);
-        String sessionId = store.putSession(new CognitoManagedLoginSession("pool-id", "user", NOW.plusSeconds(60)));
+        String sessionId = store.putSession(new CognitoManagedLoginSession("pool-id", "user", NOW, NOW.plusSeconds(60)));
 
         clock.set(NOW.plusSeconds(60));
 
@@ -159,7 +159,7 @@ class CognitoFederationStateStoreTest {
     @Test
     void putSession_idsAreOpaqueAndDistinct() {
         CognitoFederationStateStore store = storeAt(NOW);
-        CognitoManagedLoginSession session = new CognitoManagedLoginSession("pool-id", "user", NOW.plusSeconds(60));
+        CognitoManagedLoginSession session = new CognitoManagedLoginSession("pool-id", "user", NOW, NOW.plusSeconds(60));
 
         String first = store.putSession(session);
         String second = store.putSession(session);
@@ -183,7 +183,7 @@ class CognitoFederationStateStoreTest {
     private CognitoAuthorizationCode authorizationCode(Instant expiresAt) {
         return new CognitoAuthorizationCode(
             "pool-id", "client-id", "user-id", "https://example.com/callback", List.of("openid", "email"),
-            null, null, expiresAt
+            null, null, NOW, expiresAt
         );
     }
 
