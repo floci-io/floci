@@ -41,6 +41,11 @@ public class CognitoJsonHandler {
     }
 
     public Response handle(String action, JsonNode request, String region) {
+        // Every operation naming a UserPoolId is signed for the caller's region, except the unsigned
+        // UpdateAuthEventFeedback, whose region Floci cannot know.
+        if (region != null && request.hasNonNull("UserPoolId") && !"UpdateAuthEventFeedback".equals(action)) {
+            service.requireUserPoolInRegion(request.path("UserPoolId").asText(), region);
+        }
         return switch (action) {
             case "CreateUserPool" -> handleCreateUserPool(request, region);
             case "DescribeUserPool" -> handleDescribeUserPool(request);

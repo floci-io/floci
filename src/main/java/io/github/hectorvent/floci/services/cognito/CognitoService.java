@@ -752,6 +752,19 @@ public class CognitoService implements ResourceProvider {
                 .toList();
     }
 
+    /**
+     * Refuses a pool from another region as not found, as AWS does: a pool lives in the region its
+     * id names. A pool whose region cannot be told stays reachable, as {@link #listUserPools} lists it.
+     */
+    public void requireUserPoolInRegion(String userPoolId, String region) {
+        poolStore.get(userPoolId).ifPresent(pool -> {
+            String poolRegion = poolRegion(pool);
+            if (poolRegion != null && !poolRegion.equals(region)) {
+                throw userPoolNotFound(userPoolId);
+            }
+        });
+    }
+
     /** Pools are stored by id for every region; the region comes from the pool ARN, else the id prefix. */
     private static String poolRegion(UserPool pool) {
         if (pool.getArn() != null && AwsArnUtils.isArn(pool.getArn())) {

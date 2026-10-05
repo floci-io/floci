@@ -196,6 +196,20 @@ class RegionScopedListsIntegrationTest {
                 .contentType(COGNITO_JSON).body("{\"MaxResults\": 60}")
             .when().post("/").then().statusCode(200)
             .body("UserPools.Id", not(hasItem(poolId)));
+        // A pool lives in the region its id names: another region cannot read or delete it.
+        for (String action : new String[] {"DescribeUserPool", "AdminGetUser", "DeleteUserPool"}) {
+            given().header("Authorization", auth(OTHER, "cognito-idp"))
+                    .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
+                    .contentType(COGNITO_JSON)
+                    .body("{\"UserPoolId\": \"" + poolId + "\", \"Username\": \"nobody\"}")
+                .when().post("/").then().statusCode(400)
+                .body("__type", endsWith("ResourceNotFoundException"));
+        }
+        given().header("Authorization", auth(HOME, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
+                .contentType(COGNITO_JSON).body("{\"UserPoolId\": \"" + poolId + "\"}")
+            .when().post("/").then().statusCode(200)
+            .body("UserPool.Id", equalTo(poolId));
 
         given().header("Authorization", auth(HOME, "cognito-idp"))
                 .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DeleteUserPool")
