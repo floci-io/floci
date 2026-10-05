@@ -1126,6 +1126,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             order = order.reversed();
         }
         List<String> arns = taskDefinitionsIn(region)
+                .filter(td -> td.getTaskDefinitionArn() != null)
                 .filter(td -> familyPrefix == null || td.getFamily().startsWith(familyPrefix))
                 .filter(td -> effectiveStatus.equals(td.getStatus()))
                 .sorted(order)
@@ -5291,15 +5292,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private void storeTaskDefinition(TaskDefinition td) {
         String legacyKey = td.getFamily() + ":" + td.getRevision();
         TaskDefinition legacy = taskDefinitions.get(legacyKey);
-        if (legacy != null && td.getTaskDefinitionArn().equals(legacy.getTaskDefinitionArn())) {
+        if (legacy != null && Objects.equals(td.getTaskDefinitionArn(), legacy.getTaskDefinitionArn())) {
             taskDefinitions.remove(legacyKey);
         }
-        taskDefinitions.put(taskDefinitionKey(regionOf(td), td.getFamily(), td.getRevision()), td);
+        taskDefinitions.put(taskDefinitionKey(regionOf(td, regionResolver.getRegion()), td.getFamily(),
+                td.getRevision()), td);
     }
 
-    /** Task definitions are regional; the region is read from each one's ARN, whatever its storage key. */
+    /**
+     * Task definitions are regional; the region is read from each one's ARN, whatever its storage key.
+     * A definition without a readable ARN is listed in every region rather than failing them all.
+     */
     private Stream<TaskDefinition> taskDefinitionsIn(String region) {
-        return taskDefinitions.values().stream().filter(td -> region.equals(regionOf(td)));
+        return taskDefinitions.values().stream().filter(td -> region.equals(regionOf(td, region)));
     }
 
     private int latestRevision(String region, String family) {
@@ -5309,8 +5314,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .max().orElse(0);
     }
 
-    private static String regionOf(TaskDefinition td) {
-        return AwsArnUtils.parse(td.getTaskDefinitionArn()).region();
+    /** A definition whose ARN cannot be read is taken as {@code fallback}'s, so one bad record breaks no lookup. */
+    private static String regionOf(TaskDefinition td, String fallback) {
+        return AwsArnUtils.regionOrDefault(td.getTaskDefinitionArn(), fallback);
     }
 
     /**
