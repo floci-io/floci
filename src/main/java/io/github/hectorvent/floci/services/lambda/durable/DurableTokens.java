@@ -3,18 +3,26 @@ package io.github.hectorvent.floci.services.lambda.durable;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
- * The opaque CheckpointToken of the durable execution protocol, standard base64 as AWS documents it.
+ * The opaque CheckpointToken and CallbackId of the durable execution protocol, standard base64 as
+ * AWS documents them. A CallbackId carries its execution ARN, which IAM authorizes against.
  */
-final class DurableTokens {
+public final class DurableTokens {
 
     private static final String SEPARATOR = "|";
+    private static final Pattern CALLBACK_ID_PATTERN = Pattern.compile("[A-Za-z0-9+/]+={0,2}");
+    private static final int MAX_CALLBACK_ID_LENGTH = 1024;
 
     private DurableTokens() {
     }
 
     record CheckpointToken(String executionArn, String invocationId, long sequence) {
+    }
+
+    record CallbackId(String executionArn, String operationId) {
     }
 
     static String checkpointToken(String executionArn, String invocationId, long sequence) {
@@ -39,6 +47,28 @@ final class DurableTokens {
             // A token Floci did not mint. The caller answers "Invalid checkpoint token" as AWS does.
             return Optional.empty();
         }
+    }
+
+    /** The nonce keeps an id from matching a later callback that reuses the operation id. */
+    static String callbackId(String executionArn, String operationId) {
+        return encode(executionArn + SEPARATOR + operationId + SEPARATOR + UUID.randomUUID());
+    }
+
+    static Optional<CallbackId> parseCallbackId(String callbackId) {
+        if (callbackId == null || callbackId.length() > MAX_CALLBACK_ID_LENGTH
+                || !CALLBACK_ID_PATTERN.matcher(callbackId).matches()) {
+            return Optional.empty();
+        }
+        String decoded = decode(callbackId);
+        String[] parts = decoded == null ? new String[0] : decoded.split("\\" + SEPARATOR, -1);
+        if (parts.length != 3 || parts[0].isEmpty() || parts[1].isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new CallbackId(parts[0], parts[1]));
+    }
+
+    public static Optional<String> callbackExecutionArn(String callbackId) {
+        return parseCallbackId(callbackId).map(CallbackId::executionArn);
     }
 
     private static String encode(String value) {

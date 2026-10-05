@@ -222,6 +222,10 @@ class IamActionRegistryTest {
         assertEquals("lambda:GetDurableExecution", lambdaAction("GET", base));
         assertEquals("lambda:ListDurableExecutionsByFunction",
                 lambdaAction("GET", "/2025-12-01/functions/f/durable-executions"));
+        String callback = "/2025-12-01/durable-execution-callbacks/QUJD%2BREVG%2FR0g%3D";
+        assertEquals("lambda:SendDurableExecutionCallbackSuccess", lambdaAction("POST", callback + "/succeed"));
+        assertEquals("lambda:SendDurableExecutionCallbackFailure", lambdaAction("POST", callback + "/fail"));
+        assertEquals("lambda:SendDurableExecutionCallbackHeartbeat", lambdaAction("POST", callback + "/heartbeat"));
     }
 
     private String lambdaAction(String method, String path) {

@@ -102,7 +102,7 @@ class DurableExecutionServicePersistenceTest {
 
     private static DurableOperationUpdate update(String id, DurableOperationType type, DurableOperationAction action,
                                                  String payload, Integer waitSeconds) {
-        return new DurableOperationUpdate(id, null, null, type, null, action, payload, null, null, waitSeconds, null);
+        return new DurableOperationUpdate(id, null, null, type, null, action, payload, null, null, waitSeconds, null, null, null);
     }
 
     private static String arn(JsonNode event) {

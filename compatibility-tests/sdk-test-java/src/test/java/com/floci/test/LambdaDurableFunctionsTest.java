@@ -22,6 +22,7 @@ class LambdaDurableFunctionsTest {
 
     private static final String ROLE = "arn:aws:iam::000000000000:role/lambda-role";
     private static final String FN = TestFixtures.uniqueName("fn-durable-exec");
+    private static final String CALLBACK_FN = TestFixtures.uniqueName("fn-durable-callback");
 
     private static LambdaClient lambda;
 
@@ -33,10 +34,12 @@ class LambdaDurableFunctionsTest {
     @AfterAll
     static void cleanup() {
         if (lambda != null) {
-            try {
-                lambda.deleteFunction(DeleteFunctionRequest.builder().functionName(FN).build());
-            } catch (Exception ignored) {
-                // Cleanup only. A failed delete must not hide the test result.
+            for (String name : new String[] {FN, CALLBACK_FN}) {
+                try {
+                    lambda.deleteFunction(DeleteFunctionRequest.builder().functionName(name).build());
+                } catch (Exception ignored) {
+                    // Cleanup only. A failed delete must not hide the test result.
+                }
             }
             lambda.close();
         }
@@ -116,5 +119,64 @@ class LambdaDurableFunctionsTest {
                 .build()))
                 .isInstanceOf(InvalidParameterValueException.class)
                 .hasMessageContaining("You cannot invoke a durable function using an unqualified ARN.");
+    }
+
+    @Test
+    @DisplayName("a durable callback is completed through the callback APIs and resumes the execution")
+    void durableCallbackResumesTheExecution() throws InterruptedException {
+        Assumptions.assumeTrue(TestFixtures.isLambdaDispatchAvailable(),
+                "skipping: Lambda dispatch (Docker) not available in this environment");
+
+        lambda.createFunction(CreateFunctionRequest.builder()
+                .functionName(CALLBACK_FN)
+                .runtime(Runtime.PYTHON3_14)
+                .role(ROLE)
+                .handler("lambda_function.handler")
+                .timeout(30)
+                .durableConfig(DurableConfig.builder().executionTimeout(120).retentionPeriodInDays(1).build())
+                .code(FunctionCode.builder().zipFile(SdkBytes.fromByteArray(LambdaUtils.durablePythonZip())).build())
+                .build());
+
+        String arn = lambda.invoke(InvokeRequest.builder()
+                .functionName(CALLBACK_FN + ":$LATEST")
+                .invocationType(InvocationType.EVENT)
+                .payload(SdkBytes.fromUtf8String("{\"callback\": true}"))
+                .build()).durableExecutionArn();
+
+        String callbackId = null;
+        for (int i = 0; i < 60 && callbackId == null; i++) {
+            callbackId = lambda.getDurableExecutionHistory(GetDurableExecutionHistoryRequest.builder()
+                            .durableExecutionArn(arn).build())
+                    .events().stream()
+                    .filter(event -> event.eventType() == EventType.CALLBACK_STARTED)
+                    .map(event -> event.callbackStartedDetails().callbackId())
+                    .findFirst().orElse(null);
+            if (callbackId == null) {
+                Thread.sleep(500);
+            }
+        }
+        assertThat(callbackId).as("the function started a callback").isNotNull();
+        String id = callbackId;
+
+        lambda.sendDurableExecutionCallbackHeartbeat(SendDurableExecutionCallbackHeartbeatRequest.builder()
+                .callbackId(id).build());
+        lambda.sendDurableExecutionCallbackSuccess(SendDurableExecutionCallbackSuccessRequest.builder()
+                .callbackId(id).result(SdkBytes.fromUtf8String("{\"approved\": true}")).build());
+
+        GetDurableExecutionResponse execution = null;
+        for (int i = 0; i < 60; i++) {
+            execution = lambda.getDurableExecution(GetDurableExecutionRequest.builder()
+                    .durableExecutionArn(arn).includeExecutionData(true).build());
+            if (execution.status() != ExecutionStatus.RUNNING) {
+                break;
+            }
+            Thread.sleep(500);
+        }
+        assertThat(execution.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
+        assertThat(execution.result()).isEqualTo("{\"approved\": true}");
+
+        assertThatThrownBy(() -> lambda.sendDurableExecutionCallbackSuccess(
+                SendDurableExecutionCallbackSuccessRequest.builder().callbackId(id).build()))
+                .isInstanceOf(CallbackTimeoutException.class);
     }
 }

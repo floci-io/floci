@@ -28,6 +28,7 @@ public final class DurableWire {
 
     private static final JsonNodeFactory NODES = JsonNodeFactory.instance;
     private static final long MAX_DELAY_SECONDS = 31_622_400L;
+    private static final long MAX_CALLBACK_TIMEOUT_SECONDS = 99_999_999L;
 
     private DurableWire() {
     }
@@ -118,6 +119,11 @@ public final class DurableWire {
                     putTimestamp(details, "ScheduledEndTimestamp", operation.getScheduledEndTimestamp(), millis);
                 }
             }
+            case CALLBACK -> {
+                ObjectNode details = node.putObject("CallbackDetails");
+                putIfPresent(details, "CallbackId", operation.getCallbackId());
+                putResultAndError(details, operation);
+            }
             default -> {
             }
         }
@@ -203,7 +209,7 @@ public final class DurableWire {
             if (!(item instanceof Map<?, ?> map)) {
                 throw new AwsException("SerializationException", "Updates members must be JSON objects", 400);
             }
-            updates.add(parseUpdate(map));
+            updates.add(parseUpdate(map, "updates." + (updates.size() + 1) + ".member."));
         }
         return updates;
     }
@@ -250,12 +256,14 @@ public final class DurableWire {
                 result != null && result.isTextual() ? result.asText() : null, error);
     }
 
-    private static DurableOperationUpdate parseUpdate(Map<?, ?> map) {
+    /** {@code path} prefixes the member in a ValidationException, as in "updates.1.member.waitOptions.waitSeconds". */
+    private static DurableOperationUpdate parseUpdate(Map<?, ?> map, String path) {
         DurableOperationType type = enumMember(map, "Type", DurableOperationType.class);
         DurableOperationAction action = enumMember(map, "Action", DurableOperationAction.class);
         Map<?, ?> stepOptions = structure(map, "StepOptions");
         Map<?, ?> waitOptions = structure(map, "WaitOptions");
         Map<?, ?> contextOptions = structure(map, "ContextOptions");
+        Map<?, ?> callbackOptions = structure(map, "CallbackOptions");
         return new DurableOperationUpdate(
                 string(map, "Id"),
                 string(map, "ParentId"),
@@ -265,9 +273,12 @@ public final class DurableWire {
                 action,
                 string(map, "Payload"),
                 parseError(map.get("Error")),
-                stepOptions == null ? null : integer(stepOptions, "NextAttemptDelaySeconds", "StepOptions"),
-                waitOptions == null ? null : integer(waitOptions, "WaitSeconds", "WaitOptions"),
-                contextOptions == null ? null : bool(contextOptions, "ReplayChildren"));
+                integer(stepOptions, "NextAttemptDelaySeconds", path + "stepOptions", 1, MAX_DELAY_SECONDS),
+                integer(waitOptions, "WaitSeconds", path + "waitOptions", 1, MAX_DELAY_SECONDS),
+                contextOptions == null ? null : bool(contextOptions, "ReplayChildren"),
+                integer(callbackOptions, "TimeoutSeconds", path + "callbackOptions", 0, MAX_CALLBACK_TIMEOUT_SECONDS),
+                integer(callbackOptions, "HeartbeatTimeoutSeconds", path + "callbackOptions", 0,
+                        MAX_CALLBACK_TIMEOUT_SECONDS));
     }
 
     private static <E extends Enum<E>> E enumMember(Map<?, ?> map, String member, Class<E> type) {
@@ -305,20 +316,19 @@ public final class DurableWire {
         throw new AwsException("SerializationException", member + " must be a string", 400);
     }
 
-    private static Integer integer(Map<?, ?> map, String member, String structure) {
-        Object value = map.get(member);
+    private static Integer integer(Map<?, ?> structure, String member, String structurePath, long min, long max) {
+        Object value = structure == null ? null : structure.get(member);
         if (value == null) {
             return null;
         }
+        String field = structurePath + "." + Character.toLowerCase(member.charAt(0)) + member.substring(1);
         if (!(value instanceof Number number && (number instanceof Byte || number instanceof Short
                 || number instanceof Integer || number instanceof Long))) {
-            throw new AwsException("SerializationException", structure + "." + member + " must be an integer", 400);
+            throw new AwsException("SerializationException", field + " must be an integer", 400);
         }
         long seconds = number.longValue();
-        if (seconds < 1 || MAX_DELAY_SECONDS < seconds) {
-            String field = Character.toLowerCase(structure.charAt(0)) + structure.substring(1) + "."
-                    + Character.toLowerCase(member.charAt(0)) + member.substring(1);
-            String bound = seconds < 1 ? "greater than or equal to 1" : "less than or equal to " + MAX_DELAY_SECONDS;
+        if (seconds < min || max < seconds) {
+            String bound = seconds < min ? "greater than or equal to " + min : "less than or equal to " + max;
             throw new AwsException("ValidationException", "1 validation error detected: Value '" + seconds
                     + "' at '" + field + "' failed to satisfy constraint: Member must have value " + bound, 400);
         }

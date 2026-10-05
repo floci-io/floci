@@ -28,6 +28,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -53,6 +54,7 @@ public class DurableExecutionController {
 
     /** Valid Statuses filters for a state Floci never puts an execution in. */
     private static final Set<String> UNMODELLED_STATUSES = Set.of("PAUSED", "PAUSING", "DELETING");
+    private static final int MAX_CALLBACK_RESULT_BYTES = 1024 * 1024;
 
     private final DurableExecutionService service;
     private final LambdaService lambdaService;
@@ -177,6 +179,39 @@ public class DurableExecutionController {
             response.put("NextMarker", page.nextToken());
         }
         return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/durable-execution-callbacks/{callbackId: .+}/succeed")
+    public Response callbackSucceed(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,
+                                    byte[] body) {
+        if (body != null && MAX_CALLBACK_RESULT_BYTES < body.length) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value at 'result' failed to "
+                    + "satisfy constraint: Member must have length less than or equal to " + MAX_CALLBACK_RESULT_BYTES,
+                    400);
+        }
+        String result = body == null || body.length == 0 ? null : new String(body, StandardCharsets.UTF_8);
+        service.completeCallback(callbackId, regionResolver.getAccountId(), regionResolver.resolveRegion(headers), true,
+                result, null);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** Without a body the callback fails with no Error. */
+    @POST
+    @Path("/durable-execution-callbacks/{callbackId: .+}/fail")
+    public Response callbackFail(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,
+                                 String body) {
+        DurableErrorObject error = body == null || body.isBlank() ? null : DurableWire.parseError(readObject(body));
+        service.completeCallback(callbackId, regionResolver.getAccountId(), regionResolver.resolveRegion(headers), false,
+                null, error);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/durable-execution-callbacks/{callbackId: .+}/heartbeat")
+    public Response callbackHeartbeat(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId) {
+        service.heartbeatCallback(callbackId, regionResolver.getAccountId(), regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     /**

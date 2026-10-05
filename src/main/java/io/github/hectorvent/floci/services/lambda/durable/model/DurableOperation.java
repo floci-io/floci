@@ -29,6 +29,11 @@ public class DurableOperation {
     private Integer attempt;
     private Long nextAttemptTimestamp;
     private Long scheduledEndTimestamp;
+    private String callbackId;
+    private Integer heartbeatTimeoutSeconds;
+    private Long callbackDeadline;
+    /** Moves forward on every SendDurableExecutionCallbackHeartbeat. */
+    private Long heartbeatDeadline;
     /** Position in the execution's change log. The handler is only shown operations newer than it has seen. */
     private long changeSequence;
 
@@ -52,6 +57,10 @@ public class DurableOperation {
         copy.attempt = attempt;
         copy.nextAttemptTimestamp = nextAttemptTimestamp;
         copy.scheduledEndTimestamp = scheduledEndTimestamp;
+        copy.callbackId = callbackId;
+        copy.heartbeatTimeoutSeconds = heartbeatTimeoutSeconds;
+        copy.callbackDeadline = callbackDeadline;
+        copy.heartbeatDeadline = heartbeatDeadline;
         copy.changeSequence = changeSequence;
         return copy;
     }
@@ -100,6 +109,20 @@ public class DurableOperation {
 
     public Long getScheduledEndTimestamp() { return scheduledEndTimestamp; }
     public void setScheduledEndTimestamp(Long scheduledEndTimestamp) { this.scheduledEndTimestamp = scheduledEndTimestamp; }
+
+    public String getCallbackId() { return callbackId; }
+    public void setCallbackId(String callbackId) { this.callbackId = callbackId; }
+
+    public Integer getHeartbeatTimeoutSeconds() { return heartbeatTimeoutSeconds; }
+    public void setHeartbeatTimeoutSeconds(Integer heartbeatTimeoutSeconds) {
+        this.heartbeatTimeoutSeconds = heartbeatTimeoutSeconds;
+    }
+
+    public Long getCallbackDeadline() { return callbackDeadline; }
+    public void setCallbackDeadline(Long callbackDeadline) { this.callbackDeadline = callbackDeadline; }
+
+    public Long getHeartbeatDeadline() { return heartbeatDeadline; }
+    public void setHeartbeatDeadline(Long heartbeatDeadline) { this.heartbeatDeadline = heartbeatDeadline; }
 
     public long getChangeSequence() { return changeSequence; }
     public void setChangeSequence(long changeSequence) { this.changeSequence = changeSequence; }
