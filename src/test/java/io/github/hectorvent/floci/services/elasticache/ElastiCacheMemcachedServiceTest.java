@@ -177,6 +177,22 @@ class ElastiCacheMemcachedServiceTest {
     }
 
     @Test
+    void restorePersistedRuntimeRestartsTheContainerInTheClustersRegion() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
+        when(beforeRestart.tryStart(anyString(), anyString(), any()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "eu-cluster", "localhost", 32770));
+        serviceWith(storageFactory, beforeRestart).createCacheCluster("eu-cluster", "eu-west-1");
+
+        ElastiCacheMemcachedContainerManager restarted = mock(ElastiCacheMemcachedContainerManager.class);
+        when(restarted.tryStart(anyString(), anyString(), any()))
+                .thenReturn(new ElastiCacheContainerHandle("cid2", "eu-cluster", "localhost", 32771));
+        serviceWith(storageFactory, restarted).restorePersistedRuntime().join();
+
+        verify(restarted).tryStart(eq("eu-cluster"), anyString(), eq("eu-west-1"));
+    }
+
+    @Test
     void restorePersistedRuntimeRestartsTheContainerAndRepointsTheEndpoint() {
         StorageFactory storageFactory = sharedStorageFactory();
         ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);

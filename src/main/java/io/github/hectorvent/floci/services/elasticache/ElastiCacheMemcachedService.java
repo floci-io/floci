@@ -114,6 +114,7 @@ public class ElastiCacheMemcachedService {
                     + "is reachable. Metadata operations work; connections to the cache do not "
                     + "until a daemon appears.", clusterId);
         }
+        cluster.setRegion(region);
 
         clusters.put(clusterId, cluster);
         LOG.infov("Memcached cluster {0} created, endpoint={1}:{2}", clusterId, endpointHost, endpointPort);
@@ -165,8 +166,9 @@ public class ElastiCacheMemcachedService {
         String clusterId = cluster.getCacheClusterId();
         String image = config.services().elasticache().defaultMemcachedImage();
         try {
-            // A Memcached cluster records no ARN or region, so its restored container logs to the default region.
-            ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, null);
+            // The region the cluster was created in; a record from before it was kept has none and logs
+            // to the default region.
+            ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, cluster.getRegion());
             synchronized (lockFor(clusterId)) {
                 if (restoreTargetLost(clusterId)) {
                     abandonRestoredContainer(clusterId, handle);

@@ -533,7 +533,7 @@ class ElastiCacheQueryHandlerTest {
 
         String body = (String) handler.handle("CreateCacheCluster", p, "us-east-1").getEntity();
 
-        verify(memcachedService).createCacheCluster(eq("mc"), any());
+        verify(memcachedService).createCacheCluster(eq("mc"), eq("us-east-1"));
         verify(service, never()).createCacheCluster(any());
         assertTrue(body.contains(
                 "<ConfigurationEndpoint><Address>localhost</Address><Port>11211</Port></ConfigurationEndpoint>"), body);
