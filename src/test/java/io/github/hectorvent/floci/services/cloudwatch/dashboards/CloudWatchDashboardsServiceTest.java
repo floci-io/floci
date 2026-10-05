@@ -34,8 +34,32 @@ class CloudWatchDashboardsServiceTest {
         Dashboard dashboard = service.getDashboard("ops", REGION);
         assertEquals(BODY, dashboard.getDashboardBody());
         assertEquals("ops", dashboard.getDashboardName());
-        assertEquals("arn:aws:cloudwatch:us-east-1:000000000000:dashboard/ops",
-                dashboard.getDashboardArn());
+        assertEquals("arn:aws:cloudwatch::000000000000:dashboard/ops", dashboard.getDashboardArn());
+    }
+
+    // Catches: a dashboard ARN minted with the request's Region; AWS's has none, in every partition.
+    @Test
+    void theDashboardArnIsRegionlessInTheRegionsPartition() {
+        service.putDashboard("ops", BODY, "cn-north-1");
+
+        assertEquals("arn:aws-cn:cloudwatch::000000000000:dashboard/ops",
+                service.getDashboard("ops", "cn-north-1").getDashboardArn());
+    }
+
+    // Catches: a dashboard persisted before the change reading back with its old region-ful ARN.
+    @Test
+    void aDashboardStoredWithTheOldRegionfulArnReadsBackRegionless() {
+        InMemoryStorage<String, Dashboard> store = new InMemoryStorage<>();
+        store.put(REGION + "::legacy", new Dashboard("legacy",
+                "arn:aws:cloudwatch:us-east-1:000000000000:dashboard/legacy", BODY));
+        CloudWatchDashboardsService legacy = new CloudWatchDashboardsService(store,
+                new RegionResolver(REGION, "000000000000"));
+
+        String regionless = "arn:aws:cloudwatch::000000000000:dashboard/legacy";
+        assertEquals(regionless, legacy.getDashboard("legacy", REGION).getDashboardArn());
+        assertEquals(regionless, legacy.listDashboards(null, REGION).get(0).getDashboardArn());
+        legacy.tagResource(regionless, Map.of("env", "dev"), REGION);
+        assertEquals(Map.of("env", "dev"), legacy.listTagsForResource(regionless, REGION));
     }
 
     @Test
@@ -151,31 +175,30 @@ class CloudWatchDashboardsServiceTest {
     }
 
     /**
-     * AWS documents the dashboard ARN without a region and Floci mints one with a region, so
-     * both forms have to resolve. Before the tag operations raised on a miss this divergence
-     * was invisible here: the documented ARN matched nothing and got an empty tag map back.
+     * Floci mints the regionless ARN AWS uses, and used to mint one with the request's Region.
+     * Callers may still hold the old form, so both resolve to the same dashboard.
      */
     @Test
-    void bothTheRegionlessAndTheRegionfulDashboardArnResolve() {
+    void bothTheRegionlessAndTheOldRegionfulDashboardArnResolve() {
         service.putDashboard("ops", BODY, REGION);
-        String regionful = service.getDashboard("ops", REGION).getDashboardArn();
-        String regionless = "arn:aws:cloudwatch::000000000000:dashboard/ops";
+        String regionless = service.getDashboard("ops", REGION).getDashboardArn();
+        String regionful = "arn:aws:cloudwatch:us-east-1:000000000000:dashboard/ops";
 
-        assertEquals("arn:aws:cloudwatch:us-east-1:000000000000:dashboard/ops", regionful);
+        assertEquals("arn:aws:cloudwatch::000000000000:dashboard/ops", regionless);
         assertTrue(CloudWatchDashboardsService.isDashboardArn(regionless));
 
-        service.tagResource(regionless, Map.of("env", "dev"), REGION);
+        service.tagResource(regionful, Map.of("env", "dev"), REGION);
         // Read back through the other form: one dashboard, reachable either way.
-        assertEquals(Map.of("env", "dev"), service.listTagsForResource(regionful, REGION));
         assertEquals(Map.of("env", "dev"), service.listTagsForResource(regionless, REGION));
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(regionful, REGION));
 
-        service.untagResource(regionless, List.of("env"), REGION);
-        assertEquals(Map.of(), service.listTagsForResource(regionful, REGION));
+        service.untagResource(regionful, List.of("env"), REGION);
+        assertEquals(Map.of(), service.listTagsForResource(regionless, REGION));
     }
 
     /**
-     * Only an absent region stands in for the dashboard's own. An ARN naming a different
-     * region must not resolve to the same-named dashboard in this one.
+     * The old region-ful form resolves only for the Region the dashboard was put through. An
+     * ARN naming a different Region must not resolve to the same-named dashboard in this one.
      */
     @Test
     void anArnNamingAnotherRegionDoesNotResolve() {

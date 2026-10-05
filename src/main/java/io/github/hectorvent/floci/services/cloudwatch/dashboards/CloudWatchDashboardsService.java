@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -21,6 +23,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * CloudWatch dashboards. Dashboards are pure metadata: the DashboardBody is an opaque JSON
@@ -81,9 +84,7 @@ public class CloudWatchDashboardsService {
         validateDashboardBody(dashboardBody);
 
         Dashboard existing = dashboardStore.get(key(region, dashboardName)).orElse(null);
-        Dashboard dashboard = new Dashboard(dashboardName,
-                regionResolver.buildArn("cloudwatch", region, "dashboard/" + dashboardName),
-                dashboardBody);
+        Dashboard dashboard = new Dashboard(dashboardName, dashboardArn(region, dashboardName), dashboardBody);
         dashboard.setLastModified(Instant.now().getEpochSecond());
         if (existing != null) {
             dashboard.setTags(new LinkedHashMap<>(existing.getTags()));
@@ -123,12 +124,15 @@ public class CloudWatchDashboardsService {
 
     public Dashboard getDashboard(String dashboardName, String region) {
         return dashboardStore.get(key(region, dashboardName))
+                .map(CloudWatchDashboardsService::withRegionlessArn)
                 .orElseThrow(() -> notFound(dashboardName));
     }
 
     public List<Dashboard> listDashboards(String dashboardNamePrefix, String region) {
         String keyPrefix = region + "::";
-        List<Dashboard> all = dashboardStore.scan(k -> k.startsWith(keyPrefix));
+        List<Dashboard> all = new ArrayList<>(dashboardStore.scan(k -> k.startsWith(keyPrefix)).stream()
+                .map(CloudWatchDashboardsService::withRegionlessArn)
+                .toList());
         if (dashboardNamePrefix != null && !dashboardNamePrefix.isBlank()) {
             all = new ArrayList<>(all.stream()
                     .filter(d -> d.getDashboardName().startsWith(dashboardNamePrefix))
@@ -206,38 +210,44 @@ public class CloudWatchDashboardsService {
                         "Dashboard does not exist: " + resourceArn, 404));
     }
 
-    private java.util.Optional<Dashboard> findByArn(String resourceArn, String region) {
+    private Optional<Dashboard> findByArn(String resourceArn, String region) {
         return dashboardStore.scan(k -> k.startsWith(region + "::")).stream()
-                .filter(d -> namesDashboard(resourceArn, d.getDashboardArn()))
+                .map(CloudWatchDashboardsService::withRegionlessArn)
+                .filter(d -> namesDashboard(resourceArn, d.getDashboardArn(), region))
                 .findFirst();
     }
 
     /**
-     * Whether {@code candidate} is an ARN for the dashboard whose own ARN is {@code stored}.
+     * Whether {@code candidate} is an ARN for the dashboard whose regionless ARN is {@code arn}.
      *
-     * <p>Both the region-ful and the regionless form resolve, deliberately, because the two
-     * disagree here and a caller may hold either. Dashboards are a global resource and AWS
-     * documents their ARN without a region on both the TagResource and the ListTagsForResource
-     * pages, {@code arn:aws:cloudwatch::<account-id>:dashboard/<dashboard-name>}, while Floci
-     * mints a region-ful one. That divergence used to be invisible on this path: an ARN
-     * matching nothing was a silent success answering an empty tag map. Now that it is an
-     * error, a caller sending the documented ARN for a dashboard that exists would be told the
-     * dashboard does not, so the lookup accepts both shapes.
-     *
-     * <p>What Floci mints is left alone here on purpose. Clients may already hold the ARNs it
-     * has handed out, so bringing the minted shape into line with AWS is a separate change
-     * from making the lookup tolerant, and only the second one is needed to keep this path
-     * correct.
-     *
-     * <p>Only an absent region is accepted in place of the dashboard's own, so an ARN naming
-     * some other region is still a miss rather than resolving to a same-named dashboard
-     * elsewhere.
+     * <p>AWS's dashboard ARN has no Region ({@code arn:<partition>:cloudwatch::<account>:dashboard/<name>}),
+     * which is what Floci mints. Floci used to mint one with the Region of the request, and callers
+     * may still hold those, so that form resolves too, but only for the Region the dashboard is
+     * stored in: an ARN naming another Region is a miss rather than a same-named dashboard here.
      */
-    private static boolean namesDashboard(String candidate, String stored) {
-        if (candidate == null || stored == null) {
+    private static boolean namesDashboard(String candidate, String arn, String region) {
+        if (candidate == null || arn == null) {
             return false;
         }
-        return candidate.equals(stored) || candidate.equals(withoutRegion(stored));
+        if (candidate.equals(arn)) {
+            return true;
+        }
+        String[] fields = candidate.split(":", 6);
+        return fields.length == 6 && region.equals(fields[3]) && withoutRegion(candidate).equals(arn);
+    }
+
+    /** The dashboard's ARN: regionless, in the partition of the Region it was put through. */
+    private String dashboardArn(String region, String dashboardName) {
+        return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "cloudwatch",
+                regionResolver.getAccountId(), "dashboard/" + dashboardName).toString();
+    }
+
+    /** A dashboard stored before the ARN lost its Region reads back with the regionless one. */
+    private static Dashboard withRegionlessArn(Dashboard dashboard) {
+        if (dashboard.getDashboardArn() != null) {
+            dashboard.setDashboardArn(withoutRegion(dashboard.getDashboardArn()));
+        }
+        return dashboard;
     }
 
     /**
