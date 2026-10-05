@@ -144,10 +144,12 @@ class CognitoWebAuthnTest {
     }
 
     @Test
-    void subdomainOriginsAreAllowed() throws Exception {
+    void httpsSubdomainOriginsAreAllowedAndHttpOnlyForLocalhost() throws Exception {
         service.setUserPoolMfaConfig(pool.getId(), "OFF", null, false,
                 webAuthnConfiguration("example.com", null, null));
         String accessToken = accessToken();
+        assertRegistrationFails("WebAuthnOriginNotAllowedException", accessToken,
+                WebAuthnTestAuthenticator.es256("http://app.example.com"));
         service.completeWebAuthnRegistration(accessToken,
                 WebAuthnTestAuthenticator.es256("https://app.example.com").register(creationOptions(accessToken),
                         "none"));
@@ -161,9 +163,12 @@ class CognitoWebAuthnTest {
         UserPoolClient other = createClient(pool);
         String otherToken = (String) ((Map<?, ?>) service.initiateAuth(other.getClientId(), "USER_PASSWORD_AUTH",
                 Map.of("USERNAME", USERNAME, "PASSWORD", PASSWORD)).get("AuthenticationResult")).get("AccessToken");
+        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN);
         assertEquals("WebAuthnClientMismatchException", assertThrows(AwsException.class,
-                () -> service.completeWebAuthnRegistration(otherToken,
-                        WebAuthnTestAuthenticator.es256(ORIGIN).register(options, "none"))).getErrorCode());
+                () -> service.completeWebAuthnRegistration(otherToken, authenticator.register(options, "none")))
+                .getErrorCode());
+        service.completeWebAuthnRegistration(accessToken, authenticator.register(options, "none"));
+        assertEquals(1, service.adminGetUser(pool.getId(), USERNAME).getWebAuthnCredentials().size());
 
         JsonNode expiring = creationOptions(accessToken);
         clock.advance(Duration.ofMinutes(6));
@@ -280,7 +285,18 @@ class CognitoWebAuthnTest {
         assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), userAuth(null).get("AvailableChallenges"));
 
         service.setUserPoolMfaConfig(pool.getId(), "ON", true, false,
-                webAuthnConfiguration(RP_ID, "required", "MULTI_FACTOR_WITH_USER_VERIFICATION"));
+                webAuthnConfiguration(RP_ID, "preferred", "MULTI_FACTOR_WITH_USER_VERIFICATION"));
+        Map<String, Object> unverified = userAuth("WEB_AUTHN");
+        String requestOptions = challengeParameters(unverified).get("CREDENTIAL_REQUEST_OPTIONS");
+        assertEquals("required", JSON.readTree(requestOptions).path("userVerification").asText(),
+                "a passkey standing in for required MFA must verify the user");
+        String withoutVerification = authenticator.userVerified(false).authenticate(requestOptions);
+        assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                () -> service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
+                        (String) unverified.get("Session"),
+                        Map.of("USERNAME", USERNAME, "CREDENTIAL", withoutVerification))).getErrorCode());
+
+        authenticator.userVerified(true);
         Map<String, Object> challenge = userAuth("WEB_AUTHN");
         assertEquals("WEB_AUTHN", challenge.get("ChallengeName"));
         String credential = authenticator.authenticate(challengeParameters(challenge).get("CREDENTIAL_REQUEST_OPTIONS"));

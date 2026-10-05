@@ -265,13 +265,13 @@ Passkeys are on for a pool whose `Policies.SignInPolicy.AllowedFirstAuthFactors`
 `WebAuthnNotEnabledException`. `SetUserPoolMfaConfig` sets `WebAuthnConfiguration`:
 
 - `RelyingPartyId`: the relying party ID passkeys are registered for. Without one, Floci uses the
-  pool's custom domain, then its prefix domain (`<prefix>.auth.<region>.amazoncognito.com`), as AWS
-  does, and fails with `WebAuthnConfigurationMissingException` when the pool has neither. For a
+  pool's custom domain, then its prefix domain (`<prefix>.auth.<region>.amazoncognito.com` in the
+  commercial partition), as AWS does, and fails with `WebAuthnConfigurationMissingException` when the pool has neither. For a
   local page, set it to `localhost`.
 - `UserVerification`: `preferred` (the default) or `required`.
 - `FactorConfiguration`: `MULTI_FACTOR_WITH_USER_VERIFICATION` lets a passkey sign-in that verified
   the user satisfy MFA; with `SINGLE_FACTOR` or none, a pool that requires MFA does not offer
-  `WEB_AUTHN`.
+  `WEB_AUTHN`. In a pool that requires MFA, a passkey sign-in always asks for user verification.
 
 Registration: `StartWebAuthnRegistration` returns `CredentialCreationOptions` (ES256 and RS256
 keys, a discoverable credential, the user's `sub` as the user handle, the user's existing passkeys
@@ -279,7 +279,7 @@ excluded), and `CompleteWebAuthnRegistration` verifies the browser's `Registrati
 with [webauthn4j](https://github.com/webauthn4j/webauthn4j). As in Cognito, attestation is not
 enforced: `none`, `packed` (self or full), `fido-u2f`, `android-key`, `tpm` and `apple` statements
 are accepted once their signature checks out, without a trust check of their certificates. The origin must be the relying party ID or one of its subdomains, over HTTPS, or
-over HTTP as a page served from `localhost` is. Errors follow the API reference:
+over HTTP for `localhost`, the one insecure origin browsers allow. Errors follow the API reference:
 `WebAuthnChallengeNotFoundException` (no pending registration, or one older than five minutes),
 `WebAuthnClientMismatchException` (an access token from another app client),
 `WebAuthnOriginNotAllowedException`, `WebAuthnRelyingPartyMismatchException`, and

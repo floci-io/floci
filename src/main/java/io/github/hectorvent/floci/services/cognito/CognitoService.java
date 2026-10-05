@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -3421,8 +3422,10 @@ public class CognitoService implements ResourceProvider {
             }
         }
         if (!domains.isEmpty()) {
+            // A prefix domain is <prefix>.auth.<region>.amazoncognito.<partition suffix>.
             String region = AwsArnUtils.regionOrDefault(pool.getArn(), regionResolver.getDefaultRegion());
-            return domains.get(0).getDomain() + ".auth." + region + ".amazoncognito.com";
+            return domains.get(0).getDomain() + ".auth." + region + "."
+                    + AwsRegions.dnsSuffixFor(region).replaceFirst("^amazonaws", "amazoncognito");
         }
         throw new AwsException("WebAuthnConfigurationMissingException",
                 "The user pool has no relying party ID and no domain to default it to. Set "
@@ -3436,9 +3439,17 @@ public class CognitoService implements ResourceProvider {
                 ? configuration.getUserVerification() : "preferred";
     }
 
+    /**
+     * The user verification a passkey sign-in needs: the pool's setting, and always where MFA is
+     * required, since there the passkey must stand in for MFA and only a user-verified one does.
+     */
+    private static String webAuthnSignInUserVerification(UserPool pool) {
+        return "ON".equals(pool.getMfaConfiguration()) ? "required" : webAuthnUserVerification(pool);
+    }
+
     /** The {@code CREDENTIAL_REQUEST_OPTIONS} of a {@code WEB_AUTHN} challenge for {@code user}. */
     String webAuthnRequestOptions(UserPool pool, CognitoUser user, byte[] challenge, long timeoutMillis) {
-        return webAuthn.requestOptions(webAuthnRelyingPartyId(pool), webAuthnUserVerification(pool),
+        return webAuthn.requestOptions(webAuthnRelyingPartyId(pool), webAuthnSignInUserVerification(pool),
                 user.getWebAuthnCredentials(), challenge, timeoutMillis);
     }
 
@@ -3448,24 +3459,23 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * Verifies a {@code WEB_AUTHN} challenge answer for {@code username} and records the
-     * authenticator's new signature counter. Returns whether the authenticator verified the user.
+     * authenticator's new signature counter, both under the user's lock, so two sign-ins with one
+     * passkey cannot both pass the counter check. Returns whether the authenticator verified the user.
      */
     boolean verifyWebAuthnSignIn(UserPool pool, String username, byte[] challenge, String credentialJson) {
-        CognitoUser user = adminGetUser(pool.getId(), username);
-        CognitoWebAuthn.Assertion assertion = webAuthn.verifyAssertion(webAuthnRelyingPartyId(pool),
-                "required".equals(webAuthnUserVerification(pool)), challenge, user.getWebAuthnCredentials(),
-                credentialJson);
-        synchronized (userLock(pool.getId(), user.getUsername())) {
-            CognitoUser current = adminGetUser(pool.getId(), user.getUsername());
-            for (WebAuthnCredential credential : current.getWebAuthnCredentials()) {
-                if (credential.getCredentialId().equals(assertion.credential().getCredentialId())) {
-                    credential.setSignCount(assertion.signCount());
-                    credential.setUserVerified(credential.isUserVerified() || assertion.userVerified());
-                }
-            }
-            userStore.put(userKey(pool.getId(), current.getUsername()), current);
+        String relyingPartyId = webAuthnRelyingPartyId(pool);
+        boolean userVerificationRequired = "required".equals(webAuthnSignInUserVerification(pool));
+        CognitoUser resolved = adminGetUser(pool.getId(), username);
+        synchronized (userLock(pool.getId(), resolved.getUsername())) {
+            CognitoUser user = adminGetUser(pool.getId(), resolved.getUsername());
+            CognitoWebAuthn.Assertion assertion = webAuthn.verifyAssertion(relyingPartyId, userVerificationRequired,
+                    challenge, user.getWebAuthnCredentials(), credentialJson);
+            WebAuthnCredential credential = assertion.credential();
+            credential.setSignCount(assertion.signCount());
+            credential.setUserVerified(credential.isUserVerified() || assertion.userVerified());
+            userStore.put(userKey(pool.getId(), user.getUsername()), user);
+            return assertion.userVerified();
         }
-        return assertion.userVerified();
     }
 
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {

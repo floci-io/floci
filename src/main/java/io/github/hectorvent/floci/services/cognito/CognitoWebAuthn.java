@@ -175,15 +175,21 @@ final class CognitoWebAuthn {
      * consumes, and returns the passkey to store.
      */
     WebAuthnCredential completeRegistration(String poolId, String username, String clientId, JsonNode credential) {
-        PendingRegistration pending = pendingRegistrations.remove(registrationKey(poolId, username));
+        String key = registrationKey(poolId, username);
+        PendingRegistration pending = pendingRegistrations.get(key);
         if (pending == null || clock.instant().isAfter(pending.expiresAt())) {
             throw new AwsException("WebAuthnChallengeNotFoundException",
                     "The passkey registration challenge was not found or has expired.", 400);
         }
+        // Another client's attempt leaves the registration for the client that started it.
         if (!pending.clientId().equals(clientId)) {
             throw new AwsException("WebAuthnClientMismatchException",
                     "The access token is for a different app client than the one that started the registration.",
                     400);
+        }
+        if (!pendingRegistrations.remove(key, pending)) {
+            throw new AwsException("WebAuthnChallengeNotFoundException",
+                    "The passkey registration challenge was not found or has expired.", 400);
         }
         JsonNode response = credential.path("response");
         byte[] clientDataJson = requiredBytes(response, "clientDataJSON");
@@ -337,14 +343,18 @@ final class CognitoWebAuthn {
                 .build();
     }
 
-    /** The relying party ID or a subdomain of it, over HTTPS, or over HTTP as a local page uses. */
+    /**
+     * The relying party ID or a subdomain of it, over HTTPS, or over HTTP for a {@code localhost} page,
+     * the one insecure origin browsers let run WebAuthn ceremonies.
+     */
     static boolean originMatches(Origin origin, String relyingPartyId) {
-        String scheme = origin.getScheme();
         String host = origin.getHost();
-        if (host == null || !("https".equals(scheme) || "http".equals(scheme))) {
+        if (host == null || !(host.equals(relyingPartyId) || host.endsWith("." + relyingPartyId))) {
             return false;
         }
-        return host.equals(relyingPartyId) || host.endsWith("." + relyingPartyId);
+        String scheme = origin.getScheme();
+        return "https".equals(scheme)
+                || ("http".equals(scheme) && (host.equals("localhost") || host.endsWith(".localhost")));
     }
 
     private static String registrationKey(String poolId, String username) {

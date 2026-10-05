@@ -1052,6 +1052,7 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         requireSignInEligible(user);
+        // Where MFA is required, the passkey stands in for it, so its assertion must verify the user.
         boolean userVerified = service.verifyWebAuthnSignIn(pool, user.getUsername(), state.webAuthnChallenge(),
                 credential);
         user = service.adminGetUser(pool.getId(), user.getUsername());
