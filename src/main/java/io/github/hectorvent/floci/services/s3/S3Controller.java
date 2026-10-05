@@ -3424,7 +3424,8 @@ public class S3Controller {
     }
 
     private static boolean anyEntityTag(String headerValue, Predicate<String> test) {
-        for (String candidate : headerValue.split(",")) {
+        // A limit of -1 keeps empty members, so a header of only commas is still judged.
+        for (String candidate : headerValue.split(",", -1)) {
             if (test.test(unquotedEntityTag(candidate))) {
                 return true;
             }
