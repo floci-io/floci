@@ -260,4 +260,13 @@ class PostgresBackendSessionTest {
 
     private record Frame(char type, byte[] body) {
     }
+
+    @Test
+    void preparationFailsFastAfterTheClientsOwnBackendError() {
+        PostgresExtendedBackendSession session = new PostgresExtendedBackendSession(null);
+        session.onBackendError();
+        SpectrumReadException error = assertThrows(SpectrumReadException.class, () -> session.execute("CREATE TABLE t(id INT)"));
+        assertEquals("25P02", error.sqlState());
+        session.onSync();
+    }
 }

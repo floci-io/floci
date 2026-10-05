@@ -88,14 +88,8 @@ public class RedshiftInterceptingBridge {
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
                                        String clusterAccountId, List<String> iamRoleArns) {
-        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, null);
-    }
-
-    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
-                                      String clusterAccountId, List<String> iamRoleArns,
-                                      SpectrumInterceptor spectrumInterceptor) {
-        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
-                clusterAccountId + ":legacy", "dev");
+        // Without a Spectrum interceptor the cluster key and database name are never read.
+        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, null, null, null);
     }
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
@@ -212,7 +206,7 @@ public class RedshiftInterceptingBridge {
                     decision[0] = spectrumInterceptor.intercept(sql, spectrumSession(), backend);
                     return true;
                 });
-            } catch (SpectrumSqlException | SpectrumReadException | IllegalArgumentException exception) {
+            } catch (RuntimeException exception) {
                 writeSimpleSpectrumError(exception);
                 return;
             }
@@ -276,7 +270,10 @@ public class RedshiftInterceptingBridge {
         // resolve to the stale Spectrum plan in handleBind/handleDescribe/handleExecute.
         spectrumStatements.remove(parse.statementName());
         relationalStatements.remove(parse.statementName());
+        // After a backend error the backend discards everything up to Sync, so a preparation round trip
+        // would only wait out the socket timeout; forward the Parse and let the backend discard it.
         if (spectrumInterceptor != null && spectrumInterceptor.preparation() != null
+                && !coordinator.isDiscardingUntilSync()
                 && spectrumInterceptor.preparation().referencesExternal(parse.sql(), spectrumSession())) {
             try {
                 write(backendOut, new byte[]{'H', 0, 0, 0, 4});
@@ -288,7 +285,7 @@ public class RedshiftInterceptingBridge {
                     throw new SpectrumReadException("58030", "Unable to prepare external query");
                 }
                 relationalStatements.put(parse.statementName(), parse);
-            } catch (SpectrumSqlException | SpectrumReadException exception) {
+            } catch (RuntimeException exception) {
                 spectrumInterceptor.preparation().finishCycle(relationalBackend);
                 writeParseSpectrumError(exception);
                 return;
@@ -304,7 +301,7 @@ public class RedshiftInterceptingBridge {
                     write(client.getOutputStream(), backendFrame('1', EMPTY_BODY));
                     return;
                 }
-            } catch (SpectrumSqlException | SpectrumReadException | IllegalArgumentException exception) {
+            } catch (RuntimeException exception) {
                 writeParseSpectrumError(exception);
                 return;
             }
@@ -335,7 +332,7 @@ public class RedshiftInterceptingBridge {
             OutputStream backendOut) throws IOException {
         PostgresWireDecoder.BindMessage bind = decoder.decodeBind(message);
         PostgresWireDecoder.ParseMessage relational = relationalStatements.get(bind.statementName());
-        if (relational != null) {
+        if (relational != null && !coordinator.isDiscardingUntilSync()) {
             try {
                 // Parse/Describe responses may be buffered until Flush or Sync; drain them before taking ownership.
                 write(backendOut, new byte[]{'H', 0, 0, 0, 4});
@@ -346,7 +343,7 @@ public class RedshiftInterceptingBridge {
                 if (!prepared) {
                     throw new SpectrumReadException("58030", "Unable to prepare external query");
                 }
-            } catch (SpectrumSqlException | SpectrumReadException exception) {
+            } catch (RuntimeException exception) {
                 spectrumInterceptor.preparation().finishCycle(relationalBackend);
                 writeParseSpectrumError(exception);
                 return;
@@ -382,7 +379,7 @@ public class RedshiftInterceptingBridge {
                 }
                 byte[] response = spectrumDescribeResponse(spectrumPlan);
                 write(client.getOutputStream(), response);
-            } catch (SpectrumSqlException | SpectrumReadException | IllegalArgumentException exception) {
+            } catch (RuntimeException exception) {
                 writeParseSpectrumError(exception);
             }
             return;
@@ -713,7 +710,11 @@ public class RedshiftInterceptingBridge {
         if (exception instanceof SpectrumReadException spectrumReadException) {
             return spectrumReadException.sqlState();
         }
-        return "22023";
+        if (exception instanceof IllegalArgumentException) {
+            return "22023";
+        }
+        LOG.warnv(exception, "External query preparation failed unexpectedly");
+        return "58030";
     }
 
     /**
@@ -781,17 +782,22 @@ public class RedshiftInterceptingBridge {
 
     private void pumpBackendToClient() {
         WireFrameTracker tracker = new WireFrameTracker((type, body) -> {
+            // Publish or drop pending preparation state before the coordinator reports the backend idle,
+            // so the next preparation already sees a schema bound by a committed CREATE EXTERNAL SCHEMA.
+            if (spectrumInterceptor != null && spectrumInterceptor.preparation() != null) {
+                if (type == 'E' || type == 'C' && "ROLLBACK\0".equals(new String(body, StandardCharsets.UTF_8))) {
+                    spectrumInterceptor.preparation().finishCycle(relationalBackend);
+                }
+                if (type == 'Z' && body.length > 0 && body[0] == 'I') {
+                    spectrumInterceptor.preparation().finishCycle(relationalBackend, true);
+                }
+            }
+            if (type == 'E') {
+                relationalBackend.onBackendError();
+            }
             coordinator.onBackendFrame(type, body);
             if (type == 'Z') {
                 relationalBackend.onSync();
-            }
-            if ((type == 'E' || type == 'C' && "ROLLBACK\0".equals(new String(body, StandardCharsets.UTF_8)))
-                    && spectrumInterceptor != null && spectrumInterceptor.preparation() != null) {
-                spectrumInterceptor.preparation().finishCycle(relationalBackend);
-            }
-            if (type == 'Z' && body.length > 0 && body[0] == 'I'
-                    && spectrumInterceptor != null && spectrumInterceptor.preparation() != null) {
-                spectrumInterceptor.preparation().finishCycle(relationalBackend, true);
             }
         });
         try {

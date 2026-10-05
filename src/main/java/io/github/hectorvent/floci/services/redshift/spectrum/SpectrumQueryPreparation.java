@@ -9,9 +9,12 @@ import org.jboss.logging.Logger;
 
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 @ApplicationScoped
 public class SpectrumQueryPreparation {
@@ -21,6 +24,7 @@ public class SpectrumQueryPreparation {
     private final ExternalStatementParser parser;
     private final GlueService glue;
     private final ExternalMetadataWriter metadata;
+    private final Map<BackendSql, List<ExternalSchemaBinding>> pendingBindings = new ConcurrentHashMap<>();
 
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
                                     ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata) {
@@ -122,7 +126,7 @@ public class SpectrumQueryPreparation {
         backend.execute("CREATE SCHEMA " + quote(schema.schemaName()));
         try {
             metadata.refresh(backend, session.accountId(), binding);
-            registry.bind(binding);
+            bindWhenCommitted(backend, binding);
         } catch (RuntimeException exception) {
             try {
                 backend.execute("DROP SCHEMA " + quote(schema.schemaName()) + " CASCADE");
@@ -151,13 +155,31 @@ public class SpectrumQueryPreparation {
         materializer.forgetCluster(clusterKey);
     }
 
+    /**
+     * A backend that shares the client's transaction can still roll the schema back, so the binding is held
+     * until {@link #finishCycle(BackendSql, boolean)} sees the commit. Any other backend has committed already.
+     */
+    private void bindWhenCommitted(BackendSql backend, ExternalSchemaBinding binding) {
+        if (backend.permitsCachePublication()) {
+            registry.bind(binding);
+            return;
+        }
+        pendingBindings.computeIfAbsent(backend, ignored -> new CopyOnWriteArrayList<>()).add(binding);
+    }
+
     public void finishCycle(BackendSql backend) {
+        pendingBindings.remove(backend);
         materializer.finishCycle(backend);
     }
 
     public void finishCycle(BackendSql backend, boolean committed) {
+        List<ExternalSchemaBinding> completed = pendingBindings.remove(backend);
+        if (committed && completed != null) {
+            completed.forEach(registry::bind);
+        }
         materializer.finishCycle(backend, committed);
     }
+
     private static String quote(String identifier) {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }

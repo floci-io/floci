@@ -96,4 +96,35 @@ class SpectrumQueryPreparationTest {
                         + BINDING.iamRoleArn() + "'", SESSION, backend));
         verify(registry, never()).bind(any());
     }
+
+    private static final String CREATE_LAKE = "CREATE EXTERNAL SCHEMA lake FROM DATA CATALOG DATABASE 'analytics' IAM_ROLE '"
+            + BINDING.iamRoleArn() + "'";
+
+    @Test
+    void schemaCreatedInClientTransactionIsBoundOnlyWhenItCommits() {
+        when(registry.find(anyString(), anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+        when(backend.permitsCachePublication()).thenReturn(false);
+        assertTrue(preparation.prepare(CREATE_LAKE, SESSION, backend));
+        verify(registry, never()).bind(any());
+        preparation.finishCycle(backend, true);
+        verify(registry).bind(any());
+    }
+
+    @Test
+    void schemaCreatedInRolledBackTransactionIsNeverBound() {
+        when(registry.find(anyString(), anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+        when(backend.permitsCachePublication()).thenReturn(false);
+        assertTrue(preparation.prepare(CREATE_LAKE, SESSION, backend));
+        preparation.finishCycle(backend);
+        preparation.finishCycle(backend, true);
+        verify(registry, never()).bind(any());
+    }
+
+    @Test
+    void schemaCreatedOnAutocommitBackendIsBoundImmediately() {
+        when(registry.find(anyString(), anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+        when(backend.permitsCachePublication()).thenReturn(true);
+        assertTrue(preparation.prepare(CREATE_LAKE, SESSION, backend));
+        verify(registry).bind(any());
+    }
 }

@@ -107,8 +107,8 @@ final class BackendResponseCoordinator {
     void onBackendFrame(char type, byte[] body) {
         lock.lock();
         try {
-            if (type == 'C' && "BEGIN\0".equals(new String(body, StandardCharsets.UTF_8))) {
-                lastReadyStatus = 'T';
+            if (type == 'C') {
+                updateStatusFromCommandTag(new String(body, StandardCharsets.UTF_8));
             }
             if (type == 'Z') {
                 updateReadyStatus(body);
@@ -216,6 +216,18 @@ final class BackendResponseCoordinator {
     private void resolveSkippedGate(PendingOperation operation) {
         if (operation.ticket().operation() == Operation.EXECUTE) {
             resolvedGates.put(operation.ticket().sequence(), GateResult.SKIPPED_AFTER_ERROR);
+        }
+    }
+
+    /** Tracks transaction boundaries as the tag arrives, so a statement pipelined after COMMIT sees them. */
+    private void updateStatusFromCommandTag(String tag) {
+        switch (tag) {
+            case "BEGIN\0" -> lastReadyStatus = 'T';
+            case "COMMIT\0", "END\0", "ROLLBACK\0" -> {
+                lastReadyStatus = 'I';
+                session.transactionEnded();
+            }
+            default -> { }
         }
     }
 

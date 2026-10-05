@@ -366,13 +366,13 @@ CREATE TABLE IF NOT EXISTS floci_internal.external_catalog (
 );
 
 CREATE OR REPLACE FUNCTION floci_internal.refresh_external_catalog(schema_name text, payload jsonb)
-RETURNS void LANGUAGE sql AS $$
+RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
     INSERT INTO floci_internal.external_catalog VALUES ($1, $2)
     ON CONFLICT (schema_name) DO UPDATE SET payload = EXCLUDED.payload;
 $$;
 
 CREATE OR REPLACE FUNCTION floci_internal.purge_external_schema(schema_name text)
-RETURNS void LANGUAGE sql AS $$
+RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
     DELETE FROM floci_internal.external_catalog WHERE schema_name = $1;
 $$;
 

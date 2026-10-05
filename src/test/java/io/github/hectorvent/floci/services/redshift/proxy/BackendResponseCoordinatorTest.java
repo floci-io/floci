@@ -21,8 +21,16 @@ class BackendResponseCoordinatorTest {
         coordinator.onBackendFrame('C', new byte[]{'B', 'E', 'G', 'I', 'N', 0});
         assertEquals('T', coordinator.lastReadyStatus());
         coordinator.onBackendFrame('C', new byte[]{'R', 'O', 'L', 'L', 'B', 'A', 'C', 'K', 0});
-        assertEquals('T', coordinator.lastReadyStatus());
-        coordinator.onBackendFrame('Z', new byte[]{'I'});
+        assertEquals('I', coordinator.lastReadyStatus());
+    }
+
+    @Test
+    void commitLeavesTransactionBeforeSync() {
+        BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
+        coordinator.register(BackendResponseCoordinator.Operation.EXECUTE, null);
+        coordinator.onBackendFrame('C', new byte[]{'B', 'E', 'G', 'I', 'N', 0});
+        coordinator.register(BackendResponseCoordinator.Operation.EXECUTE, null);
+        coordinator.onBackendFrame('C', new byte[]{'C', 'O', 'M', 'M', 'I', 'T', 0});
         assertEquals('I', coordinator.lastReadyStatus());
     }
 

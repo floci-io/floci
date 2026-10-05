@@ -5,7 +5,6 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
@@ -23,6 +22,11 @@ public final class PostgresExtendedBackendSession implements BackendSql {
     @Override
     public boolean permitsCachePublication() {
         return false;
+    }
+
+    /** The client's own pipelined statement failed; the backend discards everything until Sync. */
+    public void onBackendError() {
+        failedUntilSync = true;
     }
 
     public void onSync() {
@@ -60,10 +64,7 @@ public final class PostgresExtendedBackendSession implements BackendSql {
                 int count;
                 while ((count = data.read(chunk)) >= 0) {
                     if (count > 0) {
-                        OutputStream output = backend.getOutputStream();
-                        output.write('d');
-                        new DataOutputStream(output).writeInt(count + 4);
-                        output.write(chunk, 0, count);
+                        frame('d', chunk, count);
                     }
                 }
             } catch (IOException exception) {
@@ -131,9 +132,14 @@ public final class PostgresExtendedBackendSession implements BackendSql {
     }
 
     private void readUntil(char type) throws IOException {
-        while (read().type() != type) {
+        Response response;
+        do {
             // ParseComplete, BindComplete and asynchronous messages precede the response.
-        }
+            response = read();
+            if (response.type() == 'Z') {
+                throw new IOException("Backend ended preparation before sending " + type);
+            }
+        } while (response.type() != type);
     }
 
     private Response read() throws IOException {
@@ -171,10 +177,17 @@ public final class PostgresExtendedBackendSession implements BackendSql {
     }
 
     private void frame(char type, byte[] body) throws IOException {
-        DataOutputStream output = new DataOutputStream(backend.getOutputStream());
+        frame(type, body, body.length);
+    }
+
+    /** Writes the frame in one call; a split write would put a header packet on the wire of its own. */
+    private void frame(char type, byte[] body, int length) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(length + 5);
+        DataOutputStream output = new DataOutputStream(bytes);
         output.writeByte(type);
-        output.writeInt(body.length + 4);
-        output.write(body);
+        output.writeInt(length + 4);
+        output.write(body, 0, length);
+        backend.getOutputStream().write(bytes.toByteArray());
     }
 
     private static void cstring(DataOutputStream output, String text) throws IOException {

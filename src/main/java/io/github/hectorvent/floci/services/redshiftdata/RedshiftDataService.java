@@ -131,6 +131,9 @@ public class RedshiftDataService implements Resettable {
                 throw new SQLException(exception.getMessage(), exception.sqlState(), exception);
             } catch (SpectrumReadException exception) {
                 throw new SQLException(exception.getMessage(), exception.sqlState(), exception);
+            } catch (RuntimeException exception) {
+                // Anything else from Glue or the read path must fail the statement, not leave it running.
+                throw new SQLException("External query preparation failed: " + exception.getMessage(), "58030", exception);
             }
         }
         ParsedSql parsed = RedshiftDataSqlParameters.parse(sql);

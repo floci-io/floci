@@ -29,8 +29,7 @@ class RedshiftDataBackendSqlTest {
         RedshiftDataBackendSql backend = new RedshiftDataBackendSql(connection);
         backend.execute("CREATE TABLE t(id INTEGER)");
         assertEquals(2L, backend.copyIn("COPY t FROM STDIN", data));
-        verify(statement).execute(argThat(sql -> sql.startsWith("DO $floci_")
-                && sql.contains("BEGIN CREATE TABLE t(id INTEGER); END")));
+        verify(statement).execute("CREATE TABLE t(id INTEGER)");
         verify(statement).close();
         verify(connection, never()).commit();
         verify(connection, never()).rollback();

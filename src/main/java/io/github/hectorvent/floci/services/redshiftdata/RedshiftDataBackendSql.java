@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
-import io.github.hectorvent.floci.services.redshift.spectrum.PostgresExtendedBackendSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
 import org.postgresql.PGConnection;
 
@@ -21,7 +20,7 @@ final class RedshiftDataBackendSql implements BackendSql {
     @Override
     public void execute(String sql) {
         try (Statement statement = connection.createStatement()) {
-            statement.execute(PostgresExtendedBackendSession.atomicCommand(sql));
+            statement.execute(sql);
         } catch (SQLException exception) {
             throw failure(exception);
         }
