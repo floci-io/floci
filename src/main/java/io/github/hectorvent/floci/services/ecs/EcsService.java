@@ -129,9 +129,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     // region::clusterName → EcsCluster
     private Map<String, EcsCluster> clusters = new ConcurrentHashMap<>();
-    // family:revision → TaskDefinition
+    // region::family:revision → TaskDefinition (entries persisted before regions were keyed: family:revision)
     private Map<String, TaskDefinition> taskDefinitions = new ConcurrentHashMap<>();
-    // family → latest revision number
+    // region::family → latest revision number
     private Map<String, Integer> latestRevisions = new ConcurrentHashMap<>();
     // taskArn → EcsTask
     private final Map<String, EcsTask> tasks = new ConcurrentHashMap<>();
@@ -695,7 +695,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             validateFargateUnsupportedParameters(request);
         }
         String family = request.getFamily();
-        int revision = latestRevisions.merge(family, 1, Integer::sum);
+        int revision = latestRevisions.compute(familyKey(region, family),
+                (key, latest) -> (latest != null ? latest : latestRevision(region, family)) + 1);
 
         TaskDefinition td = new TaskDefinition();
         td.setFamily(family);
@@ -726,7 +727,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             td.setTags(new LinkedHashMap<>(request.getTags()));
         }
 
-        taskDefinitions.put(family + ":" + revision, td);
+        storeTaskDefinition(td);
         LOG.infov("Registered task definition: {0}:{1}", family, revision);
         return td;
     }
@@ -1100,15 +1101,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * at registration, so fields set on the returned instance need this to survive a restart.
      */
     public void persistTaskDefinition(TaskDefinition td) {
-        taskDefinitions.put(td.getFamily() + ":" + td.getRevision(), td);
+        storeTaskDefinition(td);
     }
 
     public TaskDefinition describeTaskDefinition(String taskDefinitionRef, String region) {
         return resolveTaskDefinitionOrThrow(taskDefinitionRef, region);
-    }
-
-    public List<String> listTaskDefinitions(String familyPrefix, String status) {
-        return listTaskDefinitions(familyPrefix, status, null, null, null).arns();
     }
 
     /**
@@ -1119,7 +1116,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * family comes last (or first under {@code DESC}). Listing by ARN string alone would put
      * revision 10 before revision 2.
      */
-    public ListPage listTaskDefinitions(String familyPrefix, String status, String sort,
+    public ListPage listTaskDefinitions(String region, String familyPrefix, String status, String sort,
                                                 Integer maxResults, String nextToken) {
         String effectiveStatus = status != null ? status : STATUS_ACTIVE;
         Comparator<TaskDefinition> order = Comparator
@@ -1128,17 +1125,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if ("DESC".equals(sort)) {
             order = order.reversed();
         }
-        List<String> arns = taskDefinitions.values().stream()
+        List<String> arns = taskDefinitionsIn(region)
+                .filter(td -> td.getTaskDefinitionArn() != null)
                 .filter(td -> familyPrefix == null || td.getFamily().startsWith(familyPrefix))
                 .filter(td -> effectiveStatus.equals(td.getStatus()))
                 .sorted(order)
                 .map(TaskDefinition::getTaskDefinitionArn)
                 .toList();
         return paginate(arns, maxResults, nextToken);
-    }
-
-    public List<String> listTaskDefinitionFamilies(String familyPrefix) {
-        return listTaskDefinitionFamilies(familyPrefix, null, null, null).arns();
     }
 
     /**
@@ -1149,21 +1143,23 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * those that have none. A family survives the deregistration of all its revisions, which is
      * why the unfiltered listing still names it.
      */
-    public ListPage listTaskDefinitionFamilies(String familyPrefix, String status,
+    public ListPage listTaskDefinitionFamilies(String region, String familyPrefix, String status,
                                                 Integer maxResults, String nextToken) {
-        List<String> families = latestRevisions.keySet().stream()
+        List<String> families = taskDefinitionsIn(region)
+                .map(TaskDefinition::getFamily)
+                .distinct()
                 .filter(f -> familyPrefix == null || f.startsWith(familyPrefix))
-                .filter(f -> matchesFamilyStatus(f, status))
+                .filter(f -> matchesFamilyStatus(region, f, status))
                 .sorted()
                 .toList();
         return paginate(families, maxResults, nextToken);
     }
 
-    private boolean matchesFamilyStatus(String family, String status) {
+    private boolean matchesFamilyStatus(String region, String family, String status) {
         if (status == null || "ALL".equals(status)) {
             return true;
         }
-        boolean hasActiveRevision = taskDefinitions.values().stream()
+        boolean hasActiveRevision = taskDefinitionsIn(region)
                 .anyMatch(td -> family.equals(td.getFamily()) && STATUS_ACTIVE.equals(td.getStatus()));
         return STATUS_ACTIVE.equals(status) == hasActiveRevision;
     }
@@ -1172,7 +1168,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         TaskDefinition td = resolveTaskDefinitionOrThrow(taskDefinitionRef, region);
         td.setStatus(STATUS_INACTIVE);
         td.setDeregisteredAt(Instant.now());
-        taskDefinitions.put(td.getFamily() + ":" + td.getRevision(), td);
+        storeTaskDefinition(td);
         return td;
     }
 
@@ -1202,7 +1198,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             }
             td.setStatus(STATUS_DELETE_IN_PROGRESS);
             td.setDeleteRequestedAt(Instant.now());
-            taskDefinitions.put(td.getFamily() + ":" + td.getRevision(), td);
+            storeTaskDefinition(td);
             deleted.add(td);
         }
         return deleted;
@@ -5268,18 +5264,58 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private TaskDefinition resolveTaskDefinitionOrThrow(String ref, String region) {
-        TaskDefinition td = taskDefinitions.get(ref);
+        TaskDefinition td = taskDefinitions.get(familyKey(region, ref));
         if (td != null) { return td; }
-        td = taskDefinitions.values().stream()
-                .filter(d -> d.getTaskDefinitionArn().equals(ref))
+        td = taskDefinitionsIn(region)
+                .filter(d -> d.getTaskDefinitionArn().equals(ref)
+                        || (d.getFamily() + ":" + d.getRevision()).equals(ref))
                 .findFirst().orElse(null);
         if (td != null) { return td; }
-        Integer latest = latestRevisions.get(ref);
-        if (latest != null) {
-            td = taskDefinitions.get(ref + ":" + latest);
+        int latest = latestRevision(region, ref);
+        if (latest > 0) {
+            td = taskDefinitions.get(taskDefinitionKey(region, ref, latest));
+            if (td != null) { return td; }
+            td = taskDefinitionsIn(region)
+                    .filter(d -> ref.equals(d.getFamily()) && d.getRevision() == latest)
+                    .findFirst().orElse(null);
             if (td != null) { return td; }
         }
         throw new AwsException("ClientException", "Unable to describe task definition: " + ref, 400);
+    }
+
+    /**
+     * Stores a task definition under its region's key. A definition persisted before the key
+     * carried the region is re-filed on its next write, so it never appears twice. The old key
+     * named no region, so it is dropped only when it holds this same definition: the same
+     * family and revision in another region is a different definition.
+     */
+    private void storeTaskDefinition(TaskDefinition td) {
+        String legacyKey = td.getFamily() + ":" + td.getRevision();
+        TaskDefinition legacy = taskDefinitions.get(legacyKey);
+        if (legacy != null && Objects.equals(td.getTaskDefinitionArn(), legacy.getTaskDefinitionArn())) {
+            taskDefinitions.remove(legacyKey);
+        }
+        taskDefinitions.put(taskDefinitionKey(regionOf(td), td.getFamily(), td.getRevision()), td);
+    }
+
+    /** Task definitions are regional; the region is read from each one's ARN, whatever its storage key. */
+    private Stream<TaskDefinition> taskDefinitionsIn(String region) {
+        return taskDefinitions.values().stream().filter(td -> region.equals(regionOf(td)));
+    }
+
+    private int latestRevision(String region, String family) {
+        return taskDefinitionsIn(region)
+                .filter(td -> family.equals(td.getFamily()))
+                .mapToInt(TaskDefinition::getRevision)
+                .max().orElse(0);
+    }
+
+    /**
+     * The region in a definition's ARN. One whose ARN cannot be read belongs to the default region, as a
+     * task does ({@link #taskRegion}): it breaks no lookup, and it is seen in one region rather than all.
+     */
+    private String regionOf(TaskDefinition td) {
+        return AwsArnUtils.regionOrDefault(td.getTaskDefinitionArn(), regionResolver.getDefaultRegion());
     }
 
     /**
@@ -5381,6 +5417,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private static String clusterKey(String region, String clusterName) {
         return region + "::" + clusterName;
+    }
+
+    private static String familyKey(String region, String family) {
+        return region + "::" + family;
+    }
+
+    private static String taskDefinitionKey(String region, String family, int revision) {
+        return familyKey(region, family) + ":" + revision;
     }
 
     private static String serviceKey(String region, String clusterName, String serviceName) {

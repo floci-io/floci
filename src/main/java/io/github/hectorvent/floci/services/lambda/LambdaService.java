@@ -2010,8 +2010,21 @@ public class LambdaService implements ResourceProvider {
 
     public EventSourceMapping getEventSourceMapping(String uuid) {
         return esmStore.get(uuid)
+                .filter(this::inRequestRegion)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "EventSourceMapping not found: " + uuid, 404));
+    }
+
+    /**
+     * Mappings are stored by UUID for every region, so a request sees only its own region's. A mapping
+     * persisted before its region was recorded takes the region of its function ARN.
+     */
+    private boolean inRequestRegion(EventSourceMapping esm) {
+        String region = esm.getRegion();
+        if (region == null && esm.getFunctionArn() != null && AwsArnUtils.isArn(esm.getFunctionArn())) {
+            region = AwsArnUtils.parse(esm.getFunctionArn()).region();
+        }
+        return region == null || region.equals(regionResolver.getRegion());
     }
 
     public List<EventSourceMapping> listEventSourceMappings(String functionArn) {
@@ -2030,6 +2043,7 @@ public class LambdaService implements ResourceProvider {
         } else {
             mappings = esmStore.list();
         }
+        mappings = mappings.stream().filter(this::inRequestRegion).toList();
         if (eventSourceArn != null && !eventSourceArn.isBlank()) {
             mappings = mappings.stream()
                     .filter(esm -> eventSourceArn.equals(esm.getEventSourceArn()))

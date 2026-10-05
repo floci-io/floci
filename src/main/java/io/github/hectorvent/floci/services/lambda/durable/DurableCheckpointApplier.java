@@ -48,7 +48,7 @@ final class DurableCheckpointApplier {
         return new Outcome(draft.closingStatus != null);
     }
 
-    /** Completes waits and step retries whose time has come. The sweeper and every checkpoint call it. */
+    /** Completes waits, step retries and callback timeouts whose time has come. The sweeper and every checkpoint call it. */
     static boolean fireDueTimers(DurableExecution execution, long now) {
         boolean changed = false;
         for (DurableOperation operation : execution.getOperations().values()) {
@@ -71,9 +71,36 @@ final class DurableCheckpointApplier {
                 operation.setNextAttemptTimestamp(null);
                 operation.setChangeSequence(execution.nextChangeSequence());
                 changed = true;
+            } else if (operation.getType() == DurableOperationType.CALLBACK
+                    && operation.getStatus() == DurableOperationStatus.STARTED) {
+                changed |= timeOutCallback(execution, operation, now);
             }
         }
         return changed;
+    }
+
+    private static boolean timeOutCallback(DurableExecution execution, DurableOperation operation, long now) {
+        boolean timedOut = operation.getCallbackDeadline() != null && operation.getCallbackDeadline() <= now;
+        boolean heartbeatMissed = operation.getHeartbeatDeadline() != null && operation.getHeartbeatDeadline() <= now;
+        if (!timedOut && !heartbeatMissed) {
+            return false;
+        }
+        boolean heartbeatFirst = heartbeatMissed
+                && (!timedOut || operation.getHeartbeatDeadline() < operation.getCallbackDeadline());
+        DurableErrorObject error = heartbeatFirst
+                ? DurableErrorObject.of("Callback timed out on heartbeat", "Callback.Heartbeat")
+                : DurableErrorObject.of("Callback timed out", "Callback.Timeout");
+        operation.setStatus(DurableOperationStatus.TIMED_OUT);
+        operation.setError(error);
+        operation.setEndTimestamp(now);
+        operation.setCallbackDeadline(null);
+        operation.setHeartbeatDeadline(null);
+        operation.setChangeSequence(execution.nextChangeSequence());
+        // The history event names only the error type.
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("Error", DurableHistory.errorWrapper(DurableErrorObject.of(null, error.getErrorType())));
+        DurableHistory.operationEvent(execution, operation, "CallbackTimedOut", now, details);
+        return true;
     }
 
     private static void validateBatch(List<DurableOperationUpdate> updates) {
@@ -93,7 +120,7 @@ final class DurableCheckpointApplier {
             DurableOperationUpdate previous = seen.put(update.id(), update);
             if (previous != null && !(previous.action() == DurableOperationAction.START
                     && previous.type() == update.type() && closesInSameBatch(update))) {
-                throw invalid("Cannot checkpoint multiple operations with the same ID.");
+                throw invalid("Cannot update the same operation twice in a single request.");
             }
         }
     }
@@ -170,7 +197,8 @@ final class DurableCheckpointApplier {
                 case CONTEXT -> applyContext(update, existing);
                 case STEP -> applyStep(update, existing);
                 case WAIT -> applyWait(update, existing);
-                case CALLBACK, CHAINED_INVOKE -> throw invalid(update.type() + " operations are not supported yet");
+                case CALLBACK -> applyCallback(update, existing);
+                case CHAINED_INVOKE -> throw invalid(update.type() + " operations are not supported yet");
                 default -> throw invalid("Unknown operation type.");
             }
         }
@@ -338,6 +366,32 @@ final class DurableCheckpointApplier {
                 }
                 default -> throw invalid("Invalid action for the given operation type.");
             }
+        }
+
+        /** Only the function starts a callback. SendDurableExecutionCallback* completes it. */
+        private void applyCallback(DurableOperationUpdate update, DurableOperation existing) {
+            if (update.action() != DurableOperationAction.START) {
+                throw invalid("Invalid action for the given operation type.");
+            }
+            if (existing != null) {
+                throw invalid("Cannot start a CALLBACK that already exist.");
+            }
+            DurableOperation operation = create(update);
+            operation.setCallbackId(DurableTokens.callbackId(execution.getExecutionArn(), update.id()));
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("CallbackId", operation.getCallbackId());
+            Integer timeout = update.callbackTimeoutSeconds();
+            if (timeout != null && timeout > 0) {
+                operation.setCallbackDeadline(now + timeout * 1000L);
+                details.put("Timeout", timeout);
+            }
+            Integer heartbeat = update.callbackHeartbeatTimeoutSeconds();
+            if (heartbeat != null && heartbeat > 0) {
+                operation.setHeartbeatTimeoutSeconds(heartbeat);
+                operation.setHeartbeatDeadline(now + heartbeat * 1000L);
+                details.put("HeartbeatTimeout", heartbeat);
+            }
+            event(operation, "CallbackStarted", details);
         }
 
         private static void requireMatchingResult(DurableOperationUpdate update) {

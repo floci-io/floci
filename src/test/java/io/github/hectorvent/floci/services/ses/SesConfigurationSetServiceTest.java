@@ -1,19 +1,27 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
+import io.github.hectorvent.floci.services.ses.model.MessageSecurityOptions;
+import io.github.hectorvent.floci.services.ses.model.SigningScheme;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -177,5 +185,49 @@ class SesConfigurationSetServiceTest {
                 assertThrows(AwsException.class, () -> service.requireVerifiedRedirectDomain(
                         "example.com", domain -> false)).getMessage());
         service.requireVerifiedRedirectDomain("example.com", domain -> true);
+    }
+
+    @Test
+    void updateMessageSecurityOptions_nullKeepsTheStoredValue() {
+        service.create(cs("my-cs"), REGION);
+        service.updateMessageSecurityOptions("my-cs",
+                new MessageSecurityOptions(SigningScheme.smime("DETACHED")), REGION);
+
+        service.updateMessageSecurityOptions("my-cs", null, REGION);
+
+        assertEquals("DETACHED", service.get("my-cs", REGION).getMessageSecurityOptions()
+                .getSigningScheme().getSmimeScheme().getSignatureFormat());
+    }
+
+    @Test
+    void messageSecurityOptions_surviveAPersistentStorageReload(@TempDir Path dir) {
+        Path file = dir.resolve("ses-config-sets.json");
+        SesConfigurationSetService writer = new SesConfigurationSetService(
+                new PersistentStorage<>(file, new TypeReference<Map<String, ConfigurationSet>>() {}));
+        writer.create(cs("smime-cs"), REGION);
+        writer.create(cs("default-cs"), REGION);
+        writer.updateMessageSecurityOptions("smime-cs",
+                new MessageSecurityOptions(SigningScheme.smime("DETACHED")), REGION);
+        writer.updateMessageSecurityOptions("default-cs",
+                new MessageSecurityOptions(SigningScheme.defaultScheme()), REGION);
+
+        PersistentStorage<String, ConfigurationSet> reloaded =
+                new PersistentStorage<>(file, new TypeReference<Map<String, ConfigurationSet>>() {});
+        reloaded.load();
+        SesConfigurationSetService reader = new SesConfigurationSetService(reloaded);
+
+        SigningScheme smime = reader.get("smime-cs", REGION).getMessageSecurityOptions().getSigningScheme();
+        assertEquals("DETACHED", smime.getSmimeScheme().getSignatureFormat());
+        assertNull(smime.getDefaultScheme());
+        SigningScheme defaultScheme = reader.get("default-cs", REGION).getMessageSecurityOptions().getSigningScheme();
+        assertEquals(Map.of(), defaultScheme.getDefaultScheme());
+        assertNull(defaultScheme.getSmimeScheme());
+    }
+
+    @Test
+    void updateMessageSecurityOptions_missingSetThrowsEvenWithoutOptions() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.updateMessageSecurityOptions("ghost", null, REGION));
+        assertEquals("ConfigurationSetDoesNotExist", e.getErrorCode());
     }
 }

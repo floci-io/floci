@@ -332,7 +332,7 @@ public class EcsJsonHandler {
         Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
         String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
 
-        EcsService.ListPage page = service.listTaskDefinitions(familyPrefix, status, sort,
+        EcsService.ListPage page = service.listTaskDefinitions(region, familyPrefix, status, sort,
                 maxResults, nextToken);
 
         ObjectNode resp = objectMapper.createObjectNode();
@@ -351,7 +351,7 @@ public class EcsJsonHandler {
         Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
         String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
 
-        EcsService.ListPage page = service.listTaskDefinitionFamilies(familyPrefix, status,
+        EcsService.ListPage page = service.listTaskDefinitionFamilies(region, familyPrefix, status,
                 maxResults, nextToken);
 
         ObjectNode resp = objectMapper.createObjectNode();

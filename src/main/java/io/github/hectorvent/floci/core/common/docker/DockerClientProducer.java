@@ -489,14 +489,18 @@ public class DockerClientProducer {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
 
-        ApacheDockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
+        return DockerClientImpl.getInstance(clientConfig,
+                wrapForRole(newHttpClient(clientConfig, maxConnections), role));
+    }
+
+    static ApacheDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections) {
+        return new ApacheDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())
+                .sslConfig(clientConfig.getSSLConfig())
                 .maxConnections(maxConnections)
                 .connectionTimeout(Duration.ofSeconds(30))
                 .responseTimeout(Duration.ofMinutes(5))
                 .build();
-
-        return DockerClientImpl.getInstance(clientConfig, wrapForRole(httpClient, role));
     }
 
     /**

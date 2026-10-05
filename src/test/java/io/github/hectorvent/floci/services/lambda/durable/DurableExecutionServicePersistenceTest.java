@@ -93,6 +93,43 @@ class DurableExecutionServicePersistenceTest {
                 execution.getHistory().stream().map(DurableHistoryEvent::getEventType).toList());
     }
 
+    @Test
+    void aPendingCallbackKeepsItsIdAndDeadlineAcrossARestart() {
+        ScriptedInvoker before = new ScriptedInvoker();
+        PersistentStorageFactory firstStorage = new PersistentStorageFactory(directory);
+        DurableExecutionService first = newService(firstStorage, before);
+        before.script((service, event) -> {
+            service.checkpoint(arn(event), token(event), null, List.of(callbackStart("approve", 0),
+                    callbackStart("expire", 5)));
+            return "{\"Status\":\"PENDING\"}";
+        });
+        String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
+                false)).getExecutionArn();
+        String callbackId = first.get(executionArn).getOperations().get("approve").getCallbackId();
+        firstStorage.flushAll();
+
+        ScriptedInvoker after = new ScriptedInvoker();
+        DurableExecutionService restarted = newService(new PersistentStorageFactory(directory), after);
+        after.script((service, event) -> "{\"Status\":\"PENDING\"}");
+        after.script((service, event) -> {
+            assertEquals("SUCCEEDED", operation(event, "approve").get("Status").asText());
+            assertEquals("STARTED", operation(event, "expire").get("Status").asText());
+            return "{\"Status\":\"PENDING\"}";
+        });
+        after.script((service, event) -> {
+            assertEquals("Callback.Timeout", operation(event, "expire").at("/CallbackDetails/Error/ErrorType").asText());
+            return "{\"Status\":\"SUCCEEDED\",\"Result\":\"\\\"done\\\"\"}";
+        });
+        restarted.recoverAfterRestart();
+
+        restarted.completeCallback(callbackId, ACCOUNT, "us-east-1", true, "\"yes\"", null);
+        clock.advance(Duration.ofSeconds(5));
+        restarted.sweep();
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, restarted.get(executionArn).getStatus());
+        assertEquals(3, after.events.size());
+    }
+
     private DurableExecutionService newService(StorageFactory storage, ScriptedInvoker invoker) {
         DurableExecutionService service = new DurableExecutionService(storage, MAPPER, clock, invoker, Runnable::run,
                 Duration.ZERO);
@@ -102,7 +139,12 @@ class DurableExecutionServicePersistenceTest {
 
     private static DurableOperationUpdate update(String id, DurableOperationType type, DurableOperationAction action,
                                                  String payload, Integer waitSeconds) {
-        return new DurableOperationUpdate(id, null, null, type, null, action, payload, null, null, waitSeconds, null);
+        return new DurableOperationUpdate(id, null, null, type, null, action, payload, null, null, waitSeconds, null, null, null);
+    }
+
+    private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds) {
+        return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, null);
     }
 
     private static String arn(JsonNode event) {

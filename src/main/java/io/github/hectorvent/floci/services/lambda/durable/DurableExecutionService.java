@@ -34,6 +34,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -75,6 +76,8 @@ public class DurableExecutionService implements Resettable {
     static final String INVALID_TOKEN = "Invalid checkpoint token";
     static final String TOKEN_FOR_OTHER_EXECUTION = "Checkpoint token is not valid for the durable execution ARN";
     static final String NOT_FOUND = "Durable Execution does not exist";
+    static final String INVALID_CALLBACK_ID = "Invalid callback id";
+    static final String CALLBACK_CLOSED = "The callback is either timed out or already completed";
 
     private final AccountAwareStorageBackend<DurableExecution> store;
     private final ObjectMapper objectMapper;
@@ -298,6 +301,101 @@ public class DurableExecutionService implements Resettable {
         }
         runEffects(effects);
         return execution;
+    }
+
+    /**
+     * SendDurableExecutionCallbackSuccess when {@code succeeded}, else SendDurableExecutionCallbackFailure.
+     * The callback's operation completes and the function is invoked again to see it, except for a
+     * failure sent with no body: AWS records it but does not invoke the function.
+     */
+    public void completeCallback(String callbackId, String accountId, String region, boolean succeeded, String result,
+                                 DurableErrorObject error) {
+        DurableTokens.CallbackId id = parseCallbackId(callbackId);
+        ArnParts arn = callbackArn(id, accountId, region);
+        List<Runnable> effects = new ArrayList<>();
+        synchronized (lockFor(arn)) {
+            long now = clock.millis();
+            DurableExecution execution = loadPendingCallbackExecution(arn, id, callbackId, now);
+            DurableOperation operation = execution.getOperations().get(id.operationId());
+            operation.setStatus(succeeded ? DurableOperationStatus.SUCCEEDED : DurableOperationStatus.FAILED);
+            operation.setResult(succeeded ? result : null);
+            operation.setError(succeeded ? null : error);
+            operation.setEndTimestamp(now);
+            operation.setCallbackDeadline(null);
+            operation.setHeartbeatDeadline(null);
+            operation.setChangeSequence(execution.nextChangeSequence());
+            Map<String, Object> details = new LinkedHashMap<>();
+            if (succeeded) {
+                details.put("Result", DurableHistory.payloadWrapper(result));
+            } else {
+                details.put("Error", DurableHistory.errorWrapper(error));
+            }
+            DurableHistory.operationEvent(execution, operation, succeeded ? "CallbackSucceeded" : "CallbackFailed",
+                    now, details);
+            if (succeeded || error != null) {
+                trigger(execution, effects);
+            }
+            save(execution);
+        }
+        runEffects(effects);
+    }
+
+    /** SendDurableExecutionCallbackHeartbeat. It moves the heartbeat deadline when the callback has one. */
+    public void heartbeatCallback(String callbackId, String accountId, String region) {
+        DurableTokens.CallbackId id = parseCallbackId(callbackId);
+        ArnParts arn = callbackArn(id, accountId, region);
+        synchronized (lockFor(arn)) {
+            long now = clock.millis();
+            DurableExecution execution = loadPendingCallbackExecution(arn, id, callbackId, now);
+            DurableOperation operation = execution.getOperations().get(id.operationId());
+            if (operation.getHeartbeatTimeoutSeconds() != null) {
+                operation.setHeartbeatDeadline(now + operation.getHeartbeatTimeoutSeconds() * 1000L);
+                save(execution);
+            }
+        }
+    }
+
+    private static DurableTokens.CallbackId parseCallbackId(String callbackId) {
+        return DurableTokens.parseCallbackId(callbackId)
+                .orElseThrow(() -> new AwsException("InvalidParameterValueException", INVALID_CALLBACK_ID, 400));
+    }
+
+    /** A callback of another account or region is one this caller cannot complete. */
+    private static ArnParts callbackArn(DurableTokens.CallbackId id, String accountId, String region) {
+        ArnParts arn;
+        try {
+            arn = parseArn(id.executionArn());
+        } catch (AwsException e) {
+            throw new AwsException("InvalidParameterValueException", INVALID_CALLBACK_ID, 400);
+        }
+        if (!arn.accountId().equals(accountId) || !arn.region().equals(region)) {
+            throw callbackClosed();
+        }
+        return arn;
+    }
+
+    /** A callback past its deadline is closed even before the sweeper records the timeout. */
+    private DurableExecution loadPendingCallbackExecution(ArnParts arn, DurableTokens.CallbackId id, String callbackId,
+                                                          long now) {
+        DurableExecution execution = store.getForAccount(arn.accountId(), arn.storeKey())
+                .filter(candidate -> candidate.getExecutionArn().equals(arn.arn()))
+                .orElseThrow(DurableExecutionService::callbackClosed);
+        DurableOperation operation = execution.getOperations().get(id.operationId());
+        if (execution.isClosed() || operation == null || operation.getType() != DurableOperationType.CALLBACK
+                || operation.getStatus() != DurableOperationStatus.STARTED
+                || !callbackId.equals(operation.getCallbackId())
+                || isPast(operation.getCallbackDeadline(), now) || isPast(operation.getHeartbeatDeadline(), now)) {
+            throw callbackClosed();
+        }
+        return execution;
+    }
+
+    private static boolean isPast(Long deadline, long now) {
+        return deadline != null && deadline <= now;
+    }
+
+    private static AwsException callbackClosed() {
+        return new AwsException("CallbackTimeoutException", CALLBACK_CLOSED, 400);
     }
 
     /** One tick of {@link DurableExecutionSweeper}. It fires due timers, times out and expires executions. */

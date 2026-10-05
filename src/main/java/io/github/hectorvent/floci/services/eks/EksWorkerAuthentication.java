@@ -44,8 +44,8 @@ class EksWorkerAuthentication {
             if (IamService.isTemporaryAccessKey(token.accessKeyId())) {
                 return Optional.empty();
             }
-            // Keys resolve from every account, and the legacy identity is system:masters.
-            return iam.resolveAccountId(token.accessKeyId())
+            // The legacy identity is system:masters, so only a key of the cluster's own account gets it.
+            return Optional.ofNullable(token.keyAccountId())
                     .filter(owner -> owner.equals(clusterAccount(account)))
                     .flatMap(owner -> legacyIdentity());
         }

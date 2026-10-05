@@ -7,6 +7,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.List;
 import java.util.regex.Pattern;
+import java.util.zip.Checksum;
 import java.util.zip.CRC32;
 import java.util.zip.CRC32C;
 
@@ -175,9 +176,15 @@ public class S3Checksum {
     }
 
     public static String crc64NvmeBase64(byte[] data) {
-        long crc = 0xFFFFFFFFFFFFFFFFL;
-        int offset = 0;
-        int blocksEnd = data.length - data.length % Long.BYTES;
+        return base64(~crc64NvmeUpdate(~0L, data, 0, data.length), Long.BYTES);
+    }
+
+    /** Runs {@code length} bytes through the CRC64NVME register; the final value is its complement. */
+    private static long crc64NvmeUpdate(long register, byte[] data, int start, int length) {
+        long crc = register;
+        int offset = start;
+        int end = start + length;
+        int blocksEnd = end - length % Long.BYTES;
         while (offset < blocksEnd) {
             crc ^= (data[offset] & 0xFFL)
                     | (data[offset + 1] & 0xFFL) << 8
@@ -197,17 +204,88 @@ public class S3Checksum {
                     ^ CRC64_TABLES[0][(int)(crc >>> 56)];
             offset += Long.BYTES;
         }
-        while (offset < data.length) {
+        while (offset < end) {
             int idx = (int)((crc ^ data[offset]) & 0xFF);
             crc = CRC64_TABLES[0][idx] ^ (crc >>> 8);
             offset++;
         }
-        crc ^= 0xFFFFFFFFFFFFFFFFL;
-        byte[] bytes = new byte[]{
-            (byte)(crc >> 56), (byte)(crc >> 48), (byte)(crc >> 40), (byte)(crc >> 32),
-            (byte)(crc >> 24), (byte)(crc >> 16), (byte)(crc >> 8),  (byte) crc
-        };
+        return crc;
+    }
+
+    private static String base64(long value, int byteCount) {
+        byte[] bytes = new byte[byteCount];
+        for (int i = byteCount - 1; i >= 0; i--) {
+            bytes[i] = (byte) (value >>> ((byteCount - 1 - i) * Byte.SIZE));
+        }
         return Base64.getEncoder().encodeToString(bytes);
+    }
+
+    /** A {@link Calculator} for {@code algorithm}, CRC64NVME when no algorithm was declared, as {@link #of}. */
+    public static Calculator calculator(ChecksumAlgorithm algorithm) {
+        return new Calculator(algorithm != null ? algorithm : ChecksumAlgorithm.CRC64NVME);
+    }
+
+    /**
+     * Computes a checksum over data fed in pieces, for a body too large to hold in one array. The
+     * value is the one {@link ChecksumAlgorithm#compute} gives for the same bytes in one piece.
+     */
+    public static final class Calculator {
+
+        private final ChecksumAlgorithm algorithm;
+        private final Checksum crc;
+        private final MessageDigest digest;
+        private long crc64Register = ~0L;
+
+        private Calculator(ChecksumAlgorithm algorithm) {
+            this.algorithm = algorithm;
+            this.crc = switch (algorithm) {
+                case CRC32 -> new CRC32();
+                case CRC32C -> new CRC32C();
+                case CRC64NVME, SHA1, SHA256 -> null;
+            };
+            this.digest = switch (algorithm) {
+                case SHA1 -> newDigest("SHA-1");
+                case SHA256 -> newDigest("SHA-256");
+                case CRC32, CRC32C, CRC64NVME -> null;
+            };
+        }
+
+        public ChecksumAlgorithm algorithm() {
+            return algorithm;
+        }
+
+        public void update(byte[] data, int offset, int length) {
+            switch (algorithm) {
+                case CRC32, CRC32C -> crc.update(data, offset, length);
+                case CRC64NVME -> crc64Register = crc64NvmeUpdate(crc64Register, data, offset, length);
+                case SHA1, SHA256 -> digest.update(data, offset, length);
+            }
+        }
+
+        /** The Base64 checksum of everything fed so far. */
+        public String value() {
+            return switch (algorithm) {
+                case CRC32, CRC32C -> base64(crc.getValue(), Integer.BYTES);
+                case CRC64NVME -> base64(~crc64Register, Long.BYTES);
+                case SHA1, SHA256 -> Base64.getEncoder().encodeToString(digest.digest());
+            };
+        }
+
+        /** The value as a full-object checksum, the kind a single-part object carries. */
+        public S3Checksum fullObject() {
+            S3Checksum checksum = new S3Checksum();
+            checksum.setValueFor(algorithm, value());
+            checksum.setChecksumType(ChecksumType.FULL_OBJECT);
+            return checksum;
+        }
+
+        private static MessageDigest newDigest(String name) {
+            try {
+                return MessageDigest.getInstance(name);
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("Missing digest algorithm: " + name, e);
+            }
+        }
     }
 
     public static String sha256Base64(byte[] data) {

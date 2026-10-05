@@ -61,6 +61,9 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `GetDurableExecutionHistory` | Event log of a durable execution, oldest or newest first |
 | `ListDurableExecutionsByFunction` | Durable executions of a function or version, filtered by status, name and start time |
 | `StopDurableExecution` | Stop a running durable execution with an error |
+| `SendDurableExecutionCallbackSuccess` | Complete a durable callback with a result, up to 1 MB |
+| `SendDurableExecutionCallbackFailure` | Fail a durable callback with an error |
+| `SendDurableExecutionCallbackHeartbeat` | Keep a durable callback with a heartbeat timeout alive |
 
 `UpdateFunctionConfiguration` validates `MemorySize` and `Timeout` as whole numbers in their
 supported ranges before changing any stored settings. A rejected value returns
@@ -165,15 +168,25 @@ background. Invocations through an ARN (EventBridge, Scheduler, function URLs, d
 durable executions the same way.
 
 The checkpoint protocol under `/2025-12-01` is the real one, so the Durable Execution SDK works
-unchanged for steps, waits, step retries and replay. Timers are persisted and fired by a
+unchanged for steps, waits, step retries, callbacks and replay. Timers are persisted and fired by a
 background sweep, so an execution survives a restart of Floci. A function that returns something
 other than the `{Status, Result, Error}` envelope fails its execution with
 `Invalid Status in invocation output.` A function that throws is re-invoked four more times, after
 1, 2, 4 and 8 seconds, and then fails the execution with its error. AWS does the same over a few
 minutes.
 
+A callback (`createCallback`, `waitForCallback`) gets a callback id that the
+`SendDurableExecutionCallback*` APIs complete. Its `TimeoutSeconds` and `HeartbeatTimeoutSeconds`
+fail it with `Callback.Timeout` or `Callback.Heartbeat`, and each heartbeat restarts the heartbeat
+timeout. A failure sent with an empty request body fails the callback but does not invoke the
+function again, as on AWS, so the execution keeps waiting. The SDKs send `{}` when `Error` is
+omitted, which does invoke it.
+
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.
+
+`SendDurableExecutionCallbackSuccess` takes a result of up to 1 MB. The API reference names 256 KB,
+but AWS accepts 1 MB and rejects one byte more.
 
 The public `public.ecr.aws/lambda` images do not bundle the SDK that the managed runtimes carry.
 Add `aws-durable-execution-sdk-python` or `@aws/durable-execution-sdk-js` to your deployment
@@ -181,8 +194,7 @@ package.
 
 Not emulated yet:
 
-- Callbacks (`WaitForCallback` and the `SendDurableExecutionCallback*` APIs) and chained invokes
-  (`context.invoke`). Both are rejected at checkpoint time.
+- Chained invokes (`context.invoke`). They are rejected at checkpoint time.
 - Durable executions started by Step Functions or by an event source mapping. These invoke the
   function as a plain one.
 - Payload encryption. `KMSKeyArn` is stored and returned only.
@@ -387,8 +399,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - `InvokeWithResponseStream`
-- Durable function callbacks and chained invokes (`SendDurableExecutionCallbackSuccess`,
-  `SendDurableExecutionCallbackFailure`, `SendDurableExecutionCallbackHeartbeat`). See Durable Functions
+- Durable function chained invokes. See Durable Functions
 - Code signing enforcement. A configuration is created, read, updated, deleted and listed, and
   nothing verifies a signature against it, so it never gates a deployment. Attaching one to a
   function is not wired either: there is no `PutFunctionCodeSigningConfig`, so

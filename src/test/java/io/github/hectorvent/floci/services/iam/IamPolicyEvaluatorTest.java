@@ -55,6 +55,16 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
+    void supportedConditionOperatorsIncludeQuantifiersAndIfExists() {
+        assertTrue(IamPolicyEvaluator.isSupportedConditionOperator("IpAddress"));
+        assertTrue(IamPolicyEvaluator.isSupportedConditionOperator("ForAnyValue:StringLikeIfExists"));
+        assertTrue(IamPolicyEvaluator.isSupportedConditionOperator("Null"));
+        assertFalse(IamPolicyEvaluator.isSupportedConditionOperator("NullIfExists"));
+        assertFalse(IamPolicyEvaluator.isSupportedConditionOperator("IpAddres"));
+        assertFalse(IamPolicyEvaluator.isSupportedConditionOperator("forallvalues:StringEquals"));
+    }
+
+    @Test
     void wildcardMatchesLiteralAsteriskInValue() {
         assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("a*", "a*b"));
         assertTrue(IamPolicyEvaluator.globMatches("A*", "a*b"));

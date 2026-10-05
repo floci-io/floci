@@ -20,6 +20,8 @@ public class CacheCluster {
     private String cacheNodeType;
     private int numCacheNodes;
     private String arn;
+    // Persisted only: a Memcached cluster carries no ARN, so its region is kept here for a restart.
+    private String region;
     private String cacheParameterGroupName;
     private String cacheSubnetGroupName;
     private AuthMode authMode;
@@ -78,6 +80,9 @@ public class CacheCluster {
 
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
+
+    public String getRegion() { return region; }
+    public void setRegion(String region) { this.region = region; }
 
     public String getCacheParameterGroupName() { return cacheParameterGroupName; }
     public void setCacheParameterGroupName(String cacheParameterGroupName) { this.cacheParameterGroupName = cacheParameterGroupName; }

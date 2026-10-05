@@ -46,6 +46,41 @@ class IamPolicyConditionMatchingTest {
         assertEquals(expected, decision(operator, List.of(pattern), List.of(value)));
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "203.0.113.0/24, 203.0.113.42, ALLOW",
+            "203.0.113.0/24, 203.0.114.42, DENY",
+            "203.0.113.129/25, 203.0.113.255, ALLOW",
+            "203.0.113.129/25, 203.0.113.127, DENY",
+            "0.0.0.0/0, 203.0.113.42, ALLOW",
+            "203.0.113.42/32, 203.0.113.42, ALLOW",
+            "203.0.113.42/32, 203.0.113.43, DENY",
+            "2001:db8::/32, 2001:db8::42, ALLOW",
+            "2001:db8::/32, 2001:db9::42, DENY",
+            "2001:db8::1234/33, 2001:db8:7fff::42, ALLOW",
+            "2001:db8::1234/33, 2001:db8:8000::42, DENY",
+            "::/0, 2001:db8::42, ALLOW",
+            "2001:db8::42/128, 2001:0db8:0:0:0:0:0:0042, ALLOW",
+            "2001:db8::42/128, 2001:db8::43, DENY",
+            "2001:db8::42/127, 2001:db8::43, ALLOW",
+            "2001:db8::42/127, 2001:db8::44, DENY",
+            "::/0, 203.0.113.42, DENY",
+            "0.0.0.0/0, 2001:db8::42, DENY",
+            "2001:db8::/129, 2001:db8::42, DENY",
+            "2001:db8::/-1, 2001:db8::42, DENY",
+            "203.0.113.0/33, 203.0.113.42, DENY",
+            "203.0.113.0/-1, 203.0.113.42, DENY",
+            "999.0.0.0/0, 203.0.113.42, DENY",
+            "example.com/0, 203.0.113.42, DENY",
+            "2001:db8::/32/extra, 2001:db8::42, DENY",
+            "2001:db8::/32, invalid, DENY"
+    })
+    void ipConditionsMatchAddressFamilyAndPrefix(String range, String sourceIp, Decision expected) {
+        assertEquals(expected, decision("IpAddress", List.of(range), List.of(sourceIp)));
+        Decision negated = expected == Decision.ALLOW ? Decision.DENY : Decision.ALLOW;
+        assertEquals(negated, decision("NotIpAddress", List.of(range), List.of(sourceIp)));
+    }
+
     @Test
     void setOperatorsRemainCaseSensitive() {
         assertEquals(Decision.DENY, decision("ForAllValues:StringLike",
@@ -72,16 +107,17 @@ class IamPolicyConditionMatchingTest {
     }
 
     private Decision decision(String operator, List<String> patterns, List<String> values) {
+        String conditionKey = operator.endsWith("IpAddress") ? "aws:SourceIp" : "aws:SourceArn";
         String policy;
         try {
             policy = new ObjectMapper().writeValueAsString(Map.of(
                     "Version", "2012-10-17",
                     "Statement", List.of(Map.of("Effect", "Allow", "Action", "s3:GetObject", "Resource", "*",
-                            "Condition", Map.of(operator, Map.of("aws:SourceArn", patterns))))));
+                            "Condition", Map.of(operator, Map.of(conditionKey, patterns))))));
         } catch (JsonProcessingException e) {
             throw new IllegalStateException(e);
         }
         return evaluator.simulateCustomPolicy(List.of(policy), "s3:GetObject", "*",
-                Map.of("aws:SourceArn", values));
+                Map.of(conditionKey, values));
     }
 }

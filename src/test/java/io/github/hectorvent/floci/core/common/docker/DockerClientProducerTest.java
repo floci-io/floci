@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.core.DefaultDockerClientConfig;
+import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -721,6 +723,39 @@ class DockerClientProducerTest {
                     socket.close();
                 }
             }
+        }
+    }
+
+    @Test
+    void newHttpClient_tlsVerifyConfig_loadsTheConfiguredCertificates(@TempDir Path certDir) throws IOException {
+        // Catches: TLS material resolved onto the client config but never handed to the HTTP transport
+        Files.writeString(certDir.resolve("ca.pem"), "not a certificate");
+        Files.writeString(certDir.resolve("cert.pem"), "not a certificate");
+        Files.writeString(certDir.resolve("key.pem"), "not a key");
+        DefaultDockerClientConfig tlsConfig =
+                DefaultDockerClientConfig.createDefaultConfigBuilder()
+                        .withDockerHost("tcp://127.0.0.1:2376")
+                        .withDockerTlsVerify(true)
+                        .withDockerCertPath(certDir.toString())
+                        .build();
+
+        // An HTTP client that actually uses the SSL config must read the certificates, so
+        // unreadable ones fail the build; one that ignores the config builds silently.
+        assertThrows(RuntimeException.class, () -> DockerClientProducer.newHttpClient(tlsConfig, 10));
+    }
+
+    @Test
+    void newHttpClient_plainTcpConfig_buildsWithoutTls() throws IOException {
+        // Catches: passing the SSL config breaking hosts that have no TLS material
+        DefaultDockerClientConfig plainConfig =
+                DefaultDockerClientConfig.createDefaultConfigBuilder()
+                        .withDockerHost("tcp://127.0.0.1:2375")
+                        .withDockerTlsVerify(false)
+                        .build();
+
+        try (ApacheDockerHttpClient client = DockerClientProducer.newHttpClient(plainConfig, 10)) {
+            assertNull(plainConfig.getSSLConfig(), "a config without TLS verify carries no SSL config");
+            assertEquals("tcp://127.0.0.1:2375", plainConfig.getDockerHost().toString());
         }
     }
 }

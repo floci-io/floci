@@ -14,5 +14,7 @@ public record DurableOperationUpdate(String id,
                                      DurableErrorObject error,
                                      Integer nextAttemptDelaySeconds,
                                      Integer waitSeconds,
-                                     Boolean replayChildren) {
+                                     Boolean replayChildren,
+                                     Integer callbackTimeoutSeconds,
+                                     Integer callbackHeartbeatTimeoutSeconds) {
 }

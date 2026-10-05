@@ -76,9 +76,9 @@ public class ElastiCacheMemcachedContainerManager {
      * @return the container handle, or {@code null} when no Docker daemon is reachable and no
      *         container was created
      */
-    public ElastiCacheContainerHandle tryStart(String clusterId, String image) {
+    public ElastiCacheContainerHandle tryStart(String clusterId, String image, String region) {
         try {
-            ElastiCacheContainerHandle handle = start(clusterId, image);
+            ElastiCacheContainerHandle handle = start(clusterId, image, region);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -115,7 +115,9 @@ public class ElastiCacheMemcachedContainerManager {
         }
     }
 
-    public ElastiCacheContainerHandle start(String clusterId, String image) {
+    /** {@code region} is null for a cluster recorded without one, which then counts as the default region's. */
+    public ElastiCacheContainerHandle start(String clusterId, String image, String region) {
+        String effectiveRegion = region != null ? region : regionResolver.getDefaultRegion();
         LOG.infov("Starting Memcached container for cluster: {0}", clusterId);
 
         String containerName = ContainerStorageHelper.resourceName(config, "memcached", null, clusterId);
@@ -126,7 +128,7 @@ public class ElastiCacheMemcachedContainerManager {
                 .withDockerNetwork(config.services().elasticache().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "elasticache", clusterId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "elasticache", clusterId, regionResolver.getAccountId(), effectiveRegion));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
@@ -149,10 +151,9 @@ public class ElastiCacheMemcachedContainerManager {
                 : info.containerId();
         String logGroup = "/aws/elasticache/cluster/" + clusterId + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = regionResolver.getDefaultRegion();
 
         Closeable logHandle = logStreamer.attach(
-                info.containerId(), logGroup, logStream, region, "elasticache-memcached:" + clusterId);
+                info.containerId(), logGroup, logStream, effectiveRegion, "elasticache-memcached:" + clusterId);
         handle.setLogStream(logHandle);
 
         waitForBackendReady(clusterId, endpoint.host(), endpoint.port());

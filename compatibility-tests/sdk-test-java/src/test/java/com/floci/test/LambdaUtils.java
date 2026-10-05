@@ -284,6 +284,19 @@ public final class LambdaUtils {
                     if request.get("fail"):
                         return {"Status": "FAILED",
                                 "Error": {"ErrorMessage": "asked to fail", "ErrorType": "TestFailure"}}
+                    if request.get("callback"):
+                        if "callback" not in operations:
+                            client.checkpoint_durable_execution(
+                                DurableExecutionArn=event["DurableExecutionArn"],
+                                CheckpointToken=event["CheckpointToken"],
+                                Updates=[{"Id": "callback", "Name": "approval", "Type": "CALLBACK",
+                                          "SubType": "Callback", "Action": "START",
+                                          "CallbackOptions": {"HeartbeatTimeoutSeconds": 60}}])
+                            return {"Status": "PENDING"}
+                        callback = operations["callback"]
+                        if callback["Status"] == "STARTED":
+                            return {"Status": "PENDING"}
+                        return {"Status": "SUCCEEDED", "Result": callback["CallbackDetails"].get("Result", "")}
                     if "step" not in operations:
                         client.checkpoint_durable_execution(
                             DurableExecutionArn=event["DurableExecutionArn"],

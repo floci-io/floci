@@ -697,8 +697,9 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * A disk-mode multipart object. It is stored with the ETag and checksum built from its parts,
-     * since computing either here would mean reading the whole file.
+     * A body already on disk that is moved into place: an assembled multipart object, or the pinned
+     * file of a copy source. It is stored with an ETag and checksum worked out beforehand, since
+     * computing either here would mean reading the whole file under the bucket lock.
      */
     private record AssembledBody(Path file, long size) implements ObjectBody { }
 
@@ -2139,26 +2140,166 @@ public class S3Service implements Resettable, ResourceProvider {
                                String destBucket, String destKey, String versionId, CopyObjectOptions options)
     {
         CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
-        S3Object source = getObject(sourceBucket, sourceKey, versionId);
-        checkCopySourcePreconditions(source, effectiveOptions.getCopySourceConditions());
-        validateSseCustomerAccess(source,
-                effectiveOptions.getCopySourceSseCustomerAlgorithm(),
-                effectiveOptions.getCopySourceSseCustomerKey(),
-                effectiveOptions.getCopySourceSseCustomerKeyMd5());
-        return copyS3Object(sourceBucket, sourceKey,
-                destBucket, destKey, source, effectiveOptions);
+        return copyPinnedSource(sourceBucket, sourceKey, destBucket, destKey,
+                pinCopySource(sourceBucket, sourceKey, versionId), effectiveOptions);
     }
 
     public S3Object copyObject(String sourceBucket, String sourceKey,
                                String destBucket, String destKey, CopyObjectOptions options) {
         CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
-        S3Object source = getObject(sourceBucket, sourceKey);
-        checkCopySourcePreconditions(source, effectiveOptions.getCopySourceConditions());
-        validateSseCustomerAccess(source,
-                effectiveOptions.getCopySourceSseCustomerAlgorithm(),
-                effectiveOptions.getCopySourceSseCustomerKey(),
-                effectiveOptions.getCopySourceSseCustomerKeyMd5());
-        return copyS3Object(sourceBucket, sourceKey, destBucket, destKey, source, effectiveOptions);
+        return copyPinnedSource(sourceBucket, sourceKey, destBucket, destKey,
+                pinCopySource(sourceBucket, sourceKey, null), effectiveOptions);
+    }
+
+    private S3Object copyPinnedSource(String sourceBucket, String sourceKey, String destBucket, String destKey,
+                                      CopySource source, CopyObjectOptions effectiveOptions) {
+        try {
+            checkCopySourcePreconditions(source.object(), effectiveOptions.getCopySourceConditions());
+            validateSseCustomerAccess(source.object(),
+                    effectiveOptions.getCopySourceSseCustomerAlgorithm(),
+                    effectiveOptions.getCopySourceSseCustomerKey(),
+                    effectiveOptions.getCopySourceSseCustomerKeyMd5());
+            requireCopyableSize(source.object());
+            return copyS3Object(sourceBucket, sourceKey, destBucket, destKey, source, effectiveOptions);
+        } finally {
+            // A stored copy moved its pinned file into place, so this only removes one a failed
+            // copy left behind.
+            if (source.pinnedFile() != null) {
+                deleteQuietly(source.pinnedFile(), "pinned copy source that was not stored");
+            }
+        }
+    }
+
+    // S3 copies at most 5 GiB in one CopyObject; a larger object is copied with UploadPartCopy.
+    static final long MAX_COPY_OBJECT_SOURCE_SIZE = 5L * 1024 * 1024 * 1024;
+
+    static void requireCopyableSize(S3Object source) {
+        if (source.getSize() > MAX_COPY_OBJECT_SOURCE_SIZE) {
+            throw new AwsException("InvalidRequest",
+                    "The specified copy source is larger than the maximum allowable size for a copy source: "
+                            + MAX_COPY_OBJECT_SOURCE_SIZE, 400);
+        }
+    }
+
+    /**
+     * The source of a copy, held for the length of the copy: its metadata and, in disk modes, a
+     * temporary hard link to the file generation that metadata describes. The link keeps those
+     * bytes even if the source is overwritten meanwhile, since an object file is only ever replaced
+     * by a rename, and the copy can store the file without reading it into memory. In memory mode
+     * the bytes come with the object, as before.
+     */
+    private record CopySource(S3Object object, Path pinnedFile) { }
+
+    /** A copy's body, with the ETag and checksum to store it under (null to compute them from bytes). */
+    private record CopyBody(ObjectBody body, String eTag, S3Checksum checksum) { }
+
+    private static final Pattern SINGLE_PART_ETAG = Pattern.compile("[0-9a-f]{32}");
+
+    private CopySource pinCopySource(String bucketName, String key, String versionId) {
+        // The size limit is checked on the metadata before anything is pinned: without hard links,
+        // pinning copies the file, and a source too large to copy must not be duplicated to refuse it.
+        requireCopyableSize(getObjectMetadata(bucketName, key, versionId));
+        if (inMemory) {
+            return new CopySource(getObject(bucketName, key, versionId), null);
+        }
+        if (versionId == null) {
+            Snapshot<Path> snapshot = readLatestSnapshot(bucketName, key,
+                    account -> pinFile(resolveObjectPathForRead(account, bucketName, key)),
+                    pinned -> deleteQuietly(pinned, "pinned copy source of a read that raced an overwrite"));
+            return checkedCopySource(snapshot.object(), snapshot.body());
+        }
+        String bucketOwnerAccount = resolveBucketEntry(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404))
+                .account();
+        S3Object obj = getObjectMetadata(bucketName, key, versionId);
+        Path path = "null".equals(versionId)
+                ? resolveObjectPathForRead(bucketOwnerAccount, bucketName, key)
+                : resolveVersionedPathForRead(bucketOwnerAccount, bucketName, key, versionId);
+        return checkedCopySource(obj, pinFile(path));
+    }
+
+    private CopySource checkedCopySource(S3Object obj, Path pinned) {
+        long fileSize;
+        try {
+            fileSize = Files.size(pinned);
+        } catch (IOException e) {
+            deleteQuietly(pinned, "pinned copy source whose size could not be read");
+            throw new UncheckedIOException("Failed to read the copy source", e);
+        }
+        if (fileSize != obj.getSize()) {
+            deleteQuietly(pinned, "pinned copy source whose size does not match its metadata");
+            throw new IllegalStateException("S3 object file for " + obj.getBucketName() + "/"
+                    + obj.getKey() + " has " + fileSize + " bytes but metadata declares " + obj.getSize());
+        }
+        return new CopySource(obj, pinned);
+    }
+
+    /**
+     * A temporary hard link to {@code file} beside it, or a copy where the filesystem has no hard
+     * links. A failed pin removes whatever it created, since the caller never gets its path.
+     */
+    private Path pinFile(Path file) {
+        Path pinned = file.resolveSibling(file.getFileName() + ".tmp-" + UUID.randomUUID());
+        try {
+            try {
+                Files.createLink(pinned, file);
+            } catch (UnsupportedOperationException | FileSystemException e) {
+                LOG.debugv(e, "No hard link for {0}, copying it to pin a copy source", file);
+                Files.copy(file, pinned);
+            }
+            return pinned;
+        } catch (IOException e) {
+            deleteQuietly(pinned, "partly pinned copy source");
+            throw new UncheckedIOException("Failed to pin the copy source", e);
+        }
+    }
+
+    /**
+     * The copy's body, ETag and checksum. In disk modes the pinned file is the body, and it is read,
+     * once, only for what cannot carry over from the source: a single-part source's ETag is the MD5
+     * of its bytes and stays, while a multipart one's has to be computed; the source's checksum
+     * stays unless a new or composite one has to become a full-object checksum.
+     */
+    private CopyBody copyBody(CopySource source, S3Checksum effectiveChecksum, ChecksumAlgorithm copyChecksumAlgorithm) {
+        S3Object object = source.object();
+        if (source.pinnedFile() == null) {
+            return new CopyBody(new BytesBody(object.getData()), null, effectiveChecksum);
+        }
+        boolean needsETag = !SINGLE_PART_ETAG.matcher(stripSurroundingQuotes(object.getETag())).matches();
+        S3Checksum.Calculator calculator = effectiveChecksum == null ? S3Checksum.calculator(copyChecksumAlgorithm) : null;
+        String eTag = object.getETag();
+        if (needsETag || calculator != null) {
+            String md5ETag = hashFile(source.pinnedFile(), needsETag, calculator);
+            if (needsETag) {
+                eTag = md5ETag;
+            }
+        }
+        return new CopyBody(new AssembledBody(source.pinnedFile(), object.getSize()), eTag,
+                calculator != null ? calculator.fullObject() : effectiveChecksum);
+    }
+
+    /** Reads {@code file} once, feeding {@code checksum} if given; returns its MD5 ETag when {@code md5}. */
+    private static String hashFile(Path file, boolean md5, S3Checksum.Calculator checksum) {
+        try {
+            MessageDigest digest = md5 ? MessageDigest.getInstance("MD5") : null;
+            byte[] buffer = new byte[1 << 20];
+            try (InputStream in = Files.newInputStream(file)) {
+                for (int read = in.read(buffer); read >= 0; read = in.read(buffer)) {
+                    if (digest != null) {
+                        digest.update(buffer, 0, read);
+                    }
+                    if (checksum != null) {
+                        checksum.update(buffer, 0, read);
+                    }
+                }
+            }
+            return digest == null ? null : "\"" + bytesToHex(digest.digest()) + "\"";
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the copy source", e);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 algorithm not available", e);
+        }
     }
 
     // --- Versioning Operations ---
@@ -5955,7 +6096,8 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private S3Object copyS3Object(String sourceBucket, String sourceKey,
-                          String destBucket, String destKey, S3Object source, CopyObjectOptions options) {
+                          String destBucket, String destKey, CopySource copySource, CopyObjectOptions options) {
+        S3Object source = copySource.object();
         ensureBucketExists(destBucket);
         CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
@@ -6010,6 +6152,9 @@ public class S3Service implements Resettable, ResourceProvider {
         if (copyChecksumAlgorithm != null) {
             effectiveChecksum = null;
         }
+        // Prepared before any bucket monitor is taken, so reading a large source to hash it never
+        // holds up other writes to either bucket.
+        CopyBody body = copyBody(copySource, effectiveChecksum, copyChecksumAlgorithm);
 
         // Annotations travel with the copy by default (x-amz-annotation-directive COPY). They are
         // snapshotted before storeObject: a self-copy (same bucket and key) or a pre-versioning
@@ -6044,7 +6189,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 if (copyAnnotations) {
                     sourceAnnotations = snapshotAnnotations(source);
                 }
-                result[0] = storeObjectCopy(destBucket, destKey, source, metadata, effectiveChecksum,
+                result[0] = storeObjectCopy(destBucket, destKey, body, metadata,
                         effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
                         effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
                         effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
@@ -6069,7 +6214,7 @@ public class S3Service implements Resettable, ResourceProvider {
         synchronized (resolveBucket(destBucket)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404))) {
-            result[0] = storeObjectCopy(destBucket, destKey, source, metadata, effectiveChecksum,
+            result[0] = storeObjectCopy(destBucket, destKey, body, metadata,
                     effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
                     effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
                     effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
@@ -6083,16 +6228,16 @@ public class S3Service implements Resettable, ResourceProvider {
         return result[0];
     }
 
-    private S3Object storeObjectCopy(String destBucket, String destKey, S3Object source,
-                                     Map<String, String> metadata, S3Checksum effectiveChecksum,
+    private S3Object storeObjectCopy(String destBucket, String destKey, CopyBody body,
+                                     Map<String, String> metadata,
                                      String effectiveContentType, String effectiveStorageClass,
                                      String effectiveContentEncoding, String effectiveContentDisposition,
                                      String effectiveCacheControl, String effectiveServerSideEncryption,
                                      String effectiveSseKmsKeyId,
                                      CopyObjectOptions effectiveOptions, ChecksumAlgorithm copyChecksumAlgorithm,
                                      Map<String, String> effectiveTags) {
-        return storeObject(destBucket, destKey, source.getData(), effectiveContentType,
-                metadata, effectiveChecksum, null,
+        return storeObject(destBucket, destKey, body.body(), effectiveContentType,
+                metadata, body.checksum(), null,
                 new PutObjectOptions()
                         .withStorageClass(effectiveStorageClass)
                         .withContentEncoding(effectiveContentEncoding)
@@ -6112,7 +6257,8 @@ public class S3Service implements Resettable, ResourceProvider {
                         .withChecksumAlgorithm(copyChecksumAlgorithm != null ? copyChecksumAlgorithm.name() : null)
                         .withTagging(effectiveTags)
                         .withIfMatch(effectiveOptions.getIfMatch())
-                        .withIfNoneMatch(effectiveOptions.getIfNoneMatch()));
+                        .withIfNoneMatch(effectiveOptions.getIfNoneMatch()),
+                body.eTag());
     }
 
     private record AnnotationSnapshot(ObjectAnnotation metadata, byte[] payload) {}

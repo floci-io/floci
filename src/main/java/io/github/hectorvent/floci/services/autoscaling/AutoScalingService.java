@@ -1021,6 +1021,7 @@ public class AutoScalingService {
 
     public List<ScalingActivity> describeScalingActivities(String region, String asgName) {
         return activities.values().stream()
+                .filter(a -> a.getRegion() == null || a.getRegion().equals(region))
                 .filter(a -> asgName == null || asgName.equals(a.getAutoScalingGroupName()))
                 .sorted(Comparator.comparing(ScalingActivity::getStartTime).reversed())
                 .collect(Collectors.toList());
@@ -1031,6 +1032,7 @@ public class AutoScalingService {
         ScalingActivity activity = new ScalingActivity();
         activity.setActivityId(UUID.randomUUID().toString());
         activity.setAutoScalingGroupName(asgName);
+        activity.setRegion(region);
         activity.setDescription(description);
         activity.setCause(cause);
         activity.setStartTime(Instant.now());

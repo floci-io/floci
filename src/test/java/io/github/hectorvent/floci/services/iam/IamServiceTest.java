@@ -1329,7 +1329,9 @@ class IamServiceTest {
 
         IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
 
-        assertEquals("other-secret", service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow());
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("other-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
     }
 
     @Test
@@ -1341,8 +1343,56 @@ class IamServiceTest {
 
         IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
 
-        assertEquals("own-secret", service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow());
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("own-secret", found.secretAccessKey());
+        assertEquals("000000000000", found.accountId());
         Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountNamesTheRequestAccountAsTheOwnerOfItsOwnKey() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "111122223333");
+        AccessKey accessKey = new AccessKey("AKIAREQUESTACCOUNT", "request-secret", "dev");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("request-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountPrefersTheRequestAccountsKeyOverADuplicateIdElsewhere() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "111122223333");
+        accessKeys.putForAccount("111122223333", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "request-secret", "dev"));
+        accessKeys.putForAccount("444455556666", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "other-secret", "worker"));
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount("AKIADUPLICATEKEYID", null).orElseThrow();
+        assertEquals("request-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountReportsTheAccountHoldingTheSecretItReturnsAmongDuplicateIds() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        accessKeys.putForAccount("111122223333", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "secret-of-111122223333", "worker"));
+        accessKeys.putForAccount("444455556666", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "secret-of-444455556666", "worker"));
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        // Either key may be found; the account must be the one whose secret signs the request.
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount("AKIADUPLICATEKEYID", null).orElseThrow();
+        assertEquals("secret-of-" + found.accountId(), found.secretAccessKey());
     }
 
     @Test

@@ -3212,10 +3212,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * it. Only for callers with no account in scope that check the owner themselves, such as the
      * EKS token webhook: everywhere else a key from another account must stay unknown.
      */
-    public Optional<String> findSecretKeyInAnyAccount(String accessKeyId, String sessionToken) {
-        return findSecretKey(accessKeyId, sessionToken)
-                .or(() -> activeAccessKeyInAnyAccount(accessKeyId).map(entry -> entry.value().getSecretAccessKey()));
+    public Optional<OwnedSecretKey> findSecretKeyInAnyAccount(String accessKeyId, String sessionToken) {
+        Optional<OwnedSecretKey> own = activeAccessKeySecret(accessKeyId)
+                .map(secret -> new OwnedSecretKey(secret, accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware
+                        ? aware.accountId() : null));
+        return own
+                .or(() -> currentSession(accessKeyId)
+                        .filter(session -> hasMatchingSessionToken(session, sessionToken))
+                        .map(session -> new OwnedSecretKey(session.getSecretAccessKey(), null)))
+                .or(() -> activeAccessKeyInAnyAccount(accessKeyId)
+                        .map(entry -> new OwnedSecretKey(entry.value().getSecretAccessKey(), entry.accountId())));
     }
+
+    /**
+     * A secret access key with the account that owns it, so a caller that checks the owner needs no
+     * second lookup. The account is null for a temporary key, whose session records its own.
+     */
+    public record OwnedSecretKey(String secretAccessKey, String accountId) {}
 
     /** The active long-term key with this ID, from whichever account owns it. */
     private Optional<AccountAwareStorageBackend.AccountEntry<AccessKey>> activeAccessKeyInAnyAccount(

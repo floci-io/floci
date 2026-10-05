@@ -66,7 +66,7 @@ public class DurableExecution {
         return changeSequence > seenSequence;
     }
 
-    /** True while a wait or a step retry is still pending. */
+    /** True while a wait, a step retry or a callback is still pending. */
     @JsonIgnore
     public boolean hasPendingOperations() {
         for (DurableOperation operation : operations.values()) {
@@ -80,6 +80,11 @@ public class DurableExecution {
                 case STEP -> {
                     if (operationStatus == DurableOperationStatus.PENDING
                             || operationStatus == DurableOperationStatus.READY) {
+                        return true;
+                    }
+                }
+                case CALLBACK -> {
+                    if (operationStatus == DurableOperationStatus.STARTED) {
                         return true;
                     }
                 }

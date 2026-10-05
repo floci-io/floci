@@ -19,6 +19,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -129,6 +130,37 @@ class LambdaUrlInvocationControllerTest {
 
         assertTrue(eventNode.get("isBase64Encoded").asBoolean());
         assertEquals(Base64.getEncoder().encodeToString(binaryBody), eventNode.get("body").asText());
+    }
+
+    @Test
+    void requestContextTimeUsesEnglishMonthUnderNonEnglishDefaultLocale() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("my-function");
+        fn.setFunctionArn(FUNCTION_ARN);
+        fn.setAccountId("100000000012");
+
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.getTargetByUrlId("url-id")).thenReturn(fn);
+        InvokeResult invokeResult = new InvokeResult();
+        invokeResult.setStatusCode(200);
+        invokeResult.setPayload("{\"statusCode\":200,\"body\":\"ok\"}".getBytes(StandardCharsets.UTF_8));
+        when(lambdaService.invokeArn(eq(FUNCTION_ARN), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(invokeResult);
+
+        LambdaUrlInvocationController controller = newController(lambdaService);
+        Locale original = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.JAPAN);
+            controller.handlePost("url-id", "", headersWith("text/plain"),
+                    uriInfoFor("http://localhost/lambda-url/url-id/"), "hi".getBytes(StandardCharsets.UTF_8));
+        } finally {
+            Locale.setDefault(original);
+        }
+
+        ArgumentCaptor<byte[]> event = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invokeArn(eq(FUNCTION_ARN), event.capture(), eq(InvocationType.RequestResponse));
+        String time = readTree(event.getValue()).path("requestContext").path("time").asText();
+        assertTrue(time.matches("\\d{2}/[A-Z][a-z]{2}/\\d{4}:\\d{2}:\\d{2}:\\d{2} \\+0000"), time);
     }
 
     @Test

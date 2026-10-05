@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.lambda.durable.model.DurableOperation
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -513,7 +514,129 @@ class DurableExecutionServiceTest {
         assertEquals(2, invoker.events.size(), "no extra invocation after the retry ran");
     }
 
+    @Test
+    void aCallbackCompletedFromOutsideReinvokesTheFunctionWithItsResult() {
+        invoker.script(event -> {
+            CheckpointResult started = checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            assertNotNull(started.newExecutionState().get(0).getCallbackId());
+            return pending();
+        });
+        invoker.script(event -> {
+            JsonNode callback = operation(event, "c1");
+            assertEquals("SUCCEEDED", callback.get("Status").asText());
+            assertEquals("\"approved\"", callback.at("/CallbackDetails/Result").asText());
+            assertEquals("c1", event.get("UpdatedOperationIds").get(0).asText());
+            return succeeded("\"done\"");
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        service.completeCallback(callbackId, ACCOUNT, REGION, true, "\"approved\"", null);
+
+        DurableExecution execution = service.get(arn);
+        assertEquals(DurableExecutionStatus.SUCCEEDED, execution.getStatus());
+        assertEquals(List.of("ExecutionStarted", "CallbackStarted", "InvocationCompleted", "CallbackSucceeded",
+                "InvocationCompleted", "ExecutionSucceeded"), eventTypes(execution));
+        assertCallbackClosed(() -> service.completeCallback(callbackId, ACCOUNT, REGION, false, null, null));
+        assertCallbackClosed(() -> service.heartbeatCallback(callbackId, ACCOUNT, REGION));
+    }
+
+    @Test
+    void aFailedCallbackCarriesTheErrorItWasSent() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            return pending();
+        });
+        invoker.script(event -> {
+            JsonNode callback = operation(event, "c1");
+            assertEquals("FAILED", callback.get("Status").asText());
+            assertEquals("Rejected", callback.at("/CallbackDetails/Error/ErrorType").asText());
+            return succeeded("\"handled\"");
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+
+        service.completeCallback(service.get(arn).getOperations().get("c1").getCallbackId(), ACCOUNT, REGION, false,
+                null, DurableErrorObject.of("denied", "Rejected"));
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(arn).getStatus());
+    }
+
+    @Test
+    void aFailureWithoutAnErrorIsRecordedButDoesNotInvokeTheFunction() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            return pending();
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        service.completeCallback(callbackId, ACCOUNT, REGION, false, null, null);
+
+        DurableExecution execution = service.get(arn);
+        assertEquals(1, invoker.events.size());
+        assertEquals(DurableExecutionStatus.RUNNING, execution.getStatus());
+        assertEquals(DurableOperationStatus.FAILED, execution.getOperations().get("c1").getStatus());
+        assertEquals("CallbackFailed", eventTypes(execution).get(eventTypes(execution).size() - 1));
+        assertCallbackClosed(() -> service.completeCallback(callbackId, ACCOUNT, REGION, true, "\"x\"", null));
+    }
+
+    @Test
+    void heartbeatsKeepACallbackAliveUntilTheyStop() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 3)));
+            return pending();
+        });
+        invoker.script(event -> {
+            assertEquals("Callback.Heartbeat", operation(event, "c1").at("/CallbackDetails/Error/ErrorType").asText());
+            return succeeded("\"gave up\"");
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        clock.advance(Duration.ofSeconds(2));
+        service.heartbeatCallback(callbackId, ACCOUNT, REGION);
+        clock.advance(Duration.ofSeconds(2));
+        service.sweep();
+        assertEquals(DurableOperationStatus.STARTED, service.get(arn).getOperations().get("c1").getStatus());
+
+        clock.advance(Duration.ofSeconds(1));
+        assertCallbackClosed(() -> service.heartbeatCallback(callbackId, ACCOUNT, REGION));
+        service.sweep();
+
+        assertEquals(DurableOperationStatus.TIMED_OUT, service.get(arn).getOperations().get("c1").getStatus());
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(arn).getStatus());
+    }
+
+    @Test
+    void callbackIdsThatMatchNoOpenCallbackAreRejected() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            return pending();
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        for (String malformed : List.of("QUJD", "not-valid!")) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.heartbeatCallback(malformed, ACCOUNT, REGION));
+            assertEquals("InvalidParameterValueException", rejected.getErrorCode());
+            assertEquals("Invalid callback id", rejected.getMessage());
+        }
+        assertCallbackClosed(() -> service.heartbeatCallback(callbackId, ACCOUNT, "eu-west-1"));
+        assertCallbackClosed(() -> service.heartbeatCallback(callbackId, "111111111111", REGION));
+
+        service.stop(arn, null);
+        assertCallbackClosed(() -> service.completeCallback(callbackId, ACCOUNT, REGION, true, "\"late\"", null));
+    }
+
     // ──────────────────────────── helpers ────────────────────────────
+
+    private static void assertCallbackClosed(Executable call) {
+        AwsException rejected = assertThrows(AwsException.class, call);
+        assertEquals("CallbackTimeoutException", rejected.getErrorCode());
+        assertEquals("The callback is either timed out or already completed", rejected.getMessage());
+        assertEquals(400, rejected.getHttpStatus());
+    }
 
     private static DurableExecutionService newService(InMemoryStorageFactory storage, ScriptedInvoker invoker,
                                                       MutableClock clock) {
@@ -553,22 +676,27 @@ class DurableExecutionServiceTest {
     private static DurableOperationUpdate step(String id, DurableOperationAction action, String payload,
                                                DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step", action, payload, error,
-                null, null, null);
+                null, null, null, null, null);
     }
 
     private static DurableOperationUpdate stepRetry(String id, int delaySeconds, DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step",
-                DurableOperationAction.RETRY, null, error, delaySeconds, null, null);
+                DurableOperationAction.RETRY, null, error, delaySeconds, null, null, null, null);
+    }
+
+    private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds, int heartbeatSeconds) {
+        return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds);
     }
 
     private static DurableOperationUpdate waitStart(String id, int seconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.WAIT, "Wait",
-                DurableOperationAction.START, null, null, null, seconds, null);
+                DurableOperationAction.START, null, null, null, seconds, null, null, null);
     }
 
     private static DurableOperationUpdate executionSucceed(String payload) {
         return new DurableOperationUpdate("execution-result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.SUCCEED, payload, null, null, null, null);
+                DurableOperationAction.SUCCEED, payload, null, null, null, null, null, null);
     }
 
     private static DurableFunctionInvoker.DurableInvocationResult succeeded(String result) {

@@ -385,10 +385,13 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/export-jobs/{JobId}` | `GetExportJob` |
 | `POST` | `/v2/email/list-export-jobs` | `ListExportJobs` |
 | `PUT` | `/v2/email/export-jobs/{JobId}/cancel` | `CancelExportJob` |
+| `POST` | `/v2/email/update-configuration-sets` | `UpdateConfigurationSet` |
 
 Floci models no leased dedicated IPs: `GetDedicatedIps` is empty and IP-targeted operations return `NotFoundException`, as real AWS does for an account with no leased IPs, with required request members validated first (`BadRequestException`). `PutDedicatedIpPoolScalingAttributes` rejects downgrading a `MANAGED` pool to `STANDARD`, and `PutAccountDedicatedIpWarmupAttributes` stores the flag behind `GetAccount.DedicatedIpAutoWarmupEnabled` (default `true`).
 
 Configuration set event destinations are stored as configuration. The target is not validated for existence; missing targets cause Floci to log a warning and skip that destination. Each event destination must specify exactly one destination type and at least one matching event type. A CloudWatch destination requires a non-empty dimension configuration list, and a Pinpoint destination requires an application ARN.
+
+A configuration set's `MessageSecurityOptions`, set with `CreateConfigurationSet` or the partial update [`UpdateConfigurationSet`](https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_UpdateConfigurationSet.html) and read back by `GetConfigurationSet`, is stored as configuration only: Floci never adds an S/MIME signature to a message. Where the API reference is silent, Floci follows what real SES answered (probed 2026-10-04): an empty `SigningScheme` resets the set to `DefaultScheme`, a request naming both union members stores `SmimeScheme`, and an `SmimeScheme` without a `SignatureFormat` stores `DETACHED`.
 
 Floci publishes SES events to `SnsDestination`, `KinesisFirehoseDestination`, `EventBridgeDestination`, and `CloudWatchDestination`. `PinpointDestination` logs a warning and skips. The published payload follows the [AWS SES SNS notification format](https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-contents.html) with an outer `eventType` plus `mail` and event-type-specific blocks. Events fire whenever a configuration set has at least one event destination matching the event type — disable per-destination via `EventDestination.Enabled=false`, or remove the destination entirely.
 

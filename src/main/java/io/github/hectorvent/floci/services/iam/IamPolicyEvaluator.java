@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsServiceNamespaces;
+import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.PolicyStatement;
@@ -927,6 +928,14 @@ public class IamPolicyEvaluator {
      */
     private enum SetQuantifier { NONE, FOR_ALL_VALUES, FOR_ANY_VALUE }
 
+    private static final Set<String> SUPPORTED_CONDITION_OPERATORS = Set.of(
+            "StringEquals", "StringNotEquals", "StringEqualsIgnoreCase", "StringNotEqualsIgnoreCase",
+            "StringLike", "StringNotLike", "ArnEquals", "ArnLike", "ArnNotEquals", "ArnNotLike", "Bool",
+            "NumericEquals", "NumericNotEquals", "NumericLessThan", "NumericLessThanEquals",
+            "NumericGreaterThan", "NumericGreaterThanEquals", "DateEquals", "DateNotEquals",
+            "DateLessThan", "DateLessThanEquals", "DateGreaterThan", "DateGreaterThanEquals",
+            "IpAddress", "NotIpAddress");
+
     private record ParsedOperator(SetQuantifier quantifier, String baseOp, boolean ifExists) {}
 
     /**
@@ -949,6 +958,20 @@ public class IamPolicyEvaluator {
         boolean ifExists = rest.endsWith("IfExists");
         String baseOp = ifExists ? rest.substring(0, rest.length() - "IfExists".length()) : rest;
         return new ParsedOperator(quantifier, baseOp, ifExists);
+    }
+
+    /**
+     * Returns whether {@link #evaluate} understands a condition operator, including its
+     * {@code ForAllValues:}/{@code ForAnyValue:} prefix and {@code IfExists} suffix. An unknown
+     * operator never matches, which silently disables a Deny, so callers that must fail closed
+     * on a malformed policy check this first.
+     */
+    public static boolean isSupportedConditionOperator(String operator) {
+        ParsedOperator parsed = parseOperator(operator);
+        if ("Null".equals(parsed.baseOp())) {
+            return !parsed.ifExists() && parsed.quantifier() == SetQuantifier.NONE;
+        }
+        return SUPPORTED_CONDITION_OPERATORS.contains(parsed.baseOp());
     }
 
     /**
@@ -1101,31 +1124,9 @@ public class IamPolicyEvaluator {
 
     private boolean matchesIpAddress(String condValue, String ctxValue) {
         if (condValue.contains("/")) {
-            return matchesCidr(condValue, ctxValue);
+            return CidrCanonicalizer.contains(condValue, ctxValue);
         }
         return condValue.equals(ctxValue);
-    }
-
-    private boolean matchesCidr(String cidr, String ip) {
-        try {
-            String[] parts = cidr.split("/");
-            int prefix = Integer.parseInt(parts[1]);
-            long cidrAddr = ipToLong(parts[0]);
-            long ipAddr = ipToLong(ip);
-            long mask = prefix == 0 ? 0L : (0xFFFFFFFFL << (32 - prefix)) & 0xFFFFFFFFL;
-            return (cidrAddr & mask) == (ipAddr & mask);
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private long ipToLong(String ip) {
-        String[] octets = ip.split("\\.");
-        long result = 0;
-        for (String octet : octets) {
-            result = (result << 8) | Integer.parseInt(octet);
-        }
-        return result;
     }
 
     // -----------------------------------------------------------------------

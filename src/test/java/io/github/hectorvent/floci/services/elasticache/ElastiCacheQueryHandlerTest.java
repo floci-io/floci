@@ -465,7 +465,7 @@ class ElastiCacheQueryHandlerTest {
         assertEquals(1, captor.getValue().numCacheNodes());
         assertEquals(6379, captor.getValue().port());
         assertEquals("us-east-1", captor.getValue().region());
-        verify(memcachedService, never()).createCacheCluster(anyString());
+        verify(memcachedService, never()).createCacheCluster(anyString(), any());
 
         String body = (String) response.getEntity();
         assertTrue(body.contains("<Engine>redis</Engine>"), body);
@@ -523,7 +523,7 @@ class ElastiCacheQueryHandlerTest {
 
     @Test
     void createCacheCluster_memcachedStillGoesToTheMemcachedService() {
-        when(memcachedService.createCacheCluster("mc")).thenReturn(new CacheCluster(
+        when(memcachedService.createCacheCluster(eq("mc"), any())).thenReturn(new CacheCluster(
                 "mc", CacheClusterStatus.AVAILABLE, "memcached", "1.6.22",
                 new Endpoint("localhost", 11211), Instant.now()));
 
@@ -533,7 +533,7 @@ class ElastiCacheQueryHandlerTest {
 
         String body = (String) handler.handle("CreateCacheCluster", p, "us-east-1").getEntity();
 
-        verify(memcachedService).createCacheCluster("mc");
+        verify(memcachedService).createCacheCluster(eq("mc"), eq("us-east-1"));
         verify(service, never()).createCacheCluster(any());
         assertTrue(body.contains(
                 "<ConfigurationEndpoint><Address>localhost</Address><Port>11211</Port></ConfigurationEndpoint>"), body);
