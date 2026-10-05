@@ -3724,7 +3724,11 @@ public class S3Controller {
         if ("content-length-range".equals(operator)) {
             long min = condition.get(1).asLong();
             long max = condition.get(2).asLong();
-            if (contentLength < min || contentLength > max) {
+            if (contentLength < min) {
+                throw new AwsException("EntityTooSmall",
+                        "Your proposed upload is smaller than the minimum allowed object size.", 400);
+            }
+            if (contentLength > max) {
                 throw new AwsException("EntityTooLarge",
                         "Your proposed upload exceeds the maximum allowed size.", 400);
             }
