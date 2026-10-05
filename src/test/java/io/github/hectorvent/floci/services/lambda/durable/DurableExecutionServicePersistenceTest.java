@@ -166,6 +166,56 @@ class DurableExecutionServicePersistenceTest {
         assertEquals(List.of("{\"n\":1}"), after.plainPayloads);
     }
 
+    @Test
+    void aDurableChildThatClosedBeforeItsReportCompletesTheParentAfterARestart() {
+        ScriptedInvoker before = new ScriptedInvoker();
+        PersistentStorageFactory firstStorage = new PersistentStorageFactory(directory);
+        // Runs the parent's invocation and drops the child's, so the child stays RUNNING on disk.
+        int[] launched = {0};
+        DurableExecutionService first = newService(firstStorage, before, task -> {
+            if (launched[0]++ == 0) {
+                task.run();
+            }
+        });
+        before.script((service, event) -> {
+            service.checkpoint(arn(event), token(event), null, List.of(new DurableOperationUpdate("i1", null, null,
+                    DurableOperationType.CHAINED_INVOKE, "ChainedInvoke", DurableOperationAction.START, null,
+                    null, null, null, null, null, null, "child-fn:1", null)));
+            return "{\"Status\":\"PENDING\"}";
+        });
+        String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
+                false)).getExecutionArn();
+        String childArn = first.get(executionArn).getOperations().get("i1").getChildExecutionArn();
+        firstStorage.flushAll();
+
+        // The child closed, and the process stopped before its parent heard of it.
+        PersistentStorageFactory crashedStorage = new PersistentStorageFactory(directory);
+        AccountAwareStorageBackend<DurableExecution> store = crashedStorage.create("lambda",
+                "lambda-durable-executions.json", new TypeReference<Map<String, DurableExecution>>() {});
+        String childKey = DurableExecutionService.parseArn(childArn).storeKey();
+        DurableExecution child = store.getForAccount(ACCOUNT, childKey).orElseThrow();
+        child.setStatus(DurableExecutionStatus.SUCCEEDED);
+        child.setResult("\"child done\"");
+        store.putForAccount(ACCOUNT, childKey, child);
+        crashedStorage.flushAll();
+
+        ScriptedInvoker after = new ScriptedInvoker();
+        DurableExecutionService restarted = newService(new PersistentStorageFactory(directory), after);
+        Script parent = (service, event) -> {
+            JsonNode invoke = operation(event, "i1");
+            if ("STARTED".equals(invoke.get("Status").asText())) {
+                return "{\"Status\":\"PENDING\"}";
+            }
+            assertEquals("\"child done\"", invoke.at("/ChainedInvokeDetails/Result").asText());
+            return "{\"Status\":\"SUCCEEDED\",\"Result\":\"\\\"done\\\"\"}";
+        };
+        after.script(parent);
+        after.script(parent);
+        restarted.recoverAfterRestart();
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, restarted.get(executionArn).getStatus());
+    }
+
     private DurableExecutionService newService(StorageFactory storage, ScriptedInvoker invoker) {
         return newService(storage, invoker, Runnable::run);
     }

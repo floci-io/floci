@@ -724,6 +724,8 @@ class DurableExecutionServiceTest {
         String childArn = parent.getOperations().get("ok").getChildExecutionArn();
         DurableExecution child = service.get(childArn);
         assertEquals("{\"x\":1}", child.getInputPayload());
+        assertNull(service.get(parent.getOperations().get("bad").getChildExecutionArn()).getInputPayload(),
+                "a missing Payload starts the child with no input");
         assertEquals(parent.getExecutionArn(), child.getParentExecutionArn());
         assertEquals(childArn, ((Map<?, ?>) event(parent, "ChainedInvokeStarted").getDetails()
                 .get("ChainedInvokeStartedDetails")).get("DurableExecutionArn"));
@@ -773,6 +775,28 @@ class DurableExecutionServiceTest {
 
         assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(parentArn).getStatus());
         assertEquals(3, invoker.events.size());
+    }
+
+    @Test
+    void aChainedInvokeInTheBatchThatClosesTheExecutionStillRuns() {
+        List<String> received = new ArrayList<>();
+        invoker.plainFunctions.put("plain-fn", event -> {
+            received.add(event.toString());
+            return handlerResponse("\"ignored\"");
+        });
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("i1", "plain-fn", "{\"n\":1}"),
+                    executionSucceed("\"closed\"")));
+            return succeeded("");
+        });
+
+        DurableExecution execution = service.get(start("exec-1", "{}", false).getExecutionArn());
+
+        assertEquals(List.of("{\"n\":1}"), received);
+        assertEquals("\"closed\"", execution.getResult());
+        assertTrue(eventTypes(execution).contains("ChainedInvokeStarted"));
+        assertFalse(eventTypes(execution).contains("ChainedInvokeSucceeded"));
+        assertEquals(1, invoker.events.size());
     }
 
     @Test
