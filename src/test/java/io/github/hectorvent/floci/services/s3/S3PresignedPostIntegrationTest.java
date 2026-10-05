@@ -302,7 +302,7 @@ class S3PresignedPostIntegrationTest {
             .contentType("application/xml")
             .body(hasXPath("/Error/Code", equalTo("EntityTooSmall")))
             .body(hasXPath("/Error/Message", equalTo(
-                    "Your proposed upload is smaller than the minimum allowed object size.")));
+                    "Your proposed upload is smaller than the minimum allowed size")));
 
         given()
         .when()
