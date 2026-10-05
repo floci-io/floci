@@ -5295,16 +5295,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (legacy != null && Objects.equals(td.getTaskDefinitionArn(), legacy.getTaskDefinitionArn())) {
             taskDefinitions.remove(legacyKey);
         }
-        taskDefinitions.put(taskDefinitionKey(regionOf(td, regionResolver.getRegion()), td.getFamily(),
-                td.getRevision()), td);
+        taskDefinitions.put(taskDefinitionKey(regionOf(td), td.getFamily(), td.getRevision()), td);
     }
 
-    /**
-     * Task definitions are regional; the region is read from each one's ARN, whatever its storage key.
-     * A definition without a readable ARN is listed in every region rather than failing them all.
-     */
+    /** Task definitions are regional; the region is read from each one's ARN, whatever its storage key. */
     private Stream<TaskDefinition> taskDefinitionsIn(String region) {
-        return taskDefinitions.values().stream().filter(td -> region.equals(regionOf(td, region)));
+        return taskDefinitions.values().stream().filter(td -> region.equals(regionOf(td)));
     }
 
     private int latestRevision(String region, String family) {
@@ -5314,9 +5310,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .max().orElse(0);
     }
 
-    /** A definition whose ARN cannot be read is taken as {@code fallback}'s, so one bad record breaks no lookup. */
-    private static String regionOf(TaskDefinition td, String fallback) {
-        return AwsArnUtils.regionOrDefault(td.getTaskDefinitionArn(), fallback);
+    /**
+     * The region in a definition's ARN. One whose ARN cannot be read belongs to the default region, as a
+     * task does ({@link #taskRegion}): it breaks no lookup, and it is seen in one region rather than all.
+     */
+    private String regionOf(TaskDefinition td) {
+        return AwsArnUtils.regionOrDefault(td.getTaskDefinitionArn(), regionResolver.getDefaultRegion());
     }
 
     /**
