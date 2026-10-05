@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 
 import java.net.Socket;
 import java.util.Optional;
@@ -14,16 +15,48 @@ public final class SpectrumInterceptor {
     private final SpectrumQueryRewriter queryRewriter;
     private final SpectrumS3Reader reader;
     private final SpectrumMaterializer materializer;
+    private final SpectrumQueryPreparation preparation;
 
     public SpectrumInterceptor(SpectrumCatalog catalog, SpectrumStatementParser statementParser,
                                SpectrumQueryClassifier queryClassifier, SpectrumQueryRewriter queryRewriter,
                                SpectrumS3Reader reader, SpectrumMaterializer materializer) {
+        this(catalog, statementParser, queryClassifier, queryRewriter, reader, materializer, null);
+    }
+
+    @Inject
+    public SpectrumInterceptor(SpectrumCatalog catalog, SpectrumStatementParser statementParser,
+                               SpectrumQueryClassifier queryClassifier, SpectrumQueryRewriter queryRewriter,
+                               SpectrumS3Reader reader, SpectrumMaterializer materializer,
+                               SpectrumQueryPreparation preparation) {
         this.catalog = catalog;
         this.statementParser = statementParser;
         this.queryClassifier = queryClassifier;
         this.queryRewriter = queryRewriter;
         this.reader = reader;
         this.materializer = materializer;
+        this.preparation = preparation;
+    }
+
+    public SpectrumQueryPreparation preparation() {
+        return preparation;
+    }
+
+    public Plan plan(String sql, SpectrumSession session) {
+        if (preparation != null && preparation.handlesDdl(sql, session)) {
+            return new Plan.ExternalDdl(sql, session);
+        }
+        if (preparation != null && preparation.referencesExternal(sql, session)) {
+            return new Plan.Forward();
+        }
+        return plan(sql, session.accountId(), session.databaseName());
+    }
+
+    public Decision intercept(String sql, SpectrumSession session, Socket backend) {
+        Plan plan = plan(sql, session);
+        if (plan instanceof Plan.Forward && preparation != null) {
+            preparation.prepare(sql, session, new PostgresBackendSession(backend));
+        }
+        return execute(plan, session.accountId(), session.databaseName(), backend);
     }
 
     public Decision intercept(String sql, String accountId, String databaseName, Socket backend) {
@@ -54,6 +87,12 @@ public final class SpectrumInterceptor {
 
     public Decision execute(Plan plan, String accountId, String databaseName, Socket backend) {
         switch (plan) {
+            case Plan.ExternalDdl(String sql, SpectrumSession session) -> {
+                if (preparation.prepare(sql, session, new PostgresBackendSession(backend))) {
+                    return new Decision.Handled();
+                }
+                return execute(plan(sql, accountId, databaseName), accountId, databaseName, backend);
+            }
             case Plan.Ddl(SpectrumStatement parsed) -> {
                 switch (parsed) {
                 case SpectrumStatement.CreateSchema schema -> catalog.createSchema(new SpectrumExternalSchema(
@@ -91,7 +130,9 @@ public final class SpectrumInterceptor {
         materializer.cleanup(backend, materialization);
     }
 
-    public sealed interface Plan permits Plan.Ddl, Plan.Forward, Plan.Query {
+    public sealed interface Plan permits Plan.Ddl, Plan.Forward, Plan.Query, Plan.ExternalDdl {
+        record ExternalDdl(String sql, SpectrumSession session) implements Plan {
+        }
         record Ddl(SpectrumStatement statement) implements Plan {
         }
 

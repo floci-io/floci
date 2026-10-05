@@ -39,6 +39,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -69,6 +70,12 @@ class ExternalTableMaterializerTest {
 
     private static final class RecordingBackend implements BackendSql {
         private final List<String> statements = new ArrayList<>();
+        private boolean publicationAllowed = true;
+
+        @Override
+        public boolean permitsCachePublication() {
+            return publicationAllowed;
+        }
 
         @Override
         public void execute(String sql) {
@@ -113,6 +120,37 @@ class ExternalTableMaterializerTest {
         when(s3.listObjectsWithPrefixes(eq(ExternalTableMaterializer.SCRATCH_BUCKET), eq("spectrum-"), eq(""),
                 eq(1000), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+    }
+
+    @Test
+    void confirmedExtendedCommitPublishesDefinitionsAndFingerprint() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        backend.publicationAllowed = false;
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        materializer.finishCycle(backend, true);
+        RecordingBackend other = new RecordingBackend();
+        assertEquals(ExternalTableMaterializer.Outcome.CURRENT,
+                materializer.ensureCurrent(other, session(false), BINDING, "events"));
+        forceReload();
+        materializer.ensureCurrent(other, session(false), BINDING, "events");
+        assertThat(other.statements.getLast(), containsString("CREATE TABLE IF NOT EXISTS"));
+    }
+
+    @Test
+    void extendedLoadsAreReusableOnlyWithinTheirOwnCycle() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        backend.publicationAllowed = false;
+        assertEquals(ExternalTableMaterializer.Outcome.LOADED,
+                materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+        assertEquals(ExternalTableMaterializer.Outcome.CURRENT,
+                materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+        RecordingBackend other = new RecordingBackend();
+        other.publicationAllowed = false;
+        assertEquals(ExternalTableMaterializer.Outcome.LOADED,
+                materializer.ensureCurrent(other, session(false), BINDING, "events"));
+        materializer.finishCycle(backend);
+        assertEquals(ExternalTableMaterializer.Outcome.LOADED,
+                materializer.ensureCurrent(backend, session(false), BINDING, "events"));
     }
 
     @Test

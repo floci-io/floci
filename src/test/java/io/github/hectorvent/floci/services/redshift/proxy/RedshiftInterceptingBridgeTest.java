@@ -26,6 +26,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RedshiftInterceptingBridgeTest {
 
+    @Test
+    void tracksBeginCommandAcrossFragmentedBackendFrames() {
+        BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
+        RedshiftInterceptingBridge.WireFrameTracker tracker =
+                new RedshiftInterceptingBridge.WireFrameTracker(coordinator::onBackendFrame);
+        byte[] begin = new byte[]{'C', 0, 0, 0, 10, 'B', 'E', 'G', 'I', 'N', 0};
+        tracker.consume(begin, 0, 7);
+        assertEquals('I', coordinator.lastReadyStatus());
+        tracker.consume(begin, 7, 4);
+        assertEquals('T', coordinator.lastReadyStatus());
+    }
+
     private static final Logger LOG = Logger.getLogger(RedshiftInterceptingBridgeTest.class);
 
     private ServerSocket clientListener;

@@ -7,6 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -33,16 +37,25 @@ public class RedshiftDataService implements Resettable {
     private final RedshiftDataConnectionFactory connectionFactory;
     private final RedshiftDataStatementStore store;
     private final ObjectMapper objectMapper;
+    private final SpectrumQueryPreparation preparation;
 
-    @Inject
     public RedshiftDataService(RedshiftDataResourceResolver resolver,
                                RedshiftDataConnectionFactory connectionFactory,
                                RedshiftDataStatementStore store,
                                ObjectMapper objectMapper) {
+        this(resolver, connectionFactory, store, objectMapper, null);
+    }
+
+    @Inject
+    public RedshiftDataService(RedshiftDataResourceResolver resolver,
+                               RedshiftDataConnectionFactory connectionFactory,
+                               RedshiftDataStatementStore store, ObjectMapper objectMapper,
+                               SpectrumQueryPreparation preparation) {
         this.resolver = resolver;
         this.connectionFactory = connectionFactory;
         this.store = store;
         this.objectMapper = objectMapper;
+        this.preparation = preparation;
     }
 
     @Override
@@ -77,7 +90,7 @@ public class RedshiftDataService implements Resettable {
                               RedshiftDataResourceResolver.DatabaseTarget target,
                               String sql, Map<String, String> parameters) {
         try (Connection connection = connectionFactory.open(target)) {
-            runOnConnection(stored, connection, sql, parameters);
+            runOnConnection(stored, connection, sql, parameters, target.spectrum());
         } catch (SQLException e) {
             stored.status = RedshiftDataStatementStore.Status.FAILED;
             stored.error = e.getMessage();
@@ -104,8 +117,22 @@ public class RedshiftDataService implements Resettable {
     }
 
     private void runOnConnection(RedshiftDataStatementStore.StoredStatement stored,
-                                 Connection connection, String sql, Map<String, String> parameters)
+                                 Connection connection, String sql, Map<String, String> parameters, SpectrumSession context)
             throws SQLException {
+        if (preparation != null && context != null) {
+            SpectrumSession session = new SpectrumSession(context.accountId(), context.clusterKey(), context.databaseName(),
+                    context.iamRoleArns(), !connection.getAutoCommit());
+            try {
+                if (preparation.prepare(sql, session, new RedshiftDataBackendSql(connection))) {
+                    stored.status = RedshiftDataStatementStore.Status.FINISHED;
+                    return;
+                }
+            } catch (SpectrumSqlException exception) {
+                throw new SQLException(exception.getMessage(), exception.sqlState(), exception);
+            } catch (SpectrumReadException exception) {
+                throw new SQLException(exception.getMessage(), exception.sqlState(), exception);
+            }
+        }
         ParsedSql parsed = RedshiftDataSqlParameters.parse(sql);
         long t0 = System.nanoTime();
         try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
@@ -325,7 +352,7 @@ public class RedshiftDataService implements Resettable {
                 sub.createdAt = now;
                 sub.updatedAt = now;
                 try {
-                    runOnConnection(sub, connection, sqls.get(n), Map.of());
+                    runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum());
                 } catch (SQLException e) {
                     sub.status = RedshiftDataStatementStore.Status.FAILED;
                     sub.error = e.getMessage();

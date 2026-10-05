@@ -89,6 +89,7 @@ public class RedshiftServerlessRuntime {
         String backendId = backendId(region, workgroupName);
         proxyManager.stopProxy(relayKey(accountId, backendId));
         containerManager.stop(accountId, backendId);
+        proxyManager.forgetSpectrumRuntime(relayKey(accountId, backendId));
         credentialBroker.revokeCluster(accountId, backendId);
     }
 

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.Map;
@@ -106,6 +107,9 @@ final class BackendResponseCoordinator {
     void onBackendFrame(char type, byte[] body) {
         lock.lock();
         try {
+            if (type == 'C' && "BEGIN\0".equals(new String(body, StandardCharsets.UTF_8))) {
+                lastReadyStatus = 'T';
+            }
             if (type == 'Z') {
                 updateReadyStatus(body);
             }
