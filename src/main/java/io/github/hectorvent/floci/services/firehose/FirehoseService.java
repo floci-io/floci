@@ -999,9 +999,11 @@ public class FirehoseService implements ResourceProvider {
      * region so the first stream to deliver does not decide it for all the others.
      */
     private void ensureBucket(String bucket, DeliveryStreamDescription stream) {
-        String region = DEFAULT_BUCKET.equals(bucket)
-                ? regionResolver.getDefaultRegion()
-                : AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion());
+        S3Destination s3 = stream.s3Destination();
+        boolean ownDestination = s3 != null && s3.bucketName() != null;
+        String region = ownDestination
+                ? AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion())
+                : regionResolver.getDefaultRegion();
         try {
             s3Service.createBucket(bucket, region);
         } catch (Exception ignored) {

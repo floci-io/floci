@@ -262,6 +262,19 @@ class FirehoseServiceTest {
     }
 
     @Test
+    void aDestinationNamedLikeTheDefaultBucketFollowsItsStream() {
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn("arn:aws:s3:::floci-firehose-results");
+        firehoseService.createDeliveryStream("eu-west-1", "000000000000", "eu-named", s3, List.of(), null, null);
+        firehoseService.putRecord("000000000000", "eu-west-1", "eu-named",
+                new Record("one".getBytes(StandardCharsets.UTF_8)));
+
+        firehoseService.flush("000000000000", "eu-west-1", "eu-named");
+
+        verify(s3Service).createBucket("floci-firehose-results", "eu-west-1");
+    }
+
+    @Test
     void theSharedDefaultBucketStaysInTheDefaultRegion() {
         firehoseService.createDeliveryStream("eu-west-1", "000000000000", "eu-default", null, List.of(), null, null);
         firehoseService.putRecord("000000000000", "eu-west-1", "eu-default",
