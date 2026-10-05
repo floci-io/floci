@@ -240,7 +240,8 @@ public class DocDbService {
                 // A cluster record is metadata: its identifier, ARN and tags need no Docker, so the
                 // cluster is created and reaches 'available' even when no daemon is reachable. Only
                 // connecting to the database needs the container.
-                DocDbContainerHandle handle = containerManager.tryStart(id, image, masterUsername, masterPassword);
+                DocDbContainerHandle handle = containerManager.tryStart(id, image, masterUsername, masterPassword,
+                        region);
                 if (handle != null) {
                     cluster.setEndpoint(handle.getHost());
                     cluster.setReaderEndpoint(handle.getHost());

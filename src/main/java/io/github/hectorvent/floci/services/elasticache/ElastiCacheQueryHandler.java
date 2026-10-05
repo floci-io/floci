@@ -337,7 +337,7 @@ public class ElastiCacheQueryHandler {
 
         try {
             CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
-                    ? memcachedService.createCacheCluster(clusterId)
+                    ? memcachedService.createCacheCluster(clusterId, region)
                     : service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
                             clusterId,
                             engine,
