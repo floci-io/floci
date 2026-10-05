@@ -20,6 +20,9 @@ import java.util.Map;
  * The caller may supply the response of a CustomMessage Lambda trigger invocation,
  * whose {@code emailSubject}/{@code emailMessage}/{@code smsMessage} take precedence
  * over the pool's own template.
+ *
+ * Email is sent from the address the pool's {@code EmailConfiguration} names, or from
+ * {@code no-reply@verificationemail.com} when it names none.
  */
 public final class CognitoMessageDispatcher {
 
@@ -29,6 +32,8 @@ public final class CognitoMessageDispatcher {
     private static final String DEFAULT_EMAIL_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_SMS_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_FROM = "no-reply@verificationemail.com";
+    private static final String DEVELOPER_SENDING_ACCOUNT = "DEVELOPER";
+    private static final String SES_IDENTITY_RESOURCE_PREFIX = "identity/";
     private static final String CODE_PLACEHOLDER = "{####}";
 
     private final SesService ses;
@@ -74,7 +79,7 @@ public final class CognitoMessageDispatcher {
                 if (rawBody == null) rawBody = stringOr(template.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
                 String body = renderTemplate(rawBody, code);
                 ses.sendEmail(SendEmailRequest.builder()
-                    .source(DEFAULT_FROM)
+                    .source(fromAddress(pool))
                     .toAddresses(List.of(email))
                     .region(region)
                     .content(new EmailContent.Simple(subject, body, null, List.of()))
@@ -93,6 +98,45 @@ public final class CognitoMessageDispatcher {
                 );
             }
         }
+    }
+
+    /**
+     * The FROM address for the pool's {@code EmailConfiguration} (EmailConfigurationType):
+     * <ul>
+     *   <li>{@code DEVELOPER}: {@code From}, a sender's address or name and address, when set.
+     *   Only this sending account takes a sender name.</li>
+     *   <li>Otherwise the address of the {@code SourceArn} identity, which with
+     *   {@code COGNITO_DEFAULT} is the custom FROM address. A domain identity names no address,
+     *   so {@code From} supplies it.</li>
+     *   <li>Without either, {@code no-reply@verificationemail.com}.</li>
+     * </ul>
+     */
+    private String fromAddress(UserPool pool) {
+        Map<String, Object> config = pool.getEmailConfiguration();
+        if (config == null) {
+            return DEFAULT_FROM;
+        }
+        String from = stringOrNull(config, "From");
+        if (DEVELOPER_SENDING_ACCOUNT.equals(config.get("EmailSendingAccount")) && from != null) {
+            return from;
+        }
+        String identity = sesIdentity(stringOrNull(config, "SourceArn"));
+        if (identity == null) {
+            return DEFAULT_FROM;
+        }
+        if (identity.contains("@")) {
+            return identity;
+        }
+        return from != null ? from : DEFAULT_FROM;
+    }
+
+    /** The identity an SES {@code identity/<name>} ARN names, or {@code null} for anything else. */
+    private static String sesIdentity(String sourceArn) {
+        return AwsArnUtils.resourceIfArnFor(sourceArn, "ses")
+            .filter(resource -> resource.startsWith(SES_IDENTITY_RESOURCE_PREFIX))
+            .map(resource -> resource.substring(SES_IDENTITY_RESOURCE_PREFIX.length()))
+            .filter(identity -> !identity.isEmpty())
+            .orElse(null);
     }
 
     /**

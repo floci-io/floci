@@ -721,6 +721,53 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void signUpCodeIsSentFromTheEmailConfigurationFrom() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "EmailConfigurationFromPool",
+                  "AutoVerifiedAttributes": ["email"],
+                  "EmailConfiguration": {
+                    "EmailSendingAccount": "DEVELOPER",
+                    "SourceArn": "arn:aws:ses:us-east-1:000000000000:identity/noreply@repro.example",
+                    "From": "Repro App <noreply@repro.example>"
+                  }
+                }
+                """);
+        String fromPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "email-configuration-from-client"
+                }
+                """.formatted(fromPoolId));
+        String fromClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String fromUsername = "from+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(fromClientId, fromUsername, fromUsername))
+                .then()
+                .statusCode(200);
+
+        given()
+                .queryParam("email", fromUsername)
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body("messages", hasSize(1))
+                .body("messages[0].Source", equalTo("Repro App <noreply@repro.example>"));
+    }
+
+    @Test
     void resendConfirmationCodeReplacesTheSignUpCode() throws Exception {
         given().delete("/_aws/ses").then().statusCode(200);
 

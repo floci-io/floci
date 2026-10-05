@@ -46,6 +46,20 @@ format. Validation runs before pool or client lookup.
 | AddCustomAttributes | Adds 1 to 25 attributes to a user pool's schema, prefixing each name with `custom:`, or `dev:` for a `DeveloperOnlyAttribute`, and rejecting a name the schema already has. |
 | SetUserPoolMfaConfig | Sets `MfaConfiguration` (`OFF`/`ON`/`OPTIONAL`) and `SoftwareTokenMfaConfiguration`. An absent `MfaConfiguration` means `OFF`, and turning MFA off drops the factor configuration with it. Validation follows the live service: `OFF` alongside a software-token, email or SMS factor is rejected, and `ON`/`OPTIONAL` with none of those three is rejected, in both cases on the member being present, not on its `Enabled` value. `WebAuthnConfiguration` sits outside both rules, as it does in AWS. SMS, email and WebAuthn configurations are validated and not stored: Floci cannot deliver those factors, so keeping the config would imply a capability it does not have. |
 
+Email that Cognito sends to users, such as verification codes, goes through Floci's SES (readable
+at `/_aws/ses`) from the sender the pool's `EmailConfiguration` names:
+
+- With `EmailSendingAccount` `DEVELOPER`, `From` when it is set, as an address or a sender name
+  with an address, otherwise the address of the `SourceArn` identity.
+- With `COGNITO_DEFAULT`, the address of the `SourceArn` identity. AWS offers a sender name in
+  `From` only with `DEVELOPER`.
+- When the `SourceArn` identity is a domain, `From` gives the address.
+- Otherwise `no-reply@verificationemail.com`.
+
+Differences from AWS: Floci does not check that the identity is verified in SES, sends in the user
+pool's Region rather than the `SourceArn` Region, and does not apply `ReplyToEmailAddress` or
+`ConfigurationSet`.
+
 ### User Pool Tags
 
 | Action | Description |

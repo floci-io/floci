@@ -206,6 +206,84 @@ class CognitoMessageDispatcherTest {
         assertEquals("cn-northwest-1", sentEmail().region());
     }
 
+    @Test
+    void dispatch_withoutEmailConfiguration_sendsFromTheDefaultAddress() {
+        dispatcher.dispatch(pool(Map.of()), user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("no-reply@verificationemail.com", sentEmail().source());
+    }
+
+    @Test
+    void dispatch_developerSendingAccount_sendsFromTheConfiguredFrom() {
+        UserPool pool = pool(Map.of());
+        pool.setEmailConfiguration(Map.of(
+            "EmailSendingAccount", "DEVELOPER",
+            "SourceArn", "arn:aws:ses:us-east-1:000000000000:identity/noreply@repro.example",
+            "From", "Repro App <noreply@repro.example>"));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("Repro App <noreply@repro.example>", sentEmail().source());
+    }
+
+    @Test
+    void dispatch_developerSendingAccountWithoutFrom_sendsFromTheSourceArnAddress() {
+        UserPool pool = pool(Map.of());
+        pool.setEmailConfiguration(Map.of(
+            "EmailSendingAccount", "DEVELOPER",
+            "SourceArn", "arn:aws:ses:us-east-1:000000000000:identity/noreply@repro.example"));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("noreply@repro.example", sentEmail().source());
+    }
+
+    @Test
+    void dispatch_cognitoDefaultSendingAccount_sendsFromTheSourceArnAddressWithoutTheSenderName() {
+        // With COGNITO_DEFAULT the SourceArn address is the custom FROM address; a sender name in
+        // From is available only with the pool's own SES (DEVELOPER).
+        UserPool pool = pool(Map.of());
+        pool.setEmailConfiguration(Map.of(
+            "EmailSendingAccount", "COGNITO_DEFAULT",
+            "SourceArn", "arn:aws:ses:us-east-1:000000000000:identity/noreply@repro.example",
+            "From", "Repro App <noreply@repro.example>"));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("noreply@repro.example", sentEmail().source());
+    }
+
+    @Test
+    void dispatch_cognitoDefaultSendingAccountWithoutSourceArn_ignoresFrom() {
+        UserPool pool = pool(Map.of());
+        pool.setEmailConfiguration(Map.of(
+            "EmailSendingAccount", "COGNITO_DEFAULT",
+            "From", "noreply@repro.example"));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("no-reply@verificationemail.com", sentEmail().source());
+    }
+
+    @Test
+    void dispatch_domainIdentity_sendsFromTheConfiguredFrom() {
+        // A domain identity names no address of its own, so From supplies it.
+        UserPool pool = pool(Map.of());
+        pool.setEmailConfiguration(Map.of(
+            "SourceArn", "arn:aws:ses:us-east-1:000000000000:identity/repro.example",
+            "From", "noreply@repro.example"));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("noreply@repro.example", sentEmail().source());
+    }
+
     private SendEmailRequest sentEmail() {
         ArgumentCaptor<SendEmailRequest> captor = ArgumentCaptor.forClass(SendEmailRequest.class);
         verify(ses).sendEmail(captor.capture());
