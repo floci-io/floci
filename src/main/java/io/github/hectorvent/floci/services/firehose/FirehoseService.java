@@ -993,11 +993,17 @@ public class FirehoseService implements ResourceProvider {
         return DEFAULT_BUCKET;
     }
 
-    /** Creates a missing destination bucket in the stream's region, taken from its ARN. */
+    /**
+     * Creates a missing destination bucket. A stream's own destination goes in the stream's region,
+     * from its ARN; the shared default bucket, used by every stream without one, stays in the default
+     * region so the first stream to deliver does not decide it for all the others.
+     */
     private void ensureBucket(String bucket, DeliveryStreamDescription stream) {
+        String region = DEFAULT_BUCKET.equals(bucket)
+                ? regionResolver.getDefaultRegion()
+                : AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion());
         try {
-            s3Service.createBucket(bucket,
-                    AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion()));
+            s3Service.createBucket(bucket, region);
         } catch (Exception ignored) {
             // The bucket usually exists already; a real problem with it surfaces on the write that follows.
         }

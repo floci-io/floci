@@ -250,13 +250,26 @@ class FirehoseServiceTest {
 
     @Test
     void aMissingDestinationBucketIsCreatedInTheStreamsRegion() {
-        firehoseService.createDeliveryStream("eu-west-1", "000000000000", "eu-stream", null, List.of(), null, null);
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn("arn:aws:s3:::eu-stream-bucket");
+        firehoseService.createDeliveryStream("eu-west-1", "000000000000", "eu-stream", s3, List.of(), null, null);
         firehoseService.putRecord("000000000000", "eu-west-1", "eu-stream",
                 new Record("one".getBytes(StandardCharsets.UTF_8)));
 
         firehoseService.flush("000000000000", "eu-west-1", "eu-stream");
 
-        verify(s3Service).createBucket("floci-firehose-results", "eu-west-1");
+        verify(s3Service).createBucket("eu-stream-bucket", "eu-west-1");
+    }
+
+    @Test
+    void theSharedDefaultBucketStaysInTheDefaultRegion() {
+        firehoseService.createDeliveryStream("eu-west-1", "000000000000", "eu-default", null, List.of(), null, null);
+        firehoseService.putRecord("000000000000", "eu-west-1", "eu-default",
+                new Record("one".getBytes(StandardCharsets.UTF_8)));
+
+        firehoseService.flush("000000000000", "eu-west-1", "eu-default");
+
+        verify(s3Service).createBucket("floci-firehose-results", "us-east-1");
     }
 
     @Test
