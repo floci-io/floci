@@ -300,6 +300,29 @@ class IotCustomAuthorizerTest {
     }
 
     @Test
+    void anEmptyTokenIsAValidationError() throws GeneralSecurityException {
+        assertInvalidRequest("1 validation error detected: Value at 'token' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 1",
+                () -> customAuthorizer.testInvoke("s", tokenRequest("", sign(key1, "")), REGION));
+    }
+
+    @Test
+    void aTokenOverItsMaximumLengthIsAValidationError() throws GeneralSecurityException {
+        String token = "t".repeat(6145);
+
+        assertInvalidRequest("1 validation error detected: Value at 'token' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 6144",
+                () -> customAuthorizer.testInvoke("s", tokenRequest(token, sign(key1, token)), REGION));
+    }
+
+    @Test
+    void aSignatureOverItsMaximumLengthIsAValidationError() {
+        assertInvalidRequest("1 validation error detected: Value at 'tokenSignature' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 2560",
+                () -> customAuthorizer.testInvoke("s", tokenRequest("allow-me", "A".repeat(2561)), REGION));
+    }
+
+    @Test
     void tokenModeVerifiesASignatureByEitherKeyAndSendsOnlyTheToken() throws GeneralSecurityException {
         for (KeyPair key : List.of(key1, key2)) {
             assertTrue(customAuthorizer.testInvoke("s", tokenRequest("allow-me", sign(key, "allow-me")), REGION)

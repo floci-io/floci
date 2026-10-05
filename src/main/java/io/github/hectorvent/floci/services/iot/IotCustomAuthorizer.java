@@ -73,8 +73,17 @@ public class IotCustomAuthorizer {
         String token = request.path("token").asText(null);
         String signature = request.path("tokenSignature").asText(null);
         String queryString = request.path("httpContext").path("queryString").asText(null);
+        if ("".equals(token)) {
+            throw IotAuthorizerService.constraint("token", "Member must have length greater than or equal to 1");
+        }
+        if (token != null && token.length() > 6144) {
+            throw IotAuthorizerService.constraint("token", "Member must have length less than or equal to 6144");
+        }
         if (signature != null && !BASE64.matcher(signature).matches()) {
             throw IotAuthorizerService.constraint("tokenSignature", "Member must satisfy regular expression pattern: " + BASE64);
+        }
+        if (signature != null && signature.length() > 2560) {
+            throw IotAuthorizerService.constraint("tokenSignature", "Member must have length less than or equal to 2560");
         }
         if ("".equals(queryString)) {
             throw IotAuthorizerService.constraint("httpContext.queryString", "Member must have length greater than or equal to 1");
