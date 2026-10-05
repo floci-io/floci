@@ -155,7 +155,10 @@ class SesIdentityCertificateTest {
             ProcessBuilder pb = new ProcessBuilder("openssl", "req", "-x509", "-newkey", "rsa:2048",
                     "-keyout", keyFile.toString(), "-out", certFile.toString(),
                     "-days", "365", "-nodes", "-subj", "/CN=" + email,
-                    "-addext", "subjectAltName=email:" + email);
+                    "-addext", "subjectAltName=email:" + email,
+                    "-addext", "basicConstraints=critical,CA:FALSE",
+                    "-addext", "keyUsage=critical,digitalSignature",
+                    "-addext", "extendedKeyUsage=emailProtection");
             pb.redirectErrorStream(true);
             Process p = pb.start();
             p.getInputStream().readAllBytes();

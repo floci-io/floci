@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.IdentityCertificate;
 import io.github.hectorvent.floci.testing.MutableClock;
+import org.bouncycastle.asn1.x509.KeyPurposeId;
+import org.bouncycastle.asn1.x509.KeyUsage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -19,6 +21,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -185,6 +188,33 @@ class SesIdentityCertificateServiceTest {
             certificate.setCertificateBody(allowed.certificate());
             assertEquals("ACTIVE", service.list(DOMAIN, null, null, REGION).items().getFirst().status());
         }
+    }
+
+    @Test
+    void list_certificateMustBeAnEmailSigningEndEntity() {
+        Certificate certificate = certificate(CERT_ARN, CertificateStatus.ISSUED, clock.instant().plusSeconds(3600));
+        when(acmService.getCertificate(eq(CERT_ARN), eq(REGION))).thenReturn(certificate);
+        service.associate(DOMAIN, "alice@example.com", CERT_ARN, REGION);
+        int signing = KeyUsage.digitalSignature;
+        KeyPurposeId email = KeyPurposeId.id_kp_emailProtection;
+        // The eight shapes probed against SES on 2026-10-06, with the status it reported for each.
+        Map<SmimeTestCertificates.Extensions, String> probed = new LinkedHashMap<>();
+        probed.put(new SmimeTestCertificates.Extensions(true, 0), "FAILED");
+        probed.put(new SmimeTestCertificates.Extensions(false, signing, email), "ACTIVE");
+        probed.put(new SmimeTestCertificates.Extensions(false, 0), "FAILED");
+        probed.put(new SmimeTestCertificates.Extensions(false, 0, email), "FAILED");
+        probed.put(new SmimeTestCertificates.Extensions(false, signing), "FAILED");
+        probed.put(new SmimeTestCertificates.Extensions(true, signing, email), "FAILED");
+        probed.put(new SmimeTestCertificates.Extensions(null, signing, email), "ACTIVE");
+        probed.put(new SmimeTestCertificates.Extensions(false, signing | KeyUsage.keyEncipherment, email,
+                KeyPurposeId.id_kp_clientAuth), "ACTIVE");
+
+        probed.forEach((extensions, expected) -> {
+            certificate.setCertificateBody(
+                    SmimeTestCertificates.rsa("alice@example.com", 2048, extensions).certificate());
+            assertEquals(expected, service.list(DOMAIN, null, null, REGION).items().getFirst().status(),
+                    extensions.toString());
+        });
     }
 
     @Test

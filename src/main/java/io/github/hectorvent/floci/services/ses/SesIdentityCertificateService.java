@@ -41,9 +41,10 @@ import java.util.regex.Pattern;
  * Floci stores them and never signs mail. Messages and precedence follow real SES (probed 2026-10-04):
  * the request members are checked before the identity is looked up, and the certificate itself is
  * not checked when it is associated. The status applies the SES Developer Guide's certificate
- * requirements when the list is read: an association is ACTIVE while its identity is verified and
- * its ARN names an issued, currently valid certificate in Floci's ACM, with an allowed key and an
- * RFC822Name SAN equal to the From address, and FAILED otherwise.
+ * requirements, plus the ones a probe found SES also enforces, when the list is read: an association
+ * is ACTIVE while its identity is verified and its ARN names an issued, currently valid end-entity
+ * certificate in Floci's ACM, with an allowed key, the email-signing key usages and an RFC822Name
+ * SAN equal to the From address, and FAILED otherwise.
  */
 @ApplicationScoped
 public class SesIdentityCertificateService {
@@ -54,6 +55,8 @@ public class SesIdentityCertificateService {
     static final String STATUS_FAILED = "FAILED";
 
     private static final int RFC822_NAME = 1;
+    private static final int DIGITAL_SIGNATURE = 0;
+    private static final String EMAIL_PROTECTION = "1.3.6.1.5.5.7.3.4";
     private static final Set<Integer> RSA_SIGNING_KEY_SIZES = Set.of(2048, 3072, 4096);
     private static final List<String> EC_SIGNING_CURVES = List.of("secp256r1", "secp384r1", "secp521r1");
 
@@ -205,7 +208,7 @@ public class SesIdentityCertificateService {
             return null;
         }
         X509Certificate x509 = parse(certificate);
-        if (x509 == null || !isSigningKey(x509.getPublicKey())
+        if (x509 == null || !isSigningKey(x509.getPublicKey()) || !isEmailSigningCertificate(x509)
                 || !emailSubjectAlternativeNames(x509).contains(fromAddress)) {
             return null;
         }
@@ -244,6 +247,30 @@ public class SesIdentityCertificateService {
             }
         }
         return false;
+    }
+
+    /**
+     * What SES requires beyond the Developer Guide's list (probed 2026-10-06): an end-entity
+     * certificate (a CA certificate fails even with both usages) whose key usage includes
+     * digitalSignature and whose extended key usage includes emailProtection. Other usages may sit
+     * alongside them.
+     */
+    private static boolean isEmailSigningCertificate(X509Certificate x509) {
+        if (x509.getBasicConstraints() != -1) {
+            return false;
+        }
+        boolean[] keyUsage = x509.getKeyUsage();
+        if (keyUsage == null || !keyUsage[DIGITAL_SIGNATURE]) {
+            return false;
+        }
+        try {
+            List<String> extendedKeyUsage = x509.getExtendedKeyUsage();
+            return extendedKeyUsage != null && extendedKeyUsage.contains(EMAIL_PROTECTION);
+        } catch (CertificateParsingException e) {
+            LOG.debugv(e, "The extended key usage of {0} could not be read",
+                    x509.getSubjectX500Principal().getName());
+            return false;
+        }
     }
 
     private static ECParameterSpec namedCurve(String name) {
