@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -130,7 +131,7 @@ public class EmrService {
         // ValidationException if any were termination protected.
         boolean anyProtected = false;
         for (String id : ids) {
-            EmrCluster cluster = clusterStore.get(id).orElse(null);
+            EmrCluster cluster = findCluster(id).orElse(null);
             if (cluster == null) {
                 continue;
             }
@@ -184,8 +185,7 @@ public class EmrService {
     // ──────────────────────────── Steps ────────────────────────────
 
     public synchronized List<String> addJobFlowSteps(String clusterId, List<EmrStep> steps) {
-        EmrCluster cluster = clusterStore.get(clusterId).orElseThrow(() -> new AwsException(
-                "InvalidRequestException", "Cluster id '" + clusterId + "' is not valid.", 400));
+        EmrCluster cluster = requireCluster(clusterId);
         List<String> ids = new ArrayList<>();
         for (EmrStep step : steps) {
             initStep(step);
@@ -648,13 +648,22 @@ public class EmrService {
         if (id == null) {
             throw new AwsException("InvalidRequestException", "ClusterId is required.", 400);
         }
-        return clusterStore.get(id).orElseThrow(() -> new AwsException(
+        return findCluster(id).orElseThrow(() -> new AwsException(
                 "InvalidRequestException", "Cluster id '" + id + "' is not valid.", 400));
+    }
+
+    /**
+     * Clusters are stored by id for every region; a request sees only its own region's, and one from
+     * another region reads as an unknown id. A cluster recorded without a region stays reachable.
+     */
+    private Optional<EmrCluster> findCluster(String id) {
+        String region = regionResolver.getRegion();
+        return clusterStore.get(id).filter(c -> c.getRegion() == null || c.getRegion().equals(region));
     }
 
     private void mutateClusters(List<String> ids, java.util.function.Consumer<EmrCluster> mutation) {
         for (String id : ids) {
-            clusterStore.get(id).ifPresent(c -> {
+            findCluster(id).ifPresent(c -> {
                 mutation.accept(c);
                 clusterStore.put(id, c);
             });
