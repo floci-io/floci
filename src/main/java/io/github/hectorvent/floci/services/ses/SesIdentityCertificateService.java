@@ -11,7 +11,6 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
-import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.IdentityCertificate;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -147,7 +146,7 @@ public class SesIdentityCertificateService {
         List<IdentityCertificate> associations = store.scan(k -> k.startsWith(identityPrefix(region, emailIdentity)));
         PaginatedResult<IdentityCertificate> page = paging.page(region, emailIdentity, associations,
                 c -> c.fromAddress().toLowerCase(Locale.ROOT), pageSize, nextToken);
-        boolean identityVerified = isVerified(emailIdentity, region);
+        boolean identityVerified = identityService.isIdentityVerified(emailIdentity, region);
         List<Entry> entries = page.items().stream().map(c -> entry(c, identityVerified, region)).toList();
         return new PaginatedResult<>(entries, page.nextToken());
     }
@@ -167,11 +166,6 @@ public class SesIdentityCertificateService {
             }
             deleteAction.run();
         }
-    }
-
-    private boolean isVerified(String emailIdentity, String region) {
-        Identity identity = identityService.getIdentityVerificationAttributes(emailIdentity, region);
-        return identity != null && "Success".equals(identity.getVerificationStatus());
     }
 
     private Entry entry(IdentityCertificate association, boolean identityVerified, String region) {
