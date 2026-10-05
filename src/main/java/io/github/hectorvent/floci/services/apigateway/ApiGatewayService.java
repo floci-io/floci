@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,6 +12,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -25,6 +27,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.DeploymentExportSnapshot;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
@@ -64,6 +67,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -745,7 +749,16 @@ public class ApiGatewayService implements ResourceProvider {
     public Deployment createDeployment(String region, String apiId, Map<String, Object> request) {
         getRestApi(region, apiId);
         String description = (String) request.getOrDefault("description", "");
-        Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L);
+        String snapshot;
+        try {
+            snapshot = JSON.writeValueAsString(new DeploymentExportSnapshot(getRestApi(region, apiId),
+                    getResources(region, apiId), getModels(region, apiId), getAuthorizers(region, apiId),
+                    getRequestValidators(region, apiId), getGatewayResponses(region, apiId).stream()
+                            .filter(response -> !response.isDefaultResponse()).toList()));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot capture REST API deployment", e);
+        }
+        Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L, snapshot);
         deploymentStore.put(deploymentKey(region, apiId, deployment.id()), deployment);
         LOG.infov("Created deployment {0} for API {1}", deployment.id(), apiId);
 
@@ -821,11 +834,46 @@ public class ApiGatewayService implements ResourceProvider {
                 }
                 newDescription = value;
             }
-            Deployment updated = new Deployment(existing.id(), newDescription, existing.createdDate());
+            Deployment updated = new Deployment(existing.id(), newDescription, existing.createdDate(), existing.exportSnapshot());
             deploymentStore.put(deploymentKey(region, apiId, deploymentId), updated);
             return updated;
         }
         return existing;
+    }
+
+    public ObjectNode exportRestApi(String region, String apiId, String stageName, String exportType,
+                                    String extensions) {
+        Stage stage = getStage(region, apiId, stageName);
+        if (!"oas30".equals(exportType) && !"swagger".equals(exportType)) {
+            throw new AwsException("BadRequestException", "Invalid export type: " + exportType, 400);
+        }
+        Set<String> selected = extensions == null || extensions.isBlank()
+                ? Set.of() : new HashSet<>(List.of(extensions.split(",")));
+        if (!Set.of("integrations", "authorizers", "apigateway").containsAll(selected)) {
+            throw new AwsException("BadRequestException", "Unsupported export extensions: " + extensions, 400);
+        }
+        Deployment deployment = getDeployment(region, apiId, stage.getDeploymentId());
+        if (deployment.exportSnapshot() == null) {
+            throw new AwsException("BadRequestException",
+                    "This deployment predates export snapshots. Redeploy the API before exporting it.", 400);
+        }
+        try {
+            DeploymentExportSnapshot snapshot = JSON.readValue(deployment.exportSnapshot(), DeploymentExportSnapshot.class);
+            boolean all = selected.contains("apigateway");
+            ObjectNode document = RestApiOpenApiExporter.export(snapshot, "swagger".equals(exportType),
+                    all || selected.contains("integrations"), all || selected.contains("authorizers"), all);
+            String host = apiId + ".execute-api." + region + "." + AwsRegions.dnsSuffixFor(region);
+            if ("swagger".equals(exportType)) {
+                document.put("host", host);
+                document.put("basePath", "/" + stageName);
+                document.putArray("schemes").add("https");
+            } else {
+                document.putArray("servers").addObject().put("url", "https://" + host + "/" + stageName);
+            }
+            return document;
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot read REST API deployment snapshot", e);
+        }
     }
 
     // ──────────────────────────── Stages ────────────────────────────
@@ -3350,6 +3398,16 @@ public class ApiGatewayService implements ResourceProvider {
         String defaultValidatorId = null;
         Map<String, Object> topExtensions = openAPI.getExtensions();
         if (topExtensions != null) {
+            RestApi api = getRestApi(region, apiId);
+            Object binaryTypes = topExtensions.get("x-amazon-apigateway-binary-media-types");
+            if (binaryTypes instanceof List<?> types) {
+                api.setBinaryMediaTypes(types.stream().filter(String.class::isInstance).map(String.class::cast).toList());
+            }
+            Object policy = topExtensions.get("x-amazon-apigateway-policy");
+            if (policy != null) {
+                api.setPolicy(JSON.valueToTree(policy).toString());
+            }
+            apiStore.put(apiKey(region, apiId), api);
             Map<String, Object> validators = (Map<String, Object>) topExtensions
                     .get("x-amazon-apigateway-request-validators");
             if (validators != null) {
@@ -3609,6 +3667,21 @@ public class ApiGatewayService implements ResourceProvider {
                 }
             }
         }
+        boolean apiKeyRequired = false;
+        if (secReqs != null && openAPI.getComponents() != null
+                && openAPI.getComponents().getSecuritySchemes() != null) {
+            for (SecurityRequirement requirement : secReqs) {
+                for (String name : requirement.keySet()) {
+                    SecurityScheme scheme = openAPI.getComponents().getSecuritySchemes().get(name);
+                    if (scheme != null && scheme.getType() == SecurityScheme.Type.APIKEY
+                            && importedAuthorizerDefinition(scheme, name) == null
+                            && !"awsSigv4".equalsIgnoreCase(importedAuthorizationType(scheme, name))) {
+                        apiKeyRequired = true;
+                    }
+                }
+            }
+        }
+        methodRequest.put("apiKeyRequired", apiKeyRequired);
         methodRequest.put("authorizationType", authType);
         if (authorizerId != null) {
             methodRequest.put("authorizerId", authorizerId);
@@ -3689,6 +3762,19 @@ public class ApiGatewayService implements ResourceProvider {
         if (integrationExt != null) {
             applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
         }
+        if (operation.getResponses() != null) {
+            operation.getResponses().forEach((status, response) -> {
+                if (!status.matches("[1-5][0-9]{2}")) {
+                    return;
+                }
+                Map<String, Boolean> headers = new HashMap<>();
+                if (response.getHeaders() != null) {
+                    response.getHeaders().forEach((name, header) ->
+                            headers.put("method.response.header." + name, Boolean.TRUE.equals(header.getRequired())));
+                }
+                putMethodResponse(region, apiId, resourceId, httpMethod, status, Map.of("responseParameters", headers));
+            });
+        }
     }
 
     private String ensureResourcePath(String region, String apiId, String path,
@@ -3724,10 +3810,12 @@ public class ApiGatewayService implements ResourceProvider {
     private void applyIntegration(String region, String apiId, String resourceId,
                                   String httpMethod, Map<String, Object> integrationExt) {
         Map<String, Object> integrationRequest = new HashMap<>();
-        integrationRequest.put("type", integrationExt.get("type"));
+        Object integrationType = integrationExt.get("type");
+        integrationRequest.put("type", integrationType instanceof String type ? type.toUpperCase(Locale.ROOT) : integrationType);
         integrationRequest.put("httpMethod", integrationExt.get("httpMethod"));
         integrationRequest.put("uri", integrationExt.get("uri"));
-        integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
+        Object passthrough = integrationExt.get("passthroughBehavior");
+        integrationRequest.put("passthroughBehavior", passthrough instanceof String behavior ? behavior.toUpperCase(Locale.ROOT) : passthrough);
         for (String field : List.of("contentHandling", "timeoutInMillis", "connectionType",
                 "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig",
                 "responseTransferMode")) {
@@ -3758,6 +3846,7 @@ public class ApiGatewayService implements ResourceProvider {
                 irRequest.put("selectionPattern", pattern);
                 irRequest.put("responseParameters", respDef.get("responseParameters"));
                 irRequest.put("responseTemplates", respDef.get("responseTemplates"));
+                irRequest.put("contentHandling", respDef.get("contentHandling"));
 
                 putIntegrationResponse(region, apiId, resourceId, httpMethod, statusCode, irRequest);
 
