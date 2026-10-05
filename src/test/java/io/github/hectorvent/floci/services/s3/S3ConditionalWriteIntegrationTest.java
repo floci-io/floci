@@ -104,7 +104,7 @@ class S3ConditionalWriteIntegrationTest {
         String eTag = putObject(bucket, "object.txt", "first");
 
         // S3 implements If-None-Match only as "*". A literal ETag, matching or not, is 501.
-        for (String ifNoneMatch : List.of(eTag, "\"not-the-current-etag\"")) {
+        for (String ifNoneMatch : List.of(eTag, "\"not-the-current-etag\"", "*, " + eTag)) {
             assertNotImplemented(given()
                 .header("If-None-Match", ifNoneMatch)
                 .body("second")
@@ -122,12 +122,14 @@ class S3ConditionalWriteIntegrationTest {
         putObject(bucket, "object.txt", "first");
 
         for (String key : List.of("object.txt", "missing.txt")) {
-            assertNotImplemented(given()
-                .header("If-Match", "*")
-                .body("second")
-            .when()
-                .put("/" + bucket + "/" + key)
-            .then());
+            for (String ifMatch : List.of("*", "\"*\"", STALE_ETAG + ", *")) {
+                assertNotImplemented(given()
+                    .header("If-Match", ifMatch)
+                    .body("second")
+                .when()
+                    .put("/" + bucket + "/" + key)
+                .then());
+            }
         }
 
         assertObjectBody(bucket, "object.txt", "first");
