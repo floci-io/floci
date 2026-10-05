@@ -142,8 +142,8 @@ class IotMqttWebSocketBridgeTest {
     @Test
     void closingAnOlderSessionKeepsANewerSessionsEqualUpgradeOnTheSameAddress() {
         SocketAddress address = SocketAddress.inetSocketAddress(50000, "127.0.0.1");
-        IotCustomAuthorizer.WebSocketUpgrade older = new IotCustomAuthorizer.WebSocketUpgrade(Map.of("host", "h"), "", null);
-        IotCustomAuthorizer.WebSocketUpgrade newer = new IotCustomAuthorizer.WebSocketUpgrade(Map.of("host", "h"), "", null);
+        IotCustomAuthorizer.WebSocketUpgrade older = new IotCustomAuthorizer.WebSocketUpgrade(Map.of("host", "h"), "", null, null);
+        IotCustomAuthorizer.WebSocketUpgrade newer = new IotCustomAuthorizer.WebSocketUpgrade(Map.of("host", "h"), "", null, null);
         Map<SocketAddress, IotCustomAuthorizer.WebSocketUpgrade> upgrades = new ConcurrentHashMap<>(Map.of(address, newer));
 
         IotMqttWebSocketBridge.forgetting(upgrades, address, older).run();

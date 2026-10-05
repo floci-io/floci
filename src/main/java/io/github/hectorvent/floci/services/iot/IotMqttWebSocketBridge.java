@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * authorization rule applies without a second code path. No client certificate is involved: on
  * AWS this path authenticates by SigV4 or a custom authorizer. The broker enforces a custom
  * authorizer named in the MQTT username, the URL query or an upgrade header, and stays permissive
- * otherwise; the upgrade's headers, query and server name reach it through
+ * otherwise; the upgrade's headers, query, server name and client address reach it through
  * {@link IotMqttBrokerService#webSocketUpgrades()}.
  *
  * <p>Everything for one session runs on the event loop of the WebSocket's connection, the
@@ -118,7 +118,10 @@ public class IotMqttWebSocketBridge {
         return () -> upgrades.computeIfPresent(address, (key, current) -> current == upgrade ? null : current);
     }
 
-    /** The upgrade as AWS hands it to a custom authorizer; the server name only over TLS, from SNI or else the Host header. */
+    /**
+     * The upgrade as AWS hands it to a custom authorizer; the server name only over TLS, from SNI or
+     * else the Host header. The client's address rides along for the broker's policy evaluation.
+     */
     private static IotCustomAuthorizer.WebSocketUpgrade upgradeOf(ServerWebSocket ws) {
         Map<String, String> headers = new LinkedHashMap<>();
         // ponytail: a repeated header keeps its last value.
@@ -130,7 +133,9 @@ public class IotMqttWebSocketBridge {
                 serverName = ws.authority().host();
             }
         }
-        return new IotCustomAuthorizer.WebSocketUpgrade(headers, ws.query() == null ? "" : ws.query(), serverName);
+        SocketAddress client = ws.remoteAddress();
+        return new IotCustomAuthorizer.WebSocketUpgrade(headers, ws.query() == null ? "" : ws.query(), serverName,
+                client == null ? null : client.host());
     }
 
     static final class BridgeSession {

@@ -402,7 +402,7 @@ public class IotMqttBrokerService implements Resettable {
             String username = endpoint.auth() == null ? null : endpoint.auth().getUsername();
             String authorizerName = IotCustomAuthorizer.authorizerName(username, upgrade);
             if (authorizerName != null) {
-                authorizeCustom(endpoint, authorizerName, upgrade, sourceIp);
+                authorizeCustom(endpoint, authorizerName, upgrade, upgrade == null ? sourceIp : upgrade.sourceIp());
                 return;
             }
         }
