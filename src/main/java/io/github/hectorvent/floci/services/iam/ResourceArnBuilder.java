@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -20,6 +21,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -221,6 +223,10 @@ public class ResourceArnBuilder {
 
     // ── Lambda ──────────────────────────────────────────────────────────────────
     private String buildLambdaArn(String path, String region, String accountId) {
+        String executionArn = durableExecutionArn(path);
+        if (executionArn != null) {
+            return executionArn;
+        }
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
         if (name == null) return "*";
@@ -228,6 +234,17 @@ public class ResourceArnBuilder {
         int colon = name.indexOf(':');
         if (colon > 0) name = name.substring(0, colon);
         return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
+    }
+
+    /** Durable execution actions are authorized against the execution ARN, which carries the version. */
+    private static String durableExecutionArn(String path) {
+        String prefix = "/durable-executions/";
+        int executions = path.indexOf(prefix);
+        if (executions < 0) {
+            return null;
+        }
+        Matcher matcher = LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(path.substring(executions + prefix.length()));
+        return matcher.lookingAt() ? matcher.group() : null;
     }
 
     // ── SQS ─────────────────────────────────────────────────────────────────────

@@ -29,6 +29,11 @@ public final class LambdaArnUtils {
 
     private static final String EVENT_SOURCE_MAPPING_PREFIX = "event-source-mapping:";
 
+    /** The pattern AWS validates a durable execution ARN with, and quotes in its ValidationException. */
+    public static final Pattern DURABLE_EXECUTION_ARN = Pattern.compile(
+            "arn:([a-zA-Z0-9-]+):lambda:([a-zA-Z0-9-]+):(\\d{12}):function:([a-zA-Z0-9_-]+):"
+                    + "(\\$LATEST(?:\\.PUBLISHED)?|[0-9]+)/durable-execution/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)");
+
     private LambdaArnUtils() {}
 
     /** {@code arn:<partition>:lambda:<region>:<account>:event-source-mapping:<uuid>}. */

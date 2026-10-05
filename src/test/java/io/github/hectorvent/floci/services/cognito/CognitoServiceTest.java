@@ -3976,6 +3976,112 @@ class CognitoServiceTest {
         assertEquals(client.getClientId(), id.claims().get("aud"));
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void verifyApiGatewayTokenRejectsTokensOfDeletedUser() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        Map<String, Object> auth = (Map<String, Object>) service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
+        String accessToken = (String) auth.get("AccessToken");
+        String idToken = (String) auth.get("IdToken");
+
+        service.deleteUser(accessToken);
+
+        AwsException access = assertThrows(AwsException.class, () -> service.verifyApiGatewayToken(accessToken));
+        AwsException id = assertThrows(AwsException.class, () -> service.verifyApiGatewayToken(idToken));
+        assertEquals("NotAuthorizedException", access.getErrorCode());
+        assertEquals("NotAuthorizedException", id.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void verifyApiGatewayTokenRejectsOldTokenOfUserRecreatedUnderTheSameName() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        Map<String, String> credentials = Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!");
+        Map<String, Object> before = (Map<String, Object>) service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH", credentials).get("AuthenticationResult");
+
+        service.adminDeleteUser(pool.getId(), "alice");
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
+        service.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+        Map<String, Object> after = (Map<String, Object>) service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH", credentials).get("AuthenticationResult");
+
+        AwsException stale = assertThrows(AwsException.class,
+                () -> service.verifyApiGatewayToken((String) before.get("AccessToken")));
+        assertEquals("NotAuthorizedException", stale.getErrorCode());
+        assertEquals("access", service.verifyApiGatewayToken((String) after.get("AccessToken")).tokenUse());
+    }
+
+    @Test
+    void verifyApiGatewayTokenRejectsDeletedUserTokensWhoseTriggerSuppressedUsername() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        CognitoService.ClaimsOverride suppressUsername = new CognitoService.ClaimsOverride(
+                null, List.of("cognito:username"), null, List.of("username"), null, null, null, null, null);
+        String accessToken = service.generateSignedJwt(user, pool, "access", client, suppressUsername);
+        String idToken = service.generateSignedJwt(user, pool, "id", client, suppressUsername);
+        assertEquals("access", service.verifyApiGatewayToken(accessToken).tokenUse());
+        assertEquals("id", service.verifyApiGatewayToken(idToken).tokenUse());
+
+        service.adminDeleteUser(pool.getId(), "alice");
+
+        AwsException access = assertThrows(AwsException.class, () -> service.verifyApiGatewayToken(accessToken));
+        AwsException id = assertThrows(AwsException.class, () -> service.verifyApiGatewayToken(idToken));
+        assertEquals("NotAuthorizedException", access.getErrorCode());
+        assertEquals("NotAuthorizedException", id.getErrorCode());
+    }
+
+    @Test
+    void preTokenGenerationOverrideCannotSuppressOrReplaceIdentityClaims() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        String sub = user.getAttributes().get("sub");
+        CognitoService.ClaimsOverride suppress = new CognitoService.ClaimsOverride(
+                null, List.of("sub", "cognito:username"), null, List.of("sub", "username"),
+                null, null, null, null, null);
+        CognitoService.ClaimsOverride replace = new CognitoService.ClaimsOverride(
+                Map.<String, Object>of("sub", "other", "cognito:username", "bob"), null,
+                Map.<String, Object>of("sub", "other", "username", "bob"), null,
+                null, null, null, null, null);
+
+        for (CognitoService.ClaimsOverride override : List.of(suppress, replace)) {
+            Map<String, Object> access = service.verifyApiGatewayToken(
+                    service.generateSignedJwt(user, pool, "access", client, override)).claims();
+            Map<String, Object> id = service.verifyApiGatewayToken(
+                    service.generateSignedJwt(user, pool, "id", client, override)).claims();
+
+            assertEquals(sub, access.get("sub"));
+            assertEquals("alice", access.get("username"));
+            assertEquals(sub, id.get("sub"));
+            assertEquals("alice", id.get("cognito:username"));
+        }
+    }
+
+    @Test
+    void verifyApiGatewayTokenAcceptsClientCredentialsToken() {
+        String poolId = service.createUserPool(Map.of("PoolName", "m2m-pool"), "us-east-1").getId();
+        ResourceServerScope read = new ResourceServerScope();
+        read.setScopeName("read");
+        service.createResourceServer(poolId, "notes", "Notes", List.of(read));
+        UserPoolClient client = service.createUserPoolClient(poolId, "m2m", true, true,
+                List.of("client_credentials"), List.of("notes/read"));
+        String accessToken = (String) service.issueClientCredentialsToken(
+                client.getClientId(), client.getClientSecret(), null, null).get("access_token");
+
+        CognitoService.VerifiedApiGatewayToken verified = service.verifyApiGatewayToken(accessToken);
+
+        assertEquals("access", verified.tokenUse());
+        assertEquals(client.getClientId(), verified.claims().get("sub"));
+    }
+
     // =========================================================================
     // AdminGetUser resolves configured identifiers
     // =========================================================================
@@ -5490,6 +5596,24 @@ class CognitoServiceTest {
 
         assertEquals("NotAuthorizedException", ex.getErrorCode());
         assertEquals("Access Token does not have required scopes", ex.getMessage());
+    }
+
+    @Test
+    void deleteUser_accessTokenWithoutAdminScope_isRejectedAndKeepsTheUser() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        String accessToken = service.generateSignedJwt(user, pool, "access", client,
+                new CognitoService.ClaimsOverride(null, null, null, null,
+                        List.of("openid", "email"), List.of("aws.cognito.signin.user.admin"),
+                        null, null, null));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteUser(accessToken));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("Access Token does not have required scopes", ex.getMessage());
+        assertEquals("alice", service.adminGetUser(pool.getId(), "alice").getUsername());
     }
 
     private void assertInvalidAccessToken(String token, String reason) {

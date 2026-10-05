@@ -110,6 +110,15 @@ public class Cluster {
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private List<String> clusterArgs;
 
+    /**
+     * Internal setting indicating whether the cluster was started with k3s's bundled
+     * local-path provisioner and default StorageClass. Persisted to storage so restored
+     * clusters preserve their storage behavior across container recreations.
+     */
+    @JsonProperty("defaultStorageClass")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean defaultStorageClass;
+
     private AccessConfig accessConfig;
 
     public AccessConfig getAccessConfig() { return accessConfig; }
@@ -189,6 +198,9 @@ public class Cluster {
     public boolean isExplicitVersion() { return explicitVersion; }
     public void setExplicitVersion(boolean explicitVersion) { this.explicitVersion = explicitVersion; }
 
+    public Boolean getDefaultStorageClass() { return defaultStorageClass; }
+    public void setDefaultStorageClass(Boolean defaultStorageClass) { this.defaultStorageClass = defaultStorageClass; }
+
     public Cluster copy() {
         Cluster c = new Cluster();
         c.name = this.name;
@@ -215,6 +227,7 @@ public class Cluster {
         c.dockerName = this.dockerName;
         c.nodeInstanceType = this.nodeInstanceType;
         c.clusterArgs = this.clusterArgs != null ? new ArrayList<>(this.clusterArgs) : null;
+        c.defaultStorageClass = this.defaultStorageClass;
         c.accessConfig = this.accessConfig;
         return c;
     }

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
+import com.github.dockerjava.api.command.ExecCreateCmd;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -56,6 +57,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 /**
  * Starts and stops Docker containers for Lambda function execution.
@@ -315,7 +317,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
 
         if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
-            var efsCfg = config.storage().efs();
+            EmulatorConfig.EfsSharingConfig efsCfg = config.storage().efs();
             fn.getFileSystemConfigs().forEach(fileSystem -> {
                 String volumeName = efsVolumeName(fileSystem.getArn());
                 lifecycleManager.ensureSharedVolume(volumeName,
@@ -1119,7 +1121,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     static boolean shouldUseCodeVolume(Path codeDir) {
         final long threshold = CODE_VOLUME_MIN_BYTES;
         final long[] total = {0L};
-        try (var stream = Files.walk(codeDir)) {
+        try (Stream<Path> stream = Files.walk(codeDir)) {
             for (Path path : (Iterable<Path>) stream::iterator) {
                 if (Files.isRegularFile(path)) {
                     total[0] += Files.size(path);
@@ -1419,7 +1421,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         for (String name : extensionNames) {
             try {
                 String path = EXTENSIONS_DIR + "/" + name;
-                var create = dockerClient.execCreateCmd(containerId)
+                ExecCreateCmd create = dockerClient.execCreateCmd(containerId)
                         .withCmd(path)
                         .withAttachStdout(true)
                         .withAttachStderr(true);
@@ -1524,7 +1526,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      */
     private static void createTarFromDir(Path sourceDir, OutputStream out) throws IOException {
         try (TarArchiveOutputStream tar = RetryingTarCopier.newTarStream(out);
-             var stream = Files.walk(sourceDir)) {
+             Stream<Path> stream = Files.walk(sourceDir)) {
             for (Path path : (Iterable<Path>) stream::iterator) {
                 if (Files.isDirectory(path)) {
                     continue;
@@ -1534,7 +1536,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 entry.setSize(Files.size(path));
                 entry.setMode(0755);
                 tar.putArchiveEntry(entry);
-                try (var fis = Files.newInputStream(path)) {
+                try (InputStream fis = Files.newInputStream(path)) {
                     fis.transferTo(tar);
                 }
                 tar.closeArchiveEntry();

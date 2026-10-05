@@ -21,6 +21,7 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -265,7 +266,7 @@ public class MwaaEnvironmentManager {
                 return false;
             }
             String body;
-            try (var in = conn.getInputStream()) {
+            try (InputStream in = conn.getInputStream()) {
                 body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             }
             return body.contains("\"metadatabase\"") && body.contains("\"scheduler\"")

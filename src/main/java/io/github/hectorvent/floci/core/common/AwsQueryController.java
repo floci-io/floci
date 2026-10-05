@@ -119,6 +119,8 @@ public class AwsQueryController {
             "CreateVirtualMFADevice", "DeleteVirtualMFADevice", "ListVirtualMFADevices",
             "EnableMFADevice", "DeactivateMFADevice", "ResyncMFADevice", "ListMFADevices",
             "TagMFADevice", "UntagMFADevice", "ListMFADeviceTags",
+            "UploadSSHPublicKey", "GetSSHPublicKey", "ListSSHPublicKeys",
+            "UpdateSSHPublicKey", "DeleteSSHPublicKey",
             "UploadSigningCertificate", "ListSigningCertificates",
             "UpdateSigningCertificate", "DeleteSigningCertificate"
     );

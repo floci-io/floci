@@ -69,7 +69,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(1)
     void startExecutionReturnsThePascalCaseArnAndAnIsoStartDate() throws Exception {
-        var smArn = createStateMachine("aws-sdk-start-execution", """
+        String smArn = createStateMachine("aws-sdk-start-execution", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Start",
@@ -84,7 +84,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """.replace("CHILD_ARN", quickChildArn));
 
-        var result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
+        JsonNode result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
         assertTrue(result.path("ExecutionArn").asText()
                         .contains(":execution:aws-sdk-task-child-quick:"),
                 "unexpected ExecutionArn: " + result.path("ExecutionArn").asText());
@@ -93,14 +93,14 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
         assertEquals(2, result.size(), "StartExecution returns ExecutionArn and StartDate only");
 
         // The child really ran, with the Input the task passed it.
-        var child = describeExecution(result.path("ExecutionArn").asText());
+        Response child = describeExecution(result.path("ExecutionArn").asText());
         assertEquals("{\"amount\":1200}", child.jsonPath().getString("input"));
     }
 
     @Test
     @Order(2)
     void startExecutionDoesNotWaitForTheChild() throws Exception {
-        var smArn = createStateMachine("aws-sdk-start-execution-no-wait", """
+        String smArn = createStateMachine("aws-sdk-start-execution-no-wait", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Start",
@@ -115,8 +115,8 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """.replace("CHILD_ARN", slowChildArn));
 
-        var result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
-        var child = describeExecution(result.path("ExecutionArn").asText());
+        JsonNode result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
+        Response child = describeExecution(result.path("ExecutionArn").asText());
         assertEquals("RUNNING", child.jsonPath().getString("status"),
                 "the parent finished before the 5s child, so the child is still running");
     }
@@ -124,7 +124,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(3)
     void startExecutionOnAMissingStateMachineFailsWithTheSdkExceptionName() {
-        var smArn = createStateMachine("aws-sdk-start-execution-missing", """
+        String smArn = createStateMachine("aws-sdk-start-execution-missing", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Start",
@@ -141,7 +141,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """);
 
-        var describe = waitForTerminalState(startExecution(smArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("Sfn.StateMachineDoesNotExistException", describe.jsonPath().getString("error"));
     }
@@ -149,7 +149,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(4)
     void startExecutionReusingAnExecutionNameFailsWithTheSdkExceptionName() {
-        var smArn = createStateMachine("aws-sdk-start-execution-named", """
+        String smArn = createStateMachine("aws-sdk-start-execution-named", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Start",
@@ -167,7 +167,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
         assertEquals("SUCCEEDED", waitForTerminalState(startExecution(smArn, "{}"))
                 .jsonPath().getString("status"));
 
-        var describe = waitForTerminalState(startExecution(smArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("Sfn.ExecutionAlreadyExistsException", describe.jsonPath().getString("error"));
     }
@@ -177,10 +177,10 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(5)
     void sendTaskSuccessResolvesTheWaitingExecutionWithItsOutput() throws Exception {
-        var waitingExecArn = startExecution(createWaiterStateMachine("aws-sdk-send-success-waiter"), "{}");
-        var taskToken = receiveTaskToken();
+        String waitingExecArn = startExecution(createWaiterStateMachine("aws-sdk-send-success-waiter"), "{}");
+        String taskToken = receiveTaskToken();
 
-        var senderArn = createStateMachine("aws-sdk-send-success", """
+        String senderArn = createStateMachine("aws-sdk-send-success", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Resume",
@@ -201,7 +201,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
         assertEquals("{}", succeedingOutputOf(senderArn, tokenInput(taskToken)),
                 "SendTaskSuccess answers with an empty response");
 
-        var waiter = waitForTerminalState(waitingExecArn);
+        Response waiter = waitForTerminalState(waitingExecArn);
         assertEquals("SUCCEEDED", waiter.jsonPath().getString("status"));
         assertTrue(mapper.readTree(waiter.jsonPath().getString("output")).path("approved").asBoolean());
     }
@@ -209,10 +209,10 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(6)
     void sendTaskFailureFailsTheWaitingExecutionWithItsErrorAndCause() throws Exception {
-        var waitingExecArn = startExecution(createWaiterStateMachine("aws-sdk-send-failure-waiter"), "{}");
-        var taskToken = receiveTaskToken();
+        String waitingExecArn = startExecution(createWaiterStateMachine("aws-sdk-send-failure-waiter"), "{}");
+        String taskToken = receiveTaskToken();
 
-        var senderArn = createStateMachine("aws-sdk-send-failure", """
+        String senderArn = createStateMachine("aws-sdk-send-failure", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Reject",
@@ -233,7 +233,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
         assertEquals("{}", succeedingOutputOf(senderArn, tokenInput(taskToken)));
 
-        var waiter = waitForTerminalState(waitingExecArn);
+        Response waiter = waitForTerminalState(waitingExecArn);
         assertEquals("FAILED", waiter.jsonPath().getString("status"));
         assertEquals("PoolClosed", waiter.jsonPath().getString("error"));
         assertEquals("the pool is already closed", waiter.jsonPath().getString("cause"));
@@ -242,7 +242,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(7)
     void sendTaskSuccessOnATokenNobodyIsWaitingForFailsTheTask() {
-        var smArn = createStateMachine("aws-sdk-send-success-bad-token", """
+        String smArn = createStateMachine("aws-sdk-send-success-bad-token", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Resume",
@@ -257,7 +257,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """);
 
-        var describe = waitForTerminalState(startExecution(smArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("Sfn.InvalidTokenException", describe.jsonPath().getString("error"));
         assertEquals("Invalid Token: 'Invalid token'", describe.jsonPath().getString("cause"));
@@ -266,7 +266,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(8)
     void sendTaskFailureOnATokenNobodyIsWaitingForFailsTheTask() {
-        var smArn = createStateMachine("aws-sdk-send-failure-bad-token", """
+        String smArn = createStateMachine("aws-sdk-send-failure-bad-token", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Reject",
@@ -281,7 +281,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """);
 
-        var describe = waitForTerminalState(startExecution(smArn, "{}"));
+        Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("Sfn.InvalidTokenException", describe.jsonPath().getString("error"));
     }
@@ -293,7 +293,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
         // ever waits on that token. The registration must not outlive the failure: the token is
         // recovered from the TaskScheduled event it wrote on its way to failing, and a second
         // execution's SendTaskSuccess on that same token must find nothing pending for it.
-        var leakArn = createStateMachine("aws-sdk-task-leaked-token", """
+        String leakArn = createStateMachine("aws-sdk-task-leaked-token", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Leak",
@@ -308,12 +308,12 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """);
 
-        var leaked = waitForTerminalState(startExecution(leakArn, "{}"));
+        Response leaked = waitForTerminalState(startExecution(leakArn, "{}"));
         assertEquals("FAILED", leaked.jsonPath().getString("status"));
         assertEquals("States.TaskFailed", leaked.jsonPath().getString("error"));
-        var taskToken = scheduledTaskToken(leaked.jsonPath().getString("executionArn"));
+        String taskToken = scheduledTaskToken(leaked.jsonPath().getString("executionArn"));
 
-        var senderArn = createStateMachine("aws-sdk-send-success-leaked-token", """
+        String senderArn = createStateMachine("aws-sdk-send-success-leaked-token", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Resume",
@@ -328,7 +328,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """);
 
-        var describe = waitForTerminalState(startExecution(senderArn, tokenInput(taskToken)));
+        Response describe = waitForTerminalState(startExecution(senderArn, tokenInput(taskToken)));
 
         assertEquals("FAILED", describe.jsonPath().getString("status"),
                 "Leak's token must be discarded once its resource invocation throws, not left pending");
@@ -340,7 +340,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(10)
     void createScheduleReturnsTheScheduleArnAndTheScheduleIsReadable() throws Exception {
-        var result = mapper.readTree(succeedingOutputOf(
+        JsonNode result = mapper.readTree(succeedingOutputOf(
                 createStateMachine("aws-sdk-create-schedule", scheduleTask("createSchedule",
                         "payout-nightly", "rate(1 day)")), "{}"));
 
@@ -356,7 +356,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(11)
     void updateScheduleKeepsTheArnAndChangesTheExpression() throws Exception {
-        var result = mapper.readTree(succeedingOutputOf(
+        JsonNode result = mapper.readTree(succeedingOutputOf(
                 createStateMachine("aws-sdk-update-schedule", scheduleTask("updateSchedule",
                         "payout-nightly", "rate(2 days)")), "{}"));
 
@@ -370,7 +370,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(12)
     void createScheduleOnANameAlreadyTakenFailsWithConflict() {
-        var describe = waitForTerminalState(startExecution(
+        Response describe = waitForTerminalState(startExecution(
                 createStateMachine("aws-sdk-create-schedule-twice", scheduleTask("createSchedule",
                         "payout-nightly", "rate(1 day)")), "{}"));
 
@@ -381,7 +381,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(13)
     void updateScheduleOnAScheduleThatDoesNotExistFailsWithResourceNotFound() {
-        var describe = waitForTerminalState(startExecution(
+        Response describe = waitForTerminalState(startExecution(
                 createStateMachine("aws-sdk-update-missing-schedule", scheduleTask("updateSchedule",
                         "no-such-schedule", "rate(1 day)")), "{}"));
 
@@ -392,7 +392,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     @Test
     @Order(14)
     void createScheduleWithIncompleteEventBridgeParametersIsCatchableAsAValidationException() throws Exception {
-        var smArn = createStateMachine("aws-sdk-create-schedule-invalid-target", """
+        String smArn = createStateMachine("aws-sdk-create-schedule-invalid-target", """
                 {
                   "QueryLanguage": "JSONata",
                   "StartAt": "Schedule",
@@ -424,7 +424,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 .replace("TARGET_ARN", quickChildArn)
                 .replace("ROLE", ROLE_ARN));
 
-        var result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
+        JsonNode result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
         assertEquals("Scheduler.ValidationException", result.path("caughtError").asText(),
                 "a target the parser rejects must reach Catch as an SDK exception, not States.Runtime");
     }
@@ -441,7 +441,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                     "\"NetworkConfiguration\": {\"awsvpcConfiguration\": {\"Subnets\": [123]}}"},
                 {"non-list-subnet",
                     "\"NetworkConfiguration\": {\"awsvpcConfiguration\": {\"Subnets\": \"subnet-a\"}}"}}) {
-            var smArn = createStateMachine("aws-sdk-create-schedule-" + shape[0], """
+            String smArn = createStateMachine("aws-sdk-create-schedule-" + shape[0], """
                     {
                       "QueryLanguage": "JSONata",
                       "StartAt": "Schedule",
@@ -478,7 +478,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                     .replace("TARGET_ARN", quickChildArn)
                     .replace("ROLE", ROLE_ARN));
 
-            var result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
+            JsonNode result = mapper.readTree(succeedingOutputOf(smArn, "{}"));
             assertEquals("Scheduler.SerializationException", result.path("caughtError").asText(),
                     shape[0] + " must reach Catch as an SDK exception, not States.Runtime");
         }
@@ -1001,19 +1001,19 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     private String receiveTaskToken() throws Exception {
-        for (var i = 0; i < 50; i++) {
-            var resp = given()
+        for (int i = 0; i < 50; i++) {
+            Response resp = given()
                     .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
                     .contentType(SQS_CONTENT_TYPE)
                     .body("{\"QueueUrl\":\"%s\",\"MaxNumberOfMessages\":1,\"WaitTimeSeconds\":1}"
                             .formatted(callbackQueueUrl))
                     .when().post("/");
             resp.then().statusCode(200);
-            var messages = mapper.readTree(resp.body().asString()).path("Messages");
+            JsonNode messages = mapper.readTree(resp.body().asString()).path("Messages");
             if (messages.size() == 1) {
-                var message = messages.get(0);
+                JsonNode message = messages.get(0);
                 deleteMessage(message.path("ReceiptHandle").asText());
-                var token = mapper.readTree(message.path("Body").asText()).path("token").asText();
+                String token = mapper.readTree(message.path("Body").asText()).path("token").asText();
                 assertFalse(token.isBlank(), "the waiting task published a blank token");
                 return token;
             }
@@ -1038,14 +1038,14 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     private String succeedingOutputOf(String smArn, String input) {
-        var describe = waitForTerminalState(startExecution(smArn, input));
+        Response describe = waitForTerminalState(startExecution(smArn, input));
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),
                 "cause: " + describe.jsonPath().getString("cause"));
         return describe.jsonPath().getString("output");
     }
 
     private static String createQueue(String name) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AmazonSQS.CreateQueue")
                 .contentType(SQS_CONTENT_TYPE)
                 .body("{\"QueueName\":\"%s\"}".formatted(name))
@@ -1055,7 +1055,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     private static String createStateMachine(String name, String definition) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -1067,7 +1067,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     private static String startExecution(String smArn, String input) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -1100,10 +1100,10 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
     /** The token a Task registered for itself, recovered from its own TaskScheduled event. */
     private static String scheduledTaskToken(String execArn) throws Exception {
-        var events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
-        for (var event : events) {
+        JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
+        for (JsonNode event : events) {
             if ("TaskScheduled".equals(event.path("type").asText())) {
-                var parameters = event.path("taskScheduledEventDetails").path("parameters").asText();
+                String parameters = event.path("taskScheduledEventDetails").path("parameters").asText();
                 return mapper.readTree(parameters).path("token").asText();
             }
         }
@@ -1112,8 +1112,8 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
     }
 
     private static Response waitForTerminalState(String execArn) {
-        for (var i = 0; i < 150; i++) {
-            var resp = describeExecution(execArn);
+        for (int i = 0; i < 150; i++) {
+            Response resp = describeExecution(execArn);
             if (!"RUNNING".equals(resp.jsonPath().getString("status"))) {
                 return resp;
             }

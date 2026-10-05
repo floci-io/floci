@@ -4,47 +4,26 @@
         "https://checkstyle.org/dtds/suppressions_1_2.dtd">
 <suppressions>
     <!-- Files that still use var. Remove an entry once its file is clean. -->
-    <suppress id="NoVar" files="/com/floci/test/CloudFormationEventSourceMappingTest\.java$"/>
     <suppress id="NoVar" files="/com/floci/test/ElastiCacheTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SqsMd5Test\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/StsTest\.java$"/>
     <suppress id="NoVar" files="/floci/core/common/IamEnforcementFilter\.java$"/>
-    <suppress id="NoVar" files="/floci/core/common/docker/ContainerLifecycleManager\.java$"/>
-    <suppress id="NoVar" files="/floci/core/common/docker/ContainerLogStreamer\.java$"/>
     <suppress id="NoVar" files="/floci/services/apigateway/ApiGatewayService\.java$"/>
     <suppress id="NoVar" files="/floci/services/bedrockruntime/backend/BedrockOpenAiTranslator\.java$"/>
-    <suppress id="NoVar" files="/floci/services/cloudformation/CloudFormationDeletionPolicyIntegrationTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/cloudformation/CloudFormationIntegrationTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/cloudformation/CloudFormationService\.java$"/>
-    <suppress id="NoVar" files="/floci/services/cloudwatch/metricstreams/CloudWatchMetricStreamsService\.java$"/>
     <suppress id="NoVar" files="/floci/services/cognito/CognitoLambdaTriggersTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbIntegrationTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/NativeDynamoDbJsonHandler\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbService\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbStreamServiceTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbStreamsJsonHandler\.java$"/>
     <suppress id="NoVar" files="/floci/services/ec2/Ec2ContainerManager\.java$"/>
     <suppress id="NoVar" files="/floci/services/ec2/Ec2Service\.java$"/>
     <suppress id="NoVar" files="/floci/services/eks/EksClusterManager\.java$"/>
     <suppress id="NoVar" files="/floci/services/eks/EksServiceTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/eventbridge/EventBridgeInvoker\.java$"/>
     <suppress id="NoVar" files="/floci/services/eventbridge/EventBridgeService\.java$"/>
-    <suppress id="NoVar" files="/floci/services/glue/schemaregistry/GlueSchemaRegistryService\.java$"/>
-    <suppress id="NoVar" files="/floci/services/glue/schemaregistry/GlueSchemaRegistryServiceTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/glue/schemaregistry/SchemaCompatibilityChecker\.java$"/>
-    <suppress id="NoVar" files="/floci/services/glue/schemaregistry/SchemaCompatibilityCheckerTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/iam/StsQueryHandler\.java$"/>
     <suppress id="NoVar" files="/floci/services/lambda/LambdaService\.java$"/>
-    <suppress id="NoVar" files="/floci/services/lambda/WarmPool\.java$"/>
-    <suppress id="NoVar" files="/floci/services/lambda/launcher/ContainerLauncher\.java$"/>
-    <suppress id="NoVar" files="/floci/services/mwaa/MwaaEnvironmentManager\.java$"/>
-    <suppress id="NoVar" files="/floci/services/rds/RdsService\.java$"/>
-    <suppress id="NoVar" files="/floci/services/rds/RdsServiceTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/s3/S3Controller\.java$"/>
     <suppress id="NoVar" files="/floci/services/s3/S3Service\.java$"/>
     <suppress id="NoVar" files="/floci/services/s3/S3ServiceTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/s3/S3VersioningIntegrationTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/scheduler/SchedulerIntegrationTest\.java$"/>
-    <suppress id="NoVar" files="/floci/services/ses/SesQueryHandler\.java$"/>
-    <suppress id="NoVar" files="/floci/services/stepfunctions/StepFunctionsAwsSdkTaskIntegrationTest\.java$"/>
 </suppressions>

@@ -1162,7 +1162,7 @@ class SchedulerIntegrationTest {
         // Every EcsParameters list field answers 400 SerializationException "Expected list or null"
         // on AWS when it holds a scalar, measured through the Scheduler API for all six.
         record ListField(String path, String body) { }
-        var fields = List.of(
+        List<ListField> fields = List.of(
                 new ListField("CapacityProviderStrategy", "\"CapacityProviderStrategy\": \"FARGATE\""),
                 new ListField("PlacementConstraints", "\"PlacementConstraints\": \"distinctInstance\""),
                 new ListField("PlacementStrategy", "\"PlacementStrategy\": \"spread\""),

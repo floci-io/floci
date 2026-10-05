@@ -27,6 +27,8 @@ import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.RealtimeLogConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.StreamingDistribution;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.ServerCertificateReferenceProvider;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -49,7 +51,7 @@ import java.util.function.Function;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class CloudFrontService {
+public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int MAX_CUSTOM_RESPONSE_HEADERS_POLICIES = 20;
@@ -121,6 +123,7 @@ public class CloudFrontService {
     private final StorageBackend<String, MonitoringSubscription> monitoringStore;
     private final String accountId;
     private final RegionResolver regionResolver;
+    private final IamService iamService;
     private final String domainSuffix;
     /**
      * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
@@ -133,8 +136,14 @@ public class CloudFrontService {
      */
     private final List<String> localDeliverySuffixes;
 
-    @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
+        this(factory, config, regionResolver, null);
+    }
+
+    @Inject
+    public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver,
+                             IamService iamService) {
+        this.iamService = iamService;
         this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
                 new TypeReference<Map<String, Distribution>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
@@ -182,6 +191,7 @@ public class CloudFrontService {
         validateOriginCustomHeaders(dist.getConfig());
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
+        validateViewerCertificate(dist.getConfig());
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(arn("distribution/" + id));
@@ -212,6 +222,7 @@ public class CloudFrontService {
         validateOriginCustomHeaders(updated.getConfig());
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
+        validateViewerCertificate(updated.getConfig());
         updated.setId(id);
         updated.setArn(existing.getArn());
         updated.setDomainName(existing.getDomainName());
@@ -221,6 +232,36 @@ public class CloudFrontService {
         updated.setTags(existing.getTags());
         distStore.put(id, updated);
         return updated;
+    }
+
+    @Override
+    public List<Reference> serverCertificateReferences() {
+        List<Reference> references = new ArrayList<>();
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            String certificateId = iamCertificateId(distribution.getConfig());
+            if (certificateId != null) {
+                references.add(new Reference(certificateId, "distribution " + distribution.getId()));
+            }
+        }
+        return references;
+    }
+
+    private static String iamCertificateId(DistributionConfig config) {
+        if (config == null || config.getViewerCertificate() == null) {
+            return null;
+        }
+        String certificateId = config.getViewerCertificate().get("IAMCertificateId");
+        return certificateId == null || certificateId.isBlank() ? null : certificateId;
+    }
+
+    private void validateViewerCertificate(DistributionConfig config) {
+        String certificateId = iamCertificateId(config);
+        if (certificateId != null && iamService != null
+                && iamService.findServerCertificateById(certificateId).isEmpty()) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "The specified SSL certificate doesn't exist, isn't valid, "
+                            + "or doesn't include a valid certificate chain.", 400);
+        }
     }
 
     private static void validateOriginCustomHeaders(DistributionConfig config) {

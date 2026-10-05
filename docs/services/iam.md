@@ -572,11 +572,63 @@ certificate body, certificate chain, or private key".
 `ServerCertificateId` uses AWS's `ASCA` prefix for certificates. `GetAccountSummary`'s
 `ServerCertificates` count is backed by this store rather than reporting zero.
 
-One modeled error is not raised: AWS returns `DeleteConflict` from `DeleteServerCertificate` when a
-load balancer still references the certificate. Floci cannot determine that yet, because ELB
-Classic and CloudFront store certificate identifiers without resolving them against IAM. Tracked in
-[#4875](https://github.com/floci-io/floci/issues/4875), which covers both directions: rejecting a
-reference to a certificate that does not exist, and refusing to delete one that is in use.
+`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, as AWS does.
+Services that reference a certificate (ELB Classic listeners, ELBv2 listeners, CloudFront
+distributions) report it through `ServerCertificateReferenceProvider`, which IAM consults without
+depending on them. In the other direction, ELB Classic rejects a listener whose `SSLCertificateId`
+names no certificate with `CertificateNotFound`, and CloudFront rejects an unknown
+`ViewerCertificate.IAMCertificateId` with `InvalidViewerCertificate`.
+
+### SSH Public Keys
+
+| Action | Description |
+|--------|-------------|
+| UploadSSHPublicKey | Stores an SSH public key against an IAM user and returns its generated `SSHPublicKeyId`. |
+| GetSSHPublicKey | Returns a key in the encoding `Encoding` asks for, `SSH` or `PEM`. |
+| ListSSHPublicKeys | Lists a user's keys as metadata, with `Marker` and `MaxItems` paging. |
+| UpdateSSHPublicKey | Sets a key's status to `Active`, `Inactive` or `Expired`. |
+| DeleteSSHPublicKey | Deletes one of a user's SSH public keys. |
+
+AWS accepts the body "encoded in ssh-rsa format or PEM format", so both are read, and the body is
+kept exactly as it arrived: a caller that uploaded PEM gets that PEM back rather than a re-encoding
+of it. `GetSSHPublicKey` converts, because `Encoding` is required and decides the form of the
+response, so a key uploaded as `ssh-rsa` comes back as PEM when PEM is asked for.
+
+`Fingerprint` is the MD5 of the OpenSSH blob, which is what AWS reports here. It is deliberately not
+the digest EC2 reports for the same key, which is taken over the DER: both are sixteen bytes of
+colon-delimited hex, so the wrong one would look entirely plausible. The value is checked against
+the worked example in the IAM API Reference rather than assumed.
+
+Five keys per user, which the IAM service quotas give as "SSH Public keys per user" and mark as not
+adjustable. A sixth upload is `LimitExceeded`, counted inside the same lock as the write so
+concurrent uploads cannot both see room for the last slot. The minimum bit-length is 2048, as the
+model documents.
+
+The two rejection errors are kept apart the way the model separates them. A body in neither accepted
+encoding is `UnrecognizedPublicKeyEncoding`; a body in a recognised encoding that will not parse, or
+that carries a key type other than `ssh-rsa`, is `InvalidPublicKey`. An OpenSSH line is recognised by
+its key-type token rather than by whether part of it happens to base64-decode, since short words
+often do.
+
+`DuplicateSSHPublicKey` is per user, not account-wide: AWS describes it as a key "already associated
+with the specified IAM user", so two users may hold the same key. The comparison is on the
+fingerprint, so the same key uploaded in the other encoding still counts as a duplicate.
+
+`ListSSHPublicKeys` returns metadata only. AWS documents `SSHPublicKeyMetadata` as describing a key
+"without the key's body or fingerprint", so neither appears in the list even though both are stored.
+
+An SSH public key blocks `DeleteUser` until it is removed, which is one of the items AWS lists as a
+prerequisite for deleting a user programmatically, and it follows the user across an `UpdateUser`
+rename: left behind, a key would be stranded on a name that no longer exists, invisible to its owner
+because listing goes through the user.
+
+`UserName` is required on every one of these operations except `ListSSHPublicKeys`, where the model
+marks it optional and it resolves from the access key that signed the request. That is the opposite
+of the signing-certificate operations, where it is optional throughout.
+
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
+owning user's ARN, along with every other IAM action except the server-certificate operations, which
+is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979).
 
 ### Signing Certificates
 

@@ -63,6 +63,7 @@ public class RedshiftDataService implements Resettable {
         stored.sql = sql;
         stored.sqls = List.of(sql);
         stored.clusterIdentifier = clusterIdentifierOrNull(request);
+        stored.workgroupName = workgroupNameOrNull(request);
         stored.dbUser = target.user();
         stored.database = target.database();
         stored.resultFormat = request.path("ResultFormat").asText("JSON");
@@ -133,7 +134,7 @@ public class RedshiftDataService implements Resettable {
         response.put("Id", stored.id);
         if (stored.clusterIdentifier != null) {
             response.put("ClusterIdentifier", stored.clusterIdentifier);
-        } else {
+        } else if (stored.workgroupName == null) {
             response.putNull("ClusterIdentifier");
         }
         response.put("CreatedAt", epochSeconds(stored.createdAt));
@@ -142,7 +143,7 @@ public class RedshiftDataService implements Resettable {
             response.put("DbUser", stored.dbUser);
         }
         response.putArray("DbGroups");
-        response.putNull("WorkgroupName");
+        putWorkgroupName(response, stored);
         response.put("HasResultSet", stored.hasResultSet);
         response.putNull("SessionId");
         return response;
@@ -175,7 +176,7 @@ public class RedshiftDataService implements Resettable {
         if (stored.dbUser != null) {
             response.put("DbUser", stored.dbUser);
         }
-        response.putNull("WorkgroupName");
+        putWorkgroupName(response, stored);
         response.put("ResultFormat", stored.resultFormat);
         if (stored.batch && stored.subStatements != null) {
             ArrayNode subs = response.putArray("SubStatements");
@@ -300,6 +301,7 @@ public class RedshiftDataService implements Resettable {
         parent.sql = String.join("; ", sqls);
         parent.sqls = sqls;
         parent.clusterIdentifier = clusterIdentifierOrNull(request);
+        parent.workgroupName = workgroupNameOrNull(request);
         parent.dbUser = target.user();
         parent.database = target.database();
         parent.resultFormat = request.path("ResultFormat").asText("JSON");
@@ -315,6 +317,7 @@ public class RedshiftDataService implements Resettable {
                 sub.sql = sqls.get(n);
                 sub.sqls = List.of(sqls.get(n));
                 sub.clusterIdentifier = parent.clusterIdentifier;
+                sub.workgroupName = parent.workgroupName;
                 sub.database = parent.database;
                 sub.dbUser = parent.dbUser;
                 sub.resultFormat = parent.resultFormat;
@@ -670,6 +673,19 @@ public class RedshiftDataService implements Resettable {
 
     private String clusterIdentifierOrNull(JsonNode request) {
         return textOrNull(request, "ClusterIdentifier");
+    }
+
+    private String workgroupNameOrNull(JsonNode request) {
+        return textOrNull(request, "WorkgroupName");
+    }
+
+    /** A cluster statement keeps the null member it always had; a workgroup statement names its workgroup. */
+    private static void putWorkgroupName(ObjectNode response, RedshiftDataStatementStore.StoredStatement stored) {
+        if (stored.workgroupName != null) {
+            response.put("WorkgroupName", stored.workgroupName);
+        } else {
+            response.putNull("WorkgroupName");
+        }
     }
 
     private static String requiredText(JsonNode request, String name) {

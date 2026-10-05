@@ -1037,6 +1037,28 @@ class EksServiceTest {
     }
 
     @Test
+    void createNodeGroupRecordsLabelsAndTaints() {
+        createTestCluster("metadata-cluster");
+        CreateNodeGroupRequest request = nodeGroupRequest("labeled-ng");
+        request.setLabels(Map.of("role", "worker", "tier", "frontend"));
+        request.setTaints(List.of(Map.of("key", "dedicated", "value", "special", "effect", "NO_SCHEDULE")));
+        request.setCapacityType("SPOT");
+
+        Nodegroup nodegroup = eksService.createNodeGroup("metadata-cluster", request);
+        assertEquals("SPOT", nodegroup.getCapacityType());
+        assertEquals("worker", nodegroup.getLabels().get("role"));
+        assertEquals(1, nodegroup.getTaints().size());
+
+        Nodegroup retrieved = eksService.describeNodeGroup("metadata-cluster", "labeled-ng");
+        assertEquals("SPOT", retrieved.getCapacityType());
+        assertEquals("worker", retrieved.getLabels().get("role"));
+        assertEquals(1, retrieved.getTaints().size());
+
+        eksService.deleteNodeGroup("metadata-cluster", "labeled-ng");
+        assertEquals(List.of(), eksService.listNodeGroups("metadata-cluster"));
+    }
+
+    @Test
     void createNodeGroupDuplicateFails() {
         createTestCluster("my-eks-cluster");
         CreateNodeGroupRequest request = nodeGroupRequest("my-eks-nodegroup");

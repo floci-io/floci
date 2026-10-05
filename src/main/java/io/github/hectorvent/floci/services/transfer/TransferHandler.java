@@ -350,7 +350,7 @@ public class TransferHandler {
                 kNode.put("SshPublicKeyId", k.getSshPublicKeyId());
                 kNode.put("SshPublicKeyBody", k.getSshPublicKeyBody());
                 if (k.getDateImported() != null) {
-                    kNode.put("DateImported", k.getDateImported().toString());
+                    kNode.put("DateImported", k.getDateImported().toEpochMilli() / 1000.0);
                 }
                 keys.add(kNode);
             }
