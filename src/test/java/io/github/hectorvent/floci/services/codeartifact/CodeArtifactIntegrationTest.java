@@ -183,6 +183,35 @@ class CodeArtifactIntegrationTest {
     }
 
     @Test
+    void describePackageReturnsTheDirectPublishOriginControlsAndReportsUnknownPackages() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=describe-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=describe-domain&repository=repo").then().statusCode(200);
+        byte[] content = "describe".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=describe-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=describe-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(200)
+                .body("package.format", equalTo("generic"))
+                .body("package.namespace", equalTo("ns"))
+                .body("package.name", equalTo("my-pkg"))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"))
+                .body("package.originConfiguration.restrictions.upstream", equalTo("BLOCK"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=describe-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=no-such-package")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
     void unfinishedPublishKeepsVersionOpenForMoreAssets() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{}").post("/v1/domain?domain=unfinished-domain").then().statusCode(200);

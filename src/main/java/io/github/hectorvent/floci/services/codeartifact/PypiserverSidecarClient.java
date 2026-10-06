@@ -105,7 +105,14 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
         return packageName.toLowerCase(Locale.ROOT).replaceAll("[-_.]+", "-");
     }
 
-    private boolean packageIndexListsAsset(String baseUrl, String packageName, String assetName) {
+    @Override
+    public boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        return simpleIndex(baseUrl, packageName).isPresent();
+    }
+
+    private Optional<String> simpleIndex(String baseUrl, String packageName) {
         String normalized = normalizePackageName(packageName);
         URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/simple/" + SidecarUriUtils.encodeSegment(normalized)
                 + "/");
@@ -117,15 +124,23 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
             throw new IllegalStateException("Could not reach the pypiserver sidecar to look up " + packageName, e);
         }
         if (response.statusCode() == 404) {
-            return false;
+            return Optional.empty();
         }
         if (response.statusCode() != 200) {
             throw new IllegalStateException("Could not look up " + packageName + " on the pypiserver sidecar: "
                     + "upstream returned " + response.statusCode());
         }
+        return Optional.of(response.body());
+    }
+
+    private boolean packageIndexListsAsset(String baseUrl, String packageName, String assetName) {
+        Optional<String> index = simpleIndex(baseUrl, packageName);
+        if (index.isEmpty()) {
+            return false;
+        }
         // An exact entry match, not a substring search: a shorter real filename that happens to
         // be a substring of a different, longer real filename must not pass this check.
-        return SIMPLE_INDEX_HREF.matcher(response.body()).results()
+        return SIMPLE_INDEX_HREF.matcher(index.get()).results()
                 .map(match -> {
                     String href = match.group(1);
                     String filename = href.substring(href.lastIndexOf('/') + 1);

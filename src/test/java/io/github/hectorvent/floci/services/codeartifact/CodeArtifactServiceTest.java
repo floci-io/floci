@@ -1007,6 +1007,73 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void describePackageReportsTheDirectPublishDefaultsAndMatchesExactly() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my::pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("generic", described.format());
+        assertEquals("ns", described.namespace());
+        assertEquals("my-pkg", described.packageName());
+        assertEquals("ALLOW", described.publishRestriction());
+        assertEquals("BLOCK", described.upstreamRestriction());
+
+        AwsException prefixOfAnotherPackage = assertThrows(AwsException.class, () -> service.describePackage(REGION,
+                "dom", null, "repo", "generic", "ns", "my"));
+        assertEquals("ResourceNotFoundException", prefixOfAnotherPackage.getErrorCode());
+
+        AwsException wrongNamespace = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "other", "my-pkg"));
+        assertEquals("ResourceNotFoundException", wrongNamespace.getErrorCode());
+    }
+
+    @Test
+    void describePackageValidatesPackageAndNamespaceShapeBeforeTouchingRepositoryState() {
+        AwsException badPackageName = assertThrows(AwsException.class, () -> service.describePackage(REGION,
+                "no-such-domain", null, "repo", "generic", "ns", "has/slash"));
+        assertEquals("ValidationException", badPackageName.getErrorCode());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException badNamespace = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "has#hash", "my-pkg"));
+        assertEquals("ValidationException", badNamespace.getErrorCode());
+
+        AwsException missingNamespaceForGeneric = assertThrows(AwsException.class, () -> service.describePackage(
+                REGION, "dom", null, "repo", "generic", null, "my-pkg"));
+        assertEquals("ValidationException", missingNamespaceForGeneric.getErrorCode());
+
+        AwsException missingNamespaceForMaven = assertThrows(AwsException.class, () -> service.describePackage(
+                REGION, "dom", null, "repo", "maven", null, "my-artifact"));
+        assertEquals("ValidationException", missingNamespaceForMaven.getErrorCode());
+    }
+
+    /**
+     * pypi packages have no namespace at all (confirmed against the API reference): the sidecar
+     * check genuinely ignores whatever namespace is supplied, so without this rejection the response
+     * would echo a namespace back as if it were real, describing a package that does not exist the
+     * way the caller asked.
+     */
+    @Test
+    void describePackageRejectsANamespaceSuppliedForPypiRatherThanEchoingAFabricatedOne() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("real-pkg")))
+                .thenReturn(true);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "pypi", "bogus-namespace", "real-pkg"));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
     void getPackageVersionAssetReturnsExactBytesAndValidatesRevision() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
