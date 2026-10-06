@@ -217,12 +217,12 @@ class DurableExecutionServicePersistenceTest {
     }
 
     @Test
-    void aDurableChildTheStoreLostIsStartedAgainUnderItsArn() {
+    void aDurableChildTheStoreLostIsStartedAgainUnderItsArnEvenIfItsAliasMoved() {
         ScriptedInvoker before = new ScriptedInvoker();
         PersistentStorageFactory firstStorage = new PersistentStorageFactory(directory);
         DurableExecutionService first = newService(firstStorage, before, firstTaskOnly());
         before.script((service, event) -> {
-            service.checkpoint(arn(event), token(event), null, List.of(chainedStart("i1", "child-fn:1", "{\"n\":1}")));
+            service.checkpoint(arn(event), token(event), null, List.of(chainedStart("i1", "child-fn:live", "{\"n\":1}")));
             return "{\"Status\":\"PENDING\"}";
         });
         String parentArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
@@ -233,6 +233,7 @@ class DurableExecutionServicePersistenceTest {
         firstStorage.flushAll();
 
         ScriptedInvoker after = new ScriptedInvoker();
+        after.liveVersion = "2";
         DurableExecutionService restarted = newService(new PersistentStorageFactory(directory), after);
         Script dispatch = (service, event) -> {
             if (arn(event).equals(childArn)) {
@@ -348,6 +349,8 @@ class DurableExecutionServicePersistenceTest {
         final List<JsonNode> events = new ArrayList<>();
         final List<String> plainPayloads = new ArrayList<>();
         String plainOutput = "null";
+        /** The version the alias {@code live} points to. */
+        String liveVersion = "1";
         DurableExecutionService service;
 
         void script(Script script) {
@@ -360,8 +363,13 @@ class DurableExecutionServicePersistenceTest {
                 return new ResolvedDurableTarget(accountId, region, functionName,
                         "arn:aws:lambda:us-east-1:000000000000:function:plain-fn", "$LATEST", false, 0, 0);
             }
+            String version = "live".equals(qualifier) ? liveVersion : "1";
+            if (qualifier != null && !"live".equals(qualifier)) {
+                version = qualifier;
+            }
             return new ResolvedDurableTarget(accountId, region, functionName,
-                    "arn:aws:lambda:us-east-1:000000000000:function:" + functionName + ":1", "1", true, 3600, 7);
+                    "arn:aws:lambda:us-east-1:000000000000:function:" + functionName + ":" + version, version, true,
+                    3600, 7);
         }
 
         @Override

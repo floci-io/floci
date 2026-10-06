@@ -949,7 +949,10 @@ public class DurableExecutionService implements Resettable {
             }
             ResolvedDurableTarget target;
             try {
-                target = resolveChainedTarget(execution, operation.getChainedFunctionName());
+                // The version in the saved ARN, since an alias may point elsewhere by now.
+                target = childArn == null ? resolveChainedTarget(execution, operation.getChainedFunctionName())
+                        : invoker.resolve(childArn.accountId(), childArn.region(), childArn.functionName(),
+                                childArn.version());
             } catch (AwsException e) {
                 completeChainedInvoke(execution, operation, ChainedOutcome.failed(e), clock.millis(), effects);
                 continue;
