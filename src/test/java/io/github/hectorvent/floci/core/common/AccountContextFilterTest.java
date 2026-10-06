@@ -249,7 +249,7 @@ class AccountContextFilterTest {
     @Test
     void strictModeAlsoCoversPresignedCredentials() {
         strictPartitions = true;
-        ContainerRequestContext ctx = mockContext(null, "AKID/20260617/eusc-de-east-1/iam/aws4_request");
+        ContainerRequestContext ctx = mockContext(null, "AKID/20260617/cn-north-1/lightsail/aws4_request");
         filter.filter(ctx);
         ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
         verify(ctx).abortWith(aborted.capture());

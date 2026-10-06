@@ -122,8 +122,8 @@ did before.
 
 ## Partition-absent services
 
-AWS publishes which services exist in each partition (CloudFront is not in GovCloud, IAM is
-not in `aws-eusc`). On AWS a request for an absent service never reaches an API: the SDK
+AWS publishes which services exist in each partition (CloudFront is not in GovCloud, Lightsail
+is not in China). On AWS a request for an absent service never reaches an API: the SDK
 fails to resolve the host and reports an `UnknownHostException`. Floci serves every enabled
 service in every partition by default.
 
@@ -136,6 +136,14 @@ service list, matching the signing name directly or through the endpoint prefixe
 while a GovCloud CloudFront client is refused. Only a service the data lists in some other
 partition is refused: `endpoints.json` omits the newer services that ship an endpoint ruleset
 alone (FIS, MWAA, S3 Tables), and those are served everywhere.
+
+A partition also offers a service when that service's endpoint ruleset names the partition in a
+branch with its own endpoint, even where `endpoints.json` leaves it out: IAM, Route 53, Budgets and
+Cost Explorer in `aws-eusc` (`iam.eusc-de-east-1.amazonaws.eu`), IAM and Cost Explorer in
+`aws-iso-e`. The vendored data records these under `servicesFromRulesets`. The `execute-api`
+signing name is never refused: API Gateway's invoke endpoints and its WebSocket management API
+(`apigatewaymanagementapi`) sign with it as well as Connect Participant, and `endpoints.json` lists
+the API Gateway side nowhere, so the data cannot say where the name is served.
 
 STS is regionalized everywhere and its global host `sts.amazonaws.com` exists only in `aws`, so
 IAM's `GetAccountSummary` reports `GlobalEndpointTokenVersion` only there.
