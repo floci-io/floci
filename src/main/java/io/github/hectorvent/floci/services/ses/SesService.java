@@ -15,12 +15,14 @@ import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
+import io.github.hectorvent.floci.services.ses.model.MessageAttachment;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SendBulkEmailRequest;
 import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
+import io.github.hectorvent.floci.services.ses.model.SentAttachment;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
@@ -37,6 +39,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -286,7 +289,8 @@ public class SesService {
             content = new EmailContent.Simple(content.subject(),
                     replaceUnsubscribePlaceholder(content.bodyText(), url),
                     replaceUnsubscribePlaceholder(content.bodyHtml(), url),
-                    withUnsubscribeHeaders(content.headers(), url));
+                    withUnsubscribeHeaders(content.headers(), url),
+                    content.attachments());
             request = request.toBuilder().content(content).build();
         }
 
@@ -305,6 +309,19 @@ public class SesService {
         boolean rejected = SesContentScan.containsTestVirus(content.subject(), content.bodyText(),
                 content.bodyHtml())
                 || SesContentScan.containsTestVirus(headerText(content.headers()));
+        // Attachments make the message multipart, so it is assembled once as the MIME the relay
+        // delivers (Bcc stays off it, as on the wire) and scanned the way a raw send is.
+        byte[] mime = null;
+        if (content.hasAttachments()) {
+            mime = SmtpRelay.encodeMime(simpleRelayMessage(request, content, effectiveReturnPath, messageId,
+                    request.toAddresses(), request.ccAddresses(), null));
+            SesContentScan.Result scan = SesContentScan.scan(mime);
+            if (scan == SesContentScan.Result.UNREADABLE) {
+                LOG.warnv("SES content scan could not parse the assembled message, only its bytes were checked: "
+                        + "messageId={0}", messageId);
+            }
+            rejected = rejected || scan == SesContentScan.Result.REJECTED;
+        }
         SentEmail email = new SentEmail(messageId, region, source, request.toAddresses(),
                 request.ccAddresses(), request.bccAddresses(), request.replyToAddresses(), content.subject(),
                 content.bodyText(), content.bodyHtml());
@@ -313,6 +330,10 @@ public class SesService {
         email.setTenantName(firstNonBlank(request.tenantName()));
         if (content.hasHeaders()) {
             email.setHeaders(content.headers());
+        }
+        if (mime != null) {
+            email.setAttachments(sentAttachments(content.attachments()));
+            email.setMimeData(Base64.getEncoder().encodeToString(mime));
         }
         email.setEmailTags(request.emailTags());
         email.setInsights(SesMessageInsights.build(envelope,
@@ -326,18 +347,8 @@ public class SesService {
         List<String> relayedCc = filterUnsuppressed(request.ccAddresses(), suppressedReasons);
         List<String> relayedBcc = filterUnsuppressed(request.bccAddresses(), suppressedReasons);
         if (!rejected && sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
-            smtpRelay.relay(SmtpRelay.RelayMessage.builder(source)
-                    .returnPath(effectiveReturnPath)
-                    .to(relayedTo)
-                    .cc(relayedCc)
-                    .bcc(relayedBcc)
-                    .replyTo(request.replyToAddresses())
-                    .subject(content.subject())
-                    .bodyText(content.bodyText())
-                    .bodyHtml(content.bodyHtml())
-                    .headers(content.headers())
-                    .messageId(messageId)
-                    .build());
+            smtpRelay.relay(simpleRelayMessage(request, content, effectiveReturnPath, messageId,
+                    relayedTo, relayedCc, relayedBcc));
         } else {
             LOG.infov("SES email accepted but not relayed ({0}): messageId={1}",
                     rejected ? "content rejected" : "all recipients suppressed", messageId);
@@ -351,6 +362,38 @@ public class SesService {
                 request.toAddresses(), request.ccAddresses(), request.bccAddresses(), envelope,
                 suppressedReasons, rejected, request.emailTags(), content.headers(), region);
         return messageId;
+    }
+
+    private static SmtpRelay.RelayMessage simpleRelayMessage(SendEmailRequest request, EmailContent.Simple content,
+                                                             String returnPath, String messageId,
+                                                             List<String> to, List<String> cc,
+                                                             List<String> bcc) {
+        return SmtpRelay.RelayMessage.builder(request.source())
+                .returnPath(returnPath)
+                .to(to)
+                .cc(cc)
+                .bcc(bcc)
+                .replyTo(request.replyToAddresses())
+                .subject(content.subject())
+                .bodyText(content.bodyText())
+                .bodyHtml(content.bodyHtml())
+                .headers(content.headers())
+                .messageId(messageId)
+                .attachments(content.hasAttachments() ? content.attachments() : null)
+                .build();
+    }
+
+    private static List<SentAttachment> sentAttachments(List<MessageAttachment> attachments) {
+        List<SentAttachment> out = new ArrayList<>();
+        for (MessageAttachment attachment : attachments) {
+            String contentId = attachment.contentId() == null || attachment.contentId().isBlank()
+                    ? null
+                    : SmtpRelay.formatContentId(attachment.contentId());
+            out.add(new SentAttachment(attachment.fileName(), SmtpRelay.attachmentContentType(attachment),
+                    attachment.effectiveDisposition().name(), contentId, attachment.contentDescription(),
+                    attachment.size()));
+        }
+        return List.copyOf(out);
     }
 
     private String sendRawEmail(SendEmailRequest request, EmailContent.Raw raw) {

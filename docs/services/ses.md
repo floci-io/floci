@@ -229,6 +229,17 @@ Alongside the LocalStack fields, each captured message carries a
 `RejectReason` and none of its content: no `Subject`, `Body`, `Headers`,
 `ReplyToAddresses` or `RawData`, in neither the Simple nor the raw shape.
 
+A v2 `SendEmail` with `Content.Simple.Attachments` keeps the Simple shape and
+adds two fields: `Attachments`, one entry per attachment with `FileName`,
+`ContentType`, `ContentDisposition` (`ATTACHMENT` or `INLINE`), `ContentId`
+(angle-bracketed, when given), `ContentDescription` (when given) and `Size`
+in decoded bytes; and `RawData`, the assembled MIME message, base64-encoded,
+as relayed over SMTP but without a `Bcc` header. The content scan runs over
+that MIME message as it does for a raw send. An `INLINE` attachment with a
+`ContentId` is placed in a `multipart/related` part next to the HTML body.
+A `ContentType` that is not given is guessed from the file name, falling back
+to `application/octet-stream`.
+
 ## Examples
 
 ```bash
