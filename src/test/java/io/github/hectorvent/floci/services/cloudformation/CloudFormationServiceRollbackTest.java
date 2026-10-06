@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.time.Clock;
 import java.util.List;
@@ -31,6 +32,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -192,6 +194,43 @@ class CloudFormationServiceRollbackTest {
                     : "Stack with id " + nameOrId + " does not exist", error.getMessage());
         }
         assertEquals(Set.of("create"), stack.getChangeSets().keySet());
+    }
+
+    @Test
+    void deleteStack_savedWithCircularTemplate_stillDeletesDependentsFirst() {
+        // A stack saved before circular templates were rejected: the queues depend on each other,
+        // and the target group was added by a later update, so it sits after the listener using it.
+        Stack stack = new Stack();
+        stack.setStackName("delete-saved-circular-stack");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_COMPLETE");
+        stack.setTemplateBody("""
+                {"Resources": {
+                  "FirstQueue": {"Type": "AWS::SQS::Queue", "DependsOn": "SecondQueue"},
+                  "SecondQueue": {"Type": "AWS::SQS::Queue", "DependsOn": "FirstQueue"},
+                  "TargetGroup": {"Type": "AWS::ElasticLoadBalancingV2::TargetGroup"},
+                  "Listener": {"Type": "AWS::ElasticLoadBalancingV2::Listener",
+                               "Properties": {"DefaultActions": [{"Type": "forward",
+                                   "TargetGroupArn": {"Ref": "TargetGroup"}}]}}
+                }}""");
+        StackResource listener = resource("Listener", "listener-arn", "AWS::ElasticLoadBalancingV2::Listener",
+                "CREATE_COMPLETE");
+        StackResource firstQueue = resource("FirstQueue", "first-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource secondQueue = resource("SecondQueue", "second-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource targetGroup = resource("TargetGroup", "target-group-arn",
+                "AWS::ElasticLoadBalancingV2::TargetGroup", "CREATE_COMPLETE");
+        for (StackResource resource : new StackResource[] {listener, firstQueue, secondQueue, targetGroup}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(listener, REGION);
+        deletes.verify(provisioner).delete(targetGroup, REGION);
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
     }
 
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {

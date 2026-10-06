@@ -2326,7 +2326,11 @@ public class CloudFormationService implements ResourceProvider {
             }
             Map<String, Boolean> conditions = resolveConditions(
                     template, stack.parametersSnapshot(), stack, region, regionResolver.getAccountId());
-            List<String> creationOrder = topologicalSort(resources, conditions);
+            // A stack saved before circular templates were rejected may still have one; order what
+            // can be ordered and put the circular resources after it, rather than giving up.
+            CreationOrder order = creationOrder(resources, conditions);
+            List<String> creationOrder = new ArrayList<>(order.sorted());
+            creationOrder.addAll(order.circular());
             Map<String, Integer> rank = new HashMap<>();
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);
@@ -3055,6 +3059,24 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private List<String> topologicalSort(JsonNode resources, Map<String, Boolean> conditions) {
+        // A resource left unsorted is in a dependency cycle or depends on one, so no creation
+        // order exists; AWS rejects such a template instead of creating it in an arbitrary order.
+        CreationOrder order = creationOrder(resources, conditions);
+        if (!order.circular().isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "Circular dependency between resources: [" + String.join(", ", order.circular()) + "]", 400);
+        }
+        return order.sorted();
+    }
+
+    /**
+     * The template's resources that can be ordered, dependencies first, and those that cannot
+     * because they are in a dependency cycle or depend on one.
+     */
+    private record CreationOrder(List<String> sorted, Set<String> circular) {
+    }
+
+    private CreationOrder creationOrder(JsonNode resources, Map<String, Boolean> conditions) {
         Set<String> allIds = new LinkedHashSet<>();
         resources.fieldNames().forEachRemaining(allIds::add);
 
@@ -3114,16 +3136,9 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
 
-        // A resource left unsorted is in a dependency cycle or depends on one, so no creation
-        // order exists; AWS rejects such a template instead of creating it in an arbitrary order.
-        if (sorted.size() < activeIds.size()) {
-            Set<String> unsorted = new LinkedHashSet<>(activeIds);
-            unsorted.removeAll(sorted);
-            throw new AwsException("ValidationError",
-                    "Circular dependency between resources: [" + String.join(", ", unsorted) + "]", 400);
-        }
-
-        return sorted;
+        Set<String> circular = new LinkedHashSet<>(activeIds);
+        circular.removeAll(sorted);
+        return new CreationOrder(sorted, circular);
     }
 
     private static final Pattern SUB_VAR_PATTERN = Pattern.compile("\\$\\{([^}]+)}");
