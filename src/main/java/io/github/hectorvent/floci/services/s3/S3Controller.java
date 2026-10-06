@@ -3410,11 +3410,8 @@ public class S3Controller {
         return null;
     }
 
-    // S3 implements two conditional PutObject forms: If-None-Match: * (create only) and If-Match
-    // with an ETag (replace only if unchanged). The other two spellings are answered 501 before the
-    // body is decoded or validated, rather than being given a meaning S3 does not have. A list is
-    // judged member by member, as the precondition check reads it, so a "*" inside an If-Match list
-    // cannot stand in for the ETag it is listed beside.
+    // Members are judged one by one, so a "*" inside an If-Match list cannot stand in for the ETag
+    // it is listed beside.
     private static void rejectUnimplementedPutConditions(String ifMatch, String ifNoneMatch) {
         if ((ifMatch != null && anyEntityTag(ifMatch, "*"::equals))
                 || (ifNoneMatch != null && anyEntityTag(ifNoneMatch, tag -> !"*".equals(tag)))) {
