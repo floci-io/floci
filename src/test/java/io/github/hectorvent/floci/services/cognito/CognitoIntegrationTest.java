@@ -758,13 +758,14 @@ class CognitoIntegrationTest {
                 .statusCode(200);
 
         given()
-                .queryParam("email", fromUsername)
                 .when()
                 .get("/_aws/ses")
                 .then()
                 .statusCode(200)
-                .body("messages", hasSize(1))
-                .body("messages[0].Source", equalTo("Repro App <noreply@repro.example>"));
+                .body("messages.findAll { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }",
+                        hasSize(1))
+                .body("messages.find { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }.Source",
+                        equalTo("Repro App <noreply@repro.example>"));
     }
 
     @Test
