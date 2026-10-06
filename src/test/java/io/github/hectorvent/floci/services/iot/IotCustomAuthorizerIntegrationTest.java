@@ -236,6 +236,18 @@ class IotCustomAuthorizerIntegrationTest {
     }
 
     @Test
+    void overWssToAnAddressLiteralTheEventCarriesNoServerName() throws Exception {
+        String clientId = "cauth-wss-ip-" + System.nanoTime();
+
+        connectV3("wss://127.0.0.1:" + testSslPort + "/mqtt", clientId, clientId + "?" + NAME_PARAM + authorizer, "allow",
+                Map.of()).disconnect();
+
+        JsonNode event = takeEvent();
+        assertEquals(List.of("http", "mqtt"), protocols(event));
+        assertFalse(event.path("protocolData").has("tls"), event.path("protocolData").toString());
+    }
+
+    @Test
     void mqtt3AllowedConnectOnTheTcpListenerSendsAnMqttOnlyEvent() throws Exception {
         String clientId = "cauth-tcp-v3-" + System.nanoTime();
         String username = clientId + "?" + NAME_PARAM + authorizer;

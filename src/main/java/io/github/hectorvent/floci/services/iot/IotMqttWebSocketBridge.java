@@ -129,7 +129,7 @@ public class IotMqttWebSocketBridge {
         String serverName = null;
         if (ws.isSsl()) {
             serverName = IotMqttBrokerService.requestedServerName(ws.sslSession());
-            if (serverName == null && ws.authority() != null) {
+            if (serverName == null && ws.authority() != null && !IotMqttBrokerService.isAddressLiteral(ws.authority().host())) {
                 serverName = ws.authority().host();
             }
         }

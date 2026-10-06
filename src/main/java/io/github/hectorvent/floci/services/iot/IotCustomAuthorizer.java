@@ -98,6 +98,7 @@ public class IotCustomAuthorizer {
             JsonNode context = request.path(protocol + "Context");
             if (context.isObject()) {
                 // ponytail: a context goes to the function as sent, members in request order, which SDKs send in model order.
+                // Nested members are not checked against the model's length and type constraints, only those measured above.
                 protocolData.set(protocol, context);
             }
         }
