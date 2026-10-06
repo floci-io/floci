@@ -288,6 +288,53 @@ class RetryingDockerHttpClientTest {
     }
 
     @Test
+    void doesNotRetryMutatingPostsOutsideTheAllowlist() {
+        // Catches: replaying a commit (a second image), a pause, unpause or kill (a 409 for a state
+        // that already changed) or a rename (a name conflict) after a lost response. The exclusion
+        // list this replaced named none of them.
+        for (String path : List.of("/commit?container=abc&repo=img", "/containers/abc/pause",
+                "/containers/abc/unpause", "/containers/abc/kill?signal=SIGKILL",
+                "/containers/abc/rename?name=new-name")) {
+            FakeTransport delegate = new FakeTransport(attempt -> {
+                throw brokenPipe();
+            });
+            RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+            Request request = Request.builder()
+                    .method(Request.Method.POST)
+                    .path(path)
+                    .build();
+
+            RuntimeException thrown = assertThrows(RuntimeException.class, () -> client.execute(request));
+            assertEquals("Broken pipe", thrown.getCause().getMessage());
+            assertEquals(1, delegate.calls.get(), path);
+        }
+    }
+
+    @Test
+    void retriesTheAllowlistedPosts() {
+        // Catches: an allowlist too narrow to keep the replays that are safe: a start or stop (304
+        // on replay), a wait, an image pull and a volume create (docker returns the existing one).
+        for (String path : List.of("/containers/abc/start", "/containers/abc/stop?t=10",
+                "/containers/abc/wait", "/images/create?fromImage=alpine&tag=3", "/volumes/create")) {
+            Response ok = mock(Response.class);
+            FakeTransport delegate = new FakeTransport(attempt -> {
+                if (attempt == 1) {
+                    throw brokenPipe();
+                }
+                return ok;
+            });
+            RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+            Request request = Request.builder()
+                    .method(Request.Method.POST)
+                    .path(path)
+                    .build();
+
+            assertSame(ok, client.execute(request), path);
+            assertEquals(2, delegate.calls.get(), path);
+        }
+    }
+
+    @Test
     void retriesNamedContainerCreate() {
         // Catches: over-broad exclusion that stops replaying named creates, which are safe
         // because the caller adopts the container on a 409.
