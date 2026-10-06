@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
@@ -7,6 +8,8 @@ import io.restassured.http.ContentType;
 import io.restassured.parsing.Parser;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -242,6 +245,60 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
     }
 
     @Test
+    void declaringAGeneratedGroupNameExplicitlyIsRefusedAndRollsBack() {
+        // Measured on AWS: GroupName is create-only, so declaring the generated name requires a
+        // replacement keeping the same pool and name, which is refused before anything is created.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cognito-group-declare-" + suffix;
+        String poolId = createPool(stackName);
+
+        createStackAndWait(stackName, unnamedGroupTemplate(poolId));
+        String generated = output(describeStack(stackName), "GroupRef");
+        Object createdAt = cognito("GetGroup",
+                "{\"UserPoolId\": \"" + poolId + "\", \"GroupName\": \"" + generated + "\"}")
+            .statusCode(200)
+            .extract().path("Group.CreationDate");
+
+        updateStack(stackName, namedGroupTemplate(poolId, generated, false));
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
+        List<String> failures = XmlParser.extractGroups(describeEvents(stackName), "member").stream()
+                .filter(event -> "Group".equals(event.get("LogicalResourceId"))
+                        && "UPDATE_FAILED".equals(event.get("ResourceStatus")))
+                .map(event -> event.get("ResourceStatusReason"))
+                .toList();
+        assertThat(failures, contains(containsString("CloudFormation cannot update a stack when a custom-named"
+                + " resource requires replacing. Rename " + generated + " and update the stack again.")));
+        assertEquals(generated, output(describeStack(stackName), "GroupRef"));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackResource")
+            .formParam("StackName", stackName)
+            .formParam("LogicalResourceId", "Group")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<PhysicalResourceId>" + generated + "</PhysicalResourceId>"));
+        cognito("GetGroup", "{\"UserPoolId\": \"" + poolId + "\", \"GroupName\": \"" + generated + "\"}")
+            .statusCode(200)
+            .body("Group.Description", equalTo("d1"))
+            .body("Group.Precedence", equalTo(1))
+            .body("Group.CreationDate", equalTo(createdAt));
+        cognito("ListGroups", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .statusCode(200)
+            .body("Groups.GroupName", contains(generated));
+
+        deleteStackAndWait(stackName);
+
+        cognito("ListGroups", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .statusCode(200)
+            .body("Groups", hasSize(0));
+    }
+
+    @Test
     void poolSchemaCustomAttributesAreNamespacedAndStandardOnesAreNot() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-cognito-schema-" + suffix;
@@ -342,6 +399,19 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+    }
+
+    private String describeEvents(String stackName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackEvents")
             .formParam("StackName", stackName)
         .when()
             .post("/")
@@ -467,6 +537,27 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
                   }
                 }
                 """.formatted(poolId, groupName, duplicateResource);
+    }
+
+    /** The named group's template without a GroupName, so CloudFormation generates one. */
+    private static String unnamedGroupTemplate(String poolId) {
+        return """
+                {
+                  "Resources": {
+                    "Group": {
+                      "Type": "AWS::Cognito::UserPoolGroup",
+                      "Properties": {
+                        "UserPoolId": "%s",
+                        "Description": "d1",
+                        "Precedence": 1
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "GroupRef": { "Value": { "Ref": "Group" } }
+                  }
+                }
+                """.formatted(poolId);
     }
 
     private static String poolAndStudentGroupOnlyTemplate() {

@@ -254,6 +254,24 @@ class CognitoUserPoolGroupCfnProvisionerTest {
     }
 
     @Test
+    void declaringTheGeneratedNameExplicitlyIsRefusedAsACustomNamedReplacement() {
+        // Measured on AWS: GroupName is create-only, so declaring it replaces the group, and a
+        // replacement keeping the same pool and name is refused before anything is created.
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", null), ctx());
+        String generated = r.getPhysicalId();
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props("us-east-1_a", generated), ctx(generated)));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename " + generated + " and update the stack again.", thrown.getMessage());
+        verify(cognito, times(1)).createGroup(any(), any(), any(), any(), any());
+        verify(cognito, never()).updateGroup(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void movingAGeneratedGroupToAnotherPoolGeneratesANewNameAndDeletesTheOldOneFromTheOldPool() {
         StackResource r = resource(null);
         provisioner.provision(r, props("us-east-1_a", null), ctx());

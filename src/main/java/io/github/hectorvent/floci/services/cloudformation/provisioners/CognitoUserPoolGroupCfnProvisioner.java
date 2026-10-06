@@ -22,6 +22,8 @@ import java.util.Set;
  * {@link ReplacementCleanup} record. A pool move that keeps an explicit name keeps the physical id,
  * so, as on AWS, nothing is deleted: a committed move leaves the group in the old pool behind, and
  * a rolled-back one points the resource at the old pool's group again and leaves the new one.
+ * Declaring an unnamed group's generated name explicitly, in the same pool, needs a replacement
+ * keeping both the pool and the name, which, as on AWS, is refused before anything is created.
  */
 @ApplicationScoped
 public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisioner {
@@ -78,6 +80,12 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
         Integer precedence = parsePrecedence(ctx.resolveOptional(props, "Precedence"));
         String roleArn = ctx.resolveOptional(props, "RoleArn");
 
+        if (explicitName != null && !poolChanged && ctx.reusesPriorEntity(explicitName)
+                && priorNameGenerated(r, ctx)) {
+            throw new AwsException("ValidationError",
+                    "CloudFormation cannot update a stack when a custom-named resource requires "
+                            + "replacing. Rename " + explicitName + " and update the stack again.", 400);
+        }
         boolean replaced = poolChanged || !ctx.reusesPriorEntity(groupName);
         if (replaced) {
             cognitoService.createGroup(userPoolId, groupName, description, precedence, roleArn);
