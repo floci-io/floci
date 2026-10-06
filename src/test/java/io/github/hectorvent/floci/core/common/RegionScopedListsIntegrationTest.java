@@ -6,6 +6,7 @@ import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -14,7 +15,6 @@ import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Lists and lookups of resources stored for every region return only the request region's. Each
@@ -224,7 +224,8 @@ class RegionScopedListsIntegrationTest {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         JsonPath pool = given().header("Authorization", auth(HOME, "cognito-idp"))
                 .header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPool")
-                .contentType(COGNITO_JSON).body("{\"PoolName\": \"region-tags-" + suffix + "\"}")
+                .contentType(COGNITO_JSON)
+                .body("{\"PoolName\": \"region-tags-" + suffix + "\", \"UserPoolTags\": {\"team\": \"home\"}}")
             .when().post("/").then().statusCode(200)
             .extract().jsonPath();
         String poolId = pool.getString("UserPool.Id");
@@ -244,6 +245,12 @@ class RegionScopedListsIntegrationTest {
             .when().post("/").then().statusCode(400)
             .body("__type", endsWith("ResourceNotFoundException"));
         given().header("Authorization", auth(OTHER, "cognito-idp"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService.UntagResource")
+                .contentType(COGNITO_JSON)
+                .body("{\"ResourceArn\": \"" + poolArn + "\", \"TagKeys\": [\"team\"]}")
+            .when().post("/").then().statusCode(400)
+            .body("__type", endsWith("ResourceNotFoundException"));
+        given().header("Authorization", auth(OTHER, "cognito-idp"))
                 .header("X-Amz-Target", "AWSCognitoIdentityProviderService.ListTagsForResource")
                 .contentType(COGNITO_JSON).body("{\"ResourceArn\": \"" + poolArn + "\"}")
             .when().post("/").then().statusCode(400)
@@ -251,14 +258,27 @@ class RegionScopedListsIntegrationTest {
         given().header("Authorization", auth(OTHER, "cognito-idp"))
                 .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolDomain")
                 .contentType(COGNITO_JSON).body("{\"Domain\": \"" + domain + "\"}")
-            .when().post("/").then().statusCode(404)
+            .when().post("/").then().statusCode(400)
             .body("__type", endsWith("ResourceNotFoundException"));
+
+        // An ARN naming the pool's id under another region or account names another pool.
+        String[] arn = poolArn.split(":", 6);
+        String otherRegionArn = String.join(":", arn[0], arn[1], arn[2], OTHER, arn[4], arn[5]);
+        String otherAccountArn = String.join(":", arn[0], arn[1], arn[2], arn[3], "111122223333", arn[5]);
+        for (String foreignArn : List.of(otherRegionArn, otherAccountArn)) {
+            given().header("Authorization", auth(HOME, "cognito-idp"))
+                    .header("X-Amz-Target", "AWSCognitoIdentityProviderService.TagResource")
+                    .contentType(COGNITO_JSON)
+                    .body("{\"ResourceArn\": \"" + foreignArn + "\", \"Tags\": {\"team\": \"other\"}}")
+                .when().post("/").then().statusCode(400)
+                .body("__type", endsWith("ResourceNotFoundException"));
+        }
 
         given().header("Authorization", auth(HOME, "cognito-idp"))
                 .header("X-Amz-Target", "AWSCognitoIdentityProviderService.ListTagsForResource")
                 .contentType(COGNITO_JSON).body("{\"ResourceArn\": \"" + poolArn + "\"}")
             .when().post("/").then().statusCode(200)
-            .body("Tags.team", nullValue());
+            .body("Tags.team", equalTo("home"));
         given().header("Authorization", auth(HOME, "cognito-idp"))
                 .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolDomain")
                 .contentType(COGNITO_JSON).body("{\"Domain\": \"" + domain + "\"}")

@@ -294,7 +294,7 @@ class CognitoCfnProvisionerTest {
     @Test
     void updateWhosePriorDomainIsGoneCreatesItAgain() {
         when(cognito.describeUserPoolDomain(DOMAIN))
-                .thenThrow(new AwsException("ResourceNotFoundException", "Domain does not exist", 404));
+                .thenThrow(new AwsException("ResourceNotFoundException", "Domain does not exist", 400));
         when(cognito.createUserPoolDomain(DOMAIN, POOL_ID, Map.of("CertificateArn", CERTIFICATE_ARN), 2))
                 .thenReturn(domain(DOMAIN, POOL_ID, CLOUDFRONT));
         StackResource r = resource(DOMAIN, Map.of("UserPoolId", POOL_ID, "CloudFrontDistribution", CLOUDFRONT));
@@ -311,7 +311,7 @@ class CognitoCfnProvisionerTest {
         when(cognito.describeUserPoolDomain("old.example.com"))
                 .thenReturn(domain("old.example.com", POOL_ID, "dold.cloudfront.net"));
         when(cognito.createUserPoolDomain(any(), any(), any(), any())).thenReturn(domain(DOMAIN, POOL_ID, CLOUDFRONT));
-        doThrow(new AwsException("ResourceNotFoundException", "Domain does not exist", 404))
+        doThrow(new AwsException("ResourceNotFoundException", "Domain does not exist", 400))
                 .when(cognito).deleteUserPoolDomain("old.example.com", POOL_ID);
         StackResource r = resource("old.example.com", Map.of("UserPoolId", POOL_ID));
 
@@ -329,7 +329,7 @@ class CognitoCfnProvisionerTest {
 
     @Test
     void deleteToleratesAnAlreadyDeletedDomain() {
-        doThrow(new AwsException("ResourceNotFoundException", "Domain does not exist", 404))
+        doThrow(new AwsException("ResourceNotFoundException", "Domain does not exist", 400))
                 .when(cognito).deleteUserPoolDomain(DOMAIN, POOL_ID);
 
         assertDoesNotThrow(() -> provisioner.delete(resource(DOMAIN, Map.of("UserPoolId", POOL_ID)), REGION));
@@ -356,7 +356,7 @@ class CognitoCfnProvisionerTest {
     @Test
     void deleteWithoutARecordedUserPoolIdOfAMissingDomainIsANoOp() {
         when(cognito.describeUserPoolDomain(DOMAIN))
-                .thenThrow(new AwsException("ResourceNotFoundException", "Domain does not exist", 404));
+                .thenThrow(new AwsException("ResourceNotFoundException", "Domain does not exist", 400));
 
         assertDoesNotThrow(() -> provisioner.delete(resource(DOMAIN, Map.of()), REGION));
         verify(cognito, never()).deleteUserPoolDomain(any(), any());
