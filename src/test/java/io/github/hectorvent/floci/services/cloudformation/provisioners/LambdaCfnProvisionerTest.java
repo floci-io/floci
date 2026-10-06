@@ -20,6 +20,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -181,6 +182,19 @@ class LambdaCfnProvisionerTest {
 
         verify(lambda, never()).untagResource(anyString(), any());
         verify(lambda).tagResource(FUNCTION_ARN + "my-fn", Map.of("team", "b"));
+    }
+
+    @Test
+    void addingDurableConfigToANamedFunctionCannotReplaceIt() {
+        stubInPlaceUpdate("my-fn", Map.of());
+        ObjectNode props = props("my-fn");
+        props.putObject("DurableConfig").put("ExecutionTimeout", 60);
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> provisioner.provision(function("my-fn"), props, updateCtx("my-fn")));
+
+        assertEquals("Cannot replace Lambda function my-fn without a new FunctionName", rejected.getMessage());
+        verify(lambda, never()).updateFunctionConfiguration(anyString(), anyString(), anyMap());
     }
 
     @SuppressWarnings("unchecked")

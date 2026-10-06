@@ -61,6 +61,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private static final String NAME_MODE_GENERATED = "generated";
 
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
+    private static final int LAMBDA_DEFAULT_DURABLE_RETENTION_DAYS = 14;
     private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
     private static final String LAMBDA_DEFAULT_TRACING_MODE = "PassThrough";
@@ -191,6 +192,10 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         boolean packageTypeReplacement = r.getPhysicalId() != null
                 && oldPackageType != null
                 && !Objects.equals(oldPackageType, packageType);
+        Map<String, Object> durableConfig = resolveDurableConfig(props, engine);
+        // Lambda cannot add or remove a DurableConfig, so CloudFormation replaces the function.
+        LambdaFunction current = getExistingLambda(ctx.region(), r.getPhysicalId());
+        boolean durableReplacement = current != null && current.isDurable() != (durableConfig != null);
         boolean explicitRemoved = r.getPhysicalId() != null
                 && !hasExplicitName
                 && NAME_MODE_EXPLICIT.equals(previousNameMode);
@@ -198,7 +203,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         String functionName;
         if (hasExplicitName) {
             functionName = explicitName;
-        } else if (r.getPhysicalId() != null && !explicitRemoved && !packageTypeReplacement) {
+        } else if (r.getPhysicalId() != null && !explicitRemoved && !packageTypeReplacement && !durableReplacement) {
             functionName = r.getPhysicalId();
         } else {
             functionName = ctx.generatePhysicalName(r.getLogicalId(), 64, false);
@@ -240,8 +245,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         LambdaCodeSpec code = resolveLambdaCode(props, engine, handler, runtime);
         createRequest.put("Code", code.request());
 
-        configRequest.put("Timeout", intOrDefault(ctx.resolveOptional(props, "Timeout"),
-                LAMBDA_DEFAULT_TIMEOUT_SECONDS));
+        String timeout = ctx.resolveOptional(props, "Timeout");
+        configRequest.put("Timeout", intOrDefault(timeout, LAMBDA_DEFAULT_TIMEOUT_SECONDS));
         configRequest.put("MemorySize", intOrDefault(ctx.resolveOptional(props, "MemorySize"),
                 LAMBDA_DEFAULT_MEMORY_MB));
         configRequest.put("Description", ctx.resolveOptional(props, "Description"));
@@ -259,8 +264,15 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         configRequest.put("FileSystemConfigs",
                 resolveObjectListOrEmpty(props, "FileSystemConfigs", engine));
         putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
+        if (durableConfig != null) {
+            configRequest.put("DurableConfig", durableConfig);
+        }
 
         createRequest.putAll(configRequest);
+        if (durableConfig != null && timeout == null) {
+            // Created without one, a durable function gets min(ExecutionTimeout, 900). An update sends 3.
+            createRequest.remove("Timeout");
+        }
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         LambdaService.validateTagKeys(tags);
         if (!tags.isEmpty()) {
@@ -277,7 +289,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        return new LambdaDesiredState(functionName, hasExplicitName, packageType,
+        return new LambdaDesiredState(functionName, hasExplicitName, packageType, durableConfig != null,
                 createRequest, code, configRequest, tags, props != null && props.has("ReservedConcurrentExecutions"),
                 reservedConcurrentExecutions);
     }
@@ -381,7 +393,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             return true;
         }
         String existingPackageType = existing.getPackageType() != null ? existing.getPackageType() : "Zip";
-        return !Objects.equals(existingPackageType, desired.packageType());
+        return !Objects.equals(existingPackageType, desired.packageType()) || existing.isDurable() != desired.durable();
     }
 
     private LambdaFunction updateLambdaFunction(String region,
@@ -572,6 +584,14 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                         return true;
                     }
                 }
+                case "DurableConfig" -> {
+                    Map<?, ?> config = (Map<?, ?>) desired;
+                    if (!Objects.equals(fn.getDurableExecutionTimeout(), config.get("ExecutionTimeout"))
+                            || !Objects.equals(fn.getDurableRetentionPeriodInDays(), config.get("RetentionPeriodInDays"))
+                            || !Objects.equals(fn.getDurableKmsKeyArn(), config.get("KMSKeyArn"))) {
+                        return true;
+                    }
+                }
                 default -> {
                     // Properties outside UpdateFunctionConfiguration are ignored here.
                 }
@@ -683,6 +703,44 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private static int intOrDefault(String value, int defaultValue) {
         return value != null ? Integer.parseInt(value) : defaultValue;
+    }
+
+    /**
+     * Null when the template has no DurableConfig. RetentionPeriodInDays takes the schema default,
+     * 14, when the template leaves it out, on update too. A number from a parameter arrives as text.
+     */
+    private Map<String, Object> resolveDurableConfig(JsonNode props, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("DurableConfig")) {
+            return null;
+        }
+        JsonNode node = engine.resolveNode(props.get("DurableConfig"));
+        Map<String, Object> config = new LinkedHashMap<>();
+        if (node.hasNonNull("ExecutionTimeout")) {
+            config.put("ExecutionTimeout", integerOrRaw(node.get("ExecutionTimeout")));
+        }
+        config.put("RetentionPeriodInDays", node.hasNonNull("RetentionPeriodInDays")
+                ? integerOrRaw(node.get("RetentionPeriodInDays")) : LAMBDA_DEFAULT_DURABLE_RETENTION_DAYS);
+        String kmsKeyArn = node.path("KMSKeyArn").asText(null);
+        if (kmsKeyArn != null && !kmsKeyArn.isBlank()) {
+            config.put("KMSKeyArn", kmsKeyArn);
+        }
+        return config;
+    }
+
+    /** Anything else goes to Lambda as is, which rejects it with its own error. */
+    private Object integerOrRaw(JsonNode value) {
+        if (value.isIntegralNumber()) {
+            return value.intValue();
+        }
+        if (value.isTextual()) {
+            try {
+                return Integer.parseInt(value.asText());
+            } catch (NumberFormatException ignored) {
+                // Not a number. Lambda answers it with the error AWS gives.
+                return value.asText();
+            }
+        }
+        return jsonNodeToValue(value);
     }
 
     private Map<String, String> resolveLambdaEnvironment(JsonNode props, CloudFormationTemplateEngine engine) {
@@ -921,6 +979,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private record LambdaDesiredState(String functionName,
                                       boolean explicitFunctionName,
                                       String packageType,
+                                      boolean durable,
                                       Map<String, Object> createRequest,
                                       LambdaCodeSpec code,
                                       Map<String, Object> configRequest,
