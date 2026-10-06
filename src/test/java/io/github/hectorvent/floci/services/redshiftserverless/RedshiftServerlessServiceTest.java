@@ -824,8 +824,10 @@ class RedshiftServerlessServiceTest {
         assertEquals("ResourceNotFoundException", noWorkgroup.getErrorCode());
 
         createWorkgroup("restore-wg", "restore-ns");
-        Namespace restored = service.restoreFromSnapshot("restore-ns", "restore-wg", "restore-snap", REGION);
-        assertEquals("AVAILABLE", restored.getStatus());
+        RedshiftServerlessService.RestoreResult restored =
+                service.restoreFromSnapshot("restore-ns", "restore-wg", "restore-snap", REGION);
+        assertEquals("AVAILABLE", restored.namespace().getStatus());
+        assertEquals("restore-snap", restored.snapshot().getSnapshotName());
 
         AwsException noSnapshot = assertThrows(AwsException.class,
                 () -> service.restoreFromSnapshot("restore-ns", "restore-wg", "missing-snap", REGION));
@@ -858,6 +860,30 @@ class RedshiftServerlessServiceTest {
                     () -> service.snapshotNameFromArn(foreign, REGION));
             assertEquals("ValidationException", rejected.getErrorCode());
         }
+    }
+
+    @Test
+    void restoreWithoutANamespaceNameIsAValidationError() {
+        create("nullns-ns");
+        service.createSnapshot("nullns-snap", "nullns-ns", REGION);
+        createWorkgroup("nullns-wg", "nullns-ns");
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot(null, "nullns-wg", "nullns-snap", REGION));
+        assertEquals("ValidationException", missing.getErrorCode());
+    }
+
+    @Test
+    void snapshotNamesAreValidated() {
+        create("names-ns");
+        for (String bad : new String[] {null, "", "ab", "has/slash", "has::colons", "UPPER"}) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.createSnapshot(bad, "names-ns", REGION));
+            assertEquals("ValidationException", rejected.getErrorCode());
+        }
+        AwsException missing = assertThrows(AwsException.class, () -> service.getSnapshot(null, REGION));
+        assertEquals("ValidationException", missing.getErrorCode());
+        assertThrows(AwsException.class, () -> service.deleteSnapshot(null, REGION));
     }
 
     @Test

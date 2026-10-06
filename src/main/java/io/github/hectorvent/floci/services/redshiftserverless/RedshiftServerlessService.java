@@ -88,6 +88,7 @@ public class RedshiftServerlessService implements Resettable {
     public static final int MIN_CREDENTIAL_DURATION_SECONDS = 900;
     public static final int MAX_CREDENTIAL_DURATION_SECONDS = 3600;
 
+    private static final Pattern SNAPSHOT_NAME = Pattern.compile("[a-z0-9-]+");
     private static final Pattern WORKGROUP_NAME = Pattern.compile("[a-z0-9-]+");
     private static final Pattern TRACK_NAME = Pattern.compile("[a-zA-Z0-9_]+");
     private static final Set<String> IP_ADDRESS_TYPES = Set.of("ipv4", "dualstack");
@@ -344,9 +345,7 @@ public class RedshiftServerlessService implements Resettable {
      */
     public synchronized RedshiftServerlessSnapshot createSnapshot(String snapshotName, String namespaceName,
                                                                   String region) {
-        if (snapshotName == null || snapshotName.isBlank()) {
-            throw validation("snapshotName is required.");
-        }
+        validateSnapshotName(snapshotName);
         Namespace namespace = getNamespace(namespaceName, region);
         String key = storageKey(region, snapshotName);
         if (snapshots.get(key).isPresent()) {
@@ -368,6 +367,7 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     public RedshiftServerlessSnapshot getSnapshot(String snapshotName, String region) {
+        requireSnapshotName(snapshotName);
         return snapshots.get(storageKey(region, snapshotName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The snapshot " + snapshotName + " was not found.", 404));
@@ -407,9 +407,10 @@ public class RedshiftServerlessService implements Resettable {
      * only, so the restore validates its inputs and reports the namespace {@code AVAILABLE}
      * without rewinding the workgroup's database contents.
      */
-    public synchronized Namespace restoreFromSnapshot(String namespaceName, String workgroupName,
-                                                      String snapshotName, String region) {
-        getSnapshot(snapshotName, region);
+    public synchronized RestoreResult restoreFromSnapshot(String namespaceName, String workgroupName,
+                                                          String snapshotName, String region) {
+        validateNamespaceName(namespaceName);
+        RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
         Workgroup workgroup = getWorkgroup(workgroupName, region);
         if (!namespaceName.equals(workgroup.getNamespaceName())) {
             throw validation("The workgroup " + workgroupName + " does not belong to the namespace "
@@ -418,8 +419,10 @@ public class RedshiftServerlessService implements Resettable {
         Namespace restored = new Namespace(getNamespace(namespaceName, region));
         restored.setStatus("AVAILABLE");
         namespaces.put(storageKey(region, namespaceName), restored);
-        return restored;
+        return new RestoreResult(restored, snapshot);
     }
+
+    public record RestoreResult(Namespace namespace, RedshiftServerlessSnapshot snapshot) {}
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
         requireResourceArn(resourceArn);
@@ -754,6 +757,19 @@ public class RedshiftServerlessService implements Resettable {
         namespaces.clear();
         workgroups.clear();
         snapshots.clear();
+    }
+
+    private static void requireSnapshotName(String snapshotName) {
+        if (snapshotName == null || snapshotName.isBlank()) {
+            throw validation("snapshotName is required.");
+        }
+    }
+
+    private static void validateSnapshotName(String snapshotName) {
+        requireSnapshotName(snapshotName);
+        if (snapshotName.length() < 3 || snapshotName.length() > 255 || !SNAPSHOT_NAME.matcher(snapshotName).matches()) {
+            throw validation("snapshotName must be 3-255 characters of lowercase letters, numbers, and hyphens.");
+        }
     }
 
     private static void validateNamespaceName(String namespaceName) {

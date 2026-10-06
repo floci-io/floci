@@ -215,11 +215,7 @@ public class RedshiftServerlessJsonHandler {
      * and Region.
      */
     private Response handleGetSnapshot(JsonNode request, String region) {
-        String snapshotName = text(request, "snapshotName");
-        if (snapshotName == null) {
-            snapshotName = service.snapshotNameFromArn(text(request, "snapshotArn"), region);
-        }
-        return snapshotResponse(service.getSnapshot(snapshotName, region));
+        return snapshotResponse(service.getSnapshot(snapshotNameOf(request, region), region));
     }
 
     private Response handleListSnapshots(JsonNode request, String region) {
@@ -239,14 +235,24 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleRestoreFromSnapshot(JsonNode request, String region) {
-        String snapshotName = text(request, "snapshotName");
-        Namespace namespace = service.restoreFromSnapshot(
-                text(request, "namespaceName"), text(request, "workgroupName"), snapshotName, region);
+        RedshiftServerlessService.RestoreResult result = service.restoreFromSnapshot(
+                text(request, "namespaceName"), text(request, "workgroupName"),
+                snapshotNameOf(request, region), region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("namespace", namespaceNode(namespace));
-        response.put("ownerAccount", service.getSnapshot(snapshotName, region).getOwnerAccount());
-        response.put("snapshotName", snapshotName);
+        response.set("namespace", namespaceNode(result.namespace()));
+        response.put("ownerAccount", result.snapshot().getOwnerAccount());
+        response.put("snapshotName", result.snapshot().getSnapshotName());
         return Response.ok(response).build();
+    }
+
+    /** The snapshot name from {@code snapshotName}, or recovered from {@code snapshotArn} when absent. */
+    private String snapshotNameOf(JsonNode request, String region) {
+        String snapshotName = text(request, "snapshotName");
+        if (snapshotName != null) {
+            return snapshotName;
+        }
+        String snapshotArn = text(request, "snapshotArn");
+        return snapshotArn == null ? null : service.snapshotNameFromArn(snapshotArn, region);
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {

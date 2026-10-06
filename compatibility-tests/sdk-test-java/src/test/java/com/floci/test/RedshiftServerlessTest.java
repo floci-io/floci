@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.redshiftserverless.model.ConflictExceptio
 import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
 import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.redshiftserverless.model.Snapshot;
 import software.amazon.awssdk.services.redshiftserverless.model.Tag;
 import software.amazon.awssdk.services.redshiftserverless.model.Workgroup;
 import software.amazon.awssdk.services.redshiftserverless.model.WorkgroupStatus;
@@ -158,6 +159,45 @@ class RedshiftServerlessTest {
 
             assertThatThrownBy(() -> client.getWorkgroup(request -> request.workgroupName(workgroupName)))
                     .isInstanceOf(ResourceNotFoundException.class);
+        }
+    }
+
+    @Test
+    void snapshotLifecycleUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Creates snapshots instantly and asserts emulator-local behavior");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-snap-ns";
+            String workgroupName = "floci-compat-snap-wg";
+            String snapshotName = "floci-compat-snap";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin")
+                        .adminUserPassword("Secret123!"));
+                client.createWorkgroup(request -> request.workgroupName(workgroupName).namespaceName(namespaceName));
+
+                Snapshot created = client.createSnapshot(request -> request
+                        .snapshotName(snapshotName).namespaceName(namespaceName)).snapshot();
+                assertThat(created.snapshotName()).isEqualTo(snapshotName);
+                assertThat(created.status().toString()).isEqualTo("AVAILABLE");
+                assertThat(created.snapshotCreateTime()).isNotNull();
+
+                assertThat(client.getSnapshot(request -> request.snapshotArn(created.snapshotArn())).snapshot()
+                        .snapshotName()).isEqualTo(snapshotName);
+                assertThat(client.listSnapshots(request -> request.namespaceName(namespaceName)).snapshots())
+                        .extracting(Snapshot::snapshotName)
+                        .containsExactly(snapshotName);
+
+                assertThat(client.restoreFromSnapshot(request -> request
+                        .namespaceName(namespaceName).workgroupName(workgroupName).snapshotName(snapshotName))
+                        .snapshotName()).isEqualTo(snapshotName);
+
+                client.deleteSnapshot(request -> request.snapshotName(snapshotName));
+                assertThatThrownBy(() -> client.getSnapshot(request -> request.snapshotName(snapshotName)))
+                        .isInstanceOf(ResourceNotFoundException.class);
+            } finally {
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
         }
     }
 
