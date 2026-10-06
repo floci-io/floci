@@ -180,7 +180,8 @@ class CloudFormationStackIdTest {
                 if ("DELETE_FAILED".equals(stack.stackStatusAsString())) {
                     throw new AssertionError(stackName + " deletion failed: " + stack.stackStatusReason());
                 }
-                return "DELETE_COMPLETE".equals(stack.stackStatusAsString());
+                // The name is free only once DescribeStacks no longer finds it.
+                return false;
             } catch (CloudFormationException e) {
                 if ("ValidationError".equals(e.awsErrorDetails().errorCode())
                         && e.getMessage().contains("does not exist")) {
