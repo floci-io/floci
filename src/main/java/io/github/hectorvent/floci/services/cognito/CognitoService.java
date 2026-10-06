@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -3330,31 +3332,29 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
-    /** ListWebAuthnCredentials: the access token's user's passkeys, a page of at most 20 at a time. */
+    /**
+     * ListWebAuthnCredentials: the access token's user's passkeys, oldest first, a page of at most 20 at
+     * a time. {@code NextToken} is a cursor on the last passkey listed, so deleting a passkey between two
+     * pages does not shift the next page past one.
+     */
     public Map<String, Object> listWebAuthnCredentials(String accessToken, Integer maxResults, String nextToken) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         if (maxResults != null && (maxResults < 0 || maxResults > CognitoWebAuthn.MAX_CREDENTIALS_PER_USER)) {
+            String constraint = maxResults < 0
+                    ? "greater than or equal to 0"
+                    : "less than or equal to " + CognitoWebAuthn.MAX_CREDENTIALS_PER_USER;
             throw new AwsException("InvalidParameterException",
                     "1 validation error detected: Value '" + maxResults + "' at 'maxResults' failed to satisfy "
-                            + "constraint: Member must have value less than or equal to 20", 400);
+                            + "constraint: Member must have value " + constraint, 400);
         }
         int pageSize = maxResults == null || maxResults == 0 ? CognitoWebAuthn.MAX_CREDENTIALS_PER_USER : maxResults;
-        int start = 0;
-        if (nextToken != null) {
-            try {
-                start = Integer.parseInt(new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8));
-            } catch (IllegalArgumentException e) {
-                throw new AwsException("InvalidParameterException", "Invalid NextToken", 400);
-            }
-        }
         List<WebAuthnCredential> credentials = adminGetUser(token.poolId(), token.username()).getWebAuthnCredentials();
-        if (start < 0 || start > credentials.size()) {
-            throw new AwsException("InvalidParameterException", "Invalid NextToken", 400);
-        }
-        int end = Math.min(credentials.size(), start + pageSize);
+        PaginatedResult<WebAuthnCredential> listed = Pagination.paginate(credentials,
+                CognitoService::webAuthnCredentialCursor, pageSize, nextToken, "ListWebAuthnCredentials",
+                invalid -> new AwsException("InvalidParameterException", "Invalid NextToken", 400));
         List<Map<String, Object>> page = new ArrayList<>();
-        for (WebAuthnCredential credential : credentials.subList(start, end)) {
+        for (WebAuthnCredential credential : listed.items()) {
             Map<String, Object> description = new LinkedHashMap<>();
             if (credential.getAuthenticatorAttachment() != null) {
                 description.put("AuthenticatorAttachment", credential.getAuthenticatorAttachment());
@@ -3368,11 +3368,15 @@ public class CognitoService implements ResourceProvider {
         }
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("Credentials", page);
-        if (end < credentials.size()) {
-            response.put("NextToken", Base64.getUrlEncoder().withoutPadding()
-                    .encodeToString(Integer.toString(end).getBytes(StandardCharsets.UTF_8)));
+        if (listed.nextToken() != null) {
+            response.put("NextToken", listed.nextToken());
         }
         return response;
+    }
+
+    /** Orders passkeys by registration time, the credential ID telling apart two registered in one millisecond. */
+    private static String webAuthnCredentialCursor(WebAuthnCredential credential) {
+        return String.format(Locale.ROOT, "%019d/%s", credential.getCreatedAtMillis(), credential.getCredentialId());
     }
 
     /** DeleteWebAuthnCredential: removes one of the access token's user's passkeys. */
@@ -3440,16 +3444,17 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * The user verification a passkey sign-in needs: the pool's setting, and always where MFA is
-     * required, since there the passkey must stand in for MFA and only a user-verified one does.
+     * The user verification a passkey sign-in by {@code user} needs: the pool's setting, and always for
+     * a user whose passkey stands in for MFA, since AWS asks a user who turned passkey MFA on to verify
+     * themselves and only a user-verified passkey satisfies MFA.
      */
-    private static String webAuthnSignInUserVerification(UserPool pool) {
-        return "ON".equals(pool.getMfaConfiguration()) ? "required" : webAuthnUserVerification(pool);
+    private static String webAuthnSignInUserVerification(UserPool pool, CognitoUser user) {
+        return CognitoAuthFlowHandler.passkeySatisfiesMfa(pool, user) ? "required" : webAuthnUserVerification(pool);
     }
 
     /** The {@code CREDENTIAL_REQUEST_OPTIONS} of a {@code WEB_AUTHN} challenge for {@code user}. */
     String webAuthnRequestOptions(UserPool pool, CognitoUser user, byte[] challenge, long timeoutMillis) {
-        return webAuthn.requestOptions(webAuthnRelyingPartyId(pool), webAuthnSignInUserVerification(pool),
+        return webAuthn.requestOptions(webAuthnRelyingPartyId(pool), webAuthnSignInUserVerification(pool, user),
                 user.getWebAuthnCredentials(), challenge, timeoutMillis);
     }
 
@@ -3464,10 +3469,10 @@ public class CognitoService implements ResourceProvider {
      */
     boolean verifyWebAuthnSignIn(UserPool pool, String username, byte[] challenge, String credentialJson) {
         String relyingPartyId = webAuthnRelyingPartyId(pool);
-        boolean userVerificationRequired = "required".equals(webAuthnSignInUserVerification(pool));
         CognitoUser resolved = adminGetUser(pool.getId(), username);
         synchronized (userLock(pool.getId(), resolved.getUsername())) {
             CognitoUser user = adminGetUser(pool.getId(), resolved.getUsername());
+            boolean userVerificationRequired = "required".equals(webAuthnSignInUserVerification(pool, user));
             CognitoWebAuthn.Assertion assertion = webAuthn.verifyAssertion(relyingPartyId, userVerificationRequired,
                     challenge, user.getWebAuthnCredentials(), credentialJson);
             WebAuthnCredential credential = assertion.credential();
@@ -5662,12 +5667,13 @@ public class CognitoService implements ResourceProvider {
             String userPoolId,
             String username,
             Boolean emailEnabled,
-            Boolean emailPreferred) {
+            Boolean emailPreferred,
+            Boolean webAuthnMfaEnabled) {
 
         CognitoUser resolvedUser = adminGetUser(userPoolId, username);
         synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
             adminSetUserMFAPreferenceUnderUserLock(
-                    userPoolId, resolvedUser.getUsername(), emailEnabled, emailPreferred);
+                    userPoolId, resolvedUser.getUsername(), emailEnabled, emailPreferred, webAuthnMfaEnabled);
         }
     }
 
@@ -5675,11 +5681,16 @@ public class CognitoService implements ResourceProvider {
             String userPoolId,
             String username,
             Boolean emailEnabled,
-            Boolean emailPreferred) {
+            Boolean emailPreferred,
+            Boolean webAuthnMfaEnabled) {
 
         CognitoUser user = adminGetUser(userPoolId, username);
+        requirePasskeyMfaAvailable(describeUserPool(userPoolId), webAuthnMfaEnabled);
 
         updateEmailMfaPreference(user, emailEnabled, emailPreferred);
+        if (webAuthnMfaEnabled != null) {
+            user.setWebAuthnMfaEnabled(webAuthnMfaEnabled);
+        }
 
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
 
@@ -5689,13 +5700,14 @@ public class CognitoService implements ResourceProvider {
     public void setUserMFAPreference(
             String accessToken,
             Boolean emailEnabled,
-            Boolean emailPreferred) {
+            Boolean emailPreferred,
+            Boolean webAuthnMfaEnabled) {
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         synchronized (userLock(token.poolId(), token.username())) {
             setUserMFAPreferenceUnderUserLock(
-                    token.poolId(), token.username(), emailEnabled, emailPreferred);
+                    token.poolId(), token.username(), emailEnabled, emailPreferred, webAuthnMfaEnabled);
         }
     }
 
@@ -5703,15 +5715,33 @@ public class CognitoService implements ResourceProvider {
             String poolId,
             String username,
             Boolean emailEnabled,
-            Boolean emailPreferred) {
+            Boolean emailPreferred,
+            Boolean webAuthnMfaEnabled) {
 
         CognitoUser user = adminGetUser(poolId, username);
+        requirePasskeyMfaAvailable(describeUserPool(poolId), webAuthnMfaEnabled);
 
         updateEmailMfaPreference(user, emailEnabled, emailPreferred);
+        if (webAuthnMfaEnabled != null) {
+            user.setWebAuthnMfaEnabled(webAuthnMfaEnabled);
+        }
 
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
 
         userStore.put(userKey(poolId, user.getUsername()), user);
+    }
+
+    /**
+     * A user can turn passkey MFA on only where the pool's {@code WebAuthnConfiguration} lets a passkey
+     * stand in for MFA ({@code FactorConfiguration} {@code MULTI_FACTOR_WITH_USER_VERIFICATION}), as the
+     * SetUserMFAPreference reference requires. Turning it off is always accepted.
+     */
+    private static void requirePasskeyMfaAvailable(UserPool pool, Boolean webAuthnMfaEnabled) {
+        if (Boolean.TRUE.equals(webAuthnMfaEnabled) && !CognitoAuthFlowHandler.passkeyMfaAllowed(pool)) {
+            throw new AwsException("InvalidParameterException",
+                    "Passkey MFA cannot be enabled because the user pool's WebAuthnConfiguration "
+                            + "FactorConfiguration is not MULTI_FACTOR_WITH_USER_VERIFICATION.", 400);
+        }
     }
 
     private void updateEmailMfaPreference(

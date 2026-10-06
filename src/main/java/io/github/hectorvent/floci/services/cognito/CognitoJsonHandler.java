@@ -1551,7 +1551,8 @@ public class CognitoJsonHandler {
                 userPoolId,
                 username,
                 enabled,
-                preferredMfa
+                preferredMfa,
+                webAuthnMfaEnabled(request)
         );
 
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -1571,10 +1572,17 @@ public class CognitoJsonHandler {
         service.setUserMFAPreference(
                 request.path("AccessToken").asText(),
                 enabled,
-                preferredMfa
+                preferredMfa,
+                webAuthnMfaEnabled(request)
         );
 
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** {@code WebAuthnMfaSettings.Enabled}, or null when the request leaves passkey MFA as it is. */
+    private static Boolean webAuthnMfaEnabled(JsonNode request) {
+        JsonNode settings = request.path("WebAuthnMfaSettings");
+        return settings.has("Enabled") ? settings.path("Enabled").asBoolean() : null;
     }
 
     private Response handleStartWebAuthnRegistration(JsonNode request) {

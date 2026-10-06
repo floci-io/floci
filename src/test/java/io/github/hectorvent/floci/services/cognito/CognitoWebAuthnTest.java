@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -276,16 +277,26 @@ class CognitoWebAuthnTest {
     }
 
     @Test
-    void requiredMfaOffersPasskeysOnlyWhenTheyCountAsMfa() throws Exception {
+    void requiredMfaOffersPasskeysOnlyToUsersWhoTurnedPasskeyMfaOn() throws Exception {
         String accessToken = accessToken();
         WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN);
         service.completeWebAuthnRegistration(accessToken, authenticator.register(creationOptions(accessToken), "none"));
 
         service.setUserPoolMfaConfig(pool.getId(), "ON", true, false, null);
         assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), userAuth(null).get("AvailableChallenges"));
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> service.setUserMFAPreference(accessToken, null, null, true)).getErrorCode(),
+                "passkey MFA needs a pool whose passkeys can satisfy MFA");
+        assertFalse(service.adminGetUser(pool.getId(), USERNAME).isWebAuthnMfaEnabled());
 
         service.setUserPoolMfaConfig(pool.getId(), "ON", true, false,
                 webAuthnConfiguration(RP_ID, "preferred", "MULTI_FACTOR_WITH_USER_VERIFICATION"));
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), userAuth(null).get("AvailableChallenges"),
+                "the pool's FactorConfiguration alone does not let a passkey skip MFA");
+        assertEquals("SELECT_CHALLENGE", userAuth("WEB_AUTHN").get("ChallengeName"));
+
+        service.setUserMFAPreference(accessToken, null, null, true);
+        assertTrue(service.adminGetUser(pool.getId(), USERNAME).isWebAuthnMfaEnabled());
         Map<String, Object> unverified = userAuth("WEB_AUTHN");
         String requestOptions = challengeParameters(unverified).get("CREDENTIAL_REQUEST_OPTIONS");
         assertEquals("required", JSON.readTree(requestOptions).path("userVerification").asText(),
@@ -304,6 +315,56 @@ class CognitoWebAuthnTest {
                 (String) challenge.get("Session"), Map.of("USERNAME", USERNAME, "CREDENTIAL", credential));
         assertNotNull(signedIn.get("AuthenticationResult"), "a verified passkey satisfies required MFA");
         assertNull(signedIn.get("ChallengeName"));
+
+        service.adminSetUserMFAPreference(pool.getId(), USERNAME, null, null, false);
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), userAuth(null).get("AvailableChallenges"));
+    }
+
+    @Test
+    void passkeyMfaTurnedOffMidSignInLeavesMfaToBeDone() throws Exception {
+        String accessToken = accessToken();
+        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN);
+        service.completeWebAuthnRegistration(accessToken, authenticator.register(creationOptions(accessToken), "none"));
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false,
+                webAuthnConfiguration(RP_ID, "preferred", "MULTI_FACTOR_WITH_USER_VERIFICATION"));
+        service.setUserMFAPreference(accessToken, null, null, true);
+
+        Map<String, Object> challenge = userAuth("WEB_AUTHN");
+        assertEquals("WEB_AUTHN", challenge.get("ChallengeName"));
+        String credential = authenticator.authenticate(challengeParameters(challenge).get("CREDENTIAL_REQUEST_OPTIONS"));
+        service.adminSetUserMFAPreference(pool.getId(), USERNAME, null, null, false);
+
+        Map<String, Object> answered = service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
+                (String) challenge.get("Session"), Map.of("USERNAME", USERNAME, "CREDENTIAL", credential));
+        assertNull(answered.get("AuthenticationResult"), "the passkey no longer stands in for MFA");
+        assertEquals("MFA_SETUP", answered.get("ChallengeName"));
+    }
+
+    @Test
+    void optionalMfaAsksForUserVerificationOnlyFromUsersWithPasskeyMfa() throws Exception {
+        String accessToken = accessToken();
+        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN).userVerified(false);
+        service.completeWebAuthnRegistration(accessToken, authenticator.register(creationOptions(accessToken), "none"));
+        service.setUserPoolMfaConfig(pool.getId(), "OPTIONAL", true, false,
+                webAuthnConfiguration(RP_ID, "preferred", "MULTI_FACTOR_WITH_USER_VERIFICATION"));
+
+        Map<String, Object> challenge = userAuth("WEB_AUTHN");
+        String requestOptions = challengeParameters(challenge).get("CREDENTIAL_REQUEST_OPTIONS");
+        assertEquals("preferred", JSON.readTree(requestOptions).path("userVerification").asText());
+        assertNotNull(service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
+                (String) challenge.get("Session"),
+                Map.of("USERNAME", USERNAME, "CREDENTIAL", authenticator.authenticate(requestOptions)))
+                .get("AuthenticationResult"));
+
+        service.setUserMFAPreference(accessToken, null, null, true);
+        Map<String, Object> mfaChallenge = userAuth("WEB_AUTHN");
+        String mfaOptions = challengeParameters(mfaChallenge).get("CREDENTIAL_REQUEST_OPTIONS");
+        assertEquals("required", JSON.readTree(mfaOptions).path("userVerification").asText());
+        String withoutVerification = authenticator.authenticate(mfaOptions);
+        assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                () -> service.respondToAuthChallenge(client.getClientId(), "WEB_AUTHN",
+                        (String) mfaChallenge.get("Session"),
+                        Map.of("USERNAME", USERNAME, "CREDENTIAL", withoutVerification))).getErrorCode());
     }
 
     @Test
@@ -325,6 +386,42 @@ class CognitoWebAuthnTest {
     }
 
     @Test
+    void pagesListPasskeysOldestFirstAndSkipNoneWhenOneIsDeleted() throws Exception {
+        String accessToken = accessToken();
+        List<String> registered = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN);
+            service.completeWebAuthnRegistration(accessToken, authenticator.register(creationOptions(accessToken),
+                    "none"));
+            registered.add(authenticator.credentialId());
+            clock.advance(Duration.ofMillis(1));
+        }
+
+        Map<String, Object> firstPage = service.listWebAuthnCredentials(accessToken, 1, null);
+        assertEquals(List.of(registered.get(0)), credentialIds(firstPage));
+        service.deleteWebAuthnCredential(accessToken, registered.get(0));
+        Map<String, Object> secondPage = service.listWebAuthnCredentials(accessToken, 1,
+                (String) firstPage.get("NextToken"));
+        assertEquals(List.of(registered.get(1)), credentialIds(secondPage),
+                "deleting a listed passkey does not move the next page past one");
+        Map<String, Object> lastPage = service.listWebAuthnCredentials(accessToken, 1,
+                (String) secondPage.get("NextToken"));
+        assertEquals(List.of(registered.get(2)), credentialIds(lastPage));
+        assertFalse(lastPage.containsKey("NextToken"));
+
+        assertEquals(List.of(registered.get(1), registered.get(2)),
+                credentialIds(service.listWebAuthnCredentials(accessToken, 0, null)));
+        for (String token : List.of("not-a-token!", Base64.getUrlEncoder().encodeToString("ListUsers:x".getBytes()))) {
+            assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                    () -> service.listWebAuthnCredentials(accessToken, null, token)).getErrorCode());
+        }
+        AwsException negative = assertThrows(AwsException.class,
+                () -> service.listWebAuthnCredentials(accessToken, -1, null));
+        assertTrue(negative.getMessage().endsWith("Member must have value greater than or equal to 0"),
+                negative.getMessage());
+    }
+
+    @Test
     void passkeysSurviveUserSerialization() throws Exception {
         String accessToken = accessToken();
         WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256(ORIGIN);
@@ -335,6 +432,12 @@ class CognitoWebAuthnTest {
         assertEquals(authenticator.credentialId(), restored.getWebAuthnCredentials().get(0).getCredentialId());
         assertEquals(service.adminGetUser(pool.getId(), USERNAME).getWebAuthnCredentials().get(0)
                 .getAttestedCredentialData(), restored.getWebAuthnCredentials().get(0).getAttestedCredentialData());
+
+        service.setUserPoolMfaConfig(pool.getId(), "OPTIONAL", true, false,
+                webAuthnConfiguration(RP_ID, null, "MULTI_FACTOR_WITH_USER_VERIFICATION"));
+        service.setUserMFAPreference(accessToken, null, null, true);
+        assertTrue(JSON.readValue(JSON.writeValueAsBytes(service.adminGetUser(pool.getId(), USERNAME)),
+                CognitoUser.class).isWebAuthnMfaEnabled());
     }
 
     private void assertRegistrationFails(String errorCode, String accessToken, WebAuthnTestAuthenticator authenticator)
@@ -343,6 +446,12 @@ class CognitoWebAuthnTest {
         Executable complete = () -> service.completeWebAuthnRegistration(accessToken,
                 authenticator.register(options, "none"));
         assertEquals(errorCode, assertThrows(AwsException.class, complete).getErrorCode());
+    }
+
+    private static List<String> credentialIds(Map<String, Object> page) {
+        return ((List<?>) page.get("Credentials")).stream()
+                .map(description -> (String) ((Map<?, ?>) description).get("CredentialId"))
+                .toList();
     }
 
     private JsonNode creationOptions(String accessToken) {

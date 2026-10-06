@@ -13,11 +13,13 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.ChallengeNa
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ExplicitAuthFlowsType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.GetUserPoolMfaConfigResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InitiateAuthResponse;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.InvalidParameterException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ListWebAuthnCredentialsResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActionType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAuthChallengeResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserPoolMfaType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserVerificationType;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.WebAuthnFactorConfigurationType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.WebAuthnCredentialDescription;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.WebAuthnNotEnabledException;
 
@@ -111,6 +113,76 @@ class CognitoWebAuthnTest {
                 cognito.deleteWebAuthnCredential(b -> b.accessToken(accessToken)
                         .credentialId(rsa.credentialId()));
                 assertThat(cognito.listWebAuthnCredentials(b -> b.accessToken(accessToken)).credentials()).isEmpty();
+            } finally {
+                cognito.deleteUserPool(b -> b.userPoolId(poolId));
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("a passkey stands in for required MFA only for a user who turned WebAuthnMfaSettings on")
+    void sdkTurnsPasskeyMfaOnPerUser() throws Exception {
+        try (CognitoIdentityProviderClient cognito = TestFixtures.cognitoClient()) {
+            String poolId = cognito.createUserPool(b -> b.poolName("passkey-mfa-sdk-" + UUID.randomUUID())
+                    .policies(p -> p.signInPolicy(s -> s.allowedFirstAuthFactorsWithStrings("PASSWORD", "WEB_AUTHN"))))
+                    .userPool().id();
+            try {
+                cognito.setUserPoolMfaConfig(b -> b.userPoolId(poolId).mfaConfiguration(UserPoolMfaType.OFF)
+                        .webAuthnConfiguration(w -> w.relyingPartyId("localhost")));
+                String clientId = cognito.createUserPoolClient(b -> b.userPoolId(poolId)
+                        .clientName("passkey-mfa-sdk-client")
+                        .explicitAuthFlows(ExplicitAuthFlowsType.ALLOW_USER_PASSWORD_AUTH,
+                                ExplicitAuthFlowsType.ALLOW_USER_AUTH))
+                        .userPoolClient().clientId();
+                cognito.adminCreateUser(b -> b.userPoolId(poolId).username(USERNAME)
+                        .messageAction(MessageActionType.SUPPRESS));
+                cognito.adminSetUserPassword(b -> b.userPoolId(poolId).username(USERNAME)
+                        .password(PASSWORD).permanent(true));
+                String accessToken = cognito.initiateAuth(b -> b.clientId(clientId)
+                        .authFlow(AuthFlowType.USER_PASSWORD_AUTH)
+                        .authParameters(Map.of("USERNAME", USERNAME, "PASSWORD", PASSWORD)))
+                        .authenticationResult().accessToken();
+                WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256("http://localhost:5173");
+                JsonNode creationOptions = toJson(cognito.startWebAuthnRegistration(b -> b.accessToken(accessToken))
+                        .credentialCreationOptions());
+                Document credential = toDocument(authenticator.register(creationOptions, "none"));
+                cognito.completeWebAuthnRegistration(b -> b.accessToken(accessToken).credential(credential));
+
+                assertThatThrownBy(() -> cognito.setUserMFAPreference(b -> b.accessToken(accessToken)
+                        .webAuthnMfaSettings(w -> w.enabled(true))))
+                        .isInstanceOf(InvalidParameterException.class);
+
+                cognito.setUserPoolMfaConfig(b -> b.userPoolId(poolId).mfaConfiguration(UserPoolMfaType.ON)
+                        .softwareTokenMfaConfiguration(t -> t.enabled(true))
+                        .webAuthnConfiguration(w -> w.relyingPartyId("localhost")
+                                .factorConfiguration(WebAuthnFactorConfigurationType.MULTI_FACTOR_WITH_USER_VERIFICATION)));
+                InitiateAuthResponse withoutOptIn = cognito.initiateAuth(b -> b.clientId(clientId)
+                        .authFlow(AuthFlowType.USER_AUTH)
+                        .authParameters(Map.of("USERNAME", USERNAME)));
+                assertThat(withoutOptIn.challengeName()).isEqualTo(ChallengeNameType.SELECT_CHALLENGE);
+                assertThat(withoutOptIn.availableChallengesAsStrings()).containsExactly("PASSWORD", "PASSWORD_SRP");
+
+                cognito.setUserMFAPreference(b -> b.accessToken(accessToken)
+                        .webAuthnMfaSettings(w -> w.enabled(true)));
+                InitiateAuthResponse challenge = cognito.initiateAuth(b -> b.clientId(clientId)
+                        .authFlow(AuthFlowType.USER_AUTH)
+                        .authParameters(Map.of("USERNAME", USERNAME, "PREFERRED_CHALLENGE", "WEB_AUTHN")));
+                assertThat(challenge.challengeName()).isEqualTo(ChallengeNameType.WEB_AUTHN);
+                String requestOptions = challenge.challengeParameters().get("CREDENTIAL_REQUEST_OPTIONS");
+                assertThat(JSON.readTree(requestOptions).path("userVerification").asText()).isEqualTo("required");
+                String assertion = authenticator.authenticate(requestOptions);
+                RespondToAuthChallengeResponse signedIn = cognito.respondToAuthChallenge(b -> b.clientId(clientId)
+                        .challengeName(ChallengeNameType.WEB_AUTHN)
+                        .session(challenge.session())
+                        .challengeResponses(Map.of("USERNAME", USERNAME, "CREDENTIAL", assertion)));
+                assertThat(signedIn.authenticationResult().accessToken()).isNotBlank();
+
+                cognito.adminSetUserMFAPreference(b -> b.userPoolId(poolId).username(USERNAME)
+                        .webAuthnMfaSettings(w -> w.enabled(false)));
+                assertThat(cognito.initiateAuth(b -> b.clientId(clientId)
+                        .authFlow(AuthFlowType.USER_AUTH)
+                        .authParameters(Map.of("USERNAME", USERNAME))).availableChallengesAsStrings())
+                        .containsExactly("PASSWORD", "PASSWORD_SRP");
             } finally {
                 cognito.deleteUserPool(b -> b.userPoolId(poolId));
             }

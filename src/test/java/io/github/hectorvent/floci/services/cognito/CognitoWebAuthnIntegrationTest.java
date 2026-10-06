@@ -130,6 +130,91 @@ class CognitoWebAuthnIntegrationTest {
     }
 
     @Test
+    void passkeyMfaIsTurnedOnPerUserWithWebAuthnMfaSettings() throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+                {"PoolName":"PasskeyMfaPool","UserPoolTier":"ESSENTIALS",
+                 "Policies":{"SignInPolicy":{"AllowedFirstAuthFactors":["PASSWORD","WEB_AUTHN"]}}}
+                """).path("UserPool").path("Id").asText();
+        cognitoJson("SetUserPoolMfaConfig", """
+                {"UserPoolId":"%s","MfaConfiguration":"OFF",
+                 "WebAuthnConfiguration":{"RelyingPartyId":"localhost"}}
+                """.formatted(poolId));
+        String clientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId":"%s","ClientName":"passkey-mfa-client",
+                 "ExplicitAuthFlows":["ALLOW_USER_PASSWORD_AUTH","ALLOW_USER_AUTH"]}
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+        String username = "passkey-mfa-" + UUID.randomUUID();
+        cognitoJson("AdminCreateUser", """
+                {"UserPoolId":"%s","Username":"%s","MessageAction":"SUPPRESS"}
+                """.formatted(poolId, username));
+        cognitoJson("AdminSetUserPassword", """
+                {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
+                """.formatted(poolId, username, PASSWORD));
+        String accessToken = cognitoJson("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s"}}
+                """.formatted(clientId, username, PASSWORD)).path("AuthenticationResult").path("AccessToken").asText();
+        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256("http://localhost:5173");
+        ObjectNode complete = JSON.createObjectNode();
+        complete.put("AccessToken", accessToken);
+        complete.set("Credential", authenticator.register(cognitoJson("StartWebAuthnRegistration", """
+                {"AccessToken":"%s"}
+                """.formatted(accessToken)).path("CredentialCreationOptions"), "none"));
+        cognitoAction("CompleteWebAuthnRegistration", complete.toString()).then().statusCode(200);
+
+        String turnOn = """
+                {"AccessToken":"%s","WebAuthnMfaSettings":{"Enabled":true}}
+                """.formatted(accessToken);
+        cognitoAction("SetUserMFAPreference", turnOn)
+                .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
+
+        cognitoJson("SetUserPoolMfaConfig", """
+                {"UserPoolId":"%s","MfaConfiguration":"ON",
+                 "SoftwareTokenMfaConfiguration":{"Enabled":true},
+                 "WebAuthnConfiguration":{"RelyingPartyId":"localhost",
+                   "FactorConfiguration":"MULTI_FACTOR_WITH_USER_VERIFICATION"}}
+                """.formatted(poolId));
+        String userAuth = """
+                {"ClientId":"%s","AuthFlow":"USER_AUTH","AuthParameters":{"USERNAME":"%s"}}
+                """.formatted(clientId, username);
+        cognitoAction("InitiateAuth", userAuth)
+                .then().statusCode(200)
+                .body("ChallengeName", equalTo("SELECT_CHALLENGE"))
+                .body("AvailableChallenges", contains("PASSWORD", "PASSWORD_SRP"));
+
+        cognitoAction("SetUserMFAPreference", turnOn).then().statusCode(200);
+        JsonNode challenge = cognitoJson("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"USER_AUTH",
+                 "AuthParameters":{"USERNAME":"%s","PREFERRED_CHALLENGE":"WEB_AUTHN"}}
+                """.formatted(clientId, username));
+        assertEquals("WEB_AUTHN", challenge.path("ChallengeName").asText());
+        String requestOptions = challenge.path("ChallengeParameters").path("CREDENTIAL_REQUEST_OPTIONS").asText();
+        assertEquals("required", JSON.readTree(requestOptions).path("userVerification").asText());
+        ObjectNode respond = JSON.createObjectNode();
+        respond.put("ClientId", clientId);
+        respond.put("ChallengeName", "WEB_AUTHN");
+        respond.put("Session", challenge.path("Session").asText());
+        respond.putObject("ChallengeResponses")
+                .put("USERNAME", username)
+                .put("CREDENTIAL", authenticator.authenticate(requestOptions));
+        JsonNode signedIn = cognitoJson("RespondToAuthChallenge", respond.toString());
+        assertFalse(signedIn.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+
+        cognitoAction("AdminSetUserMFAPreference", """
+                {"UserPoolId":"%s","Username":"%s","WebAuthnMfaSettings":{"Enabled":false}}
+                """.formatted(poolId, username))
+                .then().statusCode(200);
+        cognitoAction("InitiateAuth", userAuth)
+                .then().statusCode(200)
+                .body("AvailableChallenges", contains("PASSWORD", "PASSWORD_SRP"));
+
+        cognitoAction("ListWebAuthnCredentials", """
+                {"AccessToken":"%s","NextToken":"bm90LWEtY3Vyc29y"}
+                """.formatted(accessToken))
+                .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
+    }
+
+    @Test
     void passkeyActionsNeedPasskeysEnabledOnThePool() throws Exception {
         String poolId = cognitoJson("CreateUserPool", """
                 {"PoolName":"PasswordOnlyPool"}

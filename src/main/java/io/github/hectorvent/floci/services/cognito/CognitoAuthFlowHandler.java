@@ -1033,8 +1033,9 @@ final class CognitoAuthFlowHandler {
     /**
      * Answers a {@code WEB_AUTHN} challenge: {@code CREDENTIAL} is the {@code AuthenticationResponseJSON}
      * signed over the session's challenge by one of the user's passkeys. A passkey that verified the user
-     * satisfies MFA in a pool whose {@code WebAuthnConfiguration.FactorConfiguration} is
-     * {@code MULTI_FACTOR_WITH_USER_VERIFICATION}; otherwise the pool's MFA rules apply as after a password.
+     * satisfies MFA for a user who turned passkey MFA on, in a pool whose
+     * {@code WebAuthnConfiguration.FactorConfiguration} is {@code MULTI_FACTOR_WITH_USER_VERIFICATION};
+     * otherwise the pool's MFA rules apply as after a password.
      */
     private Map<String, Object> handleWebAuthnChallengeResponse(UserPool pool, UserPoolClient client, String session,
                                                                 Map<String, String> responses,
@@ -1052,19 +1053,29 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         requireSignInEligible(user);
-        // Where MFA is required, the passkey stands in for it, so its assertion must verify the user.
+        // For a user whose passkey stands in for MFA, the assertion must verify the user.
         boolean userVerified = service.verifyWebAuthnSignIn(pool, user.getUsername(), state.webAuthnChallenge(),
                 credential);
         user = service.adminGetUser(pool.getId(), user.getUsername());
-        if (userVerified && passkeySatisfiesMfa(pool)) {
+        if (userVerified && passkeySatisfiesMfa(pool, user)) {
             return authenticationResult(pool, client, user, "TokenGeneration_Authentication", clientMetadata);
         }
         return completePrimaryAuth(pool, client, user, "TokenGeneration_Authentication", clientMetadata);
     }
 
-    private static boolean passkeySatisfiesMfa(UserPool pool) {
+    /** Whether the pool lets a passkey that verified the user stand in for MFA. */
+    static boolean passkeyMfaAllowed(UserPool pool) {
         return pool.getWebAuthnConfiguration() != null
                 && "MULTI_FACTOR_WITH_USER_VERIFICATION".equals(pool.getWebAuthnConfiguration().getFactorConfiguration());
+    }
+
+    /**
+     * Whether a user-verified passkey sign-in satisfies MFA for {@code user}. AWS needs both the pool's
+     * {@code FactorConfiguration} and the user's own {@code WebAuthnMfaSettings}: the pool only makes
+     * passkey MFA possible, and each user opts in.
+     */
+    static boolean passkeySatisfiesMfa(UserPool pool, CognitoUser user) {
+        return passkeyMfaAllowed(pool) && user.isWebAuthnMfaEnabled();
     }
 
     private Map<String, Object> handleOtpChallengeResponse(UserPool pool, UserPoolClient client, String challengeName,
@@ -1253,8 +1264,8 @@ final class CognitoAuthFlowHandler {
         List<String> available = availableUserAuthChallenges(user);
         List<String> allowed = allowedFirstAuthFactors(pool);
         available.removeIf(challenge -> !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
-        // Where MFA is required, a passkey is a sign-in choice only when it can satisfy MFA itself.
-        if ("ON".equals(pool.getMfaConfiguration()) && !passkeySatisfiesMfa(pool)) {
+        // Where MFA is required, a passkey is a sign-in choice only for a user whose passkey satisfies MFA.
+        if ("ON".equals(pool.getMfaConfiguration()) && !passkeySatisfiesMfa(pool, user)) {
             available.remove("WEB_AUTHN");
         }
         return available;

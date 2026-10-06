@@ -5533,7 +5533,7 @@ class CognitoServiceTest {
         assertThrows(AwsException.class, () -> service.deleteUserAttributes(invalid, List.of("email")));
         assertThrows(AwsException.class, () -> service.getUserAttributeVerificationCode(invalid, "email"));
         assertThrows(AwsException.class, () -> service.globalSignOut(invalid));
-        assertThrows(AwsException.class, () -> service.setUserMFAPreference(invalid, true, false));
+        assertThrows(AwsException.class, () -> service.setUserMFAPreference(invalid, true, false, null));
         assertThrows(AwsException.class, () -> service.getUserAuthFactors(invalid));
     }
 
@@ -5765,7 +5765,7 @@ class CognitoServiceTest {
     void adminSetUserMFAPreferenceUpdatesEmailMfaSettings() {
         UserPool pool = createPoolAndUser();
 
-        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true, null);
 
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
@@ -5778,10 +5778,10 @@ class CognitoServiceTest {
     void adminSetUserMFAPreferenceDoesNotMutateOnInvalidUpdate() {
         UserPool pool = createPoolAndUser();
 
-        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true, null);
 
         assertThrows(AwsException.class, () ->
-                service.adminSetUserMFAPreference(pool.getId(), "alice", false, true));
+                service.adminSetUserMFAPreference(pool.getId(), "alice", false, true, null));
 
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
@@ -5792,9 +5792,9 @@ class CognitoServiceTest {
     void adminSetUserMFAPreferenceDisablingEmailMfaClearsPreferredMfa() {
         UserPool pool = createPoolAndUser();
 
-        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true, null);
 
-        service.adminSetUserMFAPreference(pool.getId(), "alice", false, null);
+        service.adminSetUserMFAPreference(pool.getId(), "alice", false, null, null);
 
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 

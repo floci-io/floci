@@ -191,7 +191,7 @@ further divergences, both deliberate:
 | AdminDisableUser | Disables a user, who can no longer sign in. Tokens already issued keep working, where AWS revokes the user's access tokens. |
 | AdminEnableUser | Re-enables a disabled user. |
 | AdminResetUserPassword | Clears a user's password and sets the status to `RESET_REQUIRED`, so sign-in fails with `PasswordResetRequiredException`. Floci sends no reset code: finish with `ForgotPassword` and `ConfirmForgotPassword`, or `AdminSetUserPassword`. Refused when the pool's account recovery is `admin_only`. |
-| AdminSetUserMFAPreference | Sets a user's email MFA preference from `EmailMfaSettings`. SMS and software-token settings are accepted but not stored. |
+| AdminSetUserMFAPreference | Sets a user's email MFA preference from `EmailMfaSettings` and passkey MFA from `WebAuthnMfaSettings` (see [Passkeys](#passkeys)). SMS and software-token settings are accepted but not stored. |
 | AdminUserGlobalSignOut | Revokes the access, ID and refresh tokens issued to a user. |
 | AdminLinkProviderForUser | Links an external IdP identity to an existing user's `identities` attribute. |
 
@@ -210,11 +210,11 @@ further divergences, both deliberate:
 | DeleteUserAttributes | Deletes the named attributes from the authenticated access-token user. |
 | DeleteUser | Deletes the authenticated access-token user and removes them from their groups. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | ChangePassword | Changes the authenticated user's password. |
-| SetUserMFAPreference | Sets the authenticated access-token user's email MFA preference from `EmailMfaSettings`. SMS and software-token settings are accepted but not stored. |
+| SetUserMFAPreference | Sets the authenticated access-token user's email MFA preference from `EmailMfaSettings` and passkey MFA from `WebAuthnMfaSettings` (see [Passkeys](#passkeys)). SMS and software-token settings are accepted but not stored. |
 | GlobalSignOut | Revokes the access, ID and refresh tokens issued to the authenticated access-token user. |
 | StartWebAuthnRegistration | Returns the `CredentialCreationOptions` to register a passkey for the authenticated access-token user. See [Passkeys](#passkeys). |
 | CompleteWebAuthnRegistration | Verifies the `RegistrationResponseJSON` in `Credential` and registers the passkey. |
-| ListWebAuthnCredentials | Lists the authenticated access-token user's passkeys, up to 20 per page. |
+| ListWebAuthnCredentials | Lists the authenticated access-token user's passkeys, oldest first, up to 20 per page. `NextToken` is a cursor on the last passkey listed, so deleting a passkey between two pages skips none. |
 | DeleteWebAuthnCredential | Deletes one of the authenticated access-token user's passkeys. |
 | ForgotPassword | Starts the local forgot-password flow for a user. |
 | ConfirmForgotPassword | Completes the forgot-password flow by setting a replacement password. |
@@ -269,9 +269,13 @@ Passkeys are on for a pool whose `Policies.SignInPolicy.AllowedFirstAuthFactors`
   commercial partition), as AWS does, and fails with `WebAuthnConfigurationMissingException` when the pool has neither. For a
   local page, set it to `localhost`.
 - `UserVerification`: `preferred` (the default) or `required`.
-- `FactorConfiguration`: `MULTI_FACTOR_WITH_USER_VERIFICATION` lets a passkey sign-in that verified
-  the user satisfy MFA; with `SINGLE_FACTOR` or none, a pool that requires MFA does not offer
-  `WEB_AUTHN`. In a pool that requires MFA, a passkey sign-in always asks for user verification.
+- `FactorConfiguration`: `MULTI_FACTOR_WITH_USER_VERIFICATION` makes passkey MFA possible, and each
+  user turns it on with `WebAuthnMfaSettings` in `SetUserMFAPreference` or
+  `AdminSetUserMFAPreference`. For a user who did, a passkey sign-in asks for user verification and,
+  verified, satisfies MFA. Turning it on in a pool with `SINGLE_FACTOR` or none fails with
+  `InvalidParameterException`. A pool that requires MFA offers `WEB_AUTHN` only to users with passkey
+  MFA on; elsewhere, a passkey sign-in by a user without it goes through the pool's MFA rules, as
+  after a password.
 
 Registration: `StartWebAuthnRegistration` returns `CredentialCreationOptions` (ES256 and RS256
 keys, a discoverable credential, the user's `sub` as the user handle, the user's existing passkeys
