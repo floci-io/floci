@@ -360,6 +360,9 @@ public class RedshiftDataService implements Resettable {
                     sub.updatedAt = now;
                     try {
                         runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum());
+                        if (preparation != null) {
+                            preparation.applySavepointRollback(batchBackend);
+                        }
                     } catch (SQLException e) {
                         sub.status = RedshiftDataStatementStore.Status.FAILED;
                         sub.error = e.getMessage();

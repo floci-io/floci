@@ -152,12 +152,25 @@ class SpectrumQueryPreparationTest {
         preparation.prepare("SAVEPOINT after_sales", TRANSACTION, backend);
         preparation.prepare(CREATE_SALES.replace("lake.sales", "lake.events"), TRANSACTION, backend);
         preparation.prepare("ROLLBACK TO SAVEPOINT after_sales", TRANSACTION, backend);
+        preparation.applySavepointRollback(backend);
         verify(glue).deleteTable("analytics", "events");
         verify(glue, never()).deleteTable("analytics", "sales");
         preparation.prepare("ROLLBACK TO before_sales;", TRANSACTION, backend);
+        preparation.applySavepointRollback(backend);
         verify(glue).deleteTable("analytics", "sales");
         preparation.finishCycle(backend, true);
         verify(glue, times(2)).deleteTable(anyString(), anyString());
+    }
+
+    @Test
+    void unconfirmedRollbackToSavepointNeverTouchesGlue() {
+        preparation.prepare("SAVEPOINT s1", TRANSACTION, backend);
+        preparation.prepare(CREATE_SALES, TRANSACTION, backend);
+        preparation.prepare("ROLLBACK TO SAVEPOINT s1", TRANSACTION, backend);
+        verify(glue, never()).deleteTable(anyString(), anyString());
+        preparation.finishCycle(backend, true);
+        preparation.applySavepointRollback(backend);
+        verify(glue, never()).deleteTable(anyString(), anyString());
     }
 
     @Test

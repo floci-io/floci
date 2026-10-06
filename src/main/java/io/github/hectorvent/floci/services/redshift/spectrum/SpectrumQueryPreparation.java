@@ -32,6 +32,7 @@ public class SpectrumQueryPreparation {
     private final Map<BackendSql, List<ExternalSchemaBinding>> pendingBindings = new ConcurrentHashMap<>();
     private final Map<Object, List<StagedGlueTable>> stagedGlueTables = new ConcurrentHashMap<>();
 
+    private final Map<Object, String> pendingSavepointRollbacks = new ConcurrentHashMap<>();
     private final Map<Object, List<Savepoint>> savepoints = new ConcurrentHashMap<>();
 
     private static final Pattern SAVEPOINT = Pattern.compile(
@@ -208,6 +209,7 @@ public class SpectrumQueryPreparation {
         if (committed && completed != null) {
             completed.forEach(registry::bind);
         }
+        pendingSavepointRollbacks.remove(backend.transactionScope());
         if (committed) {
             stagedGlueTables.remove(backend.transactionScope());
             savepoints.remove(backend.transactionScope());
@@ -223,6 +225,16 @@ public class SpectrumQueryPreparation {
      */
     public void discardPendingLoads(BackendSql backend) {
         materializer.finishCycle(backend);
+        applySavepointRollback(backend);
+    }
+
+    /** The backend confirmed the statement: a ROLLBACK TO SAVEPOINT prepared before it now takes effect on Glue. */
+    public void applySavepointRollback(BackendSql backend) {
+        Object scope = backend.transactionScope();
+        String name = pendingSavepointRollbacks.remove(scope);
+        if (name != null) {
+            rollbackToSavepoint(scope, name);
+        }
     }
 
     private void trackSavepoints(String sql, BackendSql backend) {
@@ -236,7 +248,8 @@ public class SpectrumQueryPreparation {
         }
         Matcher rollback = ROLLBACK_TO_SAVEPOINT.matcher(sql);
         if (rollback.matches()) {
-            rollbackToSavepoint(backend.transactionScope(), savepointName(rollback.group(1)));
+            // The backend may still reject it, so Glue is only touched once it confirms the rollback.
+            pendingSavepointRollbacks.put(backend.transactionScope(), savepointName(rollback.group(1)));
             return;
         }
         Matcher release = RELEASE_SAVEPOINT.matcher(sql);
@@ -283,6 +296,7 @@ public class SpectrumQueryPreparation {
     private void undoStagedGlueTables(BackendSql backend) {
         Object scope = backend.transactionScope();
         savepoints.remove(scope);
+        pendingSavepointRollbacks.remove(scope);
         List<StagedGlueTable> staged = stagedGlueTables.remove(scope);
         if (staged != null) {
             deleteGlueTables(staged);
