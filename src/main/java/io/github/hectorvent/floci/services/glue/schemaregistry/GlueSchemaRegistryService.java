@@ -490,7 +490,7 @@ public class GlueSchemaRegistryService {
                     info.getOtherMetadataValueList() != null
                             ? new ArrayList<>(info.getOtherMetadataValueList())
                             : new ArrayList<>();
-            for (var item : history) {
+            for (MetadataInfo.OtherMetadataValueListItem item : history) {
                 if (value.equals(item.getMetadataValue())) {
                     throw new AwsException("AlreadyExistsException",
                             "Metadata key/value pair already exists: " + key + "=" + value, 400);
@@ -571,7 +571,7 @@ public class GlueSchemaRegistryService {
             return stored;
         }
         Map<String, MetadataInfo> filtered = new java.util.LinkedHashMap<>();
-        for (var f : metadataList) {
+        for (MetadataKeyValueFilter f : metadataList) {
             MetadataInfo info = stored.get(f.metadataKey());
             if (info == null) continue;
             if (f.metadataValue() == null || f.metadataValue().isBlank()) {
@@ -579,7 +579,7 @@ public class GlueSchemaRegistryService {
             } else if (f.metadataValue().equals(info.getMetadataValue())) {
                 filtered.put(f.metadataKey(), info);
             } else if (info.getOtherMetadataValueList() != null) {
-                for (var item : info.getOtherMetadataValueList()) {
+                for (MetadataInfo.OtherMetadataValueListItem item : info.getOtherMetadataValueList()) {
                     if (f.metadataValue().equals(item.getMetadataValue())) {
                         filtered.put(f.metadataKey(), info);
                         break;

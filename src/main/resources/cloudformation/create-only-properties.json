@@ -63,6 +63,10 @@
     "StageName",
     "ApiId"
   ],
+  "AWS::ApiGatewayV2::VpcLink": [
+    "SecurityGroupIds",
+    "SubnetIds"
+  ],
   "AWS::AppSync::ApiKey": [
     "ApiId"
   ],
@@ -450,6 +454,10 @@
   ],
   "AWS::IAM::User": [
     "UserName"
+  ],
+  "AWS::IoT::Authorizer": [
+    "SigningDisabled",
+    "AuthorizerName"
   ],
   "AWS::IoT::DomainConfiguration": [
     "DomainConfigurationName",

@@ -15,6 +15,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -594,5 +595,33 @@ class ResourceArnBuilderTest {
         when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/my-function/invocations");
         String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function", arn);
+    }
+
+    @Test
+    void lambdaDurableExecutionRoutesNameTheExecution() {
+        when(uriInfo.getPath()).thenReturn("/2025-12-01/durable-executions/arn:aws:lambda:us-east-1:000000000000:"
+                + "function:my-function:$LATEST/durable-execution/run-1/0b1c/stop");
+        String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function:$LATEST/durable-execution/run-1/0b1c",
+                arn);
+    }
+
+    @Test
+    void lambdaDurableCallbackRoutesNameTheExecutionInTheCallbackId() {
+        String executionArn = "arn:aws:lambda:us-east-1:000000000000:function:my-function:1/durable-execution/run-1/0b1c";
+        String callbackId = Base64.getEncoder().encodeToString((executionArn + "|c1|nonce").getBytes(StandardCharsets.UTF_8));
+        when(uriInfo.getPath()).thenReturn("/2025-12-01/durable-execution-callbacks/" + callbackId + "/succeed");
+        assertEquals(executionArn, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+
+        when(uriInfo.getPath()).thenReturn("/2025-12-01/durable-execution-callbacks/not-a-callback/heartbeat");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void lambdaDurableExecutionGetNamesTheExecution() {
+        when(uriInfo.getPath()).thenReturn("/2025-12-01/durable-executions/arn:aws:lambda:us-east-1:000000000000:"
+                + "function:my-function:1/durable-execution/run-1/0b1c");
+        String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function:1/durable-execution/run-1/0b1c", arn);
     }
 }

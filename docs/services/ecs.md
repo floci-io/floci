@@ -377,6 +377,8 @@ Floci plays the SSM agent's half of the Session Manager protocol on that channel
 `AgentMessage` framing, the handshake, sequenced acknowledgements and terminal resizes) and bridges
 it to a `docker exec` in the container. Deliberate limits:
 
+- The session runs as root (uid 0) whatever the container definition's `user`, as the real ECS Exec
+  agent does.
 - The command runs through `/bin/sh -c`, so an image without a shell cannot be exec'd into.
 - Sessions are in memory, single use, and expire after five minutes if nobody connects.
 - `ExecuteCommand` logging (the `executeCommandConfiguration` on a cluster, which sends session

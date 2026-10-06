@@ -150,13 +150,14 @@ public class CloudFormationQueryHandler {
         Map<String, String> parameters =
                 extractParameters(params, cfnService.currentParameters(stackName, region));
         List<String> capabilities = extractList(params, "Capabilities.member.");
+        Map<String, String> tags = extractTags(params);
 
         String changeSetName = "update-" + UUID.randomUUID().toString().substring(0, 8);
         ChangeSet cs = usePreviousTemplate
                 ? cfnService.createChangeSetFromPreviousTemplate(stackName, changeSetName,
-                        parameters, capabilities, Map.of(), region)
+                        parameters, capabilities, tags, region)
                 : cfnService.createChangeSet(stackName, changeSetName,
-                        "UPDATE", templateBody, templateUrl, parameters, capabilities, Map.of(), region);
+                        "UPDATE", templateBody, templateUrl, parameters, capabilities, tags, region);
         awaitExecution(cfnService.executeChangeSet(stackName, cs.getChangeSetName(), region));
 
         Stack stack = cfnService.describeStacks(stackName, region).get(0);
@@ -723,7 +724,9 @@ public class CloudFormationQueryHandler {
             result.put(key, value != null ? value : "");
             i++;
         }
-        return result;
+        boolean supplied = params.keySet().stream().anyMatch(name ->
+                "Tags".equals(name) || "Tags.member".equals(name) || name.startsWith("Tags.member."));
+        return supplied ? result : null;
     }
 
     private List<String> extractList(MultivaluedMap<String, String> params, String prefix) {

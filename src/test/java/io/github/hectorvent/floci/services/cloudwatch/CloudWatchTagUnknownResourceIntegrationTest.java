@@ -192,10 +192,10 @@ class CloudWatchTagUnknownResourceIntegrationTest {
     }
 
     /**
-     * The dashboard ARN AWS documents carries no region, and the one Floci mints does. A
-     * caller sending the documented form for a dashboard that exists must not be told the
-     * dashboard does not exist, which is what raising on a miss would otherwise have made of
-     * a shape that used to fall through to an empty tag map.
+     * The dashboard ARN AWS documents carries no region, and it is the one Floci mints. A
+     * caller sending it for a dashboard that exists must not be told the dashboard does not
+     * exist, which is what raising on a miss would otherwise have made of a shape that used to
+     * fall through to an empty tag map.
      */
     @Test
     void theRegionlessDashboardArnAwsDocumentsAlsoResolves() {

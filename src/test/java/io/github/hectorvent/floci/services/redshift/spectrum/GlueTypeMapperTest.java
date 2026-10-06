@@ -39,6 +39,16 @@ class GlueTypeMapperTest {
     }
 
     @Test
+    void nullsSizedStringValuesWiderThanTheColumnInBytes() {
+        String expected = "COALESCE(CAST(CASE WHEN strlen(CAST(\"name\" AS VARCHAR)) > %d THEN NULL ELSE \"name\" END"
+                + " AS VARCHAR), '\\N') AS \"name\"";
+
+        assertThat(GlueTypeMapper.duckProjection("name", "varchar(10)"), equalTo(expected.formatted(10)));
+        assertThat(GlueTypeMapper.duckProjection("name", "varchar"), equalTo(expected.formatted(256)));
+        assertThat(GlueTypeMapper.duckProjection("name", "char"), equalTo(expected.formatted(1)));
+    }
+
+    @Test
     void canonicalisesRedshiftAliases() {
         assertThat(GlueTypeMapper.canonicalGlueType("DOUBLE PRECISION"), equalTo("double"));
         assertThat(GlueTypeMapper.canonicalGlueType("float8"), equalTo("double"));

@@ -322,8 +322,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
                 accountRootPrincipal = true;
             } else if (iamService.isKnownAccessKey(akid)) {
-                // A real credential this filter cannot map to policies, such as a session with no
-                // role ARN. Denying it would reject an authenticated caller, so it stays allowed.
+                // A real credential this filter cannot map to policies, such as a session Floci mints
+                // for its own presigned URLs with no policy to scope it. Denying it would reject an
+                // authenticated caller.
                 return;
             } else {
                 // No such credential anywhere. Enforcement is on and the caller is unauthenticated,

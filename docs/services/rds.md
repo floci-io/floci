@@ -63,6 +63,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeEventSubscriptions` | List subscriptions, or the one the request names |
 | `ModifyEventSubscription` | Update the members the request names |
 | `DeleteEventSubscription` | Delete a subscription |
+| `CreateDBClusterEndpoint` | Create an Aurora custom endpoint (`READER` or `ANY`) with a static or exclusion member list; see [Cluster endpoints](#cluster-endpoints) |
+| `DescribeDBClusterEndpoints` | List a cluster's built-in writer and reader endpoints and its custom endpoints, with the four documented filters |
+| `ModifyDBClusterEndpoint` | Change a custom endpoint's type or member list |
+| `DeleteDBClusterEndpoint` | Delete a custom endpoint |
 | `AddSourceIdentifierToSubscription` | Add a source id to a subscription |
 | `RemoveSourceIdentifierFromSubscription` | Remove a source id from a subscription |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
@@ -527,6 +531,34 @@ connections drop while the container, endpoint and data stay. Deleting a source 
 same-region replicas; a cross-region replica keeps its link with the replication status
 `terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
 replica drops it from its source's list.
+
+## Cluster endpoints
+
+`CreateDBClusterEndpoint` adds an Aurora custom endpoint to an available cluster. As the Aurora user
+guide describes, its type is `READER` or `ANY` (case-insensitive, as the CLI sends it), it holds either
+a static list or an exclusion list of the cluster's instances but not both
+(`InvalidParameterCombination`), and a `READER` endpoint cannot list the writer. A member that is not
+an instance of the cluster is `DBInstanceNotFound`. The identifier follows the RDS identifier rules
+(at most 63 characters), is stored lower case and is unique in the Region
+(`DBClusterEndpointAlreadyExistsFault`); a cluster holds at most five custom endpoints
+(`DBClusterEndpointQuotaExceededFault`). The endpoint's ARN,
+`arn:aws:rds:<region>:<account>:cluster-endpoint:<id>`, works with the tagging actions.
+
+`DescribeDBClusterEndpoints` lists each cluster's built-in `WRITER` and `READER` endpoints followed by
+its custom endpoints, narrowed by `DBClusterIdentifier`, `DBClusterEndpointIdentifier` and the filters
+`db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`, `db-cluster-endpoint-id` and
+`db-cluster-endpoint-status`. `ModifyDBClusterEndpoint` changes the type or replaces the member list
+(giving static members clears the exclusion list, and the other way round). Deleting a cluster deletes
+its custom endpoints, and a deleted instance drops out of the lists that name it.
+
+A `READER` endpoint leaves out the cluster's current writer, so after a failover the promoted
+instance no longer shows among its members, as Aurora adjusts `READER` membership. Member names match
+the cluster's instances regardless of case and are stored as the cluster spells them.
+
+Custom endpoints are modelled, not routed: a custom endpoint reports the cluster's own endpoint host
+(read from the cluster each time, so it follows a restart onto another proxy port), so it is
+reachable, but connections through it go where the cluster endpoint sends them rather than being
+spread across the chosen members.
 
 ## Point in time restore
 

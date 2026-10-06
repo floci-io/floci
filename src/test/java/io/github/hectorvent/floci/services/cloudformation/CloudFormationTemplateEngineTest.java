@@ -14,6 +14,7 @@ import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -145,6 +146,19 @@ class CloudFormationTemplateEngineTest {
                 "{\"deadLetterTargetArn\":\"Dlq.Arn\"}",
                 engine().resolveJsonAttribute(json(
                         "{\"deadLetterTargetArn\":{\"Fn::GetAtt\":[\"Dlq\",\"Arn\"]}}")));
+    }
+
+    @Test
+    void getAttDoesNotExposeFlociInternalAttributes() {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(),
+                Map.of("Res", Map.of("Arn", "arn:res", "__FlociSecret", "secret-value")),
+                Map.of(), Map.of(), mapper, (Function<String, String>) name -> null);
+
+        assertEquals("arn:res", e.resolve(json("{\"Fn::GetAtt\": [\"Res\", \"Arn\"]}")));
+        assertEquals("Res.__FlociSecret",
+                e.resolve(json("{\"Fn::GetAtt\": [\"Res\", \"__FlociSecret\"]}")));
+        assertNotEquals("secret-value", e.resolve(json("{\"Fn::Sub\": \"${Res.__FlociSecret}\"}")));
     }
 
     @Test

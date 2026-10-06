@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -433,11 +434,15 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         }
     }
 
-    /** Returns whether a backing RDS container still exists and is running. */
-    public boolean isContainerRunning(String containerId) {
-        return containerId != null
-                && !containerId.isBlank()
-                && lifecycleManager.isContainerRunning(containerId);
+    /**
+     * Probes a backing RDS container. UNKNOWN means the Docker probe failed and the container's
+     * state is not known, which is not the same as the container being gone.
+     */
+    public ContainerLiveness probeContainer(String containerId) {
+        if (containerId == null || containerId.isBlank()) {
+            return ContainerLiveness.NOT_RUNNING;
+        }
+        return lifecycleManager.probeContainer(containerId);
     }
 
     /** Returns the retained runtime handle used to persist cleanup identity after a failed start. */

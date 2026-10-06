@@ -201,11 +201,15 @@ final class SesV2Json {
     }
 
     /**
-     * The model's own constraints on a {@code Filter} map, as the SES validation layer reports them:
-     * every key in the enum, listed in the order SES prints it, and no empty value. A key is checked
-     * before a value.
+     * A {@code Filter} map checked against the model's own constraints, as the SES validation layer
+     * reports them: every key in the enum, listed in the order SES prints it, and no empty value, a
+     * key being checked before a value. Returns the entries that carry a value; an absent filter is
+     * an empty one.
      */
-    static void requireFilterKeysAndValues(Map<String, String> filter, List<String> keys) {
+    static Map<String, String> filterValues(Map<String, String> filter, List<String> keys) {
+        if (filter == null) {
+            return Map.of();
+        }
         if (!keys.containsAll(filter.keySet())) {
             throw new AwsException("BadRequestException", "1 validation error detected: Value at 'filter' "
                     + "failed to satisfy constraint: Map keys must satisfy constraint: "
@@ -216,6 +220,13 @@ final class SesV2Json {
                     + "failed to satisfy constraint: Map value must satisfy constraint: "
                     + "[Member must have length greater than or equal to 1]", 400);
         }
+        Map<String, String> values = new LinkedHashMap<>();
+        filter.forEach((key, value) -> {
+            if (value != null) {
+                values.put(key, value);
+            }
+        });
+        return values;
     }
 
     static AwsException unexpectedStartError(JsonNode node) {

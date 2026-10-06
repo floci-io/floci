@@ -41,6 +41,21 @@ public class CognitoJsonHandler {
     }
 
     public Response handle(String action, JsonNode request, String region) {
+        // Every operation naming a UserPoolId is signed for the caller's region, except the unsigned
+        // UpdateAuthEventFeedback, whose region Floci cannot know.
+        if (region != null && request.hasNonNull("UserPoolId") && !"UpdateAuthEventFeedback".equals(action)) {
+            service.requireUserPoolInRegion(request.path("UserPoolId").asText(), region);
+        }
+        // The tag operations name the pool by ARN, and a domain is looked up by its name.
+        if (region != null) {
+            switch (action) {
+                case "TagResource", "UntagResource", "ListTagsForResource" ->
+                        service.requireUserPoolArnInRegion(request.path("ResourceArn").asText(), region);
+                case "DescribeUserPoolDomain" ->
+                        service.requireUserPoolDomainInRegion(request.path("Domain").asText(), region);
+                default -> { }
+            }
+        }
         return switch (action) {
             case "CreateUserPool" -> handleCreateUserPool(request, region);
             case "DescribeUserPool" -> handleDescribeUserPool(request);
@@ -111,6 +126,7 @@ public class CognitoJsonHandler {
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
             case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
             case "GlobalSignOut" -> handleGlobalSignOut(request);
+            case "DeleteUser" -> handleDeleteUser(request);
             case "CreateGroup" -> handleCreateGroup(request);
             case "GetGroup" -> handleGetGroup(request);
             case "ListGroups" -> handleListGroups(request);
@@ -1069,7 +1085,12 @@ public class CognitoJsonHandler {
     }
 
     private Response handleGlobalSignOut(JsonNode request) {
-        service.globalSignOut(request.path("AccessToken").asText());
+        service.globalSignOut(request.path("AccessToken").asText(null));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteUser(JsonNode request) {
+        service.deleteUser(request.path("AccessToken").asText(null));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

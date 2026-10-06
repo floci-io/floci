@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -19,8 +20,10 @@ import jakarta.inject.Inject;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -84,7 +87,7 @@ public class EmrService {
         cluster.setInstanceCollectionType(cluster.getInstanceFleets().isEmpty()
                 ? "INSTANCE_GROUP" : "INSTANCE_FLEET");
         cluster.setAutoTerminate(!cluster.isKeepJobFlowAliveWhenNoSteps());
-        cluster.setMasterPublicDnsName("ip-10-0-0-1." + region + ".compute.internal");
+        cluster.setMasterPublicDnsName(masterDnsName(region));
         cluster.setCreationDateTime(Instant.now());
         for (EmrInstanceGroup g : cluster.getInstanceGroups()) {
             g.setId("ig-" + randomId(13));
@@ -104,6 +107,11 @@ public class EmrService {
         advanceToWaiting(cluster);
         clusterStore.put(id, cluster);
         return cluster;
+    }
+
+    /** The master node's private DNS name, derived from the region so a stored name never goes stale. */
+    static String masterDnsName(String region) {
+        return AwsRegions.ec2PrivateIpDnsName("10.0.0.1", region);
     }
 
     public EmrCluster describeCluster(String id) {
@@ -129,7 +137,7 @@ public class EmrService {
         // ValidationException if any were termination protected.
         boolean anyProtected = false;
         for (String id : ids) {
-            EmrCluster cluster = clusterStore.get(id).orElse(null);
+            EmrCluster cluster = findCluster(id).orElse(null);
             if (cluster == null) {
                 continue;
             }
@@ -183,8 +191,7 @@ public class EmrService {
     // ──────────────────────────── Steps ────────────────────────────
 
     public synchronized List<String> addJobFlowSteps(String clusterId, List<EmrStep> steps) {
-        EmrCluster cluster = clusterStore.get(clusterId).orElseThrow(() -> new AwsException(
-                "InvalidRequestException", "Cluster id '" + clusterId + "' is not valid.", 400));
+        EmrCluster cluster = requireCluster(clusterId);
         List<String> ids = new ArrayList<>();
         for (EmrStep step : steps) {
             initStep(step);
@@ -262,6 +269,52 @@ public class EmrService {
         return ids;
     }
 
+    /** One InstanceGroupModifyConfig: a null count or configurations leaves that setting as it is. */
+    public record InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations) {}
+
+    /**
+     * Resizes or reconfigures instance groups in place. ClusterId is optional in the request, so
+     * without it each group is looked up across the account's clusters in the Region. Every modification is
+     * checked before any is applied.
+     */
+    public synchronized void modifyInstanceGroups(String clusterId, String region,
+                                                  List<InstanceGroupModification> modifications) {
+        if (modifications.isEmpty()) {
+            throw invalid("InstanceGroups must contain at least one instance group.");
+        }
+        Map<String, EmrCluster> touched = new LinkedHashMap<>();
+        List<EmrInstanceGroup> groups = new ArrayList<>();
+        for (InstanceGroupModification mod : modifications) {
+            EmrCluster found = clusterId != null ? requireCluster(clusterId) : clusterOwning(region, mod.instanceGroupId());
+            // One copy per cluster, so two groups of the same cluster are changed and stored together.
+            EmrCluster cluster = touched.computeIfAbsent(found.getId(), id -> found);
+            EmrInstanceGroup group = requireInstanceGroup(cluster, mod.instanceGroupId());
+            if (mod.instanceCount() != null) {
+                if (mod.instanceCount() < 0) {
+                    throw invalid("InstanceCount must not be negative.");
+                }
+                if ("MASTER".equals(group.getInstanceGroupType())
+                        && mod.instanceCount() != group.getRequestedInstanceCount()) {
+                    throw invalid("The instance count of a master instance group cannot be modified.");
+                }
+            }
+            groups.add(group);
+        }
+        for (int i = 0; i < modifications.size(); i++) {
+            InstanceGroupModification mod = modifications.get(i);
+            EmrInstanceGroup group = groups.get(i);
+            if (mod.instanceCount() != null) {
+                group.setRequestedInstanceCount(mod.instanceCount());
+                group.setRunningInstanceCount(mod.instanceCount());
+            }
+            if (mod.configurations() != null) {
+                group.setConfigurations(mod.configurations());
+                group.setConfigurationsVersion(group.getConfigurationsVersion() + 1);
+            }
+        }
+        touched.forEach(clusterStore::put);
+    }
+
     public List<EmrInstanceGroup> listInstanceGroups(String clusterId) {
         return requireCluster(clusterId).getInstanceGroups();
     }
@@ -275,6 +328,38 @@ public class EmrService {
         cluster.getInstanceFleets().add(fleet);
         clusterStore.put(clusterId, cluster);
         return fleet.getId();
+    }
+
+    /** Resizes an instance fleet; a null target leaves that capacity as it is. */
+    public synchronized void modifyInstanceFleet(String clusterId, String instanceFleetId,
+                                                 Integer targetOnDemandCapacity, Integer targetSpotCapacity) {
+        EmrCluster cluster = requireCluster(clusterId);
+        if (instanceFleetId == null) {
+            throw invalid("InstanceFleetId is required.");
+        }
+        EmrInstanceFleet fleet = cluster.getInstanceFleets().stream()
+                .filter(f -> instanceFleetId.equals(f.getId()))
+                .findFirst()
+                .orElseThrow(() -> invalid("Instance fleet " + instanceFleetId + " is not in cluster " + clusterId + "."));
+        int onDemand = targetOnDemandCapacity != null ? targetOnDemandCapacity : fleet.getTargetOnDemandCapacity();
+        int spot = targetSpotCapacity != null ? targetSpotCapacity : fleet.getTargetSpotCapacity();
+        if (onDemand < 0 || spot < 0) {
+            throw invalid("Target capacities must not be negative.");
+        }
+        if ("MASTER".equals(fleet.getInstanceFleetType())
+                && (onDemand != fleet.getTargetOnDemandCapacity() || spot != fleet.getTargetSpotCapacity())) {
+            throw invalid("The target capacity of a master instance fleet cannot be modified.");
+        }
+        fleet.setTargetOnDemandCapacity(onDemand);
+        fleet.setTargetSpotCapacity(spot);
+        fleet.setProvisionedOnDemandCapacity(onDemand);
+        fleet.setProvisionedSpotCapacity(spot);
+        clusterStore.put(clusterId, cluster);
+    }
+
+    /** The cluster's bootstrap actions as given to RunJobFlow, raw JSON; null when it had none. */
+    public String listBootstrapActions(String clusterId) {
+        return requireCluster(clusterId).getBootstrapActions();
     }
 
     public List<EmrInstanceFleet> listInstanceFleets(String clusterId) {
@@ -527,6 +612,30 @@ public class EmrService {
         }
     }
 
+    /** Each BootstrapActionConfig needs a Name and a ScriptBootstrapAction with a Path. */
+    static void validateBootstrapActions(JsonNode actions) {
+        if (!actions.isArray()) {
+            throw invalid("BootstrapActions must be a list.");
+        }
+        for (JsonNode action : actions) {
+            if (action.path("Name").asText("").isEmpty()
+                    || action.path("ScriptBootstrapAction").path("Path").asText("").isEmpty()) {
+                throw invalid("Each bootstrap action needs a Name and a ScriptBootstrapAction.Path.");
+            }
+        }
+    }
+
+    private EmrCluster clusterOwning(String region, String instanceGroupId) {
+        if (instanceGroupId == null) {
+            throw invalid("InstanceGroupId is required.");
+        }
+        return clusterStore.scan(k -> true).stream()
+                .filter(c -> region.equals(c.getRegion()))
+                .filter(c -> c.getInstanceGroups().stream().anyMatch(g -> instanceGroupId.equals(g.getId())))
+                .findFirst()
+                .orElseThrow(() -> invalid("Instance group " + instanceGroupId + " is not valid."));
+    }
+
     private static AwsException invalid(String message) {
         return new AwsException("InvalidRequestException", message, 400);
     }
@@ -545,13 +654,22 @@ public class EmrService {
         if (id == null) {
             throw new AwsException("InvalidRequestException", "ClusterId is required.", 400);
         }
-        return clusterStore.get(id).orElseThrow(() -> new AwsException(
+        return findCluster(id).orElseThrow(() -> new AwsException(
                 "InvalidRequestException", "Cluster id '" + id + "' is not valid.", 400));
+    }
+
+    /**
+     * Clusters are stored by id for every region; a request sees only its own region's, and one from
+     * another region reads as an unknown id. A cluster recorded without a region stays reachable.
+     */
+    private Optional<EmrCluster> findCluster(String id) {
+        String region = regionResolver.getRegion();
+        return clusterStore.get(id).filter(c -> c.getRegion() == null || c.getRegion().equals(region));
     }
 
     private void mutateClusters(List<String> ids, java.util.function.Consumer<EmrCluster> mutation) {
         for (String id : ids) {
-            clusterStore.get(id).ifPresent(c -> {
+            findCluster(id).ifPresent(c -> {
                 mutation.accept(c);
                 clusterStore.put(id, c);
             });

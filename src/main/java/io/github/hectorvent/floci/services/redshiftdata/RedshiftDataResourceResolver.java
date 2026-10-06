@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -24,25 +25,28 @@ class RedshiftDataResourceResolver {
     private final ObjectMapper objectMapper;
     private final RedshiftCredentialBroker credentialBroker;
     private final RegionResolver regionResolver;
+    private final RedshiftServerlessService serverlessService;
 
     @Inject
     RedshiftDataResourceResolver(RedshiftService redshiftService,
                                  SecretsManagerService secretsManagerService,
                                  ObjectMapper objectMapper,
                                  RedshiftCredentialBroker credentialBroker,
-                                 RegionResolver regionResolver) {
+                                 RegionResolver regionResolver,
+                                 RedshiftServerlessService serverlessService) {
         this.redshiftService = redshiftService;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
         this.credentialBroker = credentialBroker;
         this.regionResolver = regionResolver;
+        this.serverlessService = serverlessService;
     }
 
     DatabaseTarget resolve(JsonNode request, String region) {
-        if (hasText(request, "WorkgroupName")) {
-            throw validation("Redshift Serverless (WorkgroupName) is not emulated by Floci.");
-        }
         String database = requiredText(request, "Database");
+        if (hasText(request, "WorkgroupName")) {
+            return resolveWorkgroup(request, region, database);
+        }
 
         if (hasText(request, "SecretArn")) {
             return resolveViaSecret(request, region, database);
@@ -50,18 +54,32 @@ class RedshiftDataResourceResolver {
         return resolveViaDbUser(request, database);
     }
 
-    private DatabaseTarget resolveViaSecret(JsonNode request, String region, String database) {
-        String secretArn = request.get("SecretArn").asText();
-        try {
-            AwsArnUtils.Arn arn = AwsArnUtils.parse(secretArn);
-            if (region != null && !region.isBlank() && !region.equals(arn.region())) {
-                throw validation("SecretArn is outside the request region.");
-            }
-        } catch (IllegalArgumentException e) {
-            throw validation("SecretArn is not a valid ARN: " + secretArn);
+    /**
+     * A workgroup is reached either with a secret holding credentials, or as an IAM identity whose
+     * database user AWS derives from the signing identity. Floci connects the IAM path as the
+     * namespace admin, the same stand-in GetClusterCredentialsWithIAM uses for a cluster.
+     */
+    private DatabaseTarget resolveWorkgroup(JsonNode request, String region, String database) {
+        if (hasText(request, "ClusterIdentifier")) {
+            throw validation("ClusterIdentifier and WorkgroupName cannot both be specified.");
         }
-        String clusterId = requiredText(request, "ClusterIdentifier");
-        Cluster cluster = cluster(clusterId);
+        RedshiftServerlessService.WorkgroupTarget workgroup =
+                serverlessService.getWorkgroupTarget(request.get("WorkgroupName").asText(), region);
+        if (!database.equals(workgroup.database())) {
+            throw validation("Database " + database + " does not exist in workgroup " + workgroup.workgroupName()
+                    + "; the only database is " + workgroup.database() + ".");
+        }
+        if (!hasText(request, "SecretArn")) {
+            return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
+                    workgroup.masterUsername(), workgroup.masterPassword());
+        }
+        Credentials creds = secretCredentials(request.get("SecretArn").asText(), region);
+        return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
+                creds.username(), creds.password());
+    }
+
+    private Credentials secretCredentials(String secretArn, String region) {
+        validateSecretRegion(secretArn, region);
         SecretVersion secret;
         try {
             secret = secretsManagerService.getSecretValue(secretArn, null, null, region);
@@ -72,6 +90,26 @@ class RedshiftDataResourceResolver {
         if (creds == null) {
             throw validation("Secret " + secretArn + " does not contain username and password fields.");
         }
+        return creds;
+    }
+
+    private static void validateSecretRegion(String secretArn, String region) {
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(secretArn);
+            if (region != null && !region.isBlank() && !region.equals(arn.region())) {
+                throw validation("SecretArn is outside the request region.");
+            }
+        } catch (IllegalArgumentException e) {
+            throw validation("SecretArn is not a valid ARN: " + secretArn);
+        }
+    }
+
+    private DatabaseTarget resolveViaSecret(JsonNode request, String region, String database) {
+        String secretArn = request.get("SecretArn").asText();
+        validateSecretRegion(secretArn, region);
+        String clusterId = requiredText(request, "ClusterIdentifier");
+        Cluster cluster = cluster(clusterId);
+        Credentials creds = secretCredentials(secretArn, region);
         return target(clusterArn(clusterId, region), cluster, database, creds.username(), creds.password());
     }
 

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iot;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -12,11 +13,14 @@ public class IotTagHandler implements TagHandler {
 
     private final IotService iotService;
     private final IotDomainConfigurationService domainConfigurationService;
+    private final IotAuthorizerService authorizerService;
 
     @Inject
-    public IotTagHandler(IotService iotService, IotDomainConfigurationService domainConfigurationService) {
+    public IotTagHandler(IotService iotService, IotDomainConfigurationService domainConfigurationService,
+                         IotAuthorizerService authorizerService) {
         this.iotService = iotService;
         this.domainConfigurationService = domainConfigurationService;
+        this.authorizerService = authorizerService;
     }
 
     @Override
@@ -31,6 +35,9 @@ public class IotTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
+        if (isAuthorizer(arn)) {
+            return authorizerService.listTagsForResource(arn);
+        }
         return isDomainConfiguration(arn)
                 ? domainConfigurationService.listTagsForResource(arn)
                 : iotService.listTagsForResource(arn);
@@ -38,7 +45,9 @@ public class IotTagHandler implements TagHandler {
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        if (isDomainConfiguration(arn)) {
+        if (isAuthorizer(arn)) {
+            authorizerService.tagResource(arn, tags);
+        } else if (isDomainConfiguration(arn)) {
             domainConfigurationService.tagResource(arn, tags);
         } else {
             iotService.tagResource(arn, tags);
@@ -47,15 +56,21 @@ public class IotTagHandler implements TagHandler {
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        if (isDomainConfiguration(arn)) {
+        if (isAuthorizer(arn)) {
+            authorizerService.untagResource(arn, tagKeys);
+        } else if (isDomainConfiguration(arn)) {
             domainConfigurationService.untagResource(arn, tagKeys);
         } else {
             iotService.untagResource(arn, tagKeys);
         }
     }
 
-    /** Domain configurations have their own service; every other IoT resource is tagged through IotService. */
+    /** Domain configurations and authorizers have their own services; every other IoT resource is tagged through IotService. */
     private static boolean isDomainConfiguration(String arn) {
         return arn != null && arn.contains(":domainconfiguration/");
+    }
+
+    private static boolean isAuthorizer(String arn) {
+        return AwsArnUtils.isArn(arn) && AwsArnUtils.parse(arn).resource().startsWith("authorizer/");
     }
 }

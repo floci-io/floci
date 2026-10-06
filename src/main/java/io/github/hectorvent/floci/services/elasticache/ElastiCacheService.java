@@ -273,7 +273,7 @@ public class ElastiCacheService implements ResourceProvider {
             // derived from configuration and need no Docker, so the group is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
-            handle = containerManager.tryStart(groupId, image);
+            handle = containerManager.tryStart(groupId, image, request.region());
 
             String endpointHost = resolveEndpointHost();
             Endpoint endpoint = new Endpoint(endpointHost, proxyPort);
@@ -359,7 +359,7 @@ public class ElastiCacheService implements ResourceProvider {
                 inFlightMemberId = node.getMemberClusterId();
                 ElastiCacheContainerHandle handle = containerManager.start(
                         node.getMemberClusterId(), image,
-                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()));
+                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()), request.region());
                 inFlightMemberId = null;
                 handles.add(handle);
                 node.setContainerId(handle.getContainerId());
@@ -694,11 +694,16 @@ public class ElastiCacheService implements ResourceProvider {
      * monitor and re-reads the record, because a delete taken while the container started has
      * already removed it.
      */
+    /** The region in a restored resource's ARN; one recorded without an ARN counts as the default region's. */
+    private String regionOf(String arn) {
+        return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
+    }
+
     private void restoreCacheCluster(CacheCluster cluster) {
         String clusterId = cluster.getCacheClusterId();
         String image = config.services().elasticache().defaultImage();
         try {
-            ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image);
+            ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, regionOf(cluster.getArn()));
             synchronized (lockFor("cc:" + clusterId)) {
                 if (cacheClusterRestoreTargetLost(clusterId)) {
                     abandonRestoredCacheClusterContainer(clusterId, handle);
@@ -827,7 +832,7 @@ public class ElastiCacheService implements ResourceProvider {
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
         try {
-            ElastiCacheContainerHandle handle = containerManager.tryStart(groupId, image);
+            ElastiCacheContainerHandle handle = containerManager.tryStart(groupId, image, regionOf(group.getArn()));
             synchronized (lockFor("rg:" + groupId)) {
                 if (restoreTargetLost(groupId)) {
                     abandonRestoredContainer(groupId, handle);
@@ -963,7 +968,7 @@ public class ElastiCacheService implements ResourceProvider {
                 inFlightMemberId = node.getMemberClusterId();
                 ElastiCacheContainerHandle handle = containerManager.start(
                         node.getMemberClusterId(), image,
-                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()));
+                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()), regionOf(group.getArn()));
                 inFlightMemberId = null;
                 handles.add(handle);
                 node.setContainerId(handle.getContainerId());
@@ -1249,7 +1254,7 @@ public class ElastiCacheService implements ResourceProvider {
             // As for a replication group, the record is metadata: it reaches 'available' even
             // when no Docker daemon is reachable, and only connecting to the cache needs the
             // container.
-            handle = containerManager.tryStart(clusterId, image);
+            handle = containerManager.tryStart(clusterId, image, request.region());
 
             CacheCluster cluster = new CacheCluster(clusterId, CacheClusterStatus.AVAILABLE, engine,
                     request.engineVersion() != null && !request.engineVersion().isBlank()
@@ -1538,6 +1543,7 @@ public class ElastiCacheService implements ResourceProvider {
                 passwords != null ? passwords : List.of(),
                 accessString != null ? accessString : "on ~* +@all",
                 normalizedEngine, "active", Instant.now());
+        user.setArn(regionResolver.buildArn("elasticache", regionResolver.getRegion(), "user:" + userId));
 
         users.put(userId, user);
         LOG.infov("ElastiCache user {0} created with authMode={1}", userId, authMode);

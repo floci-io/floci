@@ -268,6 +268,66 @@ class ExpressionEvaluatorTest {
             return mapper.readTree(json);
         }
 
+        // DynamoDB's size() of a Binary is its length in bytes; "AQID" encodes the three bytes 1, 2, 3.
+        @Test
+        void sizeOfABinaryCountsItsBytes() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":three\": {\"N\": \"3\"}}");
+            assertTrue(ExpressionEvaluator.matches("size(b) = :three", i, null, v));
+        }
+
+        @Test
+        void aBinaryOfThreeBytesIsSmallerThanFour() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":four\": {\"N\": \"4\"}}");
+            assertTrue(ExpressionEvaluator.matches("size(b) < :four", i, null, v));
+        }
+
+        @Test
+        void sizeOfAnEmptyBinaryIsZero() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"\"}}");
+            JsonNode v = values("{\":zero\": {\"N\": \"0\"}}");
+            assertTrue(ExpressionEvaluator.matches("size(b) = :zero", i, null, v));
+        }
+
+        // A binary that is not base64 fails with a 400 SerializationException, as the binary
+        // comparisons below do, rather than being sized by its text.
+        @Test
+        void sizeOfABinaryThatIsNotBase64IsRejected() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"not base64!!\"}}");
+            JsonNode v = values("{\":three\": {\"N\": \"3\"}}");
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ExpressionEvaluator.matches("size(b) = :three", i, null, v));
+            assertEquals("SerializationException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+        }
+
+        // begins_with on a Binary compares bytes: "AQ==" (the byte 1) is a prefix of "AQID"
+        // (the bytes 1, 2, 3) even though its base64 text is not.
+        @Test
+        void beginsWithOnABinaryMatchesABytePrefix() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":prefix\": {\"B\": \"AQ==\"}}");
+            assertTrue(ExpressionEvaluator.matches("begins_with(b, :prefix)", i, null, v));
+        }
+
+        @Test
+        void beginsWithOnABinaryRejectsADifferentFirstByte() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"AQID\"}}");
+            JsonNode v = values("{\":prefix\": {\"B\": \"Ag==\"}}");
+            assertFalse(ExpressionEvaluator.matches("begins_with(b, :prefix)", i, null, v));
+        }
+
+        @Test
+        void beginsWithOnABinaryThatIsNotBase64IsRejected() throws Exception {
+            JsonNode i = item("{\"b\": {\"B\": \"not base64!!\"}}");
+            JsonNode v = values("{\":prefix\": {\"B\": \"AQ==\"}}");
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ExpressionEvaluator.matches("begins_with(b, :prefix)", i, null, v));
+            assertEquals("SerializationException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+        }
+
         @Test
         void orderingAgainstAnotherTypeMatchesNothing() throws Exception {
             JsonNode i = item("{\"a\": {\"S\": \"5\"}}");

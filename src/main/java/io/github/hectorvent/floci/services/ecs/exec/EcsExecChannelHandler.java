@@ -52,6 +52,7 @@ public class EcsExecChannelHandler {
     /** Where the stream URL points. The path mirrors Session Manager's own data-channel path. */
     public static final String CHANNEL_PATH_PREFIX = "/v1/data-channel/";
     private static final String AGENT_VERSION = "3.3.0.0";
+    private static final String EXEC_USER = "0";
 
     private final EcsExecSessionRegistry sessions;
     private final ContainerLifecycleManager lifecycleManager;
@@ -151,12 +152,14 @@ public class EcsExecChannelHandler {
         /**
          * Creates the exec and offers the handshake. The command is not started yet: the agent
          * offers the session type first and only runs anything once the client has accepted it,
-         * so the client cannot be handed output for a channel it has not finished opening.
+         * so the client cannot be handed output for a channel it has not finished opening. The exec
+         * runs as root whatever the container's own user, as the real ECS Exec agent does.
          */
         private void createExec() {
             ExecSession current = session;
             vertx.<String>executeBlocking(() -> lifecycleManager.getDockerClient()
                     .execCreateCmd(current.runtimeId())
+                    .withUser(EXEC_USER)
                     .withCmd(current.command().toArray(new String[0]))
                     .withAttachStdin(true)
                     .withAttachStdout(true)

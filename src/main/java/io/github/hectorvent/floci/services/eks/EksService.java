@@ -259,6 +259,16 @@ public class EksService implements TagHandler, ResourceProvider {
                 .thenComparing(Nodegroup::getNodegroupName));
     }
 
+    List<Nodegroup> listNodeGroupsForCluster(String clusterName, String accountId) {
+        String prefix = clusterName + "/";
+        if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
+            return aware.scanAllAccountEntries(key -> key.startsWith(prefix)).stream()
+                    .filter(entry -> accountId == null || accountId.equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value).toList();
+        }
+        return nodeGroupStorage.scan(key -> key.startsWith(prefix));
+    }
+
     /**
      * Gives clusters persisted before IRSA support an OIDC issuer and signing key. Without this,
      * a cluster restored from {@code eks-clusters.json} would report no
@@ -283,7 +293,9 @@ public class EksService implements TagHandler, ResourceProvider {
                         cluster.getIdentity().getOidc().getIssuer());
                 continue;
             }
-            String issuer = oidcService.newIssuerUrl(config.defaultRegion());
+            // The cluster's own region, from its ARN: the issuer must match the one create mints there.
+            String issuer = oidcService.newIssuerUrl(
+                    AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion()));
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
             oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
             putClusterForAccount(accountId, cluster);
@@ -790,6 +802,10 @@ public class EksService implements TagHandler, ResourceProvider {
             boolean firstGroup = firstNodeGroup(clusterName, accountId).isEmpty() && pendingFirst == null;
             if (firstGroup && !config.services().eks().mock() && clusterManager != null) {
                 applyFirstNodeGroupCapacity(clusterName, nodegroupName, currentCluster, nodeGroup);
+                if (currentCluster.getContainerId() != null && currentCluster.getStatus() == ClusterStatus.ACTIVE) {
+                    LOG.infov("EKS cluster {0} is already running; nodegroup {1} node labels and taints are not applied to the running node",
+                            clusterName, nodegroupName);
+                }
             } else if (!firstGroup && pendingFirst == null
                     && !config.services().eks().mock() && clusterManager != null) {
                 if (currentCluster.getNodeInstanceType() == null) {
@@ -802,6 +818,13 @@ public class EksService implements TagHandler, ResourceProvider {
                     LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} cannot change its capacity from {2}",
                             clusterName, nodegroupName, currentCluster.getNodeInstanceType());
                 }
+                firstNodeGroup(clusterName, accountId).ifPresent(first -> {
+                    if (!nodegroupName.equals(first.getNodegroupName())) {
+                        LOG.warnv(
+                                "EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) is not applied to the node (already represented by nodegroup {2})",
+                                clusterName, nodegroupName, first.getNodegroupName());
+                    }
+                });
             }
 
             if (nodeGroup.getStatus() == NodegroupStatus.ACTIVE && (hasUserData || pendingFirst != null)) {
@@ -961,7 +984,7 @@ public class EksService implements TagHandler, ResourceProvider {
     }
 
     public FargateProfile createFargateProfile(String clusterName, CreateFargateProfileRequest request) {
-        describeCluster(clusterName);
+        Cluster cluster = describeCluster(clusterName);
 
         String fargateProfileName = request.getFargateProfileName();
         if (fargateProfileName == null || fargateProfileName.isBlank()) {
@@ -977,7 +1000,7 @@ public class EksService implements TagHandler, ResourceProvider {
                     "Fargate profile already exists: " + fargateProfileName, 409);
         }
 
-        String region = config.defaultRegion();
+        String region = resolveClusterRegion(cluster);
         String accountId = regionResolver.getAccountId();
         String id = UUID.randomUUID().toString();
         String arn = AwsArnUtils.Arn.of("eks", region, accountId,

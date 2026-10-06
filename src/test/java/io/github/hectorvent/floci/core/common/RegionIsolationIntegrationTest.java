@@ -5,6 +5,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.UUID;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -146,37 +148,66 @@ class RegionIsolationIntegrationTest {
 
     @Test
     void sqsQueuesAreIsolatedByRegion() {
-        // Create queue in us-east-1
-        given()
-            .header("Authorization", AUTH_US_EAST_1)
+        String eastOnly = "region-east-" + UUID.randomUUID().toString().substring(0, 8);
+        String westOnly = "region-west-" + UUID.randomUUID().toString().substring(0, 8);
+        String shared = "region-shared-" + UUID.randomUUID().toString().substring(0, 8);
+        String eastOnlyUrl = createQueue("us-east-1", eastOnly);
+        String westOnlyUrl = createQueue("us-west-2", westOnly);
+        // The same name in both regions: each region gets its own queue.
+        String eastSharedUrl = createQueue("us-east-1", shared);
+        String westSharedUrl = createQueue("us-west-2", shared);
+
+        try {
+            given()
+                .header("Authorization", sqsAuth("us-east-1"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ListQueues")
+            .when().post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(eastOnly), containsString(shared), not(containsString(westOnly)));
+            given()
+                .header("Authorization", sqsAuth("us-west-2"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ListQueues")
+            .when().post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(westOnly), containsString(shared), not(containsString(eastOnly)));
+        } finally {
+            deleteQueue("us-east-1", eastOnlyUrl);
+            deleteQueue("us-west-2", westOnlyUrl);
+            deleteQueue("us-east-1", eastSharedUrl);
+            deleteQueue("us-west-2", westSharedUrl);
+        }
+    }
+
+    private static String sqsAuth(String region) {
+        return "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region
+                + "/sqs/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+
+    private static String createQueue(String region, String name) {
+        return given()
+            .header("Authorization", sqsAuth(region))
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateQueue")
-            .formParam("QueueName", "region-test-queue")
+            .formParam("QueueName", name)
         .when().post("/")
         .then()
             .statusCode(200)
-            .body(containsString("region-test-queue"));
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+    }
 
-        // Create same queue name in us-west-2 — should succeed (different region)
+    private static void deleteQueue(String region, String queueUrl) {
         given()
-            .header("Authorization", AUTH_US_WEST_2)
+            .header("Authorization", sqsAuth(region))
             .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "CreateQueue")
-            .formParam("QueueName", "region-test-queue")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", queueUrl)
         .when().post("/")
         .then()
-            .statusCode(200)
-            .body(containsString("region-test-queue"));
-
-        // List queues in us-east-1 — should see it
-        given()
-            .header("Authorization", AUTH_US_EAST_1)
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "ListQueues")
-        .when().post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("region-test-queue"));
+            .statusCode(200);
     }
 
     @Test

@@ -31,7 +31,7 @@ class LambdaInvokeClientContextIntegrationTest {
     }
 
     private void stubInvoke() {
-        when(lambdaService.invoke(any(), any(), any(), any(), any(), any()))
+        when(lambdaService.invoke(any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "req"));
     }
 
@@ -47,7 +47,7 @@ class LambdaInvokeClientContextIntegrationTest {
                 .then().statusCode(200);
 
         verify(lambdaService).invoke(any(), eq("ctx-fn"), any(), any(),
-                eq(InvocationType.RequestResponse), eq(CONTEXT_JSON));
+                eq(InvocationType.RequestResponse), eq(CONTEXT_JSON), isNull());
     }
 
     @Test
@@ -63,7 +63,7 @@ class LambdaInvokeClientContextIntegrationTest {
                 .then().statusCode(200);
 
         verify(lambdaService).invoke(any(), eq("ctx-fn-event"), any(), any(),
-                eq(InvocationType.Event), isNull());
+                eq(InvocationType.Event), isNull(), isNull());
     }
 
     @Test
@@ -80,6 +80,6 @@ class LambdaInvokeClientContextIntegrationTest {
                 .then().statusCode(200);
 
         verify(lambdaService).invoke(any(), eq("ctx-fn-utf"), any(), any(),
-                eq(InvocationType.RequestResponse), eq("{\"custom\":{\"name\":\"caf\\u00E9\"}}"));
+                eq(InvocationType.RequestResponse), eq("{\"custom\":{\"name\":\"caf\\u00E9\"}}"), isNull());
     }
 }

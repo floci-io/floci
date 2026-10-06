@@ -88,6 +88,48 @@ def test_extract_matrix_slugs_strips_anchor():
     md = "## Service Matrix\n\n| [API Gateway v2](api-gateway.md#v2) | | | 48 |\n\n## Common Setup\n"
     assert c.extract_matrix_slugs(md) == {"api-gateway"}
 
+def test_extract_matrix_action_counts():
+    md = """
+# Services Overview
+
+## Service Matrix
+
+| Service | Endpoint | Protocol | Supported operations |
+|---|---|---|---|
+| [SSM](ssm.md) | ... | JSON 1.1 | 22 |
+| [CloudFormation](cloudformation.md) | ... | Query | 19 |
+| [API Gateway v2](api-gateway.md#v2) | ... | REST JSON | 53 + data-plane |
+
+## Common Setup
+"""
+
+    assert c.extract_matrix_action_counts(md) == {
+        "ssm": 22,
+        "cloudformation": 19,
+    }
+
+
+def test_extract_matrix_action_counts_ignores_links_outside_matrix():
+    md = """
+# Services Overview
+
+A link to [SSM](ssm.md) outside the matrix must not be counted.
+
+## Service Matrix
+
+| Service | Endpoint | Protocol | Supported operations |
+|---|---|---|---|
+| [CloudFormation](cloudformation.md) | ... | Query | 19 |
+
+## Common Setup
+
+Another link to [SQS](sqs.md).
+"""
+
+    assert c.extract_matrix_action_counts(md) == {
+        "cloudformation": 19,
+    }
+
 
 def test_extract_matrix_slugs_raises_on_missing_heading():
     # A renamed/reordered heading must fail loudly rather than silently returning an

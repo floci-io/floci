@@ -336,9 +336,7 @@ public class ElastiCacheQueryHandler {
         }
 
         try {
-            CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
-                    ? memcachedService.createCacheCluster(clusterId)
-                    : service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+            ElastiCacheService.CreateCacheClusterRequest request = new ElastiCacheService.CreateCacheClusterRequest(
                             clusterId,
                             engine,
                             params.getFirst("EngineVersion"),
@@ -358,7 +356,10 @@ public class ElastiCacheQueryHandler {
                             params.getFirst("IpDiscovery"),
                             boolParam(params, "AtRestEncryptionEnabled"),
                             region,
-                            parseTags(params)));
+                            parseTags(params));
+            CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
+                    ? memcachedService.createCacheCluster(request)
+                    : service.createCacheCluster(request);
             return Response.ok(AwsQueryResponse.envelope("CreateCacheCluster", AwsNamespaces.EC,
                     cacheClusterXml(cluster, false))).build();
         } catch (AwsException e) {
@@ -826,26 +827,31 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("CacheClusterStatus", c.getCacheClusterStatus().wireName())
                   .elem("Engine", c.getEngine())
                   .elem("EngineVersion", c.getEngineVersion());
-        if ("memcached".equals(c.getEngine())) {
+        boolean memcached = "memcached".equals(c.getEngine());
+        int numCacheNodes = c.getNumCacheNodes();
+        if (memcached) {
             if (ep != null) {
                 xml.start("ConfigurationEndpoint")
                    .elem("Address", ep.address())
                    .elem("Port", (long) ep.port())
                    .end("ConfigurationEndpoint");
             }
-            return xml.end("CacheCluster").build();
+            // A record persisted before node counts were stored reads back 0; the cluster it
+            // describes was created with AWS's default of one node.
+            numCacheNodes = Math.max(1, numCacheNodes);
+            xml.elem("NumCacheNodes", (long) numCacheNodes);
+        } else {
+            xml.elem("NumCacheNodes", (long) numCacheNodes)
+               .elem("AutoMinorVersionUpgrade", true)
+               .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
+               .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH)
+               .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())
+               .elem("SnapshotRetentionLimit", (long) c.getSnapshotRetentionLimit())
+               .elem("SnapshotWindow", c.getSnapshotWindow() != null
+                       ? c.getSnapshotWindow() : ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW)
+               .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                       ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW);
         }
-
-        xml.elem("NumCacheNodes", (long) c.getNumCacheNodes())
-           .elem("AutoMinorVersionUpgrade", true)
-           .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
-           .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH)
-           .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())
-           .elem("SnapshotRetentionLimit", (long) c.getSnapshotRetentionLimit())
-           .elem("SnapshotWindow", c.getSnapshotWindow() != null
-                   ? c.getSnapshotWindow() : ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW)
-           .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
-                   ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW);
         if (c.getCacheClusterCreateTime() != null) {
             xml.elem("CacheClusterCreateTime", c.getCacheClusterCreateTime().toString());
         }
@@ -888,25 +894,29 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             // without a nil check while adopting the resource, so a node carrying only an
             // endpoint fails the refresh right after a successful create. Both are stable
             // metadata AWS returns on every available node, and both are already known here:
-            // a single-node cluster's node was created with the cluster, and its parameter
-            // group has the same in-sync status reported for the cluster above.
-            xml.start("CacheNodes")
-               .start("CacheNode")
-                 .elem("CacheNodeId", "0001")
-                 .elem("CacheNodeStatus", "available");
-            if (c.getCacheClusterCreateTime() != null) {
-                xml.elem("CacheNodeCreateTime", c.getCacheClusterCreateTime().toString());
+            // a node was created with its cluster, and its parameter group has the same in-sync
+            // status reported for the cluster above. A redis cluster has one node; a Memcached
+            // cluster has NumCacheNodes, all served by its one container, so every node reports
+            // the cluster's endpoint.
+            xml.start("CacheNodes");
+            for (int node = 1; node <= (memcached ? numCacheNodes : 1); node++) {
+                xml.start("CacheNode")
+                     .elem("CacheNodeId", String.format("%04d", node))
+                     .elem("CacheNodeStatus", "available");
+                if (c.getCacheClusterCreateTime() != null) {
+                    xml.elem("CacheNodeCreateTime", c.getCacheClusterCreateTime().toString());
+                }
+                xml.start("Endpoint")
+                     .elem("Address", ep.address())
+                     .elem("Port", (long) ep.port())
+                   .end("Endpoint")
+                   .elem("ParameterGroupStatus", "in-sync");
+                if (c.getPreferredAvailabilityZone() != null) {
+                    xml.elem("CustomerAvailabilityZone", c.getPreferredAvailabilityZone());
+                }
+                xml.end("CacheNode");
             }
-            xml.start("Endpoint")
-                 .elem("Address", ep.address())
-                 .elem("Port", (long) ep.port())
-               .end("Endpoint")
-               .elem("ParameterGroupStatus", "in-sync");
-            if (c.getPreferredAvailabilityZone() != null) {
-                xml.elem("CustomerAvailabilityZone", c.getPreferredAvailabilityZone());
-            }
-            xml.end("CacheNode")
-               .end("CacheNodes");
+            xml.end("CacheNodes");
         }
         return xml.end("CacheCluster").build();
     }
@@ -1049,8 +1059,20 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 // MinimumEngineVersion: the only value AWS documents; no valkey-specific one is published.
                 .elem("MinimumEngineVersion", "6.0")
                 .start("UserGroupIds").end("UserGroupIds")
-                .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "user:" + u.getUserId()).toString())
+                .elem("ARN", userArn(u))
                 .build();
+    }
+
+    /**
+     * The ARN stored at CreateUser. Users persisted before it was stored keep the default-region ARN
+     * they were always reported with, so their identity stays stable.
+     */
+    private String userArn(ElastiCacheUser u) {
+        if (u.getArn() != null) {
+            return u.getArn();
+        }
+        return AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(),
+                regionResolver.getAccountId(), "user:" + u.getUserId()).toString();
     }
 
     private record UserAuthentication(AuthMode mode, List<String> passwords) {}

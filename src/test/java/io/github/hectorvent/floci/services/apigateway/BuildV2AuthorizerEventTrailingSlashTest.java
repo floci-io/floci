@@ -48,7 +48,7 @@ class BuildV2AuthorizerEventTrailingSlashTest {
                 regionResolver, new ObjectMapper(), null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null,
                 null, null
-        , null);
+        , null, null);
     }
 
     private JsonNode buildEvent(String normalizedPath, String rawRequestUri) throws Exception {

@@ -34,6 +34,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -50,6 +51,46 @@ class S3ServiceTest {
     void setUp() {
         Path dataRoot = tempDir.resolve("s3");
         s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
+    }
+
+    @Test
+    void deletingTheLatestVersionPromotesThePreviousVersionsFile() throws IOException {
+        s3Service.createBucket("promotion-bucket", "us-east-1");
+        s3Service.putBucketVersioning("promotion-bucket", "Enabled");
+        S3Object first = s3Service.putObject("promotion-bucket", "key",
+                "first".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        S3Object second = s3Service.putObject("promotion-bucket", "key",
+                "second".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+
+        s3Service.deleteObject("promotion-bucket", "key", second.getVersionId());
+
+        S3Object current = s3Service.getObject("promotion-bucket", "key");
+        assertEquals(first.getVersionId(), current.getVersionId());
+        assertArrayEquals("first".getBytes(StandardCharsets.UTF_8), current.getData());
+        List<Path> objectFiles;
+        try (Stream<Path> files = Files.walk(tempDir.resolve("s3"))) {
+            objectFiles = files.filter(path -> path.getFileName().toString().endsWith(".s3data")).toList();
+        }
+        assertEquals(2, objectFiles.size(), "the promoted version's file and the current file: " + objectFiles);
+        // Without hard links the promotion copies the file instead, which is still correct.
+        if (hardLinksSupported(tempDir)) {
+            assertTrue(Files.isSameFile(objectFiles.get(0), objectFiles.get(1)),
+                    "the current file should be the promoted version's file, linked rather than read and copied");
+        }
+    }
+
+    private static boolean hardLinksSupported(Path dir) throws IOException {
+        Path probe = Files.createTempFile(dir, "link-probe", null);
+        Path link = probe.resolveSibling(probe.getFileName() + ".link");
+        try {
+            Files.createLink(link, probe);
+            return true;
+        } catch (UnsupportedOperationException | IOException unsupported) {
+            return false;
+        } finally {
+            Files.deleteIfExists(link);
+            Files.deleteIfExists(probe);
+        }
     }
 
     @Test
@@ -142,6 +183,34 @@ class S3ServiceTest {
 
         List<Bucket> buckets = s3Service.listBuckets();
         assertEquals(2, buckets.size());
+    }
+
+    @Test
+    void listBucketsHidesSpectrumScratchBucketButKeepsOtherInternalPrefixBuckets() {
+        s3Service.createBucket("bucket-a", "us-east-1");
+        s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
+        s3Service.putBucketTagging(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, Map.of(
+                S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE));
+        String userBucket = S3Service.INTERNAL_BUCKET_PREFIX + "customer-data";
+        s3Service.createBucket(userBucket, "us-east-1");
+
+        List<Bucket> buckets = s3Service.listBuckets();
+
+        assertEquals(2, buckets.size());
+        assertTrue(buckets.stream().anyMatch(bucket -> "bucket-a".equals(bucket.getName())));
+        assertTrue(buckets.stream().anyMatch(bucket -> userBucket.equals(bucket.getName())));
+        assertFalse(buckets.stream().anyMatch(bucket ->
+                S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())));
+    }
+
+    @Test
+    void listBucketsKeepsAUserBucketThatOnlySharesTheScratchBucketName() {
+        s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
+
+        List<Bucket> buckets = s3Service.listBuckets();
+
+        assertEquals(1, buckets.size());
+        assertEquals(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, buckets.get(0).getName());
     }
 
     @Test

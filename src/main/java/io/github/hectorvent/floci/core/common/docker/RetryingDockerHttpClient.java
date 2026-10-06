@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.transport.DockerHttpClient;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.LinkedHashMap;
@@ -31,10 +34,16 @@ import java.util.Map;
  *       one retrying fixes. The {@code contains} spelling (not {@code startsWith}) also covers
  *       exec-create ({@code POST /containers/{id}/exec}), where a replay would merely leak an
  *       unused exec ID; that conservative breadth costs nothing.</li>
- *   <li>It must not be an unnamed container create, a network create, a container restart or a
- *       network connect/disconnect: replaying those after a lost response duplicates a
- *       container, loses a network to a swallowed 409, restarts twice, or hits a spurious
- *       conflict.</li>
+ *   <li>Its method and route must be on the allowlist: {@code GET} and {@code HEAD} always;
+ *       {@code DELETE}, whose replay after a lost response answers 404 and every caller tolerates
+ *       that; {@code PUT} (archive upload, already limited to a byte-array body above); and
+ *       {@code POST} only for a container start or stop (a replay gets 304), a wait, an image pull,
+ *       a named volume create (docker returns the existing volume) and a named container create (the
+ *       caller adopts the container on a 409). Every other {@code POST} is never replayed: commit
+ *       would make a second image, pause/unpause/kill a 409 for a state that already changed,
+ *       rename a name conflict, restart a second restart, network create a swallowed 409, network
+ *       connect/disconnect a spurious conflict, and an unnamed create a second container. A call
+ *       added later gets retries only once someone has reasoned about its replay.</li>
  * </ul>
  *
  * <p>Idempotency of what a replay <em>means</em> stays the call site's job: docker answers a
@@ -43,6 +52,9 @@ import java.util.Map;
  * re-checks existence so a replayed create finds the volume the lost response landed.
  */
 public final class RetryingDockerHttpClient implements DockerHttpClient {
+
+    private static final Logger LOG = Logger.getLogger(RetryingDockerHttpClient.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     static final String CONNECTION_HEADER = "Connection";
     static final String CONNECTION_CLOSE = "close";
@@ -126,54 +138,52 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         if (request.path().contains("/exec")) {
             return false;
         }
-        if (isNonIdempotentCreate(request) || isNonIdempotentAction(request)) {
+        if (request.bodyBytes() == null && request.body() != null) {
             return false;
         }
-        return request.bodyBytes() != null || request.body() == null;
+        return switch (request.method()) {
+            case "GET", "HEAD", "DELETE", "PUT" -> true;
+            case "POST" -> isReplayablePost(request);
+            default -> false;
+        };
     }
 
-    /**
-     * Bodyless POST actions whose replay after a lost response changes the outcome. A replayed
-     * {@code containers/{id}/restart} restarts the container a second time (extra downtime), and
-     * a replayed {@code networks/{id}/connect} or {@code disconnect} gets a conflict or not-found
-     * the caller does not expect for an operation that in fact succeeded.
-     */
-    private static boolean isNonIdempotentAction(Request request) {
-        if (!"POST".equals(request.method())) {
-            return false;
-        }
+    /** The {@code POST} routes whose replay after a lost response leaves the same outcome. */
+    private static boolean isReplayablePost(Request request) {
         String path = request.path();
         int queryStart = path.indexOf('?');
         String route = queryStart < 0 ? path : path.substring(0, queryStart);
-        return route.endsWith("/restart") || route.endsWith("/connect") || route.endsWith("/disconnect");
-    }
-
-    /**
-     * Creates whose replay after a lost response is harmful. A replayed {@code networks/create}
-     * gets a 409 that callers swallow, silently losing the network. A replayed unnamed
-     * {@code containers/create} makes a second, orphaned container; a named one is safe because
-     * the caller adopts the existing container on a 409.
-     */
-    private static boolean isNonIdempotentCreate(Request request) {
-        if (!"POST".equals(request.method())) {
-            return false;
-        }
-        String path = request.path();
-        int queryStart = path.indexOf('?');
-        String route = queryStart < 0 ? path : path.substring(0, queryStart);
-        if (route.endsWith("/networks/create")) {
-            return true;
-        }
         if (route.endsWith("/containers/create")) {
             String query = queryStart < 0 ? "" : path.substring(queryStart + 1);
             for (String param : query.split("&")) {
                 if (param.startsWith("name=")) {
-                    return false;
+                    return true;
                 }
             }
-            return true;
+            return false;
         }
-        return false;
+        if (route.endsWith("/volumes/create")) {
+            return hasVolumeName(request.bodyBytes());
+        }
+        return route.endsWith("/start") || route.endsWith("/stop") || route.endsWith("/wait")
+                || route.endsWith("/images/create");
+    }
+
+    /**
+     * Whether a volume create names its volume. A replayed named create returns the existing
+     * volume; a replayed unnamed one makes a second volume and orphans the first.
+     */
+    private static boolean hasVolumeName(byte[] body) {
+        if (body == null || body.length == 0) {
+            return false;
+        }
+        try {
+            JsonNode name = JSON.readTree(body).get("Name");
+            return name != null && name.isTextual() && !name.asText().isBlank();
+        } catch (IOException e) {
+            LOG.debugv(e, "Not replaying a volume create whose body is not JSON");
+            return false;
+        }
     }
 
     @Override

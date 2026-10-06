@@ -3,12 +3,14 @@ package io.github.hectorvent.floci.core.common;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.RSAPublicKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.HexFormat;
 
@@ -29,6 +31,8 @@ public final class SshPublicKeys {
      * is the modulus of a 16384-bit RSA key, 2049 bytes with its sign byte.
      */
     private static final int MAX_FIELD_LENGTH = 64 * 1024;
+
+    private static final int PEM_LINE_LENGTH = 64;
 
     private SshPublicKeys() {}
 
@@ -108,7 +112,13 @@ public final class SshPublicKeys {
      */
     public static RSAPublicKey rsaKeyOf(byte[] blob) {
         Reader reader = reader(blob);
-        reader.readField();
+        // The declared type is checked rather than skipped. Discarding it parses the exponent and
+        // modulus of whatever follows, so a line labelled ssh-ed25519 carrying an RSA blob would
+        // be read as an RSA key and stored under a type that was never supported.
+        String type = new String(reader.readField(), StandardCharsets.UTF_8);
+        if (!"ssh-rsa".equals(type)) {
+            throw new SshPublicKeyException("not an ssh-rsa blob: " + type);
+        }
         BigInteger exponent = new BigInteger(reader.readField());
         BigInteger modulus = new BigInteger(reader.readField());
         try {
@@ -125,7 +135,7 @@ public final class SshPublicKeys {
     }
 
     /** The OpenSSH blob for a key: the type, then the exponent, then the modulus. */
-    private static byte[] openSshBlob(RSAPublicKey key) {
+    public static byte[] openSshBlob(RSAPublicKey key) {
         byte[] type = "ssh-rsa".getBytes(StandardCharsets.US_ASCII);
         byte[] exponent = key.getPublicExponent().toByteArray();
         byte[] modulus = key.getModulus().toByteArray();
@@ -135,6 +145,65 @@ public final class SshPublicKeys {
             blob.putInt(field.length).put(field);
         }
         return blob.array();
+    }
+
+    /** The key type an OpenSSH blob declares, such as {@code ssh-rsa}. */
+    public static String keyType(byte[] blob) {
+        return new String(reader(blob).readField(), StandardCharsets.UTF_8);
+    }
+
+    /** The key as a PEM SubjectPublicKeyInfo, the {@code BEGIN PUBLIC KEY} form. */
+    public static String toPem(RSAPublicKey key) {
+        String body = Base64.getEncoder().encodeToString(key.getEncoded());
+        StringBuilder pem = new StringBuilder("-----BEGIN PUBLIC KEY-----\n");
+        for (int i = 0; i < body.length(); i += PEM_LINE_LENGTH) {
+            pem.append(body, i, Math.min(i + PEM_LINE_LENGTH, body.length())).append('\n');
+        }
+        return pem.append("-----END PUBLIC KEY-----\n").toString();
+    }
+
+    /**
+     * Whether a value is a PEM public key rather than an OpenSSH line. Both markers are required:
+     * treating the closing one as optional accepts a truncated body, which then decodes because
+     * the base64 that survived is still valid base64.
+     */
+    public static boolean looksLikePem(String value) {
+        return value != null
+                && value.contains("-----BEGIN PUBLIC KEY-----")
+                && value.contains("-----END PUBLIC KEY-----");
+    }
+
+    /** Whether a value opens as PEM, whether or not it is complete. */
+    public static boolean opensAsPem(String value) {
+        return value != null && value.contains("-----BEGIN PUBLIC KEY-----");
+    }
+
+    /** The RSA public key a PEM SubjectPublicKeyInfo carries. */
+    public static RSAPublicKey fromPem(String pem) {
+        if (!looksLikePem(pem)) {
+            throw new SshPublicKeyException("not a PEM public key");
+        }
+        String body = pem.replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s", "");
+        try {
+            return (RSAPublicKey) KeyFactory.getInstance("RSA")
+                    .generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(body)));
+        } catch (IllegalArgumentException | GeneralSecurityException | ClassCastException e) {
+            throw new SshPublicKeyException("not a usable RSA public key: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * The OpenSSH fingerprint: the MD5 of the blob itself, colon-delimited lowercase hex.
+     *
+     * <p>This is what IAM reports as an SSH public key's {@code Fingerprint}, confirmed by
+     * reproducing the worked example in the IAM API Reference. It is deliberately not the digest
+     * EC2 reports for the same key, which is taken over the DER: both are sixteen bytes of colon
+     * hex, so substituting one for the other is wrong and looks right.
+     */
+    public static String openSshFingerprint(byte[] blob) {
+        return md5ColonHex(blob);
     }
 
     /** MD5 of the given bytes as colon-delimited lowercase hex. */

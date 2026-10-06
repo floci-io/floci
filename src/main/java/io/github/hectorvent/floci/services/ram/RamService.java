@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
+import io.github.hectorvent.floci.services.ram.model.SharePermission;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
@@ -53,6 +54,14 @@ public class RamService {
     /** The modeled ResourceShareStatus enum. */
     private static final List<String> SHARE_STATUSES =
             List.of("PENDING", "ACTIVE", "FAILED", "DELETING", "DELETED");
+    /** The owner segment of an AWS managed permission ARN. */
+    private static final String MANAGED_PERMISSION_OWNER = "aws";
+    /**
+     * Creation and update time reported for every AWS managed permission. It is fixed so the same
+     * permission reports the same times in every share and does not move when a share changes.
+     */
+    private static final Instant MANAGED_PERMISSION_TIME = Instant.parse("2018-11-14T00:00:00Z");
+    private static final String RESOURCE_SHARE_PREFIX = "resource-share/";
     /** An AWS account id, as opposed to an organization/OU principal ARN. */
     private static final Pattern ACCOUNT_ID_PRINCIPAL = Pattern.compile("\\d{12}");
 
@@ -410,6 +419,55 @@ public class RamService {
         return result;
     }
 
+    /**
+     * Floci has no explicit permission model: every resource type in a share is governed by RAM's
+     * default AWS managed permission for that type, so one summary is returned per distinct type.
+     * Readable by the owner and by an account the share is visible to, like the other reads.
+     */
+    public List<SharePermission> listResourceSharePermissions(String resourceShareArn,
+                                                              String callerAccountId, String region) {
+        if (resourceShareArn == null || resourceShareArn.isBlank()) {
+            throw new AwsException("InvalidParameterException", "resourceShareArn is required.", 400);
+        }
+        if (!isResourceShareArn(resourceShareArn)) {
+            throw new AwsException("MalformedArnException",
+                    "The specified Amazon Resource Name (ARN) has a format that isn't valid: "
+                            + resourceShareArn, 400);
+        }
+        ResourceShare share = sharesIn(region).stream()
+                .filter(candidate -> candidate.getResourceShareArn().equals(resourceShareArn))
+                .filter(candidate -> !"DELETED".equals(candidate.getStatus()))
+                .filter(candidate -> candidate.getOwningAccountId().equals(callerAccountId)
+                        || isVisible(candidate, callerAccountId, "OTHER-ACCOUNTS"))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("UnknownResourceException",
+                        "ResourceShare " + resourceShareArn + " does not exist.", 400));
+        String partition = AwsArnUtils.parse(resourceShareArn).partition();
+        Map<String, SharePermission> byType = new LinkedHashMap<>();
+        for (String resourceArn : share.getResourceArns()) {
+            String type = ramResourceType(resourceArn);
+            if (type.isEmpty() || byType.containsKey(type)) {
+                continue;
+            }
+            String name = "AWSRAMDefaultPermission" + type.substring(type.indexOf(':') + 1);
+            byType.put(type, new SharePermission(
+                    AwsArnUtils.Arn.global(partition, "ram", MANAGED_PERMISSION_OWNER,
+                            "permission/" + name).toString(),
+                    name, type, MANAGED_PERMISSION_TIME, MANAGED_PERMISSION_TIME));
+        }
+        return List.copyOf(byType.values());
+    }
+
+    private static boolean isResourceShareArn(String arn) {
+        if (!isValidArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "ram".equals(parsed.service())
+                && parsed.resource().startsWith(RESOURCE_SHARE_PREFIX)
+                && parsed.resource().length() > RESOURCE_SHARE_PREFIX.length();
+    }
+
     public void tagResource(String resourceShareArn, Map<String, String> newTags, String callerAccountId,
                             String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
@@ -620,8 +678,8 @@ public class RamService {
         }
         String service = parts[2];
         String resource = parts[5];
-        int slash = resource.indexOf('/');
-        String typeSegment = slash >= 0 ? resource.substring(0, slash) : resource;
+        int separator = indexOfTypeSeparator(resource);
+        String typeSegment = separator >= 0 ? resource.substring(0, separator) : resource;
         StringBuilder camel = new StringBuilder();
         for (String word : typeSegment.split("-")) {
             if (!word.isEmpty()) {
@@ -629,5 +687,15 @@ public class RamService {
             }
         }
         return service + ":" + camel;
+    }
+
+    /** ARN resources name their type before either a slash ({@code subnet/x}) or a colon ({@code cluster:x}). */
+    private static int indexOfTypeSeparator(String resource) {
+        int slash = resource.indexOf('/');
+        int colon = resource.indexOf(':');
+        if (slash < 0) {
+            return colon;
+        }
+        return colon < 0 ? slash : Math.min(slash, colon);
     }
 }

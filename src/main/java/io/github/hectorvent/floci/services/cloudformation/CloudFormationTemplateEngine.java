@@ -602,7 +602,8 @@ public class CloudFormationTemplateEngine {
 
     private String resolveGetAttParts(String logicalId, String attrName) {
         Map<String, String> attrs = resourceAttributes.get(logicalId);
-        if (attrs != null && attrs.containsKey(attrName)) {
+        // Provisioners keep private state under __Floci keys; AWS resolves no such attribute.
+        if (attrs != null && attrs.containsKey(attrName) && !attrName.startsWith("__Floci")) {
             return attrs.get(attrName);
         }
         LOG.warnv("Unresolved GetAtt: {0}.{1}", logicalId, attrName);

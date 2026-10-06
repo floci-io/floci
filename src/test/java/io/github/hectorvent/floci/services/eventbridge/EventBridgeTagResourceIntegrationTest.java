@@ -76,7 +76,7 @@ class EventBridgeTagResourceIntegrationTest {
         given()
             .contentType(EVENT_BRIDGE_CONTENT_TYPE)
             .header("X-Amz-Target", "AWSEvents.PutRule")
-            .body("{\"Name\":\"tag-test-rule\"}")
+            .body("{\"Name\":\"tag-test-rule\",\"ScheduleExpression\":\"rate(1 day)\"}")
         .when()
             .post("/")
         .then()

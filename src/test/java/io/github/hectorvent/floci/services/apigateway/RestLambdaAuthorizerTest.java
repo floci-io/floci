@@ -1,10 +1,14 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.apigatewayv2.AuthorizerPolicyFixtures;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
@@ -22,7 +26,7 @@ class RestLambdaAuthorizerTest {
     @BeforeEach
     void createAuthorizer() {
         when(clock.instant()).thenReturn(now);
-        authorizer = new RestLambdaAuthorizer(mapper, new IamPolicyEvaluator(mapper), clock);
+        authorizer = new RestLambdaAuthorizer(mapper, new AuthorizerPolicyEvaluator(new IamPolicyEvaluator(mapper)), clock);
     }
 
     @Test
@@ -67,6 +71,22 @@ class RestLambdaAuthorizerTest {
         assertTrue(authorizer.permits(result, "api/stage/GET/allowed/child", Map.of("aws:SourceIp", List.of("192.0.2.10"))));
         assertFalse(authorizer.permits(result, "api/stage/GET/other/child", Map.of("aws:SourceIp", List.of("192.0.2.10"))));
         assertFalse(authorizer.permits(result, "api/stage/GET/allowed/child", Map.of("aws:SourceIp", List.of("198.51.100.10"))));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("io.github.hectorvent.floci.services.apigatewayv2.AuthorizerPolicyFixtures#policies")
+    void sharesPolicySemanticsWithHttpAndWebSocketApis(String scenario, String statements, int expectedStatus)
+            throws Exception {
+        String arn = "arn:aws:execute-api:us-east-1:000000000000:api/test/GET/items";
+        byte[] payload = ("{\"principalId\":\"user\",\"policyDocument\":{\"Version\":\"2012-10-17\",\"Statement\":"
+                + AuthorizerPolicyFixtures.renderStatements(statements, arn) + "}}").getBytes(StandardCharsets.UTF_8);
+        if (expectedStatus == 500) {
+            assertThrows(IllegalArgumentException.class, () -> authorizer.parse(payload));
+            return;
+        }
+        RestLambdaAuthorizer.Result result = authorizer.parse(payload);
+        assertEquals(expectedStatus == 200,
+                authorizer.permits(result, arn, AuthorizerPolicyEvaluator.requestConditions("127.0.0.1", false)));
     }
 
     @Test

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigatewayv2.websocket;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.apigateway.AuthorizerPolicyEvaluator;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
@@ -33,16 +34,19 @@ public class WebSocketAuthorizerService {
     private final LambdaService lambdaService;
     private final WebSocketProxyEventBuilder proxyEventBuilder;
     private final ObjectMapper objectMapper;
+    private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
 
     @Inject
     public WebSocketAuthorizerService(ApiGatewayV2Service apiGatewayV2Service,
                                       LambdaService lambdaService,
                                       WebSocketProxyEventBuilder proxyEventBuilder,
-                                      ObjectMapper objectMapper) {
+                                      ObjectMapper objectMapper,
+                                      AuthorizerPolicyEvaluator authorizerPolicyEvaluator) {
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
         this.proxyEventBuilder = proxyEventBuilder;
         this.objectMapper = objectMapper;
+        this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
     }
 
     /**
@@ -82,7 +86,7 @@ public class WebSocketAuthorizerService {
                                               String authorizerId, String connectionId, long connectedAt,
                                               Map<String, List<String>> headers,
                                               Map<String, List<String>> queryParams,
-                                              String sourceIp, String userAgent,
+                                              String sourceIp, boolean secureTransport, String userAgent,
                                               Map<String, String> stageVariables) {
         // Fetch the authorizer model
         Authorizer authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, authorizerId);
@@ -138,13 +142,15 @@ public class WebSocketAuthorizerService {
         }
 
         // Parse the policy document
-        return parseAuthorizerResponse(invokeResult, apiId);
+        return parseAuthorizerResponse(invokeResult, apiId, proxyEventBuilder.buildMethodArn(region, apiId, stageName),
+                sourceIp, secureTransport);
     }
 
     /**
      * Parse the authorizer Lambda response and extract the policy decision.
      */
-    private AuthorizerResult parseAuthorizerResponse(InvokeResult invokeResult, String apiId) {
+    private AuthorizerResult parseAuthorizerResponse(InvokeResult invokeResult, String apiId, String methodArn,
+                                                     String sourceIp, boolean secureTransport) {
         // Check for function error
         if (invokeResult.getFunctionError() != null) {
             LOG.warnv("Lambda authorizer returned function error for API {0}: {1}",
@@ -166,22 +172,8 @@ public class WebSocketAuthorizerService {
                 return AuthorizerResult.error();
             }
 
-            JsonNode statements = policyDocument.path("Statement");
-            if (statements.isMissingNode() || statements.isNull()
-                    || !statements.isArray() || statements.isEmpty()) {
-                LOG.warnv("Authorizer response missing or empty Statement array for API {0}", apiId);
-                return AuthorizerResult.error();
-            }
-
-            String effect = statements.get(0).path("Effect").asText("Deny");
-            if ("Deny".equalsIgnoreCase(effect)) {
+            if (!authorizerPolicyEvaluator.permits(policyDocument, methodArn, sourceIp, secureTransport)) {
                 return AuthorizerResult.deny();
-            }
-
-            if (!"Allow".equalsIgnoreCase(effect)) {
-                LOG.warnv("Authorizer response has unrecognized Effect '{0}' for API {1}",
-                        effect, apiId);
-                return AuthorizerResult.error();
             }
 
             // Extract context map if present

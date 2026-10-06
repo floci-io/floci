@@ -120,7 +120,7 @@ public class AmazonMqService implements ResourceProvider {
 
         String brokerId = "b-" + UUID.randomUUID();
         String accountId = regionResolver.getAccountId();
-        String brokerArn = AwsArnUtils.Arn.of("mq", config.defaultRegion(), accountId,
+        String brokerArn = AwsArnUtils.Arn.of("mq", regionResolver.getRegion(), accountId,
                 "broker:" + name + ":" + brokerId).toString();
         String engineVersion = (params.engineVersion() == null || params.engineVersion().isBlank())
                 ? DEFAULT_ENGINE_VERSION : params.engineVersion();

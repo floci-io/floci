@@ -264,6 +264,60 @@ public final class LambdaUtils {
         return createZip("index.js", code);
     }
 
+    /**
+     * A Python durable function that speaks the checkpoint protocol through the image's boto3
+     * client: one step, one wait of {@code event.wait} seconds (default 2), then a result. An input
+     * of {@code {"fail": true}} fails the execution instead.
+     */
+    public static byte[] durablePythonZip() {
+        String code = """
+                import json
+                import boto3
+
+                client = boto3.client("lambda")
+
+
+                def handler(event, context):
+                    operations = {op["Id"]: op for op in event["InitialExecutionState"]["Operations"]}
+                    root = next(op for op in operations.values() if op["Type"] == "EXECUTION")
+                    request = json.loads(root["ExecutionDetails"].get("InputPayload") or "{}")
+                    if request.get("fail"):
+                        return {"Status": "FAILED",
+                                "Error": {"ErrorMessage": "asked to fail", "ErrorType": "TestFailure"}}
+                    if request.get("callback"):
+                        if "callback" not in operations:
+                            client.checkpoint_durable_execution(
+                                DurableExecutionArn=event["DurableExecutionArn"],
+                                CheckpointToken=event["CheckpointToken"],
+                                Updates=[{"Id": "callback", "Name": "approval", "Type": "CALLBACK",
+                                          "SubType": "Callback", "Action": "START",
+                                          "CallbackOptions": {"HeartbeatTimeoutSeconds": 60}}])
+                            return {"Status": "PENDING"}
+                        callback = operations["callback"]
+                        if callback["Status"] == "STARTED":
+                            return {"Status": "PENDING"}
+                        return {"Status": "SUCCEEDED", "Result": callback["CallbackDetails"].get("Result", "")}
+                    if "step" not in operations:
+                        client.checkpoint_durable_execution(
+                            DurableExecutionArn=event["DurableExecutionArn"],
+                            CheckpointToken=event["CheckpointToken"],
+                            Updates=[
+                                {"Id": "step", "Name": "validate", "Type": "STEP", "SubType": "Step",
+                                 "Action": "START"},
+                                {"Id": "step", "Name": "validate", "Type": "STEP", "SubType": "Step",
+                                 "Action": "SUCCEED", "Payload": json.dumps({"validated": True})},
+                                {"Id": "wait", "Type": "WAIT", "SubType": "Wait", "Action": "START",
+                                 "WaitOptions": {"WaitSeconds": request.get("wait", 2)}},
+                            ])
+                        return {"Status": "PENDING"}
+                    if operations["wait"]["Status"] != "SUCCEEDED":
+                        return {"Status": "PENDING"}
+                    step = json.loads(operations["step"]["StepDetails"]["Result"])
+                    return {"Status": "SUCCEEDED", "Result": json.dumps({"done": True, "step": step})}
+                """;
+        return createZip("lambda_function.py", code);
+    }
+
     private static byte[] createZip(String filename, String content) {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();

@@ -50,7 +50,7 @@ class EventBridgeSchedulerIntegrationTest {
         eventBridgeService = new EventBridgeService(
                 busStore, ruleStore, targetStore,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT),
                 new ObjectMapper(), scheduler, dispatcher, replayDispatcher,
                 new ResourceGroupsTaggingService(null));
@@ -148,7 +148,7 @@ class EventBridgeSchedulerIntegrationTest {
             assertTrue(scheduler.isRunning(arn));
 
             eventBridgeService.putRule(
-                    "test-rule", "default", null, null,
+                    "test-rule", "default", "{\"source\":[\"my.app\"]}", null,
                     RuleState.ENABLED, null, null, null, REGION);
 
             assertFalse(scheduler.isRunning(arn));
@@ -276,7 +276,7 @@ class EventBridgeSchedulerIntegrationTest {
             assertTrue(scheduler.isRunning(arn));
 
             eventBridgeService.putRule(
-                    "test-cron-rule", "default", null, null,
+                    "test-cron-rule", "default", "{\"source\":[\"my.app\"]}", null,
                     RuleState.ENABLED, null, null, null, REGION);
 
             assertFalse(scheduler.isRunning(arn));

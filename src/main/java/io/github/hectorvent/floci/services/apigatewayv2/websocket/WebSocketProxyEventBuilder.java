@@ -291,7 +291,7 @@ public class WebSocketProxyEventBuilder {
         return AwsEndpoints.executeApiHost(apiId, region);
     }
 
-    private String buildMethodArn(String region, String apiId, String stageName) {
+    String buildMethodArn(String region, String apiId, String stageName) {
         return AwsArnUtils.Arn.of("execute-api", region, regionResolver.getAccountId(),
                 apiId + "/" + stageName + "/$connect").toString();
     }

@@ -3,10 +3,12 @@
 **Protocol:** AWS JSON 1.1  
 **Signing name:** `dms`
 
-Floci emulates the replication subnet group lifecycle, which is what
-`aws_dms_replication_subnet_group` needs to plan and apply. Subnets are resolved against
+Floci emulates the replication subnet group, endpoint, replication instance and
+replication task lifecycles, which is what `aws_dms_replication_subnet_group`,
+`aws_dms_endpoint`, `aws_dms_s3_endpoint`, `aws_dms_replication_instance` and
+`aws_dms_replication_task` need to plan, apply and destroy. Subnets are resolved against
 the emulated EC2 service, so the VPC and Availability Zones a group reports are the ones
-those subnets actually have.
+those subnets actually have. No data is migrated: the resources are control-plane state.
 
 ## Supported Actions
 
@@ -19,6 +21,20 @@ those subnets actually have.
 | `ListTagsForResource` | Lists the tags on one or more DMS resource ARNs. |
 | `AddTagsToResource` | Merges tags into the resource, overwriting by key. |
 | `RemoveTagsFromResource` | Removes the named tag keys from the resource. |
+| `CreateEndpoint` | Creates a source or target endpoint; secret members are accepted and never returned. |
+| `DescribeEndpoints` | Lists endpoints, filtered by `endpoint-arn`, `endpoint-type`, `endpoint-id` or `engine-name`. |
+| `ModifyEndpoint` | Updates an endpoint; settings structures merge unless `ExactSettings` is true. |
+| `DeleteEndpoint` | Deletes an endpoint that no replication task uses. |
+| `CreateReplicationInstance` | Creates a replication instance, `available` immediately. |
+| `DescribeReplicationInstances` | Lists replication instances, filtered by `replication-instance-arn`, `replication-instance-id`, `replication-instance-class` or `engine-version`. |
+| `ModifyReplicationInstance` | Updates a replication instance, applied immediately. |
+| `DeleteReplicationInstance` | Deletes a replication instance that no replication task uses. |
+| `CreateReplicationTask` | Creates a replication task between two existing endpoints on an existing instance, `ready` immediately. |
+| `DescribeReplicationTasks` | Lists replication tasks, filtered by `replication-task-arn`, `replication-task-id`, `migration-type`, `endpoint-arn` or `replication-instance-arn`. |
+| `ModifyReplicationTask` | Updates a replication task that is not running. |
+| `DeleteReplicationTask` | Deletes a replication task that is not running. |
+| `StartReplicationTask` | Moves a task to `running`. |
+| `StopReplicationTask` | Moves a running task to `stopped`. |
 <!-- floci:actions:end -->
 
 ## Behaviour
@@ -53,13 +69,54 @@ those subnets actually have.
   not a serialization one.
 - Groups are scoped per account and Region and persist through `StorageFactory`.
 
+### Endpoints, replication instances and replication tasks
+
+- Each resource gets an ARN of the form `arn:aws:dms:<region>:<account>:<type>:<id>`, where
+  `<type>` is `endpoint`, `rep` or `task` and `<id>` is 26 characters of the base32
+  alphabet, or the request's `ResourceIdentifier` when one is given. Update and delete
+  calls address the resource by that ARN.
+- Identifiers must begin with a letter, contain only ASCII letters, digits and hyphens,
+  and not end with a hyphen or contain two consecutive hyphens (63 characters for an
+  instance, 255 otherwise). A replication instance identifier is stored lowercase, as AWS
+  documents; endpoint and task identifiers keep their case. A duplicate identifier returns
+  `ResourceAlreadyExistsFault`.
+- A describe whose `Filters` match nothing returns `ResourceNotFoundFault`, which the
+  Terraform provider reads as "gone". Without filters, no resources is an empty list.
+  Filter values compare case-insensitively. Describes paginate on `MaxRecords` and
+  `Marker` as subnet groups do.
+- **Endpoints** are `active` from creation. `EndpointType` is accepted lowercase and returned
+  uppercase (`SOURCE`, `TARGET`), as AWS does. `SslMode` defaults to `none`. Engine settings
+  structures (`MySQLSettings`, `S3Settings` and the rest) are stored as sent and returned
+  as stored, except that every member the DMS model types as a secret (`Password`,
+  `SaslPassword`, `AuthPassword` and so on) is dropped, because DMS never returns them.
+  `ModifyEndpoint` merges a settings structure into the stored one member by member, or
+  replaces it when `ExactSettings` is true.
+- **Replication instances** are `available` from creation and stay so through a modify. A
+  named `ReplicationSubnetGroupIdentifier` must exist (otherwise `ResourceNotFoundFault`)
+  and is returned as the full `ReplicationSubnetGroup` structure; without one the instance
+  reports the `default` group. Defaults: `AllocatedStorage` 50, `EngineVersion` `3.5.4`,
+  `PubliclyAccessible` true, `MultiAZ` false, `AutoMinorVersionUpgrade` true,
+  `NetworkType` `IPV4`, `AvailabilityZone` `<region>a`. `ModifyReplicationInstance` applies
+  every change at once whatever `ApplyImmediately` says.
+- **Replication tasks** need existing source and target endpoints and an existing instance
+  (otherwise `ResourceNotFoundFault`). `TableMappings` and `ReplicationTaskSettings` must be
+  JSON objects and are returned exactly as sent. A task is `ready` from creation;
+  `StartReplicationTask` makes it `running` and `StopReplicationTask` makes it `stopped`.
+  Stopping a task that is not running returns `InvalidResourceStateFault` with "is
+  currently not running", the message the Terraform provider treats as already stopped.
+  Modifying or deleting a running task returns `InvalidResourceStateFault`.
+- Deleting an endpoint or instance that a task references, or a subnet group that an
+  instance uses, returns `InvalidResourceStateFault`. A delete returns the resource with
+  status `deleting`, and it is gone from the next describe.
+
 ### Tagging
 
-`Tags` on `CreateReplicationSubnetGroup` are stored with the group, and the tagging trio
-works against the group's ARN, which is
-`arn:aws:dms:<region>:<account>:subgrp:<identifier>`. DMS does not return that ARN from
+`Tags` on every create are stored with the resource, and the tagging trio works against
+the resource's ARN. For a subnet group that is
+`arn:aws:dms:<region>:<account>:subgrp:<identifier>`; DMS does not return that ARN from
 `DescribeReplicationSubnetGroups`, so Terraform builds it client side and Floci parses it
-back the same way.
+back the same way. Endpoints, instances and tasks are tagged through the ARN their create
+returned.
 
 - `AddTagsToResource` merges by key, so re-tagging an existing key overwrites its value.
 - `RemoveTagsFromResource` removes the named keys and ignores keys that are not present.
@@ -71,15 +128,24 @@ back the same way.
 - An ARN that is unparseable, names a different DMS resource type, names another account
   or Region, or names a group that does not exist returns `ResourceNotFoundFault`. Tagging
   is not a cross-account or cross-Region operation on AWS and is not one here either.
-- Deleting a group deletes its tags with it.
+- Deleting a resource deletes its tags with it.
 
 ## Limitations
 
-- **Only the subnet group lifecycle is implemented.** Replication instances, endpoints,
-  and replication tasks return `UnknownOperationException`.
-- **Tagging covers replication subnet groups only.** The tagging trio is implemented, but
-  a `ResourceArn` naming a replication instance, endpoint, or task returns
-  `ResourceNotFoundFault` because Floci holds no such resource.
+- **No migration runs.** A started task stays `running` until stopped; a full-load task
+  never finishes on its own, and `ReplicationTaskStats`, `StopReason` and
+  `LastFailureMessage` are not reported.
+- **Values AWS fills in are not invented.** An endpoint does not report
+  `EngineDisplayName`, `ExternalId` or the settings structure AWS derives from top-level
+  connection fields, and a task without `ReplicationTaskSettings` reports none rather than
+  the AWS defaults. Instances report no private or public IP addresses.
+- **`CdcStartTime` is ignored.** `CreateReplicationTask`, `ModifyReplicationTask` and
+  `StartReplicationTask` accept it, but it is not stored or returned. `CdcStartPosition` and
+  `CdcStopPosition` are stored by create and modify, and ignored by `StartReplicationTask`.
+- **Not implemented:** `TestConnection`, `DescribeConnections`, `MoveReplicationTask`,
+  `DescribeEndpointTypes`, `DescribeOrderableReplicationInstances`, replication configs
+  (`aws_dms_replication_config`, serverless DMS), event subscriptions, certificates and the
+  `WithoutSettings` flag of `DescribeReplicationTasks`.
 - **No `ModifyReplicationSubnetGroup`.** A subnet change has to be a delete and recreate.
 
 See the [AWS DMS API Reference](https://docs.aws.amazon.com/dms/latest/APIReference/Welcome.html).

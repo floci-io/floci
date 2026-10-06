@@ -743,7 +743,57 @@ public class CognitoService implements ResourceProvider {
     }
 
     public List<UserPool> listUserPools() {
-        return poolStore.scan(k -> true);
+        String region = regionResolver.getRegion();
+        return poolStore.scan(k -> true).stream()
+                .filter(pool -> {
+                    String poolRegion = poolRegion(pool);
+                    return poolRegion == null || poolRegion.equals(region);
+                })
+                .toList();
+    }
+
+    /**
+     * Refuses a pool from another region as not found, as AWS does: a pool lives in the region its
+     * id names. A pool whose region cannot be told stays reachable, as {@link #listUserPools} lists it.
+     */
+    public void requireUserPoolInRegion(String userPoolId, String region) {
+        poolStore.get(userPoolId).ifPresent(pool -> {
+            String poolRegion = poolRegion(pool);
+            if (poolRegion != null && !poolRegion.equals(region)) {
+                throw userPoolNotFound(userPoolId);
+            }
+        });
+    }
+
+    /** {@link #requireUserPoolInRegion} for an operation that names the pool by its ARN, as tagging does. */
+    public void requireUserPoolArnInRegion(String resourceArn, String region) {
+        requireUserPoolInRegion(extractUserPoolIdFromArn(resourceArn), region);
+    }
+
+    /**
+     * Refuses a domain whose user pool lives in another region, as the same not found an unknown
+     * domain gets: domains are stored by name alone, but a domain belongs to its pool's region.
+     */
+    public void requireUserPoolDomainInRegion(String domain, String region) {
+        if (domain == null || domain.isBlank()) {
+            return;
+        }
+        domainStore.get(domain).map(UserPoolDomain::getUserPoolId).flatMap(poolStore::get).ifPresent(pool -> {
+            String poolRegion = poolRegion(pool);
+            if (poolRegion != null && !poolRegion.equals(region)) {
+                throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
+            }
+        });
+    }
+
+    /** Pools are stored by id for every region; the region comes from the pool ARN, else the id prefix. */
+    private static String poolRegion(UserPool pool) {
+        if (pool.getArn() != null && AwsArnUtils.isArn(pool.getArn())) {
+            return AwsArnUtils.parse(pool.getArn()).region();
+        }
+        String id = pool.getId();
+        int underscore = id == null ? -1 : id.indexOf('_');
+        return underscore > 0 ? id.substring(0, underscore) : null;
     }
 
     @Override
@@ -769,9 +819,14 @@ public class CognitoService implements ResourceProvider {
         return Set.of(new SupportedResourceType("cognito-idp:userpool", "cognito-idp", true));
     }
 
+    /** The ARN must name the pool itself: the same id under another region or account is another pool. */
     private UserPool describeUserPoolByArn(String resourceArn) {
         String poolId = extractUserPoolIdFromArn(resourceArn);
-        return describeUserPool(poolId);
+        UserPool pool = describeUserPool(poolId);
+        if (pool.getArn() != null && !pool.getArn().equals(resourceArn)) {
+            throw userPoolNotFound(poolId);
+        }
+        return pool;
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
@@ -1629,7 +1684,7 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "Domain is required", 400);
         }
         return domainStore.get(domain)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 400));
     }
 
     /**
@@ -1684,7 +1739,7 @@ public class CognitoService implements ResourceProvider {
         describeUserPool(userPoolId);
         UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
         }
         String previousCertificateArn = userPoolDomain.getCertificateArn();
         String certificateArn = previousCertificateArn;
@@ -1729,7 +1784,7 @@ public class CognitoService implements ResourceProvider {
     public void deleteUserPoolDomain(String domain, String userPoolId) {
         UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
         }
         domainStore.delete(domain);
         if (userPoolDomain.isCustomDomain()) {
@@ -2144,6 +2199,34 @@ public class CognitoService implements ResourceProvider {
         revokeAllUserTokens(poolId, user.getUsername());
 
         LOG.infov("GlobalSignOut: revoked all tokens for user {0} in pool {1}", user.getUsername(), poolId);
+    }
+
+    /**
+     * DeleteUser: the self-service counterpart to AdminDeleteUser, authenticated with the caller's
+     * access token instead of admin credentials. Deletes the user profile and removes them from all
+     * groups, matching AWS behavior.
+     */
+    public void deleteUser(String accessToken) {
+        if (accessToken == null || accessToken.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
+        }
+
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
+        String username = token.username();
+        String poolId = token.poolId();
+        try {
+            adminDeleteUser(poolId, username);
+        } catch (AwsException e) {
+            if ("UserNotFoundException".equals(e.getErrorCode())
+                    || "ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            }
+            throw e;
+        }
+
+        LOG.infov("DeleteUser: deleted user {0} in pool {1}", username, poolId);
     }
 
     public CognitoUser adminGetUser(String userPoolId, String username) {
@@ -3887,8 +3970,18 @@ public class CognitoService implements ResourceProvider {
         boolean isAccess = "access".equals(tokenType);
         List<String> suppress = isAccess ? override.accessClaimsToSuppress() : override.idClaimsToSuppress();
         Map<String, Object> addOrOverride = isAccess ? override.accessClaimsToAddOrOverride() : override.idClaimsToAddOrOverride();
-        if (suppress != null) suppress.forEach(claims::remove);
-        if (addOrOverride != null) claims.putAll(addOrOverride);
+        if (suppress != null) {
+            suppress.stream()
+                    .filter(claim -> !isTriggerProtectedIdentityClaim(claim, isAccess))
+                    .forEach(claims::remove);
+        }
+        if (addOrOverride != null) {
+            addOrOverride.forEach((claim, value) -> {
+                if (!isTriggerProtectedIdentityClaim(claim, isAccess)) {
+                    claims.put(claim, value);
+                }
+            });
+        }
         if (override.groupsToOverride() != null) {
             claims.put("cognito:groups", override.groupsToOverride());
         }
@@ -3915,6 +4008,15 @@ public class CognitoService implements ResourceProvider {
                 claims.put("scope", String.join(" ", current));
             }
         }
+    }
+
+    /**
+     * AWS lets no pre token generation trigger add, modify or suppress the claims that identify
+     * the user: {@code sub} in either token, {@code username} in the access token and
+     * {@code cognito:username} in the ID token.
+     */
+    private static boolean isTriggerProtectedIdentityClaim(String claim, boolean isAccess) {
+        return "sub".equals(claim) || (isAccess ? "username" : "cognito:username").equals(claim);
     }
 
     private String encodeJwtHeader(UserPool pool) {
@@ -4652,12 +4754,29 @@ public class CognitoService implements ResourceProvider {
                 validateUserNotGloballySignedOut(username, poolId, tokenUse,
                         requiredNumericClaim(claims, "iat"));
             }
+            boolean clientCredentialsToken = "access".equals(tokenUse) && subject.equals(clientId);
+            if (!clientCredentialsToken) {
+                requireTokenUserExists(poolId, username, subject);
+            }
             Map<String, Object> mapped = MAPPER.convertValue(claims, new TypeReference<Map<String, Object>>() {});
             return new VerifiedApiGatewayToken(poolId, tokenUse, Map.copyOf(mapped));
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
             LOG.debug("API Gateway Cognito token verification failed", e);
+            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+        }
+    }
+
+    /**
+     * A deleted user's tokens keep a valid signature until they expire, so the authorizer also
+     * requires the user to still be in the pool. Every user token names its user, since no pre
+     * token generation trigger can remove the username claim, and matching {@code sub} keeps a user
+     * re-created under the same name from inheriting the deleted user's tokens.
+     */
+    private void requireTokenUserExists(String poolId, String username, String subject) {
+        CognitoUser user = username == null ? null : userStore.get(userKey(poolId, username)).orElse(null);
+        if (user == null || !subject.equals(user.getAttributes().getOrDefault("sub", user.getUsername()))) {
             throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
         }
     }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -20,6 +21,7 @@ public class ChangeSet {
     private String templateBody;
     private Map<String, String> parameters;
     private List<String> capabilities;
+    private Map<String, String> tags;
     private String changeSetType; // CREATE or UPDATE
     private Instant creationTime = Instant.now();
 
@@ -43,6 +45,8 @@ public class ChangeSet {
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
     public List<String> getCapabilities() { return capabilities; }
     public void setCapabilities(List<String> capabilities) { this.capabilities = capabilities; }
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags == null ? null : new LinkedHashMap<>(tags); }
     public String getChangeSetType() { return changeSetType; }
     public void setChangeSetType(String changeSetType) { this.changeSetType = changeSetType; }
     public Instant getCreationTime() { return creationTime; }

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elbv2.model.*;
+import io.github.hectorvent.floci.services.iam.ServerCertificateReferenceProvider;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -32,7 +33,7 @@ import java.util.Map;
 import java.util.Set;
 
 @ApplicationScoped
-public class ElbV2Service implements ResourceProvider {
+public class ElbV2Service implements ResourceProvider, ServerCertificateReferenceProvider {
 
     @Inject
     ElbV2DataPlane dataPlane;
@@ -892,6 +893,19 @@ public class ElbV2Service implements ResourceProvider {
     }
 
     // ── Listener Certificates ─────────────────────────────────────────────────
+
+    @Override
+    public List<Reference> serverCertificateReferences() {
+        List<Reference> references = new ArrayList<>();
+        for (Map<String, Listener> regionListeners : listeners.values()) {
+            for (Listener listener : regionListeners.values()) {
+                for (String certificate : listener.getCertificates()) {
+                    references.add(new Reference(certificate, "listener " + listener.getListenerArn()));
+                }
+            }
+        }
+        return references;
+    }
 
     public void addListenerCertificates(String region, String listenerArn, List<String> certArns) {
         Listener listener = requireListener(region, listenerArn);

@@ -93,6 +93,7 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 - Each `CreateListener` automatically creates an immutable default rule (`priority=default`, `isDefault=true`). This rule cannot be deleted; use `ModifyListener` to change its action.
 - Rule priorities are unique per listener: `CreateRule` and `SetRulePriorities` only reject a priority held by another rule on the same listener. `SetRulePriorities` is atomic: all priority assignments are validated before any change is committed.
 - `DeleteTargetGroup` is rejected with `ResourceInUse` while the target group is referenced by any listener or rule.
+- `DeleteServerCertificate` is rejected with `DeleteConflict` while an IAM server certificate is named by a listener. Listener certificate ARNs are not validated when they are added.
 - `DeleteRule` is rejected with `OperationNotPermitted` for the default rule.
 - `DescribeSSLPolicies` returns a pre-seeded list of standard AWS SSL policies (`ELBSecurityPolicy-*`).
 - `DescribeAccountLimits` returns standard default limits (e.g., 50 load balancers per region, 100 target groups, etc.).

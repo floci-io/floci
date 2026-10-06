@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
+import java.util.Arrays;
 import java.util.Optional;
 
 /**
@@ -59,6 +60,31 @@ public final class CidrCanonicalizer {
      */
     public static boolean isCanonical(String cidr) {
         return parse(cidr).map(parsed -> render(parsed).equals(cidr)).orElse(false);
+    }
+
+    /**
+     * Tests whether a literal address belongs to an IPv4 or IPv6 CIDR block.
+     * Malformed inputs and addresses from a different address family do not match.
+     * Neither input triggers DNS resolution.
+     */
+    public static boolean contains(String cidr, String ip) {
+        Optional<ParsedCidr> parsed = parse(cidr);
+        if (parsed.isEmpty() || ip == null || ip.isBlank()) {
+            return false;
+        }
+        InetAddress address;
+        try {
+            address = InetAddress.ofLiteral(ip);
+        } catch (IllegalArgumentException ignored) {
+            // A malformed address cannot belong to a CIDR block.
+            return false;
+        }
+        ParsedCidr block = parsed.get();
+        byte[] networkBytes = block.address().getAddress();
+        byte[] addressBytes = address.getAddress();
+        return networkBytes.length == addressBytes.length
+                && Arrays.equals(maskHostBits(networkBytes, block.prefixLength()),
+                        maskHostBits(addressBytes, block.prefixLength()));
     }
 
     private static Optional<ParsedCidr> parse(String cidr) {

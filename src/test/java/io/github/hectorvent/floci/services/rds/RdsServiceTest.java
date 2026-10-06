@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -14,6 +15,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
@@ -1722,7 +1724,7 @@ class RdsServiceTest {
 
     @Test
     void describeOrderableDbInstanceOptionsFiltersByEngineVersionAndClass() {
-        var result = rdsService.describeOrderableDbInstanceOptions(
+        List<Map<String, String>> result = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "18.1", "db.t3.micro");
 
         assertEquals(1, result.size());
@@ -1733,9 +1735,9 @@ class RdsServiceTest {
 
     @Test
     void describeOrderableDbInstanceOptionsIncludesModernGravitonPostgresClasses() {
-        var flociPinned = rdsService.describeOrderableDbInstanceOptions(
+        List<Map<String, String>> flociPinned = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "18.1", "db.m8g.large");
-        var awsEquivalent = rdsService.describeOrderableDbInstanceOptions(
+        List<Map<String, String>> awsEquivalent = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "18.4", "db.m8g.large");
 
         assertEquals(1, flociPinned.size());
@@ -1748,7 +1750,7 @@ class RdsServiceTest {
 
     @Test
     void describeOrderableDbInstanceOptionsIncludesCurrentSmallGravitonPostgresClass() {
-        var result = rdsService.describeOrderableDbInstanceOptions(
+        List<Map<String, String>> result = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "16.14", "db.t4g.small");
 
         assertEquals(1, result.size());
@@ -7187,7 +7189,7 @@ class RdsServiceTest {
     @Test
     void refreshRuntimeHealthMarksDeadContainerFailedAndStopsProxy() {
         when(rdsConfig.mock()).thenReturn(false);
-        when(containerManager.isContainerRunning("cont-id")).thenReturn(false);
+        when(containerManager.probeContainer("cont-id")).thenReturn(ContainerLiveness.NOT_RUNNING);
         DbInstance instance = rdsService.createDbInstance(
                 "dead-db", "postgres", "16", "admin", "password", "dbname",
                 "db.t3.micro", 20, false, null, null, null, null, false, false,
@@ -7197,7 +7199,7 @@ class RdsServiceTest {
 
         assertEquals(DbInstanceStatus.FAILED, refreshed.getStatus());
         verify(proxyManager).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
-        var events = rdsService.describeEvents("dead-db", "db-instance", null, null, 60);
+        List<RdsEvent> events = rdsService.describeEvents("dead-db", "db-instance", null, null, 60);
         assertEquals(1, events.size());
         assertEquals(List.of("availability"), events.getFirst().eventCategories());
         assertEquals(refreshed.getDbInstanceArn(), events.getFirst().sourceArn());
@@ -7205,6 +7207,44 @@ class RdsServiceTest {
         // Repeated health reads do not duplicate the transition event.
         rdsService.refreshDbInstanceRuntimeHealth(refreshed);
         assertEquals(1, rdsService.describeEvents("dead-db", "db-instance", null, null, 60).size());
+    }
+
+    @Test
+    void refreshRuntimeHealthKeepsAvailableStatusWhenLivenessProbeFails() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.probeContainer("cont-id")).thenReturn(ContainerLiveness.UNKNOWN);
+        DbInstance instance = rdsService.createDbInstance(
+                "blip-db", "postgres", "16", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, null, true);
+
+        DbInstance refreshed = rdsService.refreshDbInstanceRuntimeHealth(instance);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, refreshed.getStatus());
+        verify(proxyManager, never()).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
+        assertTrue(rdsService.describeEvents("blip-db", "db-instance", null, null, 60).isEmpty());
+    }
+
+    @Test
+    void refreshRuntimeHealthReprobesAfterAFailedProbeAndActsOnTheNextDefiniteAnswer() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.probeContainer("cont-id"))
+                .thenReturn(ContainerLiveness.UNKNOWN, ContainerLiveness.NOT_RUNNING);
+        DbInstance instance = rdsService.createDbInstance(
+                "recover-db", "postgres", "16", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, null, true);
+        String proxyKey = "rds-resource:" + instance.getDbInstanceArn();
+
+        DbInstance afterBlip = rdsService.refreshDbInstanceRuntimeHealth(instance);
+        assertEquals(DbInstanceStatus.AVAILABLE, afterBlip.getStatus());
+        verify(proxyManager, never()).stopProxy(proxyKey);
+
+        DbInstance afterDefiniteAnswer = rdsService.refreshDbInstanceRuntimeHealth(afterBlip);
+        assertEquals(DbInstanceStatus.FAILED, afterDefiniteAnswer.getStatus());
+        verify(proxyManager).stopProxy(proxyKey);
+        verify(containerManager, times(2)).probeContainer("cont-id");
+        assertEquals(1, rdsService.describeEvents("recover-db", "db-instance", null, null, 60).size());
     }
 
     @Test
@@ -8350,6 +8390,42 @@ class RdsServiceTest {
         AwsException taken = assertThrows(AwsException.class, () ->
                 rdsService.modifyGlobalCluster("gdb-renamed", "other", null, null, null));
         assertEquals("GlobalClusterAlreadyExistsFault", taken.getErrorCode());
+    }
+
+    @Test
+    void customClusterEndpointFollowsTheClusterNamesWriterAndAddress() {
+        rdsService.createDbCluster("Mixed-Cluster", "aurora-postgresql", "16.3", "admin", "password", "appdb", false, null);
+        for (String member : List.of("Writer-1", "Reader-1")) {
+            rdsService.createDbInstance(member, "aurora-postgresql", "16.3",
+                    "admin", "password", "appdb", "db.r5.large",
+                    20, false, null, null, "Mixed-Cluster", null, false, false, null,
+                    Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+        }
+
+        // The cluster is found under its own spelling, and a member named in other capitals is
+        // stored as the cluster spells it.
+        DbClusterEndpoint created = rdsService.createDbClusterEndpoint("us-east-1", "Mixed-Cluster", "reports",
+                "READER", List.of("READER-1"), null, Map.of());
+        assertEquals(List.of("Reader-1"), created.getStaticMembers());
+
+        // After a failover the new writer drops out of the READER endpoint, as Aurora adjusts it.
+        rdsService.failoverDbCluster("Mixed-Cluster", "Reader-1", "us-east-1");
+        DbClusterEndpoint afterFailover = rdsService.describeDbClusterEndpoints("us-east-1", null, "reports",
+                Map.of(), null, null).endpoints().getFirst();
+        assertEquals(List.of(), afterFailover.getStaticMembers());
+        // A modify that leaves the lists alone still succeeds, and a failback makes the member a
+        // reader of the endpoint again, since failover never removed it from the stored list.
+        DbClusterEndpoint retyped = rdsService.modifyDbClusterEndpoint("us-east-1", "reports", "READER", null, null);
+        assertEquals(List.of(), retyped.getStaticMembers());
+        rdsService.failoverDbCluster("Mixed-Cluster", "Writer-1", "us-east-1");
+        assertEquals(List.of("Reader-1"), rdsService.describeDbClusterEndpoints("us-east-1", null, "reports",
+                Map.of(), null, null).endpoints().getFirst().getStaticMembers());
+
+        // The address follows the cluster's endpoint rather than the one stored at create.
+        rdsService.getDbCluster("Mixed-Cluster").setEndpoint(new DbEndpoint("moved.example", 7099));
+        DbClusterEndpoint moved = rdsService.describeDbClusterEndpoints("us-east-1", null, "reports",
+                Map.of(), null, null).endpoints().getFirst();
+        assertEquals("moved.example", moved.getEndpoint());
     }
 
     @Test

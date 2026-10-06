@@ -352,7 +352,7 @@ public class IotDomainConfigurationService {
         return new ClientCertificateConfig(text(node, "clientCertificateCallbackArn"));
     }
 
-    private static Map<String, String> parseTags(JsonNode node) {
+    static Map<String, String> parseTags(JsonNode node) {
         Map<String, String> tags = new TreeMap<>();
         if (!present(node)) {
             return tags;

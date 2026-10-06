@@ -17,6 +17,7 @@ AWS::ApiGatewayV2::Deployment	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Integration	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Route	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Stage	ApiGatewayV2CfnProvisioner
+AWS::ApiGatewayV2::VpcLink	ApiGatewayV2CfnProvisioner
 AWS::AppSync::ApiKey	AppSyncCfnProvisioner
 AWS::AppSync::DataSource	AppSyncCfnProvisioner
 AWS::AppSync::FunctionConfiguration	AppSyncCfnProvisioner
@@ -51,6 +52,7 @@ AWS::Cognito::UserPoolClient	CognitoCfnProvisioner
 AWS::Cognito::UserPoolDomain	CognitoCfnProvisioner
 AWS::Cognito::UserPoolGroup	CognitoUserPoolGroupCfnProvisioner
 AWS::Cognito::UserPoolUser	CognitoUserPoolUserCfnProvisioner
+AWS::Cognito::UserPoolUserToGroupAttachment	CognitoUserPoolUserToGroupAttachmentCfnProvisioner
 AWS::Config::ConfigRule	ConfigCfnProvisioner
 AWS::DynamoDB::GlobalTable	DynamoDbCfnProvisioner
 AWS::DynamoDB::Table	DynamoDbCfnProvisioner
@@ -85,6 +87,8 @@ AWS::ElasticLoadBalancingV2::Listener	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::ListenerRule	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::LoadBalancer	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::TargetGroup	ElbV2CfnProvisioner
+AWS::Events::ApiDestination	EventsCfnProvisioner
+AWS::Events::Archive	EventsArchiveCfnProvisioner
 AWS::Events::EventBus	EventsCfnProvisioner
 AWS::Events::EventBusPolicy	EventsCfnProvisioner
 AWS::Events::Rule	EventsCfnProvisioner
@@ -94,6 +98,7 @@ AWS::IAM::ManagedPolicy	IamManagedPolicyCfnProvisioner
 AWS::IAM::Policy	IamPolicyCfnProvisioner
 AWS::IAM::Role	IamRoleCfnProvisioner
 AWS::IAM::User	IamUserCfnProvisioner
+AWS::IoT::Authorizer	IotAuthorizerCfnProvisioner
 AWS::IoT::DomainConfiguration	IotDomainConfigurationCfnProvisioner
 AWS::IoT::Policy	IotCfnProvisioner
 AWS::IoT::Thing	IotCfnProvisioner
@@ -132,6 +137,8 @@ AWS::Redshift::Cluster	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterParameterGroup	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterSecurityGroup	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterSubnetGroup	RedshiftClusterCfnProvisioner
+AWS::RedshiftServerless::Namespace	RedshiftServerlessCfnProvisioner
+AWS::RedshiftServerless::Workgroup	RedshiftServerlessCfnProvisioner
 AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	Route53CfnProvisioner
 AWS::S3::Bucket	S3CfnProvisioner
@@ -151,6 +158,7 @@ AWS::ServiceDiscovery::PublicDnsNamespace	CloudMapCfnProvisioner
 AWS::ServiceDiscovery::Service	CloudMapCfnProvisioner
 AWS::StepFunctions::StateMachine	StepFunctionsCfnProvisioner
 AWS::Transfer::Server	TransferCfnProvisioner
+AWS::Transfer::User	TransferCfnProvisioner
 AWS::WAFv2::WebACL	WafV2CfnProvisioner
 AWS::WAFv2::WebACLAssociation	WafV2CfnProvisioner
 Custom::DynamoDBReplica	DynamoDbCfnProvisioner

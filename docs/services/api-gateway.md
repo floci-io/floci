@@ -340,8 +340,11 @@ than `proxy` are supported, including in `integration.request.path.*` mappings.
 REST `HTTP_PROXY` and `HTTP` integrations also accept `context.*` sources in header, query
 and path parameter mappings. Supported request fields are `accountId`, `apiId`, `deploymentId`,
 `httpMethod`, `path` (including the stage), `protocol`, `requestId`, `resourceId`, `resourcePath`,
-`stage`, `identity.sourceIp` and `identity.userAgent`. `context.requestId` uses the same ID as
-the HTTP integration's VTL templates. `context.authorizer.principalId` and
+`stage`, `domainName`, `domainPrefix`, `extendedRequestId`, `requestTime` and `requestTimeEpoch`.
+Identity fields include the immediate TCP peer's `sourceIp`, `userAgent`, a resolved API key's
+`apiKey` and `apiKeyId`, and the verified IAM caller's `accessKey`, `accountId`, `caller`, `user`
+and `userArn`. `context.requestId` uses the same ID as the authorizer and integration templates.
+A valid UUID in `x-amzn-RequestId` overrides that ID; `extendedRequestId` is generated independently. `context.authorizer.principalId` and
 `context.authorizer.<property>` come from the successful authorizer result; authenticated Cognito
 claims are available as `context.authorizer.claims.<property>`. String, number and boolean values
 are forwarded as strings. Missing values and objects are not mapped. An explicit header mapping
@@ -354,6 +357,11 @@ HTTP proxy passthrough behavior.
 
 `method.request.*` sources always read the original inbound headers, query parameters and path
 parameters. Mapped destinations do not change another mapping's source, regardless of mapping order.
+Scalar `method.request.header.*` and `method.request.querystring.*` sources select the first
+inbound value.
+`method.request.multivalueheader.*` and `method.request.multivaluequerystring.*` preserve repeated
+values in either HTTP integration type. `stageVariables.*`, the raw `method.request.body` and
+`method.request.body.<JSONPath>` are supported too.
 
 Use alphanumeric or underscore authorizer context keys, as required by the
 [AWS mapping contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-mapping-template-reference.html).
@@ -370,6 +378,17 @@ Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` r
 
 - **Request** — the body is the rendered `requestTemplates` entry selected by the incoming `Content-Type` (falling back to the type without its charset), subject to `passthroughBehavior` (`NEVER` and `WHEN_NO_TEMPLATES` return `415`). Only headers and query parameters named by `integration.request.*` mappings are forwarded; unmapped inbound headers are **not** passed through — that passthrough is `HTTP_PROXY`'s job.
 - **Response** — the backend's reply runs through the method's integration responses. As in AWS, `selectionPattern` is matched against the backend's **HTTP status code** (for `AWS`/Lambda integrations it is matched against the error message instead), so `"5\\d{2}"` on a `502` integration response remaps any backend `5xx` to `502`. The matched response's `responseTemplates` render the body, `responseParameters` map `integration.response.header.*` (case-insensitively) or `integration.response.body.<jsonpath>` onto `method.response.header.*`, and `$context.responseOverride` assignments take precedence. With no integration responses configured, the backend's status and body are relayed as-is.
+
+### Resource Method Introspection
+
+`GetResources` and `GetResource` return the configured HTTP method names in `resourceMethods`,
+with empty objects by default. Request `embed=methods` to include the supported method fields:
+authorization settings, request parameters and models, method responses, and integration
+configuration. Resources without methods omit `resourceMethods`.
+
+For example, `aws apigateway get-resources --rest-api-id <id> --embed methods` lists method
+metadata without a separate `get-method` call for each operation. Stage OpenAPI export
+(`GetExport`) is not implemented.
 
 ### Integration Settings
 
@@ -558,6 +577,19 @@ Routes carrying `authorizationType: AWS_IAM`: including those an OpenAPI import 
 `awsSigv4` security scheme: require a signed caller; see
 [IAM Authorization](#iam-authorization).
 
+Lambda authorizer policies are evaluated the same way for REST APIs, HTTP APIs (payload
+formats 1.0 and 2.0) and WebSocket `$connect` routes, against the request's execute-api ARN.
+An invocation requires a matching `execute-api:Invoke` Allow; a matching Deny takes
+precedence regardless of statement order. Statements may be an object or an array,
+and actions and resources may be strings or arrays with wildcards. No matching Allow
+returns 403; a malformed policy returns 500. HTTP API simple responses continue to
+use `isAuthorized` instead of an IAM policy.
+
+Conditions can test `aws:SourceIp` (IPv4 and IPv6 CIDR ranges), `aws:SecureTransport` and
+`aws:CurrentTime`. The source IP is the connection's transport address, so a
+caller-supplied `X-Forwarded-For` header does not override it. An empty `Condition`
+object places no condition on its statement, as in IAM.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -573,8 +605,12 @@ Routes carrying `authorizationType: AWS_IAM`: including those an OpenAPI import 
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
 | **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, DeleteApiMapping |
-| **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, DeleteVpcLink |
+| **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink, DeleteVpcLink |
 | **Tags** | TagResource, UntagResource, GetTags |
+
+`TagResource`, `UntagResource` and `GetTags` accept API, stage and VPC link ARNs
+(`arn:<partition>:apigateway:<region>::/vpclinks/<vpcLinkId>`). `UpdateVpcLink` changes only the
+name, as in the API model.
 
 ### WebSocket Data-Plane {#websocket-data-plane}
 
@@ -636,7 +672,6 @@ DELETE /execute-api/{apiId}/{stageName}/@connections/{connectionId}  — Disconn
 ### Not Implemented
 
 - `ExportApi`, `UpdateDomainName`, `UpdateApiMapping`
-- `UpdateVpcLink` — the other four VPC Link operations are implemented; see the table above
 
 ### Examples
 

@@ -15,11 +15,14 @@ import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
-import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
+import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
+import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
+import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -67,18 +70,21 @@ public class IamQueryHandler {
     private final SAMLProviderService samlProviderService;
     private final ServiceLastAccessedService serviceLastAccessedService;
     private final RegionResolver regionResolver;
+    private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
                            AccountResolver accountResolver, SAMLProviderService samlProviderService,
                            ServiceLastAccessedService serviceLastAccessedService,
-                           RegionResolver regionResolver) {
+                           RegionResolver regionResolver,
+                           Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.accountResolver = accountResolver;
         this.samlProviderService = samlProviderService;
         this.serviceLastAccessedService = serviceLastAccessedService;
         this.regionResolver = regionResolver;
+        this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
@@ -92,6 +98,16 @@ public class IamQueryHandler {
             case "DeleteUser" -> handleDeleteUser(params);
             case "ListUsers" -> handleListUsers(params);
             case "UpdateUser" -> handleUpdateUser(params);
+            case "CreateServiceSpecificCredential" -> handleCreateServiceSpecificCredential(params);
+            case "ListServiceSpecificCredentials" -> handleListServiceSpecificCredentials(params, authorization);
+            case "UpdateServiceSpecificCredential" -> handleUpdateServiceSpecificCredential(params, authorization);
+            case "ResetServiceSpecificCredential" -> handleResetServiceSpecificCredential(params, authorization);
+            case "DeleteServiceSpecificCredential" -> handleDeleteServiceSpecificCredential(params, authorization);
+            case "UploadSSHPublicKey" -> handleUploadSshPublicKey(params);
+            case "GetSSHPublicKey" -> handleGetSshPublicKey(params);
+            case "ListSSHPublicKeys" -> handleListSshPublicKeys(params, authorization);
+            case "UpdateSSHPublicKey" -> handleUpdateSshPublicKey(params);
+            case "DeleteSSHPublicKey" -> handleDeleteSshPublicKey(params);
             case "UploadSigningCertificate" -> handleUploadSigningCertificate(params, authorization);
             case "ListSigningCertificates" -> handleListSigningCertificates(params, authorization);
             case "UpdateSigningCertificate" -> handleUpdateSigningCertificate(params, authorization);
@@ -734,7 +750,8 @@ public class IamQueryHandler {
     }
 
     private Response handleDeleteServerCertificate(MultivaluedMap<String, String> params) {
-        iamService.deleteServerCertificate(getParam(params, "ServerCertificateName"));
+        iamService.deleteServerCertificate(getParam(params, "ServerCertificateName"),
+                serverCertificateReferenceProviders.stream().toList());
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteServerCertificate", AwsNamespaces.IAM)).build();
     }
 
@@ -754,6 +771,204 @@ public class IamQueryHandler {
             xml.elem("Marker", page.marker());
         }
         return Response.ok(AwsQueryResponse.envelope("ListServerCertificates", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * UserName is required here and optional on the other four, which is a third pattern again:
+     * the signing-certificate operations take it optionally throughout and the SSH ones require it
+     * everywhere but the list.
+     */
+    private Response handleCreateServiceSpecificCredential(
+            MultivaluedMap<String, String> params) {
+        ServiceSpecificCredential credential = iamService.createServiceSpecificCredential(
+                requireParam(params, "UserName"), requireParam(params, "ServiceName"),
+                optionalInt(params, "CredentialAgeDays"));
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredential")
+                .raw(serviceCredentialXml(credential, true)).end("ServiceSpecificCredential");
+        return Response.ok(AwsQueryResponse.envelope("CreateServiceSpecificCredential",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * The metadata list, which the model defines without either secret. {@code AllUsers} cannot be
+     * given together with {@code UserName}, so naming both is a validation error rather than one
+     * quietly winning.
+     */
+    private Response handleListServiceSpecificCredentials(
+            MultivaluedMap<String, String> params, String authorization) {
+        boolean allUsers = "true".equalsIgnoreCase(getParam(params, "AllUsers"));
+        if (allUsers && getParam(params, "UserName") != null) {
+            throw new AwsException("ValidationError",
+                    "AllUsers cannot be specified together with UserName.", 400);
+        }
+        String userName = allUsers ? null : resolveUserName(params, authorization);
+        Page<ServiceSpecificCredential> page = paginate(
+                iamService.listServiceSpecificCredentials(
+                        userName, getParam(params, "ServiceName"), allUsers), params);
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredentials");
+        for (ServiceSpecificCredential credential : page.items()) {
+            xml.start("member").raw(serviceCredentialXml(credential, false)).end("member");
+        }
+        xml.end("ServiceSpecificCredentials").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListServiceSpecificCredentials",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        iamService.updateServiceSpecificCredential(resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"), getParam(params, "Status"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateServiceSpecificCredential",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /** The reset is the only operation besides the create that returns the secret half. */
+    private Response handleResetServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        ServiceSpecificCredential credential = iamService.resetServiceSpecificCredential(
+                resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"));
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredential")
+                .raw(serviceCredentialXml(credential, true)).end("ServiceSpecificCredential");
+        return Response.ok(AwsQueryResponse.envelope("ResetServiceSpecificCredential",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDeleteServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        iamService.deleteServiceSpecificCredential(resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteServiceSpecificCredential",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * A credential, with the secret half only when the operation is one that discloses it. The
+     * metadata shape the list uses is defined without {@code ServicePassword} or
+     * {@code ServiceCredentialSecret}, so omitting them is the shape rather than a precaution.
+     */
+    private String serviceCredentialXml(ServiceSpecificCredential credential, boolean withSecret) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("UserName", credential.getUserName())
+                .elem("ServiceName", credential.getServiceName())
+                .elem("ServiceSpecificCredentialId", credential.getServiceSpecificCredentialId())
+                .elem("Status", iamService.reportedStatus(credential))
+                .elem("CreateDate", isoDate(credential.getCreateDate()));
+        if (credential.getServiceUserName() != null) {
+            xml.elem("ServiceUserName", credential.getServiceUserName());
+        }
+        if (credential.getServiceCredentialAlias() != null) {
+            xml.elem("ServiceCredentialAlias", credential.getServiceCredentialAlias());
+        }
+        if (credential.getExpirationDate() != null) {
+            xml.elem("ExpirationDate", isoDate(credential.getExpirationDate()));
+        }
+        if (withSecret) {
+            if (credential.getServicePassword() != null) {
+                xml.elem("ServicePassword", credential.getServicePassword());
+            }
+            if (credential.getServiceCredentialSecret() != null) {
+                xml.elem("ServiceCredentialSecret", credential.getServiceCredentialSecret());
+            }
+        }
+        return xml.build();
+    }
+
+    /** An optional integer parameter that AWS documents as having to be positive. */
+    /**
+     * An optional integer parameter. Absent means absent, but present and unparseable is a
+     * validation error rather than a silent absence: {@code CredentialAgeDays=} would otherwise
+     * create a credential that never expires, which is the opposite of what the caller asked for.
+     */
+    private Integer optionalInt(MultivaluedMap<String, String> params, String name) {
+        String raw = getParam(params, name);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "Value '" + raw + "' at '" + Character.toLowerCase(name.charAt(0))
+                            + name.substring(1) + "' failed to satisfy constraint: Member must be "
+                            + "an integer", 400);
+        }
+    }
+
+    /**
+     * UserName is required on every SSH public key operation but the list, which is the opposite
+     * of the signing-certificate operations: there the model marks it optional throughout.
+     */
+    private Response handleUploadSshPublicKey(MultivaluedMap<String, String> params) {
+        SshPublicKey key = iamService.uploadSshPublicKey(requireParam(params, "UserName"),
+                getParam(params, "SSHPublicKeyBody"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("SSHPublicKey").raw(sshPublicKeyXml(key)).end("SSHPublicKey");
+        return Response.ok(AwsQueryResponse.envelope("UploadSSHPublicKey",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleGetSshPublicKey(MultivaluedMap<String, String> params) {
+        SshPublicKey key = iamService.getSshPublicKey(requireParam(params, "UserName"),
+                requireParam(params, "SSHPublicKeyId"), getParam(params, "Encoding"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("SSHPublicKey").raw(sshPublicKeyXml(key)).end("SSHPublicKey");
+        return Response.ok(AwsQueryResponse.envelope("GetSSHPublicKey",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * The metadata list only. AWS documents SSHPublicKeyMetadata as carrying the key "without the
+     * key's body or fingerprint", so neither appears here even though both are stored.
+     */
+    private Response handleListSshPublicKeys(MultivaluedMap<String, String> params,
+                                             String authorization) {
+        Page<SshPublicKey> page = paginate(
+                iamService.listSshPublicKeys(resolveUserName(params, authorization)), params);
+        XmlBuilder xml = new XmlBuilder().start("SSHPublicKeys");
+        for (SshPublicKey key : page.items()) {
+            xml.start("member")
+                    .elem("UserName", key.getUserName())
+                    .elem("SSHPublicKeyId", key.getSshPublicKeyId())
+                    .elem("Status", key.getStatus())
+                    .elem("UploadDate", isoDate(key.getUploadDate()))
+                    .end("member");
+        }
+        xml.end("SSHPublicKeys").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListSSHPublicKeys",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateSshPublicKey(MultivaluedMap<String, String> params) {
+        iamService.updateSshPublicKey(requireParam(params, "UserName"),
+                requireParam(params, "SSHPublicKeyId"), getParam(params, "Status"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateSSHPublicKey",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteSshPublicKey(MultivaluedMap<String, String> params) {
+        iamService.deleteSshPublicKey(requireParam(params, "UserName"),
+                requireParam(params, "SSHPublicKeyId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteSSHPublicKey",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /** The five members the model marks required on SSHPublicKey, plus UploadDate. */
+    private String sshPublicKeyXml(SshPublicKey key) {
+        return new XmlBuilder()
+                .elem("UserName", key.getUserName())
+                .elem("SSHPublicKeyId", key.getSshPublicKeyId())
+                .elem("Fingerprint", key.getFingerprint())
+                .elem("SSHPublicKeyBody", key.getSshPublicKeyBody())
+                .elem("Status", key.getStatus())
+                .elem("UploadDate", isoDate(key.getUploadDate()))
+                .build();
     }
 
     /**

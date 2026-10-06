@@ -277,6 +277,28 @@ class EksServiceTest {
     }
 
     @Test
+    void initBackfillsTheOidcIssuerInTheClustersOwnRegion() {
+        StorageBackend<String, Cluster> clusterStore = new InMemoryStorage<>();
+        StorageBackend<String, ClusterOidcKey> keyStore = new InMemoryStorage<>();
+
+        Cluster legacy = new Cluster();
+        legacy.setName("eu-legacy-cluster");
+        legacy.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/eu-legacy-cluster");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        clusterStore.put("eu-legacy-cluster", legacy);
+
+        EksOidcService oidcService = new EksOidcService(
+                fixedStorageFactory(keyStore), new ObjectMapper());
+        EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
+        restarted.init();
+
+        String issuer = clusterStore.get("eu-legacy-cluster").orElseThrow().getIdentity().getOidc().getIssuer();
+        assertTrue(issuer.startsWith("https://oidc.eks.eu-west-1.amazonaws.com/id/"), issuer);
+    }
+
+    @Test
     void initLeavesAnExistingOidcIssuerUnchanged() {
         StorageBackend<String, Cluster> clusterStore = new InMemoryStorage<>();
         StorageBackend<String, ClusterOidcKey> keyStore = new InMemoryStorage<>();
@@ -1034,6 +1056,28 @@ class EksServiceTest {
         assertEquals(NodegroupStatus.DELETING, deleted.getStatus());
         assertThrows(AwsException.class, () -> eksService.describeNodeGroup("my-eks-cluster", "nodegroup-a"));
         assertEquals(List.of("nodegroup-b"), eksService.listNodeGroups("my-eks-cluster"));
+    }
+
+    @Test
+    void createNodeGroupRecordsLabelsAndTaints() {
+        createTestCluster("metadata-cluster");
+        CreateNodeGroupRequest request = nodeGroupRequest("labeled-ng");
+        request.setLabels(Map.of("role", "worker", "tier", "frontend"));
+        request.setTaints(List.of(Map.of("key", "dedicated", "value", "special", "effect", "NO_SCHEDULE")));
+        request.setCapacityType("SPOT");
+
+        Nodegroup nodegroup = eksService.createNodeGroup("metadata-cluster", request);
+        assertEquals("SPOT", nodegroup.getCapacityType());
+        assertEquals("worker", nodegroup.getLabels().get("role"));
+        assertEquals(1, nodegroup.getTaints().size());
+
+        Nodegroup retrieved = eksService.describeNodeGroup("metadata-cluster", "labeled-ng");
+        assertEquals("SPOT", retrieved.getCapacityType());
+        assertEquals("worker", retrieved.getLabels().get("role"));
+        assertEquals(1, retrieved.getTaints().size());
+
+        eksService.deleteNodeGroup("metadata-cluster", "labeled-ng");
+        assertEquals(List.of(), eksService.listNodeGroups("metadata-cluster"));
     }
 
     @Test

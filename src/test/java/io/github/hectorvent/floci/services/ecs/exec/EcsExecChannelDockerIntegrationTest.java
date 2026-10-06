@@ -119,6 +119,51 @@ class EcsExecChannelDockerIntegrationTest {
         }
     }
 
+    @Test
+    void theSessionRunsAsRootEvenWhenTheContainerDoesNot() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage(BUSYBOX_IMAGE);
+        app.setUser("1000:1000");
+        app.setCommand(List.of("sh", "-c", "trap 'exit 0' TERM; sleep 120 & wait"));
+
+        TaskDefinition taskDefinition = new TaskDefinition();
+        taskDefinition.setFamily("exec-root-" + suffix);
+        taskDefinition.setContainerDefinitions(List.of(app));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn(TASK_ARN + suffix);
+        task.setEnableExecuteCommand(true);
+
+        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), "us-east-1");
+        try {
+            String runtimeId = handle.getContainerIds().get("app");
+            assertEquals("1000:1000",
+                    dockerClient.inspectContainerCmd(runtimeId).exec().getConfig().getUser(),
+                    "the container itself must run as the task definition's user");
+            ExecSession session = sessions.create(task.getTaskArn(),
+                    "arn:aws:ecs:us-east-1:000000000000:cluster/exec-cluster", "app",
+                    "arn:aws:ecs:us-east-1:000000000000:container/exec/app", runtimeId,
+                    List.of("/bin/sh", "-c", "echo exec-uid-$(id -u)-end"), false);
+
+            PluginClient client = new PluginClient(vertx, session);
+            try {
+                client.open();
+                client.next();
+                client.sendHandshakeResponse();
+
+                String output = client.readUntil("-end");
+                assertTrue(output.contains("exec-uid-0-end"),
+                        "the session must run as root, got: " + output);
+            } finally {
+                client.close();
+            }
+        } finally {
+            containerManager.stopTask(handle);
+        }
+    }
+
     /** Reads the ExecuteCommandAgent status a task's containers report. */
     private enum ManagedAgentStatus {
         RUNNING, ABSENT;

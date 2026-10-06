@@ -4,8 +4,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @RegisterForReflection
@@ -16,7 +16,7 @@ public class ApiGatewayResource {
     private String parentId;
     private String pathPart;
     private String path;
-    private Map<String, MethodConfig> resourceMethods = new HashMap<>();
+    private Map<String, MethodConfig> resourceMethods = new ConcurrentHashMap<>();
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -35,6 +35,6 @@ public class ApiGatewayResource {
 
     public Map<String, MethodConfig> getResourceMethods() { return resourceMethods; }
     public void setResourceMethods(Map<String, MethodConfig> resourceMethods) {
-        this.resourceMethods = resourceMethods != null ? resourceMethods : new HashMap<>();
+        this.resourceMethods = resourceMethods != null ? new ConcurrentHashMap<>(resourceMethods) : new ConcurrentHashMap<>();
     }
 }
