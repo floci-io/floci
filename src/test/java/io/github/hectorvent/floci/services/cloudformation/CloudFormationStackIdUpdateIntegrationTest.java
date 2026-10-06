@@ -8,8 +8,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -44,7 +44,7 @@ class CloudFormationStackIdUpdateIntegrationTest {
             }
             """;
 
-    private final List<String> stacksToDelete = new ArrayList<>();
+    private final Set<String> stacksToDelete = new LinkedHashSet<>();
 
     @BeforeAll
     static void configureRestAssured() {
