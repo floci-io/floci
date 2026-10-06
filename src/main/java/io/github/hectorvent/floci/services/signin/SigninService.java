@@ -50,7 +50,7 @@ public class SigninService {
     private static final int MAX_STATE_LENGTH = 128;
     private static final Pattern PKCE_VALUE_PATTERN = Pattern.compile("[A-Za-z0-9._~-]{43,128}");
     private static final Pattern AWS_SIGNIN_HOST_PATTERN =
-            Pattern.compile("[a-z]{2}-[a-z-]+-\\d+\\.signin\\.aws\\.amazon\\.com");
+            Pattern.compile("[a-z]{2}-[a-z-]+-\\d+\\.signin\\.aws\\.amazon\\.com"); // partition-literal: console sign-in host, non-commercial host has no published source
 
     private final IamService iamService;
     private final RegionResolver regionResolver;
