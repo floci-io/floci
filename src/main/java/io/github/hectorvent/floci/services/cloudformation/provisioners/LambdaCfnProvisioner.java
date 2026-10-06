@@ -715,9 +715,18 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         if (props == null || !props.has("DurableConfig")) {
             return null;
         }
-        JsonNode node = engine.resolveNode(props.get("DurableConfig"));
-        if (node == null || !node.isObject()) {
+        JsonNode raw = props.get("DurableConfig");
+        if (raw.isNull()) {
             return null;
+        }
+        JsonNode node = engine.resolveNode(raw);
+        if (node == null || !node.isObject()) {
+            // The engine yields AWS::NoValue as "". Anything else fails CloudFormation's schema check
+            // before the function is touched.
+            if (!raw.isValueNode() && node != null && node.isTextual() && node.asText().isEmpty()) {
+                return null;
+            }
+            throw new AwsException("ValidationError", "AWS::Lambda::Function DurableConfig must be an object", 400);
         }
         Map<String, Object> config = new LinkedHashMap<>();
         if (node.hasNonNull("ExecutionTimeout")) {

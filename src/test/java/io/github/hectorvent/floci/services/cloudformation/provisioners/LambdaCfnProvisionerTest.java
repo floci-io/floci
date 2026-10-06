@@ -198,15 +198,28 @@ class LambdaCfnProvisionerTest {
     }
 
     @Test
-    void aDurableConfigThatNoValueRemovedIsLeftOut() {
-        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("my-fn"));
-        ObjectNode props = props("my-fn");
-        // What the engine resolves Fn::If to when the branch is AWS::NoValue.
-        props.put("DurableConfig", "");
+    void aDurableConfigThatIsNotAnObjectLeavesTheFunctionAlone() {
+        // A generated name, so treating the value as removed would replace and delete the function.
+        String generated = "my-stack-MyFunction-ABCDEFGHIJKL";
+        LambdaFunction existing = lambdaFunction(generated);
+        existing.setDurableExecutionTimeout(60);
+        when(lambda.getFunction(REGION, generated)).thenReturn(existing);
+        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("replacement"));
+        for (JsonNode malformed : List.of(mapper.getNodeFactory().textNode("abc"), mapper.getNodeFactory().textNode(""),
+                mapper.getNodeFactory().numberNode(5), mapper.createArrayNode())) {
+            StackResource r = function(generated);
+            r.getAttributes().put("FlociLambdaFunctionNameMode", "generated");
+            ObjectNode props = mapper.createObjectNode();
+            props.set("DurableConfig", malformed);
 
-        provisioner.provision(function(null), props, ctx());
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> provisioner.provision(r, props, updateCtx(generated)));
 
-        assertFalse(capturedCreateRequest().containsKey("DurableConfig"));
+            assertEquals("ValidationError", rejected.getErrorCode());
+        }
+        verify(lambda, never()).createFunction(anyString(), anyMap());
+        verify(lambda, never()).updateFunctionConfiguration(anyString(), anyString(), anyMap());
+        verify(lambda, never()).deleteFunction(anyString(), anyString());
     }
 
     @Test
