@@ -208,9 +208,22 @@ public class PostgresProtocolHandler {
             sendStartupToBackend(backendOut, backendUser, effectiveDbName, clientParameters);
             backendOut.flush();
 
-            if (!authenticateWithBackend(backendIn, backendOut, backendUser, backendPass)) {
-                sendErrorResponse(clientOut, "FATAL", "08006",
-                        "Backend database authentication failed");
+            boolean backendAuthenticated = false;
+            byte[] backendRejection = null;
+            try {
+                backendAuthenticated = authenticateWithBackend(backendIn, backendOut, backendUser, backendPass);
+            } catch (BackendRejectedException e) {
+                backendRejection = e.errorResponse();
+            }
+            if (!backendAuthenticated) {
+                // PostgreSQL's own refusal, such as a missing pg_hba.conf entry for a forwarded
+                // replication=true, says far more than the proxy's generic error.
+                if (backendRejection != null) {
+                    clientOut.write(backendRejection);
+                } else {
+                    sendErrorResponse(clientOut, "FATAL", "08006",
+                            "Backend database authentication failed");
+                }
                 clientOut.flush();
                 closeQuietly(client);
                 closeQuietly(backend);
@@ -417,7 +430,7 @@ public class PostgresProtocolHandler {
 
     private static boolean authenticateWithBackend(InputStream in, OutputStream out,
                                                    String username, String password) throws IOException {
-        int type = in.read();
+        int type = readAuthenticationType(in);
         if (type != 'R') {
             LOG.warnv("Expected Authentication ('R') from backend, got type={0}", type);
             return false;
@@ -463,6 +476,33 @@ public class PostgresProtocolHandler {
         return false;
     }
 
+    /**
+     * Reads the type byte of a message the handshake expects to be an Authentication one. When
+     * PostgreSQL refuses the login instead, the whole ErrorResponse is read and thrown so the
+     * client sees PostgreSQL's reason.
+     */
+    private static int readAuthenticationType(InputStream in) throws IOException {
+        int type = in.read();
+        if (type == 'E') {
+            throw new BackendRejectedException(readMessage(in, type));
+        }
+        return type;
+    }
+
+    /** PostgreSQL refused the backend login with {@code errorResponse}, a complete message. */
+    private static final class BackendRejectedException extends IOException {
+        private final byte[] errorResponse;
+
+        BackendRejectedException(byte[] errorResponse) {
+            super("Backend rejected the login: " + errorMessage(errorResponse, "no message"));
+            this.errorResponse = errorResponse;
+        }
+
+        byte[] errorResponse() {
+            return errorResponse;
+        }
+    }
+
     // ── SCRAM-SHA-256 ─────────────────────────────────────────────────────────
 
     private static boolean performScramSha256(InputStream in, OutputStream out,
@@ -486,7 +526,7 @@ public class PostgresProtocolHandler {
         out.flush();
 
         // Step 2: Read AuthenticationSASLContinue (authType=11)
-        if (in.read() != 'R') {
+        if (readAuthenticationType(in) != 'R') {
             return false;
         }
         int len2 = checkedPacketLength(readInt32(in), 8, "SASL continue message");
@@ -527,7 +567,7 @@ public class PostgresProtocolHandler {
         out.flush();
 
         // Step 4: Read AuthenticationSASLFinal (authType=12) — server signature (ignored)
-        if (in.read() != 'R') {
+        if (readAuthenticationType(in) != 'R') {
             return false;
         }
         int len3 = checkedPacketLength(readInt32(in), 8, "SASL final message");
@@ -601,7 +641,7 @@ public class PostgresProtocolHandler {
     // ── MD5 password ──────────────────────────────────────────────────────────
 
     private static boolean readAuthOk(InputStream in) throws IOException {
-        int type = in.read();
+        int type = readAuthenticationType(in);
         if (type != 'R') {
             LOG.warnv("Expected AuthenticationOK from backend, got type={0}", type);
             return false;
@@ -646,19 +686,7 @@ public class PostgresProtocolHandler {
             if (type < 0) {
                 throw new EOFException("Connection closed before ReadyForQuery");
             }
-            int length = checkedPacketLength(readInt32(in), 4, "backend message");
-            byte[] payload = new byte[length - 4];
-            readFully(in, payload);
-
-            // Reconstruct full message: type + length(4) + payload
-            byte[] full = new byte[1 + 4 + payload.length];
-            full[0] = (byte) type;
-            full[1] = (byte) ((length >> 24) & 0xFF);
-            full[2] = (byte) ((length >> 16) & 0xFF);
-            full[3] = (byte) ((length >> 8) & 0xFF);
-            full[4] = (byte) (length & 0xFF);
-            System.arraycopy(payload, 0, full, 5, payload.length);
-            messages.add(full);
+            messages.add(readMessage(in, type));
 
             if (type == 'Z') { // ReadyForQuery
                 break;
@@ -669,6 +697,23 @@ public class PostgresProtocolHandler {
             }
         }
         return messages;
+    }
+
+    /** Reads the rest of a backend message whose type byte was {@code type}, returning it whole. */
+    private static byte[] readMessage(InputStream in, int type) throws IOException {
+        int length = checkedPacketLength(readInt32(in), 4, "backend message");
+        byte[] payload = new byte[length - 4];
+        readFully(in, payload);
+
+        // Reconstruct full message: type + length(4) + payload
+        byte[] full = new byte[1 + 4 + payload.length];
+        full[0] = (byte) type;
+        full[1] = (byte) ((length >> 24) & 0xFF);
+        full[2] = (byte) ((length >> 16) & 0xFF);
+        full[3] = (byte) ((length >> 8) & 0xFF);
+        full[4] = (byte) (length & 0xFF);
+        System.arraycopy(payload, 0, full, 5, payload.length);
+        return full;
     }
 
     // ── IAM session role ──────────────────────────────────────────────────────

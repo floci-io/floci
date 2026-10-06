@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -163,6 +164,36 @@ class PostgresProtocolHandlerTest {
 
         assertEquals("PostgreSQL backend message length exceeds the 1048576 byte limit: 1048577",
                 error.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void relaysPostgresRefusalOfTheBackendLogin(boolean afterPassword) throws Exception {
+        ByteArrayOutputStream backendInput = new ByteArrayOutputStream();
+        DataOutputStream backendOut = new DataOutputStream(backendInput);
+        if (afterPassword) {
+            backendOut.writeByte('R');
+            backendOut.writeInt(8);
+            backendOut.writeInt(3);
+        }
+        String reason = "no pg_hba.conf entry for replication connection from host \"172.17.0.1\", "
+                + "user \"dbadmin\", no encryption";
+        writeErrorResponse(backendOut, "FATAL", "28000", reason);
+        MemorySocket client = new MemorySocket(startupAndPassword());
+
+        assertNull(PostgresProtocolHandler.authenticate(
+                client, () -> new MemorySocket(backendInput.toByteArray()),
+                "dbadmin", "adminpass", "postgres",
+                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
+                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
+
+        DataInputStream clientIn = new DataInputStream(
+                new ByteArrayInputStream(client.getOutputStream().toByteArray()));
+        readCleartextPasswordChallenge(clientIn);
+        Map<Character, String> error = readErrorResponse(clientIn);
+        assertEquals("FATAL", error.get('S'));
+        assertEquals("28000", error.get('C'));
+        assertEquals(reason, error.get('M'));
     }
 
     @Test
