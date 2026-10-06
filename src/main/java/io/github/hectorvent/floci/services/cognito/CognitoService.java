@@ -28,6 +28,8 @@ import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.RevokedTokenInfo;
+import io.github.hectorvent.floci.services.cognito.model.SmsMfaSettings;
+import io.github.hectorvent.floci.services.cognito.model.SoftwareTokenMfaSettings;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
@@ -695,9 +697,9 @@ public class CognitoService implements ResourceProvider {
      * what GetUserPoolMfaConfig reports back and what the Terraform provider reads to
      * detect drift on mfa_configuration / software_token_mfa_configuration.
      *
-     * <p>SMS, email and WebAuthn MFA are accepted and not stored: Floci has no path to
-     * deliver an SMS or email factor, so retaining the config would claim a capability
-     * that does not exist.
+     * <p>SMS and email MFA configurations are stored and turn those factors on for the pool:
+     * Floci delivers their codes through SNS and SES. WebAuthn configuration is accepted and
+     * not stored.
      */
     /**
      * @param otherFactorConfigured whether EmailMfaConfiguration or SmsMfaConfiguration was
@@ -709,6 +711,20 @@ public class CognitoService implements ResourceProvider {
     public UserPool setUserPoolMfaConfig(String id, String mfaConfiguration,
                                          Boolean softwareTokenMfaEnabled,
                                          boolean otherFactorConfigured) {
+        return setUserPoolMfaConfig(id, mfaConfiguration, softwareTokenMfaEnabled,
+                otherFactorConfigured ? Map.of() : null, null);
+    }
+
+    /**
+     * @param smsMfaConfiguration the request's SmsMfaConfiguration, or null when absent; its
+     *     SmsAuthenticationMessage and SmsConfiguration also become the pool's, as on AWS
+     * @param emailMfaConfiguration the request's EmailMfaConfiguration, or null when absent
+     */
+    public UserPool setUserPoolMfaConfig(String id, String mfaConfiguration,
+                                         Boolean softwareTokenMfaEnabled,
+                                         Map<String, Object> smsMfaConfiguration,
+                                         Map<String, Object> emailMfaConfiguration) {
+        boolean otherFactorConfigured = smsMfaConfiguration != null || emailMfaConfiguration != null;
         UserPool pool = describeUserPool(id);
         // An absent MfaConfiguration means OFF, not "leave the current mode alone":
         // measured against the live service, which resets a pool that was OPTIONAL back
@@ -740,8 +756,26 @@ public class CognitoService implements ResourceProvider {
             // Turning MFA off drops the factor configuration with it: the live service
             // answers OFF alone afterwards, with no SoftwareTokenMfaConfiguration member.
             pool.setSoftwareTokenMfaEnabled(null);
-        } else if (softwareTokenMfaEnabled != null) {
-            pool.setSoftwareTokenMfaEnabled(softwareTokenMfaEnabled);
+            pool.setSmsMfaConfiguration(null);
+            pool.setEmailMfaConfiguration(null);
+        } else {
+            if (softwareTokenMfaEnabled != null) {
+                pool.setSoftwareTokenMfaEnabled(softwareTokenMfaEnabled);
+            }
+            if (smsMfaConfiguration != null) {
+                pool.setSmsMfaConfiguration(new LinkedHashMap<>(smsMfaConfiguration));
+                if (smsMfaConfiguration.get("SmsAuthenticationMessage") instanceof String message) {
+                    pool.setSmsAuthenticationMessage(message);
+                }
+                if (smsMfaConfiguration.get("SmsConfiguration") instanceof Map<?, ?> smsConfiguration) {
+                    Map<String, Object> copy = new LinkedHashMap<>();
+                    smsConfiguration.forEach((key, value) -> copy.put(String.valueOf(key), value));
+                    pool.setSmsConfiguration(copy);
+                }
+            }
+            if (emailMfaConfiguration != null) {
+                pool.setEmailMfaConfiguration(new LinkedHashMap<>(emailMfaConfiguration));
+            }
         }
         poolStore.put(id, pool);
         return pool;
@@ -3386,13 +3420,13 @@ public class CognitoService implements ResourceProvider {
         List<Map<String, String>> attrs = new ArrayList<>();
         user.getAttributes().forEach((k, v) -> attrs.add(Map.of("Name", k, "Value", v)));
         result.put("UserAttributes", attrs);
+        putMfaSettings(result, describeUserPool(token.poolId()), user);
         return result;
     }
 
     /**
-     * GetUserAuthFactors. The MFA members come from the email MFA preference, the one per-user
-     * MFA setting Floci stores; SetUserMFAPreference accepts SMS and software-token settings
-     * without keeping them.
+     * GetUserAuthFactors. The MFA members come from the email and software-token MFA preferences;
+     * SetUserMFAPreference accepts SMS settings without keeping them.
      */
     public Map<String, Object> getUserAuthFactors(String accessToken) {
         VerifiedAccessToken token;
@@ -3414,13 +3448,7 @@ public class CognitoService implements ResourceProvider {
         if (!factors.isEmpty()) {
             result.put("ConfiguredUserAuthFactors", factors);
         }
-        EmailMfaSettings emailMfa = user.getEmailMfaSettings();
-        if (emailMfa != null && emailMfa.isEnabled()) {
-            if (emailMfa.isPreferredMfa()) {
-                result.put("PreferredMfaSetting", "EMAIL_OTP");
-            }
-            result.put("UserMFASettingList", List.of("EMAIL_OTP"));
-        }
+        putMfaSettings(result, describeUserPool(token.poolId()), user);
         return result;
     }
 
@@ -5486,101 +5514,246 @@ public class CognitoService implements ResourceProvider {
         }
         return value;
     }
-    public void adminSetUserMFAPreference(
-            String userPoolId,
-            String username,
-            Boolean emailEnabled,
-            Boolean emailPreferred) {
+    /**
+     * One factor's settings from an MFA preference request ({@code EmailMfaSettings},
+     * {@code SoftwareTokenMfaSettings}). A null member leaves the stored value alone.
+     */
+    public record MfaSettingsUpdate(Boolean enabled, Boolean preferredMfa) {
+        public static final MfaSettingsUpdate NONE = new MfaSettingsUpdate(null, null);
 
-        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
-        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
-            adminSetUserMFAPreferenceUnderUserLock(
-                    userPoolId, resolvedUser.getUsername(), emailEnabled, emailPreferred);
+        boolean isEmpty() {
+            return enabled == null && preferredMfa == null;
         }
     }
 
-    private void adminSetUserMFAPreferenceUnderUserLock(
-            String userPoolId,
-            String username,
-            Boolean emailEnabled,
-            Boolean emailPreferred) {
-
-        CognitoUser user = adminGetUser(userPoolId, username);
-
-        updateEmailMfaPreference(user, emailEnabled, emailPreferred);
-
-        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-
-        userStore.put(userKey(userPoolId, user.getUsername()), user);
+    public void adminSetUserMFAPreference(String userPoolId, String username,
+                                          MfaSettingsUpdate email, MfaSettingsUpdate softwareToken) {
+        adminSetUserMFAPreference(userPoolId, username, MfaSettingsUpdate.NONE, email, softwareToken);
     }
 
-    public void setUserMFAPreference(
-            String accessToken,
-            Boolean emailEnabled,
-            Boolean emailPreferred) {
+    public void adminSetUserMFAPreference(String userPoolId, String username, MfaSettingsUpdate sms,
+                                          MfaSettingsUpdate email, MfaSettingsUpdate softwareToken) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            updateMfaPreferenceUnderUserLock(userPoolId, resolvedUser.getUsername(), sms, email, softwareToken);
+        }
+    }
 
+    public void setUserMFAPreference(String accessToken, MfaSettingsUpdate email, MfaSettingsUpdate softwareToken) {
+        setUserMFAPreference(accessToken, MfaSettingsUpdate.NONE, email, softwareToken);
+    }
+
+    public void setUserMFAPreference(String accessToken, MfaSettingsUpdate sms, MfaSettingsUpdate email,
+                                     MfaSettingsUpdate softwareToken) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         synchronized (userLock(token.poolId(), token.username())) {
-            setUserMFAPreferenceUnderUserLock(
-                    token.poolId(), token.username(), emailEnabled, emailPreferred);
+            updateMfaPreferenceUnderUserLock(token.poolId(), token.username(), sms, email, softwareToken);
         }
     }
 
-    private void setUserMFAPreferenceUnderUserLock(
-            String poolId,
-            String username,
-            Boolean emailEnabled,
-            Boolean emailPreferred) {
-
+    private void updateMfaPreferenceUnderUserLock(String poolId, String username, MfaSettingsUpdate sms,
+                                                  MfaSettingsUpdate email, MfaSettingsUpdate softwareToken) {
         CognitoUser user = adminGetUser(poolId, username);
-
-        updateEmailMfaPreference(user, emailEnabled, emailPreferred);
-
+        long preferredCount = List.of(sms, email, softwareToken).stream()
+                .filter(update -> Boolean.TRUE.equals(update.preferredMfa())).count();
+        if (preferredCount > 1) {
+            throw new AwsException("InvalidParameterException",
+                    "Only one MFA method can be set as preferred.", 400);
+        }
+        SmsMfaSettings smsSettings = user.getSmsMfaSettings();
+        EmailMfaSettings emailSettings = user.getEmailMfaSettings();
+        SoftwareTokenMfaSettings tokenSettings = user.getSoftwareTokenMfaSettings();
+        FactorState smsState = resolveMfaSettings(sms, smsSettings == null
+                ? FactorState.OFF : new FactorState(smsSettings.isEnabled(), smsSettings.isPreferredMfa()));
+        FactorState emailState = resolveMfaSettings(email, emailSettings == null
+                ? FactorState.OFF : new FactorState(emailSettings.isEnabled(), emailSettings.isPreferredMfa()));
+        FactorState tokenState = resolveMfaSettings(softwareToken, tokenSettings == null
+                ? FactorState.OFF : new FactorState(tokenSettings.isEnabled(), tokenSettings.isPreferredMfa()));
+        // AWS refuses to turn on a factor it has nowhere to deliver: an SMS code without a phone number,
+        // an email code without an email address, TOTP without a verified authenticator.
+        if (Boolean.TRUE.equals(sms.enabled()) && user.getAttributes().get("phone_number") == null) {
+            throw new AwsException("InvalidParameterException",
+                    "User does not have delivery config set to turn on SMS_MFA", 400);
+        }
+        if (Boolean.TRUE.equals(email.enabled()) && user.getAttributes().get("email") == null) {
+            throw new AwsException("InvalidParameterException",
+                    "User does not have delivery config set to turn on EMAIL_OTP", 400);
+        }
+        if (Boolean.TRUE.equals(softwareToken.enabled()) && user.getSoftwareTokenMfaSecret() == null) {
+            throw new AwsException("InvalidParameterException",
+                    "User does not have delivery config set to turn on SOFTWARE_TOKEN_MFA", 400);
+        }
+        // Only one factor is preferred, so preferring one drops the preference of the others.
+        if (Boolean.TRUE.equals(sms.preferredMfa())) {
+            emailState = new FactorState(emailState.enabled(), false);
+            tokenState = new FactorState(tokenState.enabled(), false);
+        } else if (Boolean.TRUE.equals(email.preferredMfa())) {
+            smsState = new FactorState(smsState.enabled(), false);
+            tokenState = new FactorState(tokenState.enabled(), false);
+        } else if (Boolean.TRUE.equals(softwareToken.preferredMfa())) {
+            smsState = new FactorState(smsState.enabled(), false);
+            emailState = new FactorState(emailState.enabled(), false);
+        }
+        if (!sms.isEmpty() || smsSettings != null) {
+            SmsMfaSettings settings = smsSettings != null ? smsSettings : new SmsMfaSettings();
+            settings.setEnabled(smsState.enabled());
+            settings.setPreferredMfa(smsState.preferred());
+            user.setSmsMfaSettings(settings);
+        }
+        if (!email.isEmpty() || emailSettings != null) {
+            EmailMfaSettings settings = emailSettings != null ? emailSettings : new EmailMfaSettings();
+            settings.setEnabled(emailState.enabled());
+            settings.setPreferredMfa(emailState.preferred());
+            user.setEmailMfaSettings(settings);
+        }
+        if (!softwareToken.isEmpty() || tokenSettings != null) {
+            SoftwareTokenMfaSettings settings = tokenSettings != null ? tokenSettings : new SoftwareTokenMfaSettings();
+            settings.setEnabled(tokenState.enabled());
+            settings.setPreferredMfa(tokenState.preferred());
+            user.setSoftwareTokenMfaSettings(settings);
+        }
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-
         userStore.put(userKey(poolId, user.getUsername()), user);
     }
 
-    private void updateEmailMfaPreference(
-            CognitoUser user,
-            Boolean enabled,
-            Boolean preferredMfa) {
-
-        if (enabled == null && preferredMfa == null) {
-            return;
-        }
-
-        EmailMfaSettings current = user.getEmailMfaSettings();
-
-        boolean newEnabled = enabled != null
-                ? enabled
-                : current != null && current.isEnabled();
-
-        boolean newPreferredMfa = preferredMfa != null
-                ? preferredMfa
-                : current != null && current.isPreferredMfa();
-        if (!newEnabled && Boolean.TRUE.equals(preferredMfa)) {
-            throw new AwsException(
-                    "InvalidParameterException",
-                    "Preferred MFA setting cannot be enabled when the MFA method is disabled.",
-                    400
-            );
-        }
-
-        if (!newEnabled) {
-            newPreferredMfa = false;
-        }
-
-        EmailMfaSettings settings = current != null
-                ? current
-                : new EmailMfaSettings();
-
-        settings.setEnabled(newEnabled);
-        settings.setPreferredMfa(newPreferredMfa);
-
-        user.setEmailMfaSettings(settings);
+    private record FactorState(boolean enabled, boolean preferred) {
+        static final FactorState OFF = new FactorState(false, false);
     }
+
+    /**
+     * The state a factor ends up in after {@code update}. Disabling a factor drops its preference,
+     * and preferring a disabled one is refused.
+     */
+    private static FactorState resolveMfaSettings(MfaSettingsUpdate update, FactorState current) {
+        boolean enabled = update.enabled() != null ? update.enabled() : current.enabled();
+        boolean preferred = update.preferredMfa() != null ? update.preferredMfa() : current.preferred();
+        if (!enabled && Boolean.TRUE.equals(update.preferredMfa())) {
+            throw new AwsException("InvalidParameterException",
+                    "Preferred MFA setting cannot be enabled when the MFA method is disabled.", 400);
+        }
+        return new FactorState(enabled, enabled && preferred);
+    }
+
+    /**
+     * The message factor's code for a challenge after a password: a new code, or while one sent
+     * moments ago is still live, that one, since each sign-in asks for a code and the code store
+     * paces new ones. Returns the CODE_DELIVERY challenge parameters.
+     */
+    Map<String, String> issueMfaCode(UserPool pool, CognitoUser user, VerificationCode.Purpose purpose,
+                                     String attributeName, String deliveryMedium,
+                                     Map<String, Object> customMessageResponse) {
+        try {
+            return issueSignInOtp(pool, user, purpose, attributeName, deliveryMedium, customMessageResponse);
+        } catch (AwsException e) {
+            if (!"LimitExceededException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            String destination = user.getAttributes().get(attributeName);
+            Map<String, String> details = new LinkedHashMap<>();
+            details.put("CODE_DELIVERY_DELIVERY_MEDIUM", deliveryMedium);
+            details.put("CODE_DELIVERY_DESTINATION",
+                    "email".equals(attributeName) ? maskEmail(destination) : maskPhoneNumber(destination));
+            return details;
+        }
+    }
+
+    /** After an SMS or email MFA code, AWS marks the attribute it went to as verified. */
+    void markAttributeVerified(String poolId, String username, String attributeName) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            if (!"true".equals(user.getAttributes().get(attributeName + "_verified"))) {
+                user.getAttributes().put(attributeName + "_verified", "true");
+                user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+                userStore.put(userKey(poolId, user.getUsername()), user);
+            }
+        }
+    }
+
+    /**
+     * Marks the user's newly registered authenticator as their MFA factor, which completing the
+     * {@code MFA_SETUP} challenge does on AWS. It becomes the preferred factor when no other is.
+     */
+    void activateSoftwareTokenMfaAfterSetup(String poolId, String username) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            SoftwareTokenMfaSettings settings = user.getSoftwareTokenMfaSettings() != null
+                    ? user.getSoftwareTokenMfaSettings() : new SoftwareTokenMfaSettings();
+            settings.setEnabled(true);
+            if (preferredMfaSetting(describeUserPool(poolId), user) == null) {
+                settings.setPreferredMfa(true);
+            }
+            user.setSoftwareTokenMfaSettings(settings);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+        }
+    }
+
+    /**
+     * {@code UserMFASettingList}: the MFA factors activated for the user, in the order the API
+     * reference lists them. Software-token MFA counts once the user has a verified authenticator
+     * that is turned on, or that a pool requiring software-token MFA asks for at every sign-in.
+     */
+    static List<String> userMfaSettingList(UserPool pool, CognitoUser user) {
+        List<String> factors = new ArrayList<>();
+        if (user.getSmsMfaSettings() != null && user.getSmsMfaSettings().isEnabled()) {
+            factors.add("SMS_MFA");
+        }
+        if (user.getEmailMfaSettings() != null && user.getEmailMfaSettings().isEnabled()) {
+            factors.add("EMAIL_OTP");
+        }
+        if (softwareTokenMfaActive(pool, user)) {
+            factors.add("SOFTWARE_TOKEN_MFA");
+        }
+        return factors;
+    }
+
+    /** {@code PreferredMfaSetting}: the user's preferred MFA factor, or null when none is. */
+    static @Nullable String preferredMfaSetting(UserPool pool, CognitoUser user) {
+        SmsMfaSettings sms = user.getSmsMfaSettings();
+        if (sms != null && sms.isEnabled() && sms.isPreferredMfa()) {
+            return "SMS_MFA";
+        }
+        EmailMfaSettings email = user.getEmailMfaSettings();
+        if (email != null && email.isEnabled() && email.isPreferredMfa()) {
+            return "EMAIL_OTP";
+        }
+        SoftwareTokenMfaSettings token = user.getSoftwareTokenMfaSettings();
+        if (token != null && token.isPreferredMfa() && softwareTokenMfaActive(pool, user)) {
+            return "SOFTWARE_TOKEN_MFA";
+        }
+        return null;
+    }
+
+    /** Whether the user has turned on software-token MFA for a verified authenticator. */
+    static boolean softwareTokenMfaEnabled(CognitoUser user) {
+        SoftwareTokenMfaSettings settings = user.getSoftwareTokenMfaSettings();
+        return settings != null && settings.isEnabled() && user.getSoftwareTokenMfaSecret() != null;
+    }
+
+    /**
+     * Whether software-token MFA is active for the user: turned on, or required. A pool that requires
+     * software-token MFA asks for a registered authenticator at every sign-in, whether or not it was
+     * turned on, and AWS lets users there choose only which factor is preferred.
+     */
+    static boolean softwareTokenMfaActive(UserPool pool, CognitoUser user) {
+        return softwareTokenMfaEnabled(user)
+                || (user.getSoftwareTokenMfaSecret() != null && "ON".equals(pool.getMfaConfiguration())
+                        && Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled()));
+    }
+
+    /** Adds {@code UserMFASettingList} and {@code PreferredMfaSetting} to a user response, when set. */
+    static void putMfaSettings(Map<String, Object> response, UserPool pool, CognitoUser user) {
+        String preferred = preferredMfaSetting(pool, user);
+        if (preferred != null) {
+            response.put("PreferredMfaSetting", preferred);
+        }
+        List<String> factors = userMfaSettingList(pool, user);
+        if (!factors.isEmpty()) {
+            response.put("UserMFASettingList", factors);
+        }
+    }
+
     private record DeliveryTarget(String attributeName, String deliveryMedium, String destination) {
     }
 }
