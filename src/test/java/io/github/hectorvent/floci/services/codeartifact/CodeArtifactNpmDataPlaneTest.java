@@ -50,7 +50,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for routing npm registry traffic through Floci's data plane to the per-repository
- * Verdaccio container. {@link VerdaccioSidecarManager} is mocked throughout, so no container ever
+ * Verdaccio container. {@link VerdaccioSidecarClient} is mocked throughout, so no container ever
  * actually starts; the round-trip proxy tests point it at a fake upstream HTTP server instead. The
  * real container-creation path (config injection, {@code VERDACCIO_PUBLIC_URL}) is covered by the
  * Docker-gated npm client integration test.
@@ -108,8 +108,8 @@ class CodeArtifactNpmDataPlaneTest {
     @Test
     void missingTokenIsRejectedWithoutStartingAContainer() throws Exception {
         CodeArtifactService service = mock(CodeArtifactService.class);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        startDataPlane(service, verdaccioManager);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/lodash", null);
 
@@ -120,21 +120,21 @@ class CodeArtifactNpmDataPlaneTest {
     @Test
     void disabledCodeArtifactServiceIsNotServedByThisRoute() throws Exception {
         CodeArtifactService service = mock(CodeArtifactService.class);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        startDataPlane(service, verdaccioManager, false);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        startDataPlane(service, verdaccioClient, false);
 
         HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/lodash", "good-token");
 
         assertEquals(404, response.statusCode());
-        verifyNoInteractions(service, verdaccioManager);
+        verifyNoInteractions(service, verdaccioClient);
     }
 
     @Test
     void invalidTokenIsRejected() throws Exception {
         CodeArtifactService service = mock(CodeArtifactService.class);
         when(service.resolveAuthorizationToken(anyString(), anyString())).thenReturn(Optional.empty());
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        startDataPlane(service, verdaccioManager);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/lodash", "not-a-real-token");
 
@@ -148,8 +148,8 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenThrow(new AwsException("ResourceNotFoundException", "no such repository", 404));
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        startDataPlane(service, verdaccioManager);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/lodash", "good-token");
 
@@ -175,10 +175,10 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        startDataPlane(service, verdaccioManager);
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/lodash", "good-token");
 
@@ -208,10 +208,10 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        startDataPlane(service, verdaccioManager);
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 "{\"name\":\"my-pkg\"}");
@@ -247,11 +247,11 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        givenStoredVersion(verdaccioManager, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
-        startDataPlane(service, verdaccioManager);
+        givenStoredVersion(verdaccioClient, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
@@ -285,11 +285,11 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        givenStoredVersion(verdaccioManager, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", existingContent, Map.of());
-        startDataPlane(service, verdaccioManager);
+        givenStoredVersion(verdaccioClient, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", existingContent, Map.of());
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", newContent));
@@ -320,10 +320,10 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        startDataPlane(service, verdaccioManager);
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", "fresh bytes".getBytes(StandardCharsets.UTF_8)));
@@ -357,13 +357,13 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
         // A match exists for "other-pkg", the envelope's own (wrong) name, but the URL is
         // publishing to "my-pkg": this must never be consulted for this request at all.
-        givenStoredVersion(verdaccioManager, null, "other-pkg", "1.0.0", "other-pkg-1.0.0.tgz", content, Map.of());
-        startDataPlane(service, verdaccioManager);
+        givenStoredVersion(verdaccioClient, null, "other-pkg", "1.0.0", "other-pkg-1.0.0.tgz", content, Map.of());
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 publishEnvelope("other-pkg", "1.0.0", "other-pkg-1.0.0.tgz", content));
@@ -398,11 +398,11 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        givenStoredVersion(verdaccioManager, "myscope", "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
-        startDataPlane(service, verdaccioManager);
+        givenStoredVersion(verdaccioClient, "myscope", "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@myscope%2Fmy-pkg",
                 "good-token", publishEnvelope("@myscope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
@@ -434,13 +434,13 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        givenStoredVersion(verdaccioManager, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
-        when(verdaccioManager.storedTarballIntegrity(anyString(), isNull(), eq("my-pkg"), eq("my-pkg-1.0.0.tgz")))
+        givenStoredVersion(verdaccioClient, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
+        when(verdaccioClient.storedTarballIntegrity(anyString(), isNull(), eq("my-pkg"), eq("my-pkg-1.0.0.tgz")))
                 .thenReturn(Optional.of("sha512-" + Base64.getEncoder().encodeToString(new byte[64])));
-        startDataPlane(service, verdaccioManager);
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
@@ -456,7 +456,7 @@ class CodeArtifactNpmDataPlaneTest {
      */
     @Test
     void aPublishThatCannotBeConfirmedAsARepublishFallsThroughToTheBackend() throws Exception {
-        assertForwardedWhenNotConfirmable("not json at all", verdaccioManager -> { });
+        assertForwardedWhenNotConfirmable("not json at all", verdaccioClient -> { });
     }
 
     @Test
@@ -464,8 +464,8 @@ class CodeArtifactNpmDataPlaneTest {
         String envelopeWithoutAttachment = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\","
                 + "\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\"}}},"
                 + "\"_attachments\":{}}";
-        assertForwardedWhenNotConfirmable(envelopeWithoutAttachment, verdaccioManager ->
-                givenStoredVersion(verdaccioManager, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", new byte[0],
+        assertForwardedWhenNotConfirmable(envelopeWithoutAttachment, verdaccioClient ->
+                givenStoredVersion(verdaccioClient, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", new byte[0],
                         Map.of()));
     }
 
@@ -473,11 +473,11 @@ class CodeArtifactNpmDataPlaneTest {
     void aPublishWhoseSidecarLookupFailsFallsThroughToTheBackend() throws Exception {
         assertForwardedWhenNotConfirmable(
                 publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", "tarball bytes".getBytes(StandardCharsets.UTF_8)),
-                verdaccioManager -> when(verdaccioManager.fetchPackageDocument(anyString(), isNull(), eq("my-pkg")))
+                verdaccioClient -> when(verdaccioClient.fetchPackageDocument(anyString(), isNull(), eq("my-pkg")))
                         .thenThrow(new IllegalStateException("sidecar unreachable")));
     }
 
-    private void assertForwardedWhenNotConfirmable(String body, Consumer<VerdaccioSidecarManager> arrange)
+    private void assertForwardedWhenNotConfirmable(String body, Consumer<VerdaccioSidecarClient> arrange)
             throws Exception {
         AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
         upstream = vertx.createHttpServer()
@@ -495,11 +495,11 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        arrange.accept(verdaccioManager);
-        startDataPlane(service, verdaccioManager);
+        arrange.accept(verdaccioClient);
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token", body);
 
@@ -511,11 +511,11 @@ class CodeArtifactNpmDataPlaneTest {
      * Arranges a package that already exists on the backend: its metadata document (with
      * {@code storedTags} and one version whose tarball is {@code filename}) and that tarball's bytes.
      */
-    private static void givenStoredVersion(VerdaccioSidecarManager verdaccioManager, String namespace, String name,
+    private static void givenStoredVersion(VerdaccioSidecarClient verdaccioClient, String namespace, String name,
             String version, String filename, byte[] storedContent, Map<String, String> storedTags) {
-        when(verdaccioManager.fetchPackageDocument(anyString(), eq(namespace), eq(name)))
+        when(verdaccioClient.fetchPackageDocument(anyString(), eq(namespace), eq(name)))
                 .thenReturn(Optional.of(storedDocument(name, version, filename, storedContent, storedTags)));
-        when(verdaccioManager.storedTarballIntegrity(anyString(), eq(namespace), eq(name), eq(filename)))
+        when(verdaccioClient.storedTarballIntegrity(anyString(), eq(namespace), eq(name), eq(filename)))
                 .thenReturn(Optional.of(integrity(storedContent)));
     }
 
@@ -543,11 +543,11 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        givenStoredVersion(verdaccioManager, null, "big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content, Map.of());
-        startDataPlane(service, verdaccioManager);
+        givenStoredVersion(verdaccioClient, null, "big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content, Map.of());
+        startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/big-pkg", "good-token",
                 publishEnvelope("big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content));
@@ -610,20 +610,20 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
         CountDownLatch entered = new CountDownLatch(4);
         CountDownLatch release = new CountDownLatch(1);
         ObjectNode document = storedDocument("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
-        when(verdaccioManager.storedTarballIntegrity(anyString(), isNull(), eq("my-pkg"), eq("my-pkg-1.0.0.tgz")))
+        when(verdaccioClient.storedTarballIntegrity(anyString(), isNull(), eq("my-pkg"), eq("my-pkg-1.0.0.tgz")))
                 .thenReturn(Optional.of(integrity(content)));
-        when(verdaccioManager.fetchPackageDocument(anyString(), isNull(), eq("my-pkg"))).thenAnswer(invocation -> {
+        when(verdaccioClient.fetchPackageDocument(anyString(), isNull(), eq("my-pkg"))).thenAnswer(invocation -> {
             entered.countDown();
             release.await(5, TimeUnit.SECONDS);
             return Optional.of(document);
         });
-        startDataPlane(service, verdaccioManager);
+        startDataPlane(service, verdaccioClient);
 
         String path = "/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg";
         ExecutorService pool = Executors.newFixedThreadPool(5);
@@ -688,11 +688,11 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
         when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
                 .thenReturn(NPM_REPOSITORY_ID);
-        VerdaccioSidecarManager verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
                 .thenReturn("http://127.0.0.1:" + upstream.actualPort());
-        givenStoredVersion(verdaccioManager, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, storedTags);
-        startDataPlane(service, verdaccioManager);
+        givenStoredVersion(verdaccioClient, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, storedTags);
+        startDataPlane(service, verdaccioClient);
 
         return put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 publishEnvelopeWithDistTags("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, distTagsJson));
@@ -728,19 +728,19 @@ class CodeArtifactNpmDataPlaneTest {
         assertEquals(true, upstreamReceivedPut.get());
     }
 
-    private void startDataPlane(CodeArtifactService service, VerdaccioSidecarManager verdaccioManager)
+    private void startDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient)
             throws Exception {
-        startDataPlane(service, verdaccioManager, true);
+        startDataPlane(service, verdaccioClient, true);
     }
 
-    private void startDataPlane(CodeArtifactService service, VerdaccioSidecarManager verdaccioManager,
+    private void startDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient,
                                  boolean codeArtifactEnabled) throws Exception {
-        when(verdaccioManager.publicUrl(DOMAIN, REPOSITORY)).thenReturn("http://localhost:4566/codeartifact/npm/"
+        when(verdaccioClient.publicUrl(DOMAIN, REPOSITORY)).thenReturn("http://localhost:4566/codeartifact/npm/"
                 + DOMAIN + "/" + REPOSITORY + "/");
         ServiceConfigAccess serviceConfigAccess = mock(ServiceConfigAccess.class);
         when(serviceConfigAccess.isEnabled("codeartifact")).thenReturn(codeArtifactEnabled);
         Router router = Router.router(vertx);
-        new CodeArtifactNpmDataPlane(service, verdaccioManager, serviceConfigAccess, vertx, new ObjectMapper())
+        new CodeArtifactNpmDataPlane(service, verdaccioClient, serviceConfigAccess, vertx, new ObjectMapper())
                 .register(router);
         dataPlane = vertx.createHttpServer().requestHandler(router)
                 .listen(0, "127.0.0.1")

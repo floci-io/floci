@@ -67,7 +67,7 @@ public class CodeArtifactNpmDataPlane {
             "te", "trailers", "transfer-encoding", "upgrade", "authorization", "host");
 
     private final CodeArtifactService service;
-    private final VerdaccioSidecarManager verdaccioManager;
+    private final VerdaccioSidecarClient verdaccioClient;
     private final ServiceConfigAccess serviceConfigAccess;
     private final Vertx vertx;
     private final HttpClient proxyClient;
@@ -76,10 +76,10 @@ public class CodeArtifactNpmDataPlane {
     private final PreflightGate preflights = new PreflightGate(MAX_CONCURRENT_PREFLIGHTS, MAX_QUEUED_PREFLIGHTS);
 
     @Inject
-    public CodeArtifactNpmDataPlane(CodeArtifactService service, VerdaccioSidecarManager verdaccioManager,
+    public CodeArtifactNpmDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient,
                                      ServiceConfigAccess serviceConfigAccess, Vertx vertx, ObjectMapper mapper) {
         this.service = service;
-        this.verdaccioManager = verdaccioManager;
+        this.verdaccioClient = verdaccioClient;
         this.serviceConfigAccess = serviceConfigAccess;
         this.vertx = vertx;
         this.proxyClient = vertx.createHttpClient(new HttpClientOptions()
@@ -341,8 +341,8 @@ public class CodeArtifactNpmDataPlane {
     }
 
     private String ensureBackendReady(String npmRepositoryId, NpmRequest npmRequest) {
-        return verdaccioManager.ensureReady(npmRepositoryId,
-                verdaccioManager.publicUrl(npmRequest.domain(), npmRequest.repository()));
+        return verdaccioClient.ensureReady(npmRepositoryId,
+                verdaccioClient.publicUrl(npmRequest.domain(), npmRequest.repository()));
     }
 
     /**
@@ -364,7 +364,7 @@ public class CodeArtifactNpmDataPlane {
         }
         Optional<JsonNode> storedDocument;
         try {
-            storedDocument = verdaccioManager.fetchPackageDocument(backendBaseUrl, identity.namespace(),
+            storedDocument = verdaccioClient.fetchPackageDocument(backendBaseUrl, identity.namespace(),
                     identity.packageName());
         } catch (IllegalStateException e) {
             LOG.warnv(e, "Could not check {0}/{1} for an existing match before publishing: {2}",
@@ -376,7 +376,7 @@ public class CodeArtifactNpmDataPlane {
         }
         for (NpmPublishEnvelopeScanner.Version version : envelope.versions().values()) {
             try {
-                Optional<String> stored = verdaccioManager.storedTarballIntegrity(backendBaseUrl,
+                Optional<String> stored = verdaccioClient.storedTarballIntegrity(backendBaseUrl,
                         identity.namespace(), identity.packageName(), tarballFilename(version.tarball()));
                 if (stored.isEmpty() || !stored.get().equals(version.integrity())) {
                     return false;

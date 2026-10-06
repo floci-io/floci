@@ -51,7 +51,7 @@ class CodeArtifactServiceTest {
     private CodeArtifactService service;
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
-    private VerdaccioSidecarManager verdaccioManager;
+    private VerdaccioSidecarClient verdaccioClient;
     private ReposiliteSidecarClient reposiliteClient;
     private PypiserverSidecarManager pypiserverManager;
 
@@ -71,15 +71,15 @@ class CodeArtifactServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
-        verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.format()).thenReturn("npm");
+        verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.format()).thenReturn("npm");
         reposiliteClient = mock(ReposiliteSidecarClient.class);
         when(reposiliteClient.format()).thenReturn("maven");
         pypiserverManager = mock(PypiserverSidecarManager.class);
         when(pypiserverManager.format()).thenReturn("pypi");
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
                 true, null, new CodeArtifactSidecarRegistry(
-                        List.of(verdaccioManager, reposiliteClient, pypiserverManager)));
+                        List.of(verdaccioClient, reposiliteClient, pypiserverManager)));
     }
 
     // -------------------------------------------------------------- domains
@@ -396,7 +396,7 @@ class CodeArtifactServiceTest {
 
         service.deleteRepository(REGION, "dom", null, "repo");
 
-        verify(verdaccioManager).release(created.getSidecarContainerIds().get("npm"));
+        verify(verdaccioClient).release(created.getSidecarContainerIds().get("npm"));
         verify(reposiliteClient).release(created.getSidecarContainerIds().get("maven"));
     }
 
@@ -413,7 +413,7 @@ class CodeArtifactServiceTest {
         CodeArtifactRepository deleted = service.deleteRepository(REGION, "dom", null, "repo");
 
         assertEquals("repo", deleted.getName());
-        verify(verdaccioManager).release(deleted.getSidecarContainerIds().get("npm"));
+        verify(verdaccioClient).release(deleted.getSidecarContainerIds().get("npm"));
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
@@ -1108,7 +1108,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "tarball bytes".getBytes(StandardCharsets.UTF_8);
-        when(verdaccioManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), eq("myscope"),
+        when(verdaccioClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), eq("myscope"),
                 eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(content));
 
         PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "npm",
