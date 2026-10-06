@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemp
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.IdentityCertificate;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
@@ -44,6 +46,7 @@ final class SesServiceTestBuilder {
     private final InMemoryStorage<String, Tenant> tenantStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, TenantResourceAssociation> tenantAssociationStore =
             new InMemoryStorage<>();
+    private final InMemoryStorage<String, IdentityCertificate> certificateStore = new InMemoryStorage<>();
 
     private SmtpRelay smtpRelay = mock(SmtpRelay.class);
     // Default null, matching the production null-Route53 case: SesIdentityService treats a null
@@ -60,6 +63,7 @@ final class SesServiceTestBuilder {
     private SesIdentityService identityService;
     private SesCvetService cvetService;
     private SesSentEmailService sentEmailService;
+    private SesIdentityCertificateService certificateService;
 
     static SesServiceTestBuilder create() {
         return new SesServiceTestBuilder();
@@ -157,6 +161,13 @@ final class SesServiceTestBuilder {
         return identityService;
     }
 
+    SesIdentityCertificateService certificateService() {
+        if (certificateService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return certificateService;
+    }
+
     SesService build() {
         contactService = new SesContactService(contactListStore, contactStore, clock);
         suppressionService = new SesSuppressionService(suppressionStore, accountSuppressionStore,
@@ -165,6 +176,8 @@ final class SesServiceTestBuilder {
         identityService = new SesIdentityService(identityStore, route53Service, clock);
         sentEmailService = new SesSentEmailService(emailStore);
         cvetService = new SesCvetService(cvetStore);
+        certificateService = new SesIdentityCertificateService(certificateStore, identityService,
+                mock(AcmService.class), clock);
         return new SesService(
                 identityService,
                 sentEmailService,
@@ -176,6 +189,7 @@ final class SesServiceTestBuilder {
                 new SesPolicyService(policyStore, objectMapper),
                 cvetService,
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
+                certificateService,
                 smtpRelay);
     }
 }

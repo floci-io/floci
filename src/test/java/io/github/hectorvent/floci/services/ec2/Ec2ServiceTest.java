@@ -2106,6 +2106,25 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void standaloneNetworkInterfaceNamesAllPrivateIpsForTheRegion() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-west-2", "10.72.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-west-2", vpcId, "10.72.0.0/24", "us-west-2a")
+                .getSubnetId();
+
+        NetworkInterface eni = service.createNetworkInterface("us-west-2", subnetId, null,
+                "10.72.0.10", List.of("10.72.0.11"), List.of(), List.of());
+
+        assertEquals("ip-10-72-0-10.us-west-2.compute.internal", eni.getPrivateDnsName());
+        assertEquals("ip-10-72-0-10.us-west-2.compute.internal",
+                eni.getPrivateIpAddresses().get(0).getPrivateDnsName());
+        assertEquals("ip-10-72-0-11.us-west-2.compute.internal",
+                eni.getPrivateIpAddresses().get(1).getPrivateDnsName());
+    }
+
+    @Test
     void synthesisedAddressesSkipReservedOnesAndReportExhaustion() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),

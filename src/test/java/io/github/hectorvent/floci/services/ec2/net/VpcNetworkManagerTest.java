@@ -521,6 +521,33 @@ class VpcNetworkManagerTest {
         assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-1").orElseThrow());
     }
 
+    // Catches: planning a VPC skipping another Region's surviving network for a VPC with the same id,
+    // which then accepts an overlapping CIDR and fails when its own network is created.
+    @Test
+    void anotherRegionsNetworkForTheSameVpcIdIsStillACollision() {
+        Map<String, String> otherRegion = new LinkedHashMap<>(newLabels("vpc-default", "4650"));
+        otherRegion.put("io.floci.region", "eu-west-1");
+        existingNetwork(manager.networkName("eu-west-1", "vpc-default"), "10.0.0.0/16", otherRegion);
+
+        manager.declareVpc(REGION, "vpc-default", "10.0.0.0/16");
+
+        assertTrue(manager.isSubstituted(REGION, "vpc-default"),
+                "eu-west-1's network for vpc-default holds 10.0.0.0/16; us-east-1's vpc-default cannot reuse it");
+        assertNotEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-default").orElseThrow());
+    }
+
+    // The same rule through the labels a network carried before the io.floci.* keys.
+    @Test
+    void anotherRegionsLegacyNetworkForTheSameVpcIdIsStillACollision() {
+        Map<String, String> otherRegion = new LinkedHashMap<>(ourLabels("vpc-default", "4650"));
+        otherRegion.put("floci_vpc_region", "eu-west-1");
+        existingNetwork("floci-aws-vpc-4650-eu-west-1-vpc-default", "10.0.0.0/16", otherRegion);
+
+        manager.declareVpc(REGION, "vpc-default", "10.0.0.0/16");
+
+        assertTrue(manager.isSubstituted(REGION, "vpc-default"));
+    }
+
     @Test
     void createdNetworkCarriesTheIdentityLabelsAndTheirLegacyAliases() {
         manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -1948,7 +1949,7 @@ public class SnsService implements Resettable, ResourceProvider {
         for (int attempt = 1; attempt <= SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS; attempt++) {
             try {
                 sqsService.sendMessage(queueUrl, body, null, messageGroupId,
-                        messageDeduplicationId, sqsAttributes, region);
+                        messageDeduplicationId, sqsAttributes, null, ServicePrincipals.of("sns"), region);
                 LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}",
                         sub.getEndpoint(), queueUrl, rawDelivery);
                 return;
@@ -1977,7 +1978,8 @@ public class SnsService implements Resettable, ResourceProvider {
                     deadLetterDeduplicationId = sha256(messageId + "\0" + sub.getSubscriptionArn());
                 }
                 sqsService.sendMessage(sqsArnToUrl(deadLetterTargetArn), body, null,
-                        deadLetterGroupId, deadLetterDeduplicationId, sqsAttributes, deadLetterRegion);
+                        deadLetterGroupId, deadLetterDeduplicationId, sqsAttributes, null,
+                        ServicePrincipals.of("sns"), deadLetterRegion);
                 LOG.warnv("SNS delivery to {0} failed after {1} attempts; sent notification to subscription DLQ {2}",
                         sub.getEndpoint(), SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS, deadLetterTargetArn);
                 return;

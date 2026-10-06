@@ -137,9 +137,12 @@ class EksPodIdentityCredentialsControllerTest {
         assertNotNull(creds.expiration());
 
         ArgumentCaptor<String> akidCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> sessionNameCaptor = ArgumentCaptor.forClass(String.class);
         verify(iamService).registerSession(akidCaptor.capture(), eq(creds.secretAccessKey()),
-                eq(creds.token()), eq(ROLE_ARN), any(Instant.class), eq(null), eq(ACCOUNT_ID));
+                eq(creds.token()), eq(ROLE_ARN), any(Instant.class), eq(null), eq(ACCOUNT_ID),
+                sessionNameCaptor.capture(), any());
         assertEquals(creds.accessKeyId(), akidCaptor.getValue());
+        assertTrue(sessionNameCaptor.getValue().startsWith("eks-" + CLUSTER_NAME + "-" + SERVICE_ACCOUNT + "-"));
     }
 
     @Test

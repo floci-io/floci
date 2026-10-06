@@ -160,6 +160,8 @@ public final class IamServiceTestHelper {
             InMemoryStorage<String, SessionCredential> sessions = new InMemoryStorage<>();
             SessionCredential cred = new SessionCredential(
                     accessKeyId, secretAccessKey, sessionToken, null, expiration, null);
+            // A GetSessionToken session the account root minted: one with no issuer is no credential.
+            cred.setIssuerArn("arn:aws:iam::123456789012:root");
             sessions.put(accessKeyId, cred);
 
             return constructor.newInstance(

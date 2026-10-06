@@ -2732,10 +2732,7 @@ public class EksClusterManager
     }
 
     String deriveClusterNodePrivateDnsDomain(String region) {
-        String safeRegion = (region != null && !region.isBlank()) ? region : "us-east-1"; // partition-literal: fallback for domain derivation
-        return "us-east-1".equals(safeRegion) // partition-literal: ec2.internal is us-east-1's own search domain
-                ? "ec2.internal"
-                : safeRegion + ".compute.internal";
+        return AwsRegions.ec2PrivateDnsDomain(region);
     }
 
     String deriveClusterNodePrivateDnsName(Cluster cluster, String region, String accountId) {

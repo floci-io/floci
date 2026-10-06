@@ -161,7 +161,7 @@ cross-resource references.
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
-| IoT Core | `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
+| IoT Core | `Authorizer`, `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
 | CloudFront | `CachePolicy`, `Distribution`, `OriginAccessControl`, `OriginRequestPolicy`, `ResponseHeadersPolicy` |
 | CloudWatch | `Alarm`, `Dashboard` |
 | CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |

@@ -112,6 +112,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.dms.DmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService

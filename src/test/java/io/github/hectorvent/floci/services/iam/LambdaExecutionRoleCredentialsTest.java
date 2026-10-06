@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -59,7 +60,7 @@ class LambdaExecutionRoleCredentialsTest {
         assertNotNull(caller);
         assertEquals(java.util.List.of(POLICY), caller.identityPolicies());
         assertEquals(
-                "arn:aws:sts::000000000000:assumed-role/LambdaExecutionRole/floci-session",
+                "arn:aws:sts::000000000000:assumed-role/LambdaExecutionRole/function",
                 iamService.resolveCallerArn(session.accessKeyId()).orElseThrow());
     }
 
@@ -103,6 +104,24 @@ class LambdaExecutionRoleCredentialsTest {
         for (String role : new String[]{null, "", "   ", "not-an-arn", "arn:aws:s3:::bucket"}) {
             assertEquals(Optional.empty(), credentials.forFunction(function(role)), role);
         }
+    }
+
+    @Test
+    void differentFunctionsSharingSameRoleMintDistinctAssumedRoleIds() {
+        LambdaFunction func1 = function(ROLE_ARN);
+        func1.setFunctionName("func-1");
+        LambdaFunction func2 = function(ROLE_ARN);
+        func2.setFunctionName("func-2");
+
+        SessionCreds session1 = credentials.forFunction(func1).orElseThrow();
+        SessionCreds session2 = credentials.forFunction(func2).orElseThrow();
+
+        String userId1 = iamService.resolveCallerUserId(session1.accessKeyId(), session1.sessionToken()).orElseThrow();
+        String userId2 = iamService.resolveCallerUserId(session2.accessKeyId(), session2.sessionToken()).orElseThrow();
+
+        assertNotEquals(userId1, userId2);
+        assertTrue(userId1.endsWith(":func-1"), "First function user ID should end with function name");
+        assertTrue(userId2.endsWith(":func-2"), "Second function user ID should end with function name");
     }
 
     private static LambdaFunction function(String roleArn) {

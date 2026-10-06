@@ -65,6 +65,38 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
+    void numericAndBooleanScalarConditionValuesAreCompared() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket",
+                  "Resource":"*","Condition":{"NumericLessThanEquals":{"s3:max-keys":10},
+                  "StringEquals":{"aws:MultiFactorAuthPresent":true}}}]}""";
+        Map<String, List<String>> within = Map.of("s3:max-keys", List.of("10"),
+                "aws:MultiFactorAuthPresent", List.of("true"));
+        Map<String, List<String>> over = Map.of("s3:max-keys", List.of("11"),
+                "aws:MultiFactorAuthPresent", List.of("true"));
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy), "s3:ListBucket", "*", within));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "s3:ListBucket", "*", over));
+    }
+
+    @Test
+    void nullConditionReadsUnquotedBooleanValues() {
+        String requireAbsent = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket",
+                  "Resource":"*","Condition":{"Null":{"aws:TokenIssueTime":true}}}]}""";
+        String requirePresent = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket",
+                  "Resource":"*","Condition":{"Null":{"aws:TokenIssueTime":false}}}]}""";
+        Map<String, List<String>> absent = Map.of();
+        Map<String, List<String>> present = Map.of("aws:TokenIssueTime", List.of("2030-01-01T00:00:00Z"));
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(requireAbsent), "s3:ListBucket", "*", absent));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(requireAbsent), "s3:ListBucket", "*", present));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(requirePresent), "s3:ListBucket", "*", absent));
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(requirePresent), "s3:ListBucket", "*", present));
+    }
+
+    @Test
     void wildcardMatchesLiteralAsteriskInValue() {
         assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("a*", "a*b"));
         assertTrue(IamPolicyEvaluator.globMatches("A*", "a*b"));

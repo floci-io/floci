@@ -98,6 +98,7 @@ AWS::IAM::ManagedPolicy	IamManagedPolicyCfnProvisioner
 AWS::IAM::Policy	IamPolicyCfnProvisioner
 AWS::IAM::Role	IamRoleCfnProvisioner
 AWS::IAM::User	IamUserCfnProvisioner
+AWS::IoT::Authorizer	IotAuthorizerCfnProvisioner
 AWS::IoT::DomainConfiguration	IotDomainConfigurationCfnProvisioner
 AWS::IoT::Policy	IotCfnProvisioner
 AWS::IoT::Thing	IotCfnProvisioner

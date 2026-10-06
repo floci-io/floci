@@ -88,6 +88,22 @@ class EmbeddedDnsServerTest {
     }
 
     @Test
+    void resolveEc2PrivateDnsName_decodesRegionalIpName() {
+        assertEquals("172.16.128.9", dns.resolveEc2PrivateDnsName(
+                "ip-172-16-128-9.us-west-2.compute.internal").orElseThrow());
+        assertEquals("10.42.32.17", dns.resolveEc2PrivateDnsName(
+                "ip-10-42-32-17.eu-central-1.compute.internal").orElseThrow());
+        assertTrue(dns.resolveEc2PrivateDnsName("ip-172-16-128-9.invalid.compute.internal").isEmpty());
+        assertTrue(dns.resolveEc2PrivateDnsName("ip-172-16-128-9.my-cd-1.compute.internal").isEmpty());
+    }
+
+    @Test
+    void resolveEc2PrivateDnsName_decodesUnpublishedRegionIpName() {
+        assertEquals("10.0.0.5", dns.resolveEc2PrivateDnsName(
+                "ip-10-0-0-5.us-new-1.compute.internal").orElseThrow());
+    }
+
+    @Test
     void resolveEc2PrivateDnsName_isCaseInsensitive() {
         assertEquals(
                 "10.42.32.17",
@@ -104,6 +120,12 @@ class EmbeddedDnsServerTest {
         assertEquals(
                 "172.16.128.9",
                 dns.resolveARecord("ip-172-16-128-9.ec2.internal", "172.16.128.5").getFirst());
+    }
+
+    @Test
+    void resolveARecord_answersRegionalEc2PrivateDnsName() {
+        assertEquals("172.16.128.9", dns.resolveARecord(
+                "ip-172-16-128-9.us-west-2.compute.internal", "172.16.128.5").getFirst());
     }
 
     // ── resolveARecord: DnsRecordSource ───────────────────────────────────────

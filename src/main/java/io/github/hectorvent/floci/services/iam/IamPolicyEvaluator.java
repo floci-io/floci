@@ -12,7 +12,14 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
+import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +27,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntPredicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -86,6 +94,9 @@ public class IamPolicyEvaluator {
     // Parsing is a pure function of the document text, so entries never go stale. The bound
     // only guards against growth from many distinct session policies.
     static final int MAX_CACHED_DOCUMENTS = 2048;
+
+    private static final Pattern EPOCH_SECONDS = Pattern.compile("-?\\d+");
+    private static final Pattern YEAR_MONTH = Pattern.compile("\\d{4}-\\d{2}");
 
     // Matches an IAM policy variable such as ${aws:username} inside a Resource pattern or a
     // Condition value. Stops at the first ',' or '}' so a default value (${key, 'default'}),
@@ -1085,18 +1096,18 @@ public class IamPolicyEvaluator {
             case "ArnEquals", "ArnLike"      -> matchesArnCondition(condValue, ctxValue);
             case "ArnNotEquals", "ArnNotLike"-> !matchesArnCondition(condValue, ctxValue);
             case "Bool"                      -> Boolean.parseBoolean(condValue) == Boolean.parseBoolean(ctxValue);
-            case "NumericEquals"             -> compareNumeric(ctxValue, condValue) == 0;
-            case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue) != 0;
-            case "NumericLessThan"           -> compareNumeric(ctxValue, condValue) < 0;
-            case "NumericLessThanEquals"     -> compareNumeric(ctxValue, condValue) <= 0;
-            case "NumericGreaterThan"        -> compareNumeric(ctxValue, condValue) > 0;
-            case "NumericGreaterThanEquals"  -> compareNumeric(ctxValue, condValue) >= 0;
-            case "DateEquals"                -> compareDates(ctxValue, condValue) == 0;
-            case "DateNotEquals"             -> compareDates(ctxValue, condValue) != 0;
-            case "DateLessThan"              -> compareDates(ctxValue, condValue) < 0;
-            case "DateLessThanEquals"        -> compareDates(ctxValue, condValue) <= 0;
-            case "DateGreaterThan"           -> compareDates(ctxValue, condValue) > 0;
-            case "DateGreaterThanEquals"     -> compareDates(ctxValue, condValue) >= 0;
+            case "NumericEquals"             -> compareNumeric(ctxValue, condValue, order -> order == 0);
+            case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue, order -> order != 0);
+            case "NumericLessThan"           -> compareNumeric(ctxValue, condValue, order -> order < 0);
+            case "NumericLessThanEquals"     -> compareNumeric(ctxValue, condValue, order -> order <= 0);
+            case "NumericGreaterThan"        -> compareNumeric(ctxValue, condValue, order -> order > 0);
+            case "NumericGreaterThanEquals"  -> compareNumeric(ctxValue, condValue, order -> order >= 0);
+            case "DateEquals"                -> compareDates(ctxValue, condValue, order -> order == 0);
+            case "DateNotEquals"             -> compareDates(ctxValue, condValue, order -> order != 0);
+            case "DateLessThan"              -> compareDates(ctxValue, condValue, order -> order < 0);
+            case "DateLessThanEquals"        -> compareDates(ctxValue, condValue, order -> order <= 0);
+            case "DateGreaterThan"           -> compareDates(ctxValue, condValue, order -> order > 0);
+            case "DateGreaterThanEquals"     -> compareDates(ctxValue, condValue, order -> order >= 0);
             case "IpAddress"                 -> matchesIpAddress(condValue, ctxValue);
             case "NotIpAddress"              -> !matchesIpAddress(condValue, ctxValue);
             default -> {
@@ -1106,20 +1117,52 @@ public class IamPolicyEvaluator {
         };
     }
 
-    private int compareNumeric(String ctxValue, String condValue) {
+    /**
+     * Compares exactly, so integers beyond a double's precision stay distinct. A value that
+     * does not parse never satisfies the operator, so it cannot pass as equal.
+     */
+    private static boolean compareNumeric(String ctxValue, String condValue, IntPredicate test) {
+        if (ctxValue == null || condValue == null) {
+            return false;
+        }
         try {
-            return Double.compare(Double.parseDouble(ctxValue), Double.parseDouble(condValue));
+            return test.test(new BigDecimal(ctxValue.trim()).compareTo(new BigDecimal(condValue.trim())));
         } catch (NumberFormatException e) {
-            return 0;
+            LOG.debugv("Numeric condition on non-numeric value {0} vs {1}: no match", ctxValue, condValue);
+            return false;
         }
     }
 
-    private int compareDates(String ctxValue, String condValue) {
-        try {
-            return Instant.parse(ctxValue).compareTo(Instant.parse(condValue));
-        } catch (Exception e) {
-            return 0;
+    /** A value that does not parse as a date never satisfies the operator. */
+    private static boolean compareDates(String ctxValue, String condValue, IntPredicate test) {
+        if (ctxValue == null || condValue == null) {
+            return false;
         }
+        try {
+            return test.test(parseConditionDate(ctxValue).compareTo(parseConditionDate(condValue)));
+        } catch (DateTimeException | ArithmeticException | NumberFormatException e) {
+            LOG.debugv("Date condition on non-date value {0} vs {1}: no match", ctxValue, condValue);
+            return false;
+        }
+    }
+
+    /**
+     * Reads epoch seconds or a W3C ISO 8601 profile date: {@code YYYY-MM}, {@code YYYY-MM-DD},
+     * or a date-time with or without seconds and fraction. A bare {@code YYYY} is read as epoch
+     * seconds, as the two forms cannot be told apart. Dates without a time start at midnight UTC.
+     */
+    private static Instant parseConditionDate(String value) {
+        String trimmed = value.trim();
+        if (EPOCH_SECONDS.matcher(trimmed).matches()) {
+            return Instant.ofEpochSecond(Long.parseLong(trimmed));
+        }
+        if (trimmed.indexOf('T') >= 0 || trimmed.indexOf('t') >= 0) {
+            return OffsetDateTime.parse(trimmed, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant();
+        }
+        if (YEAR_MONTH.matcher(trimmed).matches()) {
+            return YearMonth.parse(trimmed).atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+        }
+        return LocalDate.parse(trimmed).atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 
     private boolean matchesIpAddress(String condValue, String ctxValue) {
@@ -1318,10 +1361,9 @@ public class IamPolicyEvaluator {
         Map<String, Map<String, List<String>>> result = new LinkedHashMap<>();
         condNode.fields().forEachRemaining(opEntry -> {
             Map<String, List<String>> kvMap = new LinkedHashMap<>();
-            boolean boolOperator = "Bool".equals(parseOperator(opEntry.getKey()).baseOp());
             opEntry.getValue().fields().forEachRemaining(kvEntry -> {
                 JsonNode value = kvEntry.getValue();
-                kvMap.put(kvEntry.getKey(), boolOperator && value.isBoolean()
+                kvMap.put(kvEntry.getKey(), value.isBoolean() || value.isNumber()
                         ? List.of(value.asText()) : nodeToList(value));
             });
             result.put(opEntry.getKey(), kvMap);

@@ -40,6 +40,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -65,6 +66,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -215,6 +217,10 @@ public class S3Service implements Resettable, ResourceProvider {
     }
     // Memory mode keeps an object in one byte array; this is the largest the JDK reliably allocates.
     private static final long MAX_IN_MEMORY_OBJECT_SIZE = Integer.MAX_VALUE - 8;
+    // Directory under .multipart where a streamed part or object body is written before it is
+    // published. Upload IDs are UUIDs, so it never collides with an upload's own directory, and the
+    // sweep at startup and reset clears it with them.
+    private static final String INCOMING_BODIES = ".incoming";
     // Upload ID to part bytes, keyed by each part's storage ID.
     private final ConcurrentHashMap<String, Map<String, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
@@ -618,6 +624,62 @@ public class S3Service implements Resettable, ResourceProvider {
         return createObject(bucketName, key, data, contentType, metadata, options, "ObjectCreated:Put");
     }
 
+    /**
+     * Stores an object streamed from {@code body}, checked against {@code checksums}, without holding
+     * it in memory in the disk-backed modes. Everything the request alone decides is checked before
+     * any of the body is read, so a write that cannot succeed fails without transferring it. The body
+     * is staged on disk with its ETag and checksum worked out as it arrives, then moved into place
+     * like an assembled multipart object.
+     */
+    S3Object putObject(String bucketName, String key, InputStream body, UploadChecksums checksums,
+                       String contentType, Map<String, String> metadata, PutObjectOptions options) {
+        PutObjectOptions effectiveOptions = options != null ? options : new PutObjectOptions();
+        checksums.requireWellFormedContentMd5();
+        AccountAwareStorageBackend.OwnedEntry<Bucket> checkedBucket = resolveBucketEntry(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        rejectConflictingServerSideEncryption(
+                normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption()),
+                validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(),
+                        effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5()));
+        ChecksumAlgorithm declared = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
+        // Checked again under the bucket lock when the object is stored; this only spares a transfer.
+        checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
+        if (inMemory) {
+            byte[] data = readVerified(body, checksums, "PutObject of " + bucketName + "/" + key);
+            S3Object object = storeObject(checkedBucket, bucketName, key, new BytesBody(data),
+                    contentType, metadata, null, null, effectiveOptions, null);
+            fireNotifications(bucketName, key, "ObjectCreated:Put", object);
+            return object;
+        }
+
+        // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
+        ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
+                : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
+        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
+        algorithms.addAll(checksums.algorithms());
+        if (computed != null) {
+            algorithms.add(computed);
+        }
+        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        Path staged = stageBody(digests);
+        try {
+            checksums.verify(digests.md5(), digests::checksum);
+            S3Checksum checksum = null;
+            if (computed != null) {
+                checksum = new S3Checksum();
+                checksum.setValueFor(computed, digests.checksum(computed));
+                checksum.setChecksumType(ChecksumType.FULL_OBJECT);
+            }
+            S3Object object = storeObject(checkedBucket, bucketName, key, new AssembledBody(staged, digests.size()),
+                    contentType, metadata, checksum, null, effectiveOptions, digests.eTag());
+            fireNotifications(bucketName, key, "ObjectCreated:Put", object);
+            return object;
+        } finally {
+            deleteQuietly(staged, "staged body of an object that was not stored");
+        }
+    }
+
     public S3Object postObject(String bucketName, String key, byte[] data,
                                String contentType, Map<String, String> metadata) {
         return postObject(bucketName, key, data, contentType, metadata, new PutObjectOptions());
@@ -671,19 +733,39 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object storeObject(String bucketName, String key, ObjectBody body,
                                  String contentType, Map<String, String> metadata,
                                  S3Checksum checksum, List<Part> parts, PutObjectOptions options, String eTag) {
+        return storeObject(null, bucketName, key, body, contentType, metadata, checksum, parts, options, eTag);
+    }
+
+    /**
+     * Stores the object, and with {@code checkedBucket} given, only in that bucket: an upload checked
+     * against a bucket that was deleted while its body arrived fails with NoSuchBucket rather than
+     * landing in a bucket created under the same name since, whose policy it was never checked
+     * against. A bucket is created once and keeps its instance until it is deleted, so the instance
+     * tells one bucket of a name from another.
+     */
+    private S3Object storeObject(AccountAwareStorageBackend.OwnedEntry<Bucket> checkedBucket,
+                                 String bucketName, String key, ObjectBody body,
+                                 String contentType, Map<String, String> metadata,
+                                 S3Checksum checksum, List<Part> parts, PutObjectOptions options, String eTag) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
         Bucket bucket = ownedBucket.value();
         synchronized (bucket) {
+            // Rechecked under the bucket's monitor, which deleting the bucket also holds.
+            if (checkedBucket != null && resolveBucketEntry(bucketName)
+                    .map(current -> current.value() != checkedBucket.value())
+                    .orElse(true)) {
+                throw new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404);
+            }
             return storeObjectInternal(ownedBucket.account(), bucket, bucketName, key, body,
                     contentType, metadata, checksum, parts, options, eTag);
         }
     }
 
     /**
-     * The body of an object being stored: the bytes of a single-request write, or the file a
-     * multipart upload was assembled into, which is moved into place instead of being read back.
+     * The body of an object being stored: bytes already in memory, or a file on disk, which is moved
+     * into place instead of being read back.
      */
     private sealed interface ObjectBody permits BytesBody, AssembledBody {
         long size();
@@ -697,9 +779,10 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * A body already on disk that is moved into place: an assembled multipart object, or the pinned
-     * file of a copy source. It is stored with an ETag and checksum worked out beforehand, since
-     * computing either here would mean reading the whole file under the bucket lock.
+     * A body already on disk that is moved into place: an assembled multipart object, the pinned file
+     * of a copy source, or a streamed PutObject body. It is stored with an ETag and checksum worked
+     * out beforehand, since computing either here would mean reading the whole file under the bucket
+     * lock.
      */
     private record AssembledBody(Path file, long size) implements ObjectBody { }
 
@@ -3734,7 +3817,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         .filter(part -> part.getPartNumber() != partNumber)
                         .mapToLong(Part::getSize)
                         .sum();
-                requireFitsInMemory(uploadId, otherParts + data.length);
+                requireFitsInMemory("Multipart upload " + uploadId, otherParts + data.length);
                 memoryMultipartStore.get(uploadId).put(storageId, data);
             } else {
                 Path partPath = dataRoot.resolve(".multipart").resolve(uploadId).resolve(storageId);
@@ -3756,6 +3839,104 @@ public class S3Service implements Resettable, ResourceProvider {
             LOG.debugv("Uploaded part {0} for upload {1} ({2} bytes)", partNumber, uploadId, data.length);
             return part;
         });
+    }
+
+    /**
+     * Stores one part streamed from {@code body}, checked against {@code checksums}, without holding it
+     * in memory in the disk-backed modes. The upload is checked before any of the body is read. The
+     * body is staged outside the upload's directory and outside any lock, so parts of one upload still
+     * arrive in parallel and a slow client never holds up the bucket's other multipart operations. Only
+     * once it has passed its checks is it moved into the upload and its record published, under the
+     * upload's lock, so an upload aborted or completed meanwhile fails the part with NoSuchUpload.
+     */
+    Part storePart(String bucket, String key, String uploadId, int partNumber, InputStream body,
+                   UploadChecksums checksums,
+                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5) {
+        checksums.requireWellFormedContentMd5();
+        ChecksumAlgorithm declared = withMultipartOperationLock(bucket, uploadId, () -> {
+            MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
+            if (partNumber < 1 || partNumber > 10000) {
+                throw new AwsException("InvalidArgument",
+                        "Part number must be between 1 and 10000.", 400);
+            }
+            validateSseCustomerAccess(upload, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
+            return upload.getChecksumAlgorithm();
+        });
+        if (inMemory) {
+            byte[] data = readVerified(body, checksums, "Multipart upload " + uploadId);
+            return storePart(bucket, key, uploadId, partNumber, data,
+                    sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
+        }
+        ChecksumAlgorithm algorithm = declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
+        Set<ChecksumAlgorithm> algorithms = EnumSet.of(algorithm);
+        algorithms.addAll(checksums.algorithms());
+        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        Path staged = stageBody(digests);
+        try {
+            checksums.verify(digests.md5(), digests::checksum);
+            S3Checksum partChecksum = new S3Checksum();
+            partChecksum.setValueFor(algorithm, digests.checksum(algorithm));
+            return withMultipartOperationLock(bucket, uploadId, () -> {
+                MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
+                String storageId = partNumber + "-" + UUID.randomUUID();
+                try {
+                    Files.move(staged, dataRoot.resolve(".multipart").resolve(uploadId).resolve(storageId),
+                            StandardCopyOption.ATOMIC_MOVE);
+                } catch (IOException e) {
+                    throw new UncheckedIOException("Failed to write multipart part", e);
+                }
+                Part part = new Part(partNumber, digests.eTag(), digests.size());
+                part.setChecksum(partChecksum);
+                part.setStorageId(storageId);
+                Part replaced = upload.getParts().put(partNumber, part);
+                if (replaced != null) {
+                    discardPartBytes(uploadId, replaced);
+                }
+                LOG.debugv("Uploaded part {0} for upload {1} ({2} bytes)", partNumber, uploadId, digests.size());
+                return part;
+            });
+        } finally {
+            deleteQuietly(staged, "staged part of an upload that was not stored");
+        }
+    }
+
+    /**
+     * Reads a memory-mode upload body into one array, checked against {@code checksums}, failing
+     * with EntityTooLarge once it outgrows the largest array the JDK allocates.
+     */
+    private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
+        DigestingInputStream digests = new DigestingInputStream(body, checksums.algorithms());
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[64 * 1024];
+        try {
+            for (int read = digests.read(buffer); read >= 0; read = digests.read(buffer)) {
+                requireFitsInMemory(upload, (long) out.size() + read);
+                out.write(buffer, 0, read);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the upload body", e);
+        }
+        checksums.verify(digests.md5(), digests::checksum);
+        return out.toByteArray();
+    }
+
+    /**
+     * Writes a streamed body to a new file under the staging directory and returns it. The file is
+     * deleted if the body fails partway, so on return the caller owns it.
+     */
+    private Path stageBody(InputStream body) {
+        Path staged = dataRoot.resolve(".multipart").resolve(INCOMING_BODIES).resolve(UUID.randomUUID().toString());
+        try {
+            Files.createDirectories(staged.getParent());
+            Files.copy(body, staged);
+            return staged;
+        } catch (IOException e) {
+            deleteQuietly(staged, "partly staged upload body");
+            throw new UncheckedIOException("Failed to write the upload body", e);
+        } catch (RuntimeException e) {
+            deleteQuietly(staged, "partly staged upload body");
+            throw e;
+        }
     }
 
     /**
@@ -3940,7 +4121,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
             validateCompleteChecksumType(algorithm, storedChecksumType, ChecksumType.fromWireValue(checksumType));
             if (inMemory) {
-                requireFitsInMemory(uploadId, parts.stream().mapToLong(Part::getSize).sum());
+                requireFitsInMemory("Multipart upload " + uploadId, parts.stream().mapToLong(Part::getSize).sum());
             }
 
             // Concatenate parts in order
@@ -4020,10 +4201,10 @@ public class S3Service implements Resettable, ResourceProvider {
      * object over its size limit, so it fails at the part that crosses the limit instead of running
      * the heap out of memory or overflowing the array size at completion.
      */
-    private static void requireFitsInMemory(String uploadId, long uploadSize) {
+    private static void requireFitsInMemory(String upload, long uploadSize) {
         if (uploadSize > MAX_IN_MEMORY_OBJECT_SIZE) {
-            LOG.warnv("Multipart upload {0} would hold {1} bytes, over the {2} an object can have in memory storage mode; set FLOCI_STORAGE_SERVICES_S3_MODE=persistent for larger objects",
-                    uploadId, uploadSize, MAX_IN_MEMORY_OBJECT_SIZE);
+            LOG.warnv("{0} would hold {1} bytes, over the {2} an object can have in memory storage mode; set FLOCI_STORAGE_SERVICES_S3_MODE=persistent for larger objects",
+                    upload, uploadSize, MAX_IN_MEMORY_OBJECT_SIZE);
             throw new AwsException("EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size.", 400);
         }
     }
@@ -4043,7 +4224,7 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             totalSize += partData[i].length;
         }
-        requireFitsInMemory(uploadId, totalSize);
+        requireFitsInMemory("Multipart upload " + uploadId, totalSize);
         byte[] allData = new byte[(int) totalSize];
         int offset = 0;
         for (byte[] part : partData) {

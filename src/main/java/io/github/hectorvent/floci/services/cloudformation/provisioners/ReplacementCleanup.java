@@ -52,7 +52,9 @@ public final class ReplacementCleanup {
      * physical id. Call after the new entity exists, with the attributes the resource carried
      * before {@code provision} overwrote them: they are what {@link #rollback} puts back. A
      * provision that replaced nothing drops the rollback fields but keeps any entity an earlier
-     * failed rollback left owed a delete.
+     * failed rollback left owed a delete. A dispatcher stub's id is never listed, because a stub
+     * created nothing, but a stub migration that kept the stub's id still keeps the rollback fields,
+     * because the entity under that id is the one this update created.
      */
     static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision) {
         ObjectNode cleanup = readOrEmpty(r);
@@ -60,7 +62,8 @@ public final class ReplacementCleanup {
         cleanup.remove("priorAttributes");
         cleanup.put("region", ctx.region());
         String prior = ctx.priorPhysicalId();
-        if (ctx.isUpdate() && !prior.equals(r.getPhysicalId())) {
+        boolean priorIsStub = CfnResourceDispatcher.isStub(prior, attributesBeforeProvision);
+        if (ctx.isUpdate() && (!prior.equals(r.getPhysicalId()) || priorIsStub)) {
             cleanup.put("priorPhysicalId", prior);
             ObjectNode priorAttributes = cleanup.putObject("priorAttributes");
             attributesBeforeProvision.forEach((key, value) -> {
@@ -68,7 +71,9 @@ public final class ReplacementCleanup {
                     priorAttributes.put(key, value);
                 }
             });
-            addDisplaced(cleanup, prior, r.getResourceType(), ctx.region(), true);
+            if (!priorIsStub) {
+                addDisplaced(cleanup, prior, r.getResourceType(), ctx.region(), true);
+            }
         }
         write(r, cleanup);
     }
@@ -76,7 +81,8 @@ public final class ReplacementCleanup {
     /**
      * Undoes this update's replacement when a later resource failed the stack update: the resource
      * names the prior entity again, with the attributes it had, and the replacement is deleted. The
-     * prior entity was displaced, never changed, so nothing is written to it.
+     * prior entity was displaced, never changed, so nothing is written to it. A stub migration that
+     * kept the stub's id still has its entity deleted, because the restored stub created nothing.
      *
      * <p>The prior leaves the delete list before the replacement's delete is attempted: it is
      * standing again, and a resource still owing its delete would put it on the next cleanup's list.
@@ -105,7 +111,7 @@ public final class ReplacementCleanup {
         cleanup.remove("priorAttributes");
         removeDisplaced(cleanup, prior);
         write(r, cleanup);
-        if (prior.equals(replacement)) {
+        if (prior.equals(replacement) && !CfnResourceDispatcher.isStub(prior, r.getAttributes())) {
             return true;
         }
         try {
@@ -150,14 +156,14 @@ public final class ReplacementCleanup {
         if (cleanup == null) {
             return null;
         }
-        JsonNode next = nextOwed(cleanup.path("displaced"), r.getPhysicalId(), "Retain".equals(r.getUpdateReplacePolicy()));
+        JsonNode next = nextOwed(cleanup.path("displaced"), liveEntityId(r), "Retain".equals(r.getUpdateReplacePolicy()));
         return next == null ? null : next.path("physicalId").asText(null);
     }
 
     /**
      * The owed entry with the fewest attempts, ties by list order: the one the engine's retries are
-     * still for. Skips the resource's own entity and, under Retain, the entities a committed
-     * replacement displaced.
+     * still for. Skips the resource's live entity, which a stub has none of, and, under Retain, the
+     * entities a committed replacement displaced.
      */
     private static JsonNode nextOwed(JsonNode displaced, String currentPhysicalId, boolean retain) {
         JsonNode next = null;
@@ -218,12 +224,13 @@ public final class ReplacementCleanup {
             return UpdateCleanupResult.notApplicable();
         }
         boolean retain = "Retain".equals(r.getUpdateReplacePolicy());
+        String liveEntityId = liveEntityId(r);
         ArrayNode displaced = cleanup.withArray("displaced");
         ArrayNode remaining = MAPPER.createArrayNode();
         for (JsonNode node : displaced) {
             ObjectNode entry = (ObjectNode) node;
             String physicalId = entry.path("physicalId").asText(null);
-            if (physicalId == null || physicalId.equals(r.getPhysicalId())
+            if (physicalId == null || physicalId.equals(liveEntityId)
                     || (retain && entry.path("retainable").asBoolean(false))) {
                 continue;
             }
@@ -248,9 +255,13 @@ public final class ReplacementCleanup {
         }
         // The result names the entity with the fewest attempts, the one the engine's retries are
         // still for and the one cleanupPhysicalId announced, so both events point at the same thing.
-        JsonNode next = nextOwed(remaining, r.getPhysicalId(), retain);
+        JsonNode next = nextOwed(remaining, liveEntityId, retain);
         return new UpdateCleanupResult(true, false, next.path("physicalId").asText(null),
                 next.path("cleanupAttempts").asInt(0), next.path("cleanupFailureReason").asText(null));
+    }
+
+    private static String liveEntityId(StackResource r) {
+        return CfnResourceDispatcher.isStub(r.getPhysicalId(), r.getAttributes()) ? null : r.getPhysicalId();
     }
 
     private static String firstDisplaced(ArrayNode displaced) {

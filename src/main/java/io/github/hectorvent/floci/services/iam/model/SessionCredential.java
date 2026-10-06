@@ -32,6 +32,13 @@ public class SessionCredential {
     /** Exact object action and ARN for an internally generated S3 presigned URL. */
     private String presignedAction;
     private String presignedResourceArn;
+    /**
+     * The long-term identity whose key minted this session through GetSessionToken or
+     * GetFederationToken: an IAM user's ARN, or the account root's. Null for every other session.
+     */
+    private String issuerArn;
+    /** The unique ID of the IAM user named by {@link #issuerArn}, so a same-named replacement is not it. */
+    private String issuerUserId;
 
     public SessionCredential() {}
 
@@ -123,4 +130,10 @@ public class SessionCredential {
 
     public boolean isLambdaExecutionRole() { return lambdaExecutionRole; }
     public void setLambdaExecutionRole(boolean lambdaExecutionRole) { this.lambdaExecutionRole = lambdaExecutionRole; }
+
+    public String getIssuerArn() { return issuerArn; }
+    public void setIssuerArn(String issuerArn) { this.issuerArn = issuerArn; }
+
+    public String getIssuerUserId() { return issuerUserId; }
+    public void setIssuerUserId(String issuerUserId) { this.issuerUserId = issuerUserId; }
 }

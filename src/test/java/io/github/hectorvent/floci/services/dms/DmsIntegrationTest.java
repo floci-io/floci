@@ -278,7 +278,7 @@ class DmsIntegrationTest {
 
     @Test
     void unsupportedDmsActionReportsUnknownOperation() {
-        dms("CreateReplicationInstance")
+        dms("CreateReplicationConfig")
                 .body("{}")
         .when()
                 .post("/")

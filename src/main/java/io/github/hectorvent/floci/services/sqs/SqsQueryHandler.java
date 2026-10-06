@@ -250,7 +250,8 @@ public class SqsQueryHandler {
         }
 
         Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId,
-                messageDeduplicationId, messageAttributes, awsTraceHeader, region);
+                messageDeduplicationId, messageAttributes, awsTraceHeader,
+                sqsService.resolveCallerSenderId(queueUrl), region);
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("MessageId", msg.getMessageId())
@@ -276,7 +277,7 @@ public class SqsQueryHandler {
         Set<String> requestedMessageAttrs = new LinkedHashSet<>(collectIndexed(params, "MessageAttributeName."));
 
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages, visibilityTimeout, waitTimeSeconds, region);
-        String senderId = sqsService.senderIdFor(queueUrl);
+        String defaultSenderId = sqsService.senderIdFor(queueUrl);
 
         XmlBuilder xml = new XmlBuilder();
         for (Message msg : messages) {
@@ -291,6 +292,7 @@ public class SqsQueryHandler {
                 xml.elem("MD5OfMessageAttributes", messageAttrsMd5);
             }
             xml.elem("Body", msg.getBody());
+            String senderId = msg.getSenderId() != null ? msg.getSenderId() : defaultSenderId;
             writeSystemAttributesXml(xml, msg, requestedAttrs, senderId);
             if (!selectedMessageAttrs.isEmpty()) {
                 for (Map.Entry<String, MessageAttributeValue> entry : selectedMessageAttrs.entrySet()) {
@@ -403,12 +405,13 @@ public class SqsQueryHandler {
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
 
+        String senderId = sqsService.resolveCallerSenderId(queueUrl);
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
                 Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
-                        parsed.awsTraceHeader(), region);
+                        parsed.awsTraceHeader(), senderId, region);
                 xml.start("SendMessageBatchResultEntry")
                    .elem("Id", id)
                    .elem("MessageId", msg.getMessageId())

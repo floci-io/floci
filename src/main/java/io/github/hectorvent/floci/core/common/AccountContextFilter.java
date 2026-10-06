@@ -70,13 +70,18 @@ public class AccountContextFilter implements ContainerRequestFilter {
         Object pinnedAccount = ctx.getProperty(PINNED_ACCOUNT_PROPERTY);
         if (pinnedAccount != null) {
             requestContext.setAccountId(pinnedAccount.toString());
+            requestContext.setAccessKeyId(null);
+            requestContext.setSessionToken(null);
             applyRegion(regionResolver.resolveRegionFromAuth(null));
             return;
         }
+        String sessionToken = extractSessionToken(ctx);
         String auth = ctx.getHeaderString("Authorization");
-        if (auth != null && !auth.isEmpty()) {
-            String akid = accountResolver.extractAccessKeyId(auth);
+        String akid = auth != null && !auth.isEmpty() ? accountResolver.extractAccessKeyId(auth) : null;
+        if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
+            requestContext.setAccessKeyId(akid);
+            requestContext.setSessionToken(sessionToken);
             String region = regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
             rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
@@ -84,9 +89,11 @@ public class AccountContextFilter implements ContainerRequestFilter {
         } else {
             String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
             if (credential != null && !credential.isEmpty()) {
-                String akid = accountResolver.extractPresignedAccessKeyId(credential);
+                String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
-                        resolveAccount(akid, accountResolver.resolveFromPresignedCredential(credential)));
+                        resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
+                requestContext.setAccessKeyId(presignedAkid);
+                requestContext.setSessionToken(sessionToken);
                 String region = regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));
@@ -94,9 +101,23 @@ public class AccountContextFilter implements ContainerRequestFilter {
                         SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
             } else {
                 requestContext.setAccountId(accountResolver.resolve(null));
+                requestContext.setAccessKeyId(null);
+                requestContext.setSessionToken(null);
                 applyRegion(regionResolver.resolveRegionFromAuth(null));
             }
         }
+    }
+
+    private String extractSessionToken(ContainerRequestContext ctx) {
+        String token = ctx.getHeaderString("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token.trim();
+        }
+        token = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token.trim();
+        }
+        return null;
     }
 
     /**

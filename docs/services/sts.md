@@ -20,6 +20,25 @@
 |---|---|---|
 | `FLOCI_SERVICES_STS_ENABLED` | `true` | Enable or disable the service |
 
+## Session Token and Federation Token Permissions
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, credentials from `GetSessionToken` and `GetFederationToken`
+are evaluated as the identity whose long-term key signed the call, as on AWS:
+
+- `GetSessionToken` credentials have the permissions of that IAM user, or of the account root when its key minted them,
+  still bounded by the account's service control policies.
+- `GetFederationToken` credentials have no permissions without a session policy (`Policy`). With one, they have the
+  intersection of that policy and the permissions of the IAM user that minted them, never those of a role that shares
+  the federated user's name. A resource policy naming the federated user's ARN can grant access on its own, but not
+  past an explicit `Deny` in the user's policies or permissions boundary. Whatever their policies allow, they cannot
+  call any IAM operation, nor any STS operation except `GetCallerIdentity`.
+  Managed session policies (`PolicyArns`) are not supported yet.
+
+A session minted with another session's temporary credentials, which AWS does not accept here, with an inactive access
+key or one that belongs to another account, or by an IAM user since deleted and recreated under the same name, is not
+a valid credential: it is refused like an unknown access key. A key IAM does not know anywhere mints sessions that act
+as the account root, as the key itself does.
+
 ## Trust Policy Enforcement
 
 `AssumeRole` and `AssumeRoleWithWebIdentity` require the target role to exist in IAM, returning `AccessDenied` (403)
@@ -89,5 +108,7 @@ aws sts get-session-token --endpoint-url $AWS_ENDPOINT_URL
 `GetCallerIdentity` is commonly used in CI pipelines and integration tests as a quick connectivity check before running more complex tests.
 For temporary credentials returned by an assumed-role action, its `Arn` and `UserId` match
 the `AssumedRoleUser.Arn` and `AssumedRoleUser.AssumedRoleId` returned when the session was created.
+For `GetSessionToken` credentials they are those of the IAM user that minted them, and for `GetFederationToken`
+credentials the `FederatedUser.Arn` and `FederatedUser.FederatedUserId` (`<account>:<name>`).
 
 When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.

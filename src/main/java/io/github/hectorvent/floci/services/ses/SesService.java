@@ -120,6 +120,9 @@ public class SesService {
     // the tenant record; the facade keeps the associations, the delete cascade, the send-time tenant
     // gate and the tenant-scoped suppression routing.
     private final SesTenantService tenantService;
+    // S/MIME certificate associations live in SesIdentityCertificateService, which the v2 controller
+    // calls directly; the facade only reaches it for the identity delete-guard.
+    private final SesIdentityCertificateService certificateService;
     private final SmtpRelay smtpRelay;
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
@@ -136,7 +139,7 @@ public class SesService {
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
                        SesTenantService tenantService, SesConfigurationSetService configSetService,
-                       SmtpRelay smtpRelay,
+                       SesIdentityCertificateService certificateService, SmtpRelay smtpRelay,
                        SesEventPublisher eventPublisher, EmulatorConfig config,
                        RegionResolver regionResolver) {
         this.identityService = identityService;
@@ -149,6 +152,7 @@ public class SesService {
         this.policyService = policyService;
         this.cvetService = cvetService;
         this.tenantService = tenantService;
+        this.certificateService = certificateService;
         this.smtpRelay = smtpRelay;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
@@ -166,6 +170,7 @@ public class SesService {
                SesPolicyService policyService,
                SesCvetService cvetService,
                SesTenantService tenantService,
+               SesIdentityCertificateService certificateService,
                SmtpRelay smtpRelay) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
@@ -177,6 +182,7 @@ public class SesService {
         this.policyService = policyService;
         this.cvetService = cvetService;
         this.tenantService = tenantService;
+        this.certificateService = certificateService;
         this.smtpRelay = smtpRelay;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
@@ -201,8 +207,10 @@ public class SesService {
         if (identityValue == null || identityValue.isBlank()) {
             return;
         }
+        String accountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
         tenantService.deleteBackingResource(SesTenantService.RESOURCE_TYPE_IDENTITY, identityValue,
-                region, () -> doDeleteIdentity(identityValue, region));
+                region, () -> certificateService.deleteIdentityGuarded(identityValue, accountId, region,
+                        () -> doDeleteIdentity(identityValue, region)));
     }
 
     private void doDeleteIdentity(String identityValue, String region) {

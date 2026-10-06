@@ -73,7 +73,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
                     .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account", equalTo(ACCOUNT_ID))
                     .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn",
                             equalTo("arn:aws:sts::" + ACCOUNT_ID
-                                    + ":assumed-role/" + roleName + "/floci-session"));
+                                    + ":assumed-role/" + roleName + "/" + function.getFunctionName()));
         } finally {
             executionRoleCredentials.unregister(ACCOUNT_ID, credentials.accessKeyId());
             iamService.deleteRolePolicy(roleName, "RuntimePolicy");
@@ -113,7 +113,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
             SessionCreds credentials = executionRoleCredentials.forFunction(version).orElseThrow();
             try {
                 org.junit.jupiter.api.Assertions.assertEquals(
-                        "arn:aws:sts::" + ACCOUNT_ID + ":assumed-role/" + roleName + "/floci-session",
+                        "arn:aws:sts::" + ACCOUNT_ID + ":assumed-role/" + roleName + "/" + functionName,
                         iamService.resolveCallerArn(credentials.accessKeyId()).orElseThrow());
             } finally {
                 executionRoleCredentials.unregister(
