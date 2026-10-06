@@ -3126,13 +3126,13 @@ public class CloudFormationService implements ResourceProvider {
         while (sorted.size() < activeIds.size()) {
             if (queue.isEmpty()) {
                 // Every resource left waits on another one left. Note them all as circular, then
-                // release one that is on a cycle itself, so whatever depends on the cycle is still
-                // ordered by its dependencies after it.
+                // release one on a cycle that depends on no other cycle, so whatever depends on it
+                // is still ordered by its dependencies after it.
                 if (circular.isEmpty()) {
                     circular.addAll(activeIds);
                     circular.removeAll(placed);
                 }
-                String onCycle = resourceOnCycle(circular, placed, dependencies, inDegree);
+                String onCycle = resourceOnCycle(circular, placed, dependencies);
                 inDegree.put(onCycle, 0);
                 queue.add(onCycle);
             }
@@ -3154,20 +3154,39 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * Follows unplaced dependencies from a resource left unsorted until one repeats; that resource
-     * is on a dependency cycle. Each resource left unsorted still waits on an unplaced dependency,
-     * so the walk always finds one.
+     * A resource on a cycle whose unplaced dependencies all lie on that cycle. Tarjan's algorithm
+     * completes a strongly connected component only after every component it depends on, so the
+     * first one it completes over the unplaced resources depends on no other; as each resource
+     * left still waits on an unplaced dependency, that component is a cycle.
      */
     private static String resourceOnCycle(Set<String> circular, Set<String> placed,
-                                          Map<String, Set<String>> dependencies, Map<String, Integer> inDegree) {
-        String current = circular.stream().filter(id -> !placed.contains(id)).findFirst().orElseThrow();
-        Set<String> seen = new HashSet<>();
-        while (seen.add(current)) {
-            current = dependencies.get(current).stream()
-                    .filter(dep -> inDegree.containsKey(dep) && !placed.contains(dep))
-                    .findFirst().orElseThrow();
+                                          Map<String, Set<String>> dependencies) {
+        String start = circular.stream().filter(id -> !placed.contains(id)).findFirst().orElseThrow();
+        return firstCompletedComponentRoot(start, placed, dependencies, new HashMap<>(), new HashMap<>());
+    }
+
+    // Tarjan's depth-first search, stopped at the first completed component. Nothing is popped
+    // before that, so every visited resource is still on the search stack.
+    private static String firstCompletedComponentRoot(String id, Set<String> placed,
+                                                      Map<String, Set<String>> dependencies,
+                                                      Map<String, Integer> index, Map<String, Integer> lowLink) {
+        index.put(id, index.size());
+        lowLink.put(id, index.get(id));
+        for (String dep : dependencies.get(id)) {
+            if (!dependencies.containsKey(dep) || placed.contains(dep)) {
+                continue;
+            }
+            if (!index.containsKey(dep)) {
+                String root = firstCompletedComponentRoot(dep, placed, dependencies, index, lowLink);
+                if (root != null) {
+                    return root;
+                }
+                lowLink.put(id, Math.min(lowLink.get(id), lowLink.get(dep)));
+            } else {
+                lowLink.put(id, Math.min(lowLink.get(id), index.get(dep)));
+            }
         }
-        return current;
+        return lowLink.get(id).equals(index.get(id)) ? id : null;
     }
 
     private static final Pattern SUB_VAR_PATTERN = Pattern.compile("\\$\\{([^}]+)}");

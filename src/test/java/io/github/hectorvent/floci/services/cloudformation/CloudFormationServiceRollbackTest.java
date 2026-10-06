@@ -271,6 +271,39 @@ class CloudFormationServiceRollbackTest {
         assertEquals("DELETE_COMPLETE", stack.getStatus());
     }
 
+    @Test
+    void deleteStack_savedWithLinkedCircularTemplates_deletesTheDependentCycleFirst() {
+        // Two cycles, the consumer's cycle also depending on the queues' cycle: the consumer must
+        // be deleted while the queues it uses still exist.
+        Stack stack = new Stack();
+        stack.setStackName("delete-saved-linked-cycles");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_COMPLETE");
+        stack.setTemplateBody("""
+                {"Resources": {
+                  "Consumer": {"Type": "AWS::SQS::Queue", "DependsOn": ["Partner", "FirstQueue"]},
+                  "Partner": {"Type": "AWS::SQS::Queue", "DependsOn": "Consumer"},
+                  "FirstQueue": {"Type": "AWS::SQS::Queue", "DependsOn": "SecondQueue"},
+                  "SecondQueue": {"Type": "AWS::SQS::Queue", "DependsOn": "FirstQueue"}
+                }}""");
+        StackResource consumer = resource("Consumer", "consumer-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource partner = resource("Partner", "partner-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource firstQueue = resource("FirstQueue", "first-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource secondQueue = resource("SecondQueue", "second-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        for (StackResource resource : new StackResource[] {consumer, partner, firstQueue, secondQueue}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(consumer, REGION);
+        deletes.verify(provisioner).delete(firstQueue, REGION);
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+    }
+
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
