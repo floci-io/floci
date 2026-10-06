@@ -13,6 +13,7 @@ import org.apache.james.mime4j.field.address.ParseException;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -122,9 +123,9 @@ public final class CognitoMessageDispatcher {
      *   <li>Without either, {@code no-reply@verificationemail.com}.</li>
      * </ul>
      * A configured sender is used only when the {@code SourceArn} names an SES identity that is
-     * verified in the pool's account, in the {@code SourceArn} Region (the pool's own for a
-     * wildcard Region), and {@code From}, when it supplies the sender, is one mailbox at that
-     * address or in that domain. Anything else falls back to {@code no-reply@verificationemail.com},
+     * verified in the pool's partition and account, in the {@code SourceArn} Region (the pool's
+     * own for a wildcard Region), and {@code From}, when it supplies the sender, is one mailbox at
+     * that address or in that domain or one of its subdomains. Anything else falls back to {@code no-reply@verificationemail.com},
      * so a pool cannot send as an address its account has not verified.
      */
     private Sender sender(UserPool pool, String sendRegion) {
@@ -166,12 +167,15 @@ public final class CognitoMessageDispatcher {
 
     /**
      * True when the identity is verified in SES for the pool's account. The identity store is read
-     * in the caller's account, which is the pool's, so the ARN's account must be the pool's too.
+     * in the caller's account, which is the pool's, so the ARN's partition and account must be the
+     * pool's too.
      */
     private boolean isVerifiedForPool(AwsArnUtils.Arn sourceArn, String identity, UserPool pool,
                                       String sendRegion) {
+        String poolPartition = AwsArnUtils.partitionOrDefault(pool.getArn(), null);
         String poolAccount = AwsArnUtils.accountOrDefault(pool.getArn(), null);
-        if (poolAccount == null || !poolAccount.equals(sourceArn.accountId())) {
+        if (poolPartition == null || !poolPartition.equals(sourceArn.partition())
+            || poolAccount == null || !poolAccount.equals(sourceArn.accountId())) {
             return false;
         }
         String region = sourceArn.region().isEmpty() || "*".equals(sourceArn.region())
@@ -189,14 +193,17 @@ public final class CognitoMessageDispatcher {
         }
     }
 
-    /** True when the mailbox is the email address identity, or an address in the domain identity. */
+    /**
+     * True when the mailbox is the email address identity, or an address in the domain identity or
+     * one of its subdomains. SES email address identities are case sensitive; domains are not.
+     */
     private static boolean isCoveredBy(Mailbox mailbox, String identity) {
-        int at = identity.lastIndexOf('@');
-        if (at < 0) {
-            return identity.equalsIgnoreCase(mailbox.getDomain());
+        if (identity.contains("@")) {
+            return identity.equals(mailbox.getAddress());
         }
-        return identity.substring(0, at).equals(mailbox.getLocalPart())
-            && identity.substring(at + 1).equalsIgnoreCase(mailbox.getDomain());
+        String domain = mailbox.getDomain().toLowerCase(Locale.ROOT);
+        String identityDomain = identity.toLowerCase(Locale.ROOT);
+        return domain.equals(identityDomain) || domain.endsWith("." + identityDomain);
     }
 
     /** The identity an SES {@code identity/<name>} ARN names, or {@code null} for anything else. */

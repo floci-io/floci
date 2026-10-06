@@ -57,9 +57,10 @@ at `/_aws/ses`) from the sender the pool's `EmailConfiguration` names:
 - Otherwise `no-reply@verificationemail.com`.
 
 A configured sender is used only when SES has verified it for the pool. The `SourceArn` must name
-an identity in the user pool's account that SES has verified in the `SourceArn` Region (the pool's
-Region when the ARN has `*` there), and a `From` that gives the sender must be a single mailbox at
-that email address or in that domain. Otherwise the email goes from
+an identity in the user pool's partition and account that SES has verified in the `SourceArn`
+Region (the pool's Region when the ARN has `*` there), and a `From` that gives the sender must be a
+single mailbox at that email address (matched case-sensitively, as SES matches email address
+identities) or in that domain or one of its subdomains. Otherwise the email goes from
 `no-reply@verificationemail.com` and Floci logs a warning. Verify the identity first with
 `VerifyEmailIdentity` or `CreateEmailIdentity`, or as a domain whose DKIM records are in Route 53.
 When `From` has a sender name, the captured message keeps it in `Source`, and its `ReturnPath`,

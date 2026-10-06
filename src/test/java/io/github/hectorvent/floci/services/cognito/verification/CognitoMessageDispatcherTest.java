@@ -356,6 +356,36 @@ class CognitoMessageDispatcherTest {
     }
 
     @Test
+    void dispatch_fromInASubdomainOfTheDomainIdentity_sendsFromTheConfiguredFrom() {
+        // SES: a verified domain covers its subdomains without identities of their own.
+        verified("repro.example", "us-east-1");
+        UserPool pool = emailConfiguredPool(Map.of(
+            "EmailSendingAccount", "DEVELOPER",
+            "SourceArn", "arn:aws:ses:us-east-1:000000000000:identity/repro.example",
+            "From", "no-reply@auth.Repro.example"));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("no-reply@auth.Repro.example", sentEmail().source());
+    }
+
+    @Test
+    void dispatch_fromThatDiffersFromTheEmailIdentityOnlyInCase_sendsFromTheDefaultAddress() {
+        // SES: email address identities are case sensitive, domain part included.
+        verified("noreply@REPRO.example", "us-east-1");
+        UserPool pool = emailConfiguredPool(Map.of(
+            "EmailSendingAccount", "DEVELOPER",
+            "SourceArn", "arn:aws:ses:us-east-1:000000000000:identity/noreply@REPRO.example",
+            "From", "noreply@repro.example"));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("no-reply@verificationemail.com", sentEmail().source());
+    }
+
+    @Test
     void dispatch_fromThatIsNotOneMailbox_sendsFromTheDefaultAddress() {
         verified("repro.example", "us-east-1");
         UserPool pool = emailConfiguredPool(Map.of(
@@ -376,6 +406,19 @@ class CognitoMessageDispatcherTest {
             "EmailSendingAccount", "DEVELOPER",
             "SourceArn", "arn:aws:ses:us-east-1:111122223333:identity/noreply@repro.example",
             "From", "noreply@repro.example"));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
+
+        assertEquals("no-reply@verificationemail.com", sentEmail().source());
+    }
+
+    @Test
+    void dispatch_sourceArnInAnotherPartition_sendsFromTheDefaultAddress() {
+        verified("noreply@repro.example", "cn-north-1");
+        UserPool pool = emailConfiguredPool(Map.of(
+            "EmailSendingAccount", "DEVELOPER",
+            "SourceArn", "arn:aws-cn:ses:cn-north-1:000000000000:identity/noreply@repro.example"));
 
         dispatcher.dispatch(pool, user("alice@example.com", null),
             VerificationCode.Purpose.SIGNUP_CONFIRMATION, "123456", List.of("EMAIL"));
