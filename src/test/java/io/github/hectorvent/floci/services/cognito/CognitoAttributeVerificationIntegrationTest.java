@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -411,14 +412,7 @@ class CognitoAttributeVerificationIntegrationTest {
     }
 
     private static String fetchLatestSesVerificationCode(String recipient) throws Exception {
-        String response = given()
-                .queryParam("email", recipient)
-                .get("/_aws/ses")
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString();
-        JsonNode messages = JSON.readTree(response).path("messages");
+        JsonNode messages = SesMailbox.messagesTo(recipient);
         assertTrue(messages.isArray() && !messages.isEmpty());
         return extractVerificationCode(messages.get(0).path("Body").path("text_part").asText());
     }

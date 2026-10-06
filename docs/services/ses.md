@@ -217,9 +217,13 @@ stripped from the relayed message without being acted on.
 
 For test assertions and debugging, Floci exposes a LocalStack-compatible mailbox endpoint:
 
-- `GET /_aws/ses` lists captured messages
+- `GET /_aws/ses` lists captured messages, oldest first by `Timestamp`
 - `GET /_aws/ses?id=<message-id>` returns a specific captured message
+- `GET /_aws/ses?email=<address>` returns the messages whose `Source` equals that value exactly, so a sender given as `Name <a@example.com>` is matched in that form; with `id` as well, both filters apply
 - `DELETE /_aws/ses` clears the captured mailbox
+- `DELETE /_aws/ses?id=<message-id>` deletes only that message; an unknown id deletes nothing
+
+The `email` filter matches the sender, as on [LocalStack](https://docs.localstack.cloud/aws/services/ses/), not a recipient. Earlier Floci versions matched it against `ToAddresses`; to find the messages sent to an address, list them all and filter on `Destination.ToAddresses`.
 
 Messages are stored locally by Floci and can be persisted when SES storage is backed by persistent or hybrid storage.
 

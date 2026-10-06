@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -7,7 +8,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 
 /**
  * Integration tests for the SES V2 {@code SendEmail} {@code ListManagementOptions} wiring through the
@@ -127,14 +131,13 @@ class SesListManagementOptionsV2IntegrationTest {
         .when().post("/v2/email/outbound-emails").then().statusCode(200);
 
         // The stored message body has the placeholder replaced with a functional Floci unsubscribe URL.
-        given().header("Authorization", AUTH).queryParam("email", recipient)
-        .when().get("/_aws/ses").then().statusCode(200)
-                .body(org.hamcrest.Matchers.containsString("/_aws/ses/unsubscribe?"))
-                .body(org.hamcrest.Matchers.containsString("contactList=" + LIST))
-                .body(org.hamcrest.Matchers.containsString("topic=Sports"))
-                .body(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("amazonSESUnsubscribeUrl")))
-                // the stored message also carries the List-Unsubscribe header
-                .body(org.hamcrest.Matchers.containsString("List-Unsubscribe"));
+        String stored = SesMailbox.messagesTo(recipient).toString();
+        assertThat(stored, containsString("/_aws/ses/unsubscribe?"));
+        assertThat(stored, containsString("contactList=" + LIST));
+        assertThat(stored, containsString("topic=Sports"));
+        assertThat(stored, not(containsString("amazonSESUnsubscribeUrl")));
+        // the stored message also carries the List-Unsubscribe header
+        assertThat(stored, containsString("List-Unsubscribe"));
     }
 
     @Test
@@ -211,11 +214,10 @@ class SesListManagementOptionsV2IntegrationTest {
                     """.formatted(FROM, recipient))
         .when().post("/v2/email/outbound-emails").then().statusCode(200);
 
-        given().header("Authorization", AUTH).queryParam("email", recipient)
-        .when().get("/_aws/ses").then().statusCode(200)
-                .body(org.hamcrest.Matchers.containsString("X-Safe"))
-                .body(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("X-Evil")))
-                .body(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("attacker@evil.com")));
+        String stored = SesMailbox.messagesTo(recipient).toString();
+        assertThat(stored, containsString("X-Safe"));
+        assertThat(stored, not(containsString("X-Evil")));
+        assertThat(stored, not(containsString("attacker@evil.com")));
     }
 
     @Test
