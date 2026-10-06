@@ -115,7 +115,7 @@ class AccountContextFilterTest {
         filter.filter(mockContext(
             "AWS4-HMAC-SHA256 Credential=000000000001/20260617/aws-cn-global/iam/aws4_request, SignedHeaders=host, Signature=abc",
             null));
-        assertEquals("aws-cn-global", requestContext.getRegion());
+        assertEquals("cn-northwest-1", requestContext.getRegion(), "a pseudo-region is never a request region");
         assertEquals("aws-cn", requestContext.getPartition());
     }
 

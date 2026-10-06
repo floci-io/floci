@@ -45,7 +45,10 @@ The scope region of a global service is its *signing* region, not a place to put
 resources: China IAM always signs `cn-north-1` even from Ningxia, GovCloud IAM signs
 `us-gov-west-1`. Floci uses it to pick the partition and nothing else. The
 `<partition>-global` pseudo-regions the SDKs accept (`aws-global`, `aws-cn-global`, ...)
-resolve to their partition as well; `aws-eusc` publishes none.
+resolve to their partition as well; `aws-eusc` publishes none. AWS never signs with one (the SDKs
+map each to a real signing region), so a scope that names one is served as the partition's
+implicit global region: a request signed `aws-cn-global` is a `cn-northwest-1` request, and no
+ARN or storage namespace carries the pseudo-region.
 
 A scope region that no partition publishes or admits by its region pattern, such as
 `polygondwanaland-west-1`, is refused with a 400: an S3-signed request gets S3's
@@ -56,7 +59,9 @@ The pattern rule is the AWS SDKs' own, so a region AWS launches after the vendor
 refreshed (`eu-south-9`, say) is still served; it is looser than S3's `LocationConstraint` enum,
 which stays published-only. Set `FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS=true`
 (`floci.partitions.allow-unknown-regions`) to serve any label with its own namespace, as Floci
-did before.
+did before. Such a label belongs to the deployment's partition. ARNs minted through Floci's
+shared region resolver use that partition too; services that build their ARNs directly still fall
+back to `aws` for a label no partition publishes.
 
 ## What changes per partition
 
