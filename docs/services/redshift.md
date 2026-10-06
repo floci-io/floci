@@ -310,8 +310,8 @@ caller transaction do not publish a reusable fingerprint because the transaction
 Temporary transfer objects and staging tables are cleaned up independently of cached relations.
 Extended Query loads retain a connection-local fingerprint until its transaction completes;
 the fingerprint becomes shared only after confirmed commit and is discarded on rollback.
-Creating an external schema
-inside a transaction, including a Data API batch, is currently rejected before changing the catalogs.
+Creating an external schema or table
+inside a transaction, including a Data API batch (which runs as one transaction), is rejected before changing the catalogs: AWS does not allow `CREATE EXTERNAL TABLE` inside a transaction block (SQLSTATE `25001`).
 Cold loads and reloads require database privileges to maintain the materialized table and catalog;
 ordinary users with schema USAGE and table SELECT can read an existing committed cache entry.
 The current floci-duck transfer uses account-scoped development credentials. Cold loads and reloads

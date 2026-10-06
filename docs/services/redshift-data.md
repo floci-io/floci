@@ -67,7 +67,7 @@ Create the external schema through either the wire endpoint or the Data API; bot
 runtime and database binding. Batch preparation runs inside the existing batch transaction, so
 failure rolls back the batch. External read or preparation failures are stored as `FAILED` and
 reported by `DescribeStatement`, as other SQL execution failures are.
-Create external schemas outside a batch: transactional external-schema creation is currently unsupported.
+Create external schemas and tables outside a batch: `CREATE EXTERNAL TABLE` cannot run inside a transaction block on AWS, and a batch runs as one transaction, so both statements are rejected there.
 
 This does not add Data API session reuse or asynchronous execution. The legacy Phase 1 catalog
 is not the Glue-backed relational path.

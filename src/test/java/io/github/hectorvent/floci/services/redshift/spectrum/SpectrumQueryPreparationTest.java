@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.net.Socket;
 import java.util.List;
 import java.util.Optional;
 
@@ -28,7 +27,6 @@ class SpectrumQueryPreparationTest {
         registry = mock(ExternalCatalogRegistry.class);
         materializer = mock(ExternalTableMaterializer.class);
         backend = mock(BackendSql.class);
-        when(backend.transactionScope()).thenReturn(backend);
         when(registry.list(SESSION.accountId(), SESSION.clusterKey(), "dev")).thenReturn(List.of(BINDING));
         when(materializer.ensureCurrent(any(), any(), any(), anyString()))
                 .thenReturn(ExternalTableMaterializer.Outcome.CURRENT);
@@ -128,81 +126,25 @@ class SpectrumQueryPreparationTest {
             "CREATE EXTERNAL TABLE lake.sales (id INTEGER) STORED AS TEXTFILE LOCATION 's3://bucket/'";
 
     @Test
-    void glueTableCreatedInRolledBackTransactionIsDeleted() {
-        assertTrue(preparation.prepare(CREATE_SALES, TRANSACTION, backend));
-        verify(glue, never()).deleteTable(anyString(), anyString());
-        preparation.finishCycle(backend);
-        verify(glue).deleteTable("analytics", "sales");
+    void transactionalTableCreateIsRejectedBeforeChangingEitherStore() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> preparation.prepare(CREATE_SALES, TRANSACTION, backend));
+        assertEquals("25001", error.sqlState());
+        assertEquals("CREATE EXTERNAL TABLE cannot run inside a transaction block", error.getMessage());
+        verifyNoInteractions(glue, backend);
     }
 
     @Test
-    void glueTableIsUndoneThroughAnotherSessionOnTheSameSocket() {
-        Socket socket = new Socket();
-        PostgresBackendSession creating = new PostgresBackendSession(socket);
-        PostgresExtendedBackendSession rollingBack = new PostgresExtendedBackendSession(socket);
-        assertTrue(preparation.prepare(CREATE_SALES, TRANSACTION, creating));
-        preparation.finishCycle(rollingBack);
-        verify(glue).deleteTable("analytics", "sales");
-    }
-
-    @Test
-    void rollbackToSavepointUndoesOnlyTablesCreatedAfterIt() {
-        preparation.prepare("SAVEPOINT before_sales", TRANSACTION, backend);
-        preparation.prepare(CREATE_SALES, TRANSACTION, backend);
-        preparation.prepare("SAVEPOINT after_sales", TRANSACTION, backend);
-        preparation.prepare(CREATE_SALES.replace("lake.sales", "lake.events"), TRANSACTION, backend);
-        preparation.prepare("ROLLBACK TO SAVEPOINT after_sales", TRANSACTION, backend);
-        preparation.applySavepointRollback(backend);
-        verify(glue).deleteTable("analytics", "events");
-        verify(glue, never()).deleteTable("analytics", "sales");
-        preparation.prepare("ROLLBACK TO before_sales;", TRANSACTION, backend);
-        preparation.applySavepointRollback(backend);
-        verify(glue).deleteTable("analytics", "sales");
-        preparation.finishCycle(backend, true);
-        verify(glue, times(2)).deleteTable(anyString(), anyString());
-    }
-
-    @Test
-    void unconfirmedRollbackToSavepointNeverTouchesGlue() {
-        preparation.prepare("SAVEPOINT s1", TRANSACTION, backend);
-        preparation.prepare(CREATE_SALES, TRANSACTION, backend);
-        preparation.prepare("ROLLBACK TO SAVEPOINT s1", TRANSACTION, backend);
-        verify(glue, never()).deleteTable(anyString(), anyString());
-        preparation.finishCycle(backend, true);
-        preparation.applySavepointRollback(backend);
-        verify(glue, never()).deleteTable(anyString(), anyString());
-    }
-
-    @Test
-    void releasedSavepointCanNoLongerBeRolledBackTo() {
-        preparation.prepare("SAVEPOINT s1", TRANSACTION, backend);
-        preparation.prepare(CREATE_SALES, TRANSACTION, backend);
-        preparation.prepare("RELEASE SAVEPOINT s1", TRANSACTION, backend);
-        preparation.prepare("ROLLBACK TO SAVEPOINT s1", TRANSACTION, backend);
-        verify(glue, never()).deleteTable(anyString(), anyString());
-    }
-
-    @Test
-    void glueTableCreatedInCommittedTransactionIsKept() {
-        assertTrue(preparation.prepare(CREATE_SALES, TRANSACTION, backend));
-        preparation.finishCycle(backend, true);
-        preparation.finishCycle(backend);
-        verify(glue, never()).deleteTable(anyString(), anyString());
-    }
-
-    @Test
-    void glueTableCreatedOutsideTransactionIsNeverUndone() {
+    void tableCreatedOutsideTransactionIsStoredInGlue() {
         assertTrue(preparation.prepare(CREATE_SALES, SESSION, backend));
-        preparation.finishCycle(backend);
-        verify(glue, never()).deleteTable(anyString(), anyString());
+        verify(glue).createTable(eq("analytics"), any());
     }
 
     @Test
-    void discardingLoadsKeepsStagedGlueTables() {
-        assertTrue(preparation.prepare(CREATE_SALES, TRANSACTION, backend));
+    void discardingLoadsOnlyDropsPendingLoads() {
         preparation.discardPendingLoads(backend);
         verify(materializer).finishCycle(backend);
-        verify(glue, never()).deleteTable(anyString(), anyString());
+        verifyNoInteractions(glue);
     }
 
     @Test

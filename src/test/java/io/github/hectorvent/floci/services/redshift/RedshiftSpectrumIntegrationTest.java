@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
@@ -165,6 +166,17 @@ class RedshiftSpectrumIntegrationTest {
                 assertTrue(externalRegistry.find("000000000000", "000000000000:" + clusterId,
                         "dev", "rolledback_lake").isEmpty());
             }
+            connection.setAutoCommit(false);
+            try {
+                SQLException rejected = assertThrows(SQLException.class, () -> statement.execute(
+                        externalDdl.replace("lake.events", "lake.in_transaction")));
+                assertEquals("25001", rejected.getSQLState());
+                assertTrue(rejected.getMessage().contains("cannot run inside a transaction block"));
+            } finally {
+                connection.rollback();
+                connection.setAutoCommit(true);
+            }
+            assertThrows(AwsException.class, () -> glueService.getTable(glueDatabase, "in_transaction"));
             try (PreparedStatement query = connection.prepareStatement("SELECT c.country, SUM(e.amount) AS total "
                     + "FROM lake.events e JOIN customers c ON c.id=e.id WHERE e.amount > ? "
                     + "GROUP BY c.country ORDER BY total DESC")) {

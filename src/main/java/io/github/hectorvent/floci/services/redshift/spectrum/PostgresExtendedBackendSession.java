@@ -24,11 +24,6 @@ public final class PostgresExtendedBackendSession implements BackendSql {
         return false;
     }
 
-    @Override
-    public Object transactionScope() {
-        return backend;
-    }
-
     /** The client's own pipelined statement failed; the backend discards everything until Sync. */
     public void onBackendError() {
         failedUntilSync = true;

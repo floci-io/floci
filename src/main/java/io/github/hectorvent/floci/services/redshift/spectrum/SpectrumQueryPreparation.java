@@ -4,22 +4,17 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
-import io.github.hectorvent.floci.services.glue.model.Table;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SpectrumQueryPreparation {
@@ -30,23 +25,6 @@ public class SpectrumQueryPreparation {
     private final GlueService glue;
     private final ExternalMetadataWriter metadata;
     private final Map<BackendSql, List<ExternalSchemaBinding>> pendingBindings = new ConcurrentHashMap<>();
-    private final Map<Object, List<StagedGlueTable>> stagedGlueTables = new ConcurrentHashMap<>();
-
-    private final Map<Object, String> pendingSavepointRollbacks = new ConcurrentHashMap<>();
-    private final Map<Object, List<Savepoint>> savepoints = new ConcurrentHashMap<>();
-
-    private static final Pattern SAVEPOINT = Pattern.compile(
-            "^\\s*SAVEPOINT\\s+(\\S+?)\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
-    private static final Pattern ROLLBACK_TO_SAVEPOINT = Pattern.compile(
-            "^\\s*ROLLBACK\\s+(?:WORK\\s+|TRANSACTION\\s+)?TO\\s+(?:SAVEPOINT\\s+)?(\\S+?)\\s*;?\\s*$",
-            Pattern.CASE_INSENSITIVE);
-    private static final Pattern RELEASE_SAVEPOINT = Pattern.compile(
-            "^\\s*RELEASE\\s+(?:SAVEPOINT\\s+)?(\\S+?)\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
-
-    private record StagedGlueTable(String accountId, String database, String table) { }
-
-    /** A savepoint and how many Glue tables the transaction had staged when it was taken. */
-    private record Savepoint(String name, int stagedTables) { }
 
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
                                     ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata) {
@@ -86,22 +64,17 @@ public class SpectrumQueryPreparation {
     }
 
     private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend) {
-        if (session.inTransaction()) {
-            trackSavepoints(sql, backend);
-        }
         Optional<ExternalStatement> statement = parser.parse(sql);
         if (statement.orElse(null) instanceof ExternalStatement.CreateSchema schema) {
             return createSchema(schema, session, backend);
         }
         Map<String, ExternalSchemaBinding> bindings = bindings(session);
         if (statement.orElse(null) instanceof ExternalStatement.CreateTable table && bindings.containsKey(table.schemaName())) {
-            ExternalSchemaBinding binding = bindings.get(table.schemaName());
-            Table glueTable = GlueTableBuilder.toGlueTable(table);
-            glue.createTable(binding.glueDatabase(), glueTable);
             if (session.inTransaction()) {
-                stagedGlueTables.computeIfAbsent(backend.transactionScope(), ignored -> new CopyOnWriteArrayList<>())
-                        .add(new StagedGlueTable(session.accountId(), binding.glueDatabase(), glueTable.getName()));
+                throw new SpectrumSqlException("25001", "CREATE EXTERNAL TABLE cannot run inside a transaction block");
             }
+            ExternalSchemaBinding binding = bindings.get(table.schemaName());
+            glue.createTable(binding.glueDatabase(), GlueTableBuilder.toGlueTable(table));
             metadata.refresh(backend, session.accountId(), binding);
             return true;
         }
@@ -153,13 +126,13 @@ public class SpectrumQueryPreparation {
         }
         ExternalSchemaBinding binding = new ExternalSchemaBinding(session.accountId(), session.clusterKey(),
                 session.databaseName(), schema.schemaName(), schema.glueDatabase(), schema.iamRoleArn());
-        backend.execute("CREATE SCHEMA " + quote(schema.schemaName()));
+        backend.execute("CREATE SCHEMA " + ExternalTableMaterializer.quote(schema.schemaName()));
         try {
             metadata.refresh(backend, session.accountId(), binding);
             bindWhenCommitted(backend, binding);
         } catch (RuntimeException exception) {
             try {
-                backend.execute("DROP SCHEMA " + quote(schema.schemaName()) + " CASCADE");
+                backend.execute("DROP SCHEMA " + ExternalTableMaterializer.quote(schema.schemaName()) + " CASCADE");
             } catch (RuntimeException cleanupFailure) {
                 LOG.warnv(cleanupFailure, "Could not clean up failed external schema {0}", schema.schemaName());
             }
@@ -197,10 +170,9 @@ public class SpectrumQueryPreparation {
         pendingBindings.computeIfAbsent(backend, ignored -> new CopyOnWriteArrayList<>()).add(binding);
     }
 
-    /** The transaction rolled back: drop everything staged for it, including the Glue tables it created. */
+    /** The transaction rolled back: drop everything staged for it. */
     public void finishCycle(BackendSql backend) {
         pendingBindings.remove(backend);
-        undoStagedGlueTables(backend);
         materializer.finishCycle(backend);
     }
 
@@ -208,13 +180,6 @@ public class SpectrumQueryPreparation {
         List<ExternalSchemaBinding> completed = pendingBindings.remove(backend);
         if (committed && completed != null) {
             completed.forEach(registry::bind);
-        }
-        pendingSavepointRollbacks.remove(backend.transactionScope());
-        if (committed) {
-            stagedGlueTables.remove(backend.transactionScope());
-            savepoints.remove(backend.transactionScope());
-        } else {
-            undoStagedGlueTables(backend);
         }
         materializer.finishCycle(backend, committed);
     }
@@ -225,95 +190,5 @@ public class SpectrumQueryPreparation {
      */
     public void discardPendingLoads(BackendSql backend) {
         materializer.finishCycle(backend);
-        applySavepointRollback(backend);
-    }
-
-    /** The backend confirmed the statement: a ROLLBACK TO SAVEPOINT prepared before it now takes effect on Glue. */
-    public void applySavepointRollback(BackendSql backend) {
-        Object scope = backend.transactionScope();
-        String name = pendingSavepointRollbacks.remove(scope);
-        if (name != null) {
-            rollbackToSavepoint(scope, name);
-        }
-    }
-
-    private void trackSavepoints(String sql, BackendSql backend) {
-        Matcher savepoint = SAVEPOINT.matcher(sql);
-        if (savepoint.matches()) {
-            Object scope = backend.transactionScope();
-            List<StagedGlueTable> staged = stagedGlueTables.get(scope);
-            savepoints.computeIfAbsent(scope, ignored -> new CopyOnWriteArrayList<>())
-                    .add(new Savepoint(savepointName(savepoint.group(1)), staged == null ? 0 : staged.size()));
-            return;
-        }
-        Matcher rollback = ROLLBACK_TO_SAVEPOINT.matcher(sql);
-        if (rollback.matches()) {
-            // The backend may still reject it, so Glue is only touched once it confirms the rollback.
-            pendingSavepointRollbacks.put(backend.transactionScope(), savepointName(rollback.group(1)));
-            return;
-        }
-        Matcher release = RELEASE_SAVEPOINT.matcher(sql);
-        if (release.matches()) {
-            List<Savepoint> marks = savepoints.get(backend.transactionScope());
-            int index = marks == null ? -1 : lastIndexOf(marks, savepointName(release.group(1)));
-            if (index >= 0) {
-                marks.subList(index, marks.size()).clear();
-            }
-        }
-    }
-
-    /** ROLLBACK TO SAVEPOINT undoes the Glue tables created after it while the transaction stays open. */
-    private void rollbackToSavepoint(Object scope, String name) {
-        List<Savepoint> marks = savepoints.get(scope);
-        int index = marks == null ? -1 : lastIndexOf(marks, name);
-        if (index < 0) {
-            return;
-        }
-        int keep = marks.get(index).stagedTables();
-        marks.subList(index + 1, marks.size()).clear();
-        List<StagedGlueTable> staged = stagedGlueTables.get(scope);
-        if (staged == null || staged.size() <= keep) {
-            return;
-        }
-        List<StagedGlueTable> undone = new ArrayList<>(staged.subList(keep, staged.size()));
-        staged.subList(keep, staged.size()).clear();
-        deleteGlueTables(undone);
-    }
-
-    private static int lastIndexOf(List<Savepoint> marks, String name) {
-        for (int i = marks.size() - 1; i >= 0; i--) {
-            if (marks.get(i).name().equals(name)) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private static String savepointName(String raw) {
-        return raw.replace("\"", "").toLowerCase(Locale.ROOT);
-    }
-
-    private void undoStagedGlueTables(BackendSql backend) {
-        Object scope = backend.transactionScope();
-        savepoints.remove(scope);
-        pendingSavepointRollbacks.remove(scope);
-        List<StagedGlueTable> staged = stagedGlueTables.remove(scope);
-        if (staged != null) {
-            deleteGlueTables(staged);
-        }
-    }
-
-    private void deleteGlueTables(List<StagedGlueTable> staged) {
-        for (StagedGlueTable table : staged) {
-            try {
-                RequestScopes.runAs(table.accountId(), () -> glue.deleteTable(table.database(), table.table()));
-            } catch (AwsException exception) {
-                LOG.warnv(exception, "Could not undo Glue table {0}.{1} after a rollback", table.database(), table.table());
-            }
-        }
-    }
-
-    private static String quote(String identifier) {
-        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 }
