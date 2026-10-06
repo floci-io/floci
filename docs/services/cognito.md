@@ -583,9 +583,21 @@ Cognito JSON protocol.
 
 ## Configuration
 
-| Variable                         | Default | Description                   |
-|----------------------------------|---------|-------------------------------|
-| `FLOCI_SERVICES_COGNITO_ENABLED` | `true`  | Enable or disable the service |
+| Variable                                               | Default | Description                   |
+|--------------------------------------------------------|---------|-------------------------------|
+| `FLOCI_SERVICES_COGNITO_ENABLED`                       | `true`  | Enable or disable the service |
+| `FLOCI_SERVICES_COGNITO_ENFORCE_TOKEN_VALIDITY_LIMITS` | `true`  | Reject app clients whose token validity is outside AWS's limits |
+
+`CreateUserPoolClient` and `UpdateUserPoolClient` enforce AWS's token validity limits: access and
+ID tokens between 5 minutes and 1 day, refresh tokens between 60 minutes and 3,650 days, each in
+its `TokenValidityUnits` unit (hours for access and ID tokens, days for refresh tokens, by default).
+A client outside them fails with `InvalidParameterException` (`Invalid range for token validity.`),
+as on AWS. A `RefreshTokenValidity` of `0` is AWS's 30-day default and is accepted. An update is
+checked against the client as it would be after the update, so a field the request omits keeps its
+stored value there too. To keep tokens shorter than AWS allows, for example a one-minute access
+token to test what happens when it expires, set
+`FLOCI_SERVICES_COGNITO_ENFORCE_TOKEN_VALIDITY_LIMITS=false`
+(`floci.services.cognito.enforce-token-validity-limits`).
 
 ## Examples
 

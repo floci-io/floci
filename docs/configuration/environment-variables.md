@@ -343,6 +343,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_COGNITO_ENABLED` | `true` | Enable the Cognito User Pools service |
+| `FLOCI_SERVICES_COGNITO_ENFORCE_TOKEN_VALIDITY_LIMITS` | `true` | Reject app clients whose token validity is outside AWS's limits (access and ID tokens 5 minutes to 1 day, refresh tokens 60 minutes to 3,650 days). Set to `false` to allow shorter tokens, for example in expiry tests |
 
 ### Step Functions
 

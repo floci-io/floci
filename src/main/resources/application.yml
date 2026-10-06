@@ -521,6 +521,7 @@ floci:
       enabled: true
     cognito:
       enabled: true
+      enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
       allow-plaintext-http: false

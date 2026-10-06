@@ -2598,6 +2598,48 @@ class CognitoIntegrationTest {
                 .statusCode(400);
     }
 
+    /**
+     * AWS: access and ID tokens "Must be set to a value between 5 minutes and 1 day", refresh tokens
+     * "between 60 minutes and 3,650 days". The first two requests are the reproduction in #5147.
+     */
+    @Test
+    @Order(96)
+    void createAndUpdateUserPoolClientRejectTokenValidityOutsideAwsLimits() throws Exception {
+        String limitsPoolId = cognitoJson("CreateUserPool", """
+                {"PoolName": "TokenValidityLimitsPool"}
+                """).path("UserPool").path("Id").asText();
+
+        for (String validity : List.of(
+                """
+                "AccessTokenValidity": 1, "IdTokenValidity": 1,
+                "TokenValidityUnits": {"AccessToken": "minutes", "IdToken": "minutes"}""",
+                """
+                "RefreshTokenValidity": 20, "TokenValidityUnits": {"RefreshToken": "minutes"}""",
+                """
+                "AccessTokenValidity": 25""")) {
+            cognitoAction("CreateUserPoolClient", """
+                    {"UserPoolId": "%s", "ClientName": "short-tokens", %s}
+                    """.formatted(limitsPoolId, validity))
+                    .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"))
+                    .body("message", equalTo("Invalid range for token validity."));
+        }
+
+        String limitsClientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId": "%s", "ClientName": "limit-tokens",
+                 "AccessTokenValidity": 5, "IdTokenValidity": 1440, "RefreshTokenValidity": 60,
+                 "TokenValidityUnits": {"AccessToken": "minutes", "IdToken": "minutes", "RefreshToken": "minutes"}}
+                """.formatted(limitsPoolId)).path("UserPoolClient").path("ClientId").asText();
+        cognitoAction("UpdateUserPoolClient", """
+                {"UserPoolId": "%s", "ClientId": "%s", "AccessTokenValidity": 4}
+                """.formatted(limitsPoolId, limitsClientId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("Invalid range for token validity."));
+    }
+
     @Test
     @Order(97)
     void createUserPoolClientRejectsInconsistentOAuthFlowConfiguration() throws Exception {
