@@ -206,6 +206,78 @@ class CognitoMessageDispatcherTest {
         assertEquals("cn-northwest-1", sentEmail().region());
     }
 
+    @Test
+    void dispatchInvitation_withoutTemplate_emailsAwsDefaultInvitation() {
+        CognitoUser user = user("alice@example.com", null);
+        user.setUsername("alice");
+
+        dispatcher.dispatchInvitation(pool(Map.of()), user, "Temp1234!", List.of("EMAIL"));
+
+        assertEquals(SendEmailRequest.builder()
+            .source("no-reply@verificationemail.com")
+            .toAddresses(List.of("alice@example.com"))
+            .region("us-east-1")
+            .content(new EmailContent.Simple("Your temporary password",
+                "Your username is alice and temporary password is Temp1234!.", null, List.of()))
+            .build(), sentEmail());
+        verifyNoInteractions(sns);
+    }
+
+    @Test
+    void dispatchInvitation_rendersThePoolsInviteMessageTemplate() {
+        UserPool pool = pool(Map.of());
+        pool.setAdminCreateUserConfig(Map.of("InviteMessageTemplate", Map.of(
+            "EmailSubject", "Welcome to Repro",
+            "EmailMessage", "Hi {username}, sign in with {####}",
+            "SMSMessage", "{username} / {####}")));
+        CognitoUser user = user("alice@example.com", "+5215551234567");
+        user.setUsername("alice");
+
+        dispatcher.dispatchInvitation(pool, user, "Temp1234!", List.of("EMAIL", "SMS"));
+
+        SendEmailRequest sent = sentEmail();
+        assertEquals("Welcome to Repro", subject(sent));
+        assertEquals("Hi alice, sign in with Temp1234!", bodyText(sent));
+        verify(sns).publish(isNull(), isNull(), eq("+5215551234567"), eq("alice / Temp1234!"),
+            isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
+    void dispatchInvitation_defaultsToSms() {
+        CognitoUser user = user("alice@example.com", "+5215551234567");
+        user.setUsername("alice");
+
+        dispatcher.dispatchInvitation(pool(Map.of()), user, "Temp1234!", List.of());
+
+        verify(sns).publish(isNull(), isNull(), eq("+5215551234567"),
+            eq("Your username is alice and temporary password is Temp1234!."), isNull(), isNull(), eq("us-east-1"));
+        verifyNoInteractions(ses);
+    }
+
+    @Test
+    void dispatchInvitation_templateWithoutPasswordPlaceholder_isNotDelivered() {
+        // "If your template doesn't have this placeholder, Amazon Cognito doesn't deliver the invitation message."
+        UserPool pool = pool(Map.of());
+        pool.setAdminCreateUserConfig(Map.of("InviteMessageTemplate", Map.of(
+            "EmailMessage", "Welcome {username}")));
+        CognitoUser user = user("alice@example.com", null);
+        user.setUsername("alice");
+
+        dispatcher.dispatchInvitation(pool, user, "Temp1234!", List.of("EMAIL"));
+
+        verifyNoInteractions(ses);
+    }
+
+    @Test
+    void dispatchInvitation_passwordlessUser_getsTheUsernameOnly() {
+        CognitoUser user = user("alice@example.com", null);
+        user.setUsername("alice");
+
+        dispatcher.dispatchInvitation(pool(Map.of()), user, null, List.of("EMAIL"));
+
+        assertEquals("Your username is alice.", bodyText(sentEmail()));
+    }
+
     private SendEmailRequest sentEmail() {
         ArgumentCaptor<SendEmailRequest> captor = ArgumentCaptor.forClass(SendEmailRequest.class);
         verify(ses).sendEmail(captor.capture());

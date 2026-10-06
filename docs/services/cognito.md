@@ -181,7 +181,7 @@ further divergences, both deliberate:
 
 | Action | Description |
 |--------|-------------|
-| AdminCreateUser | Creates or resends setup for a user in a user pool. |
+| AdminCreateUser | Creates a user, or with `MessageAction` `RESEND` gives an existing `FORCE_CHANGE_PASSWORD` user a new temporary password, and sends the invitation. See [AdminCreateUser invitations](#admincreateuser-invitations). |
 | AdminGetUser | Returns a user's stored attributes and status. |
 | AdminDeleteUser | Deletes a user from a user pool. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | AdminSetUserPassword | Sets a user's password and permanent-password status. |
@@ -194,6 +194,27 @@ further divergences, both deliberate:
 | AdminSetUserMFAPreference | Sets a user's email MFA preference from `EmailMfaSettings`. SMS and software-token settings are accepted but not stored. |
 | AdminUserGlobalSignOut | Revokes the access, ID and refresh tokens issued to a user. |
 | AdminLinkProviderForUser | Links an external IdP identity to an existing user's `identities` attribute. |
+
+#### AdminCreateUser invitations
+
+- **Temporary password:** without `TemporaryPassword`, Floci generates one that meets the pool's
+  password policy, and the user starts in `FORCE_CHANGE_PASSWORD`, as on AWS. In a pool whose
+  `SignInPolicy.AllowedFirstAuthFactors` offers `EMAIL_OTP` or `SMS_OTP` (above the Lite tier),
+  no password is generated and the user is created `CONFIRMED` without one.
+- **Invitation:** without `MessageAction`, the invitation goes to each of `DesiredDeliveryMediums`
+  (default `SMS`) the user has an `email` or `phone_number` for. Email reaches Floci's SES
+  (readable at `/_aws/ses`) and SMS its SNS. The text is the pool's
+  `AdminCreateUserConfig.InviteMessageTemplate` (`EmailSubject`, `EmailMessage`, `SMSMessage`) with
+  `{username}` and `{####}` (the temporary password) filled in, or AWS's default
+  `Your username is {username} and temporary password is {####}.` under the subject
+  `Your temporary password`. As on AWS, a template without `{####}` is not delivered to a user
+  with a password.
+- **`SUPPRESS`** sends nothing. **`RESEND`** sets the request's `TemporaryPassword`, or a
+  generated one, and sends the invitation again.
+
+Differences from AWS: the `CustomMessage_AdminCreateUser` trigger is not invoked. A requested
+medium the user has no attribute for is skipped rather than refused. `TemporaryPasswordValidityDays`
+is not enforced.
 
 ### User Operations
 

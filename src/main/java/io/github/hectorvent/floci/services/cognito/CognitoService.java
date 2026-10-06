@@ -67,6 +67,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -90,6 +91,13 @@ public class CognitoService implements ResourceProvider {
             List.of("ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH");
     private static final String COGNITO_PASSWORD_SYMBOLS =
             "^$*.[]{}()?\"!@#%&/\\,><':;|_~`=+-";
+    private static final int GENERATED_PASSWORD_MINIMUM_LENGTH = 8;
+    /**
+     * Uppercase, lowercase, digits, and a subset of {@link #COGNITO_PASSWORD_SYMBOLS} without
+     * quotes, backslashes or braces, so a generated password pastes cleanly into a shell or template.
+     */
+    private static final List<String> GENERATED_PASSWORD_CHARACTER_CLASSES = List.of(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz", "0123456789", "!#%*+-.=?@^_~");
     // JVM-local stripes bound lock memory without retaining one lock for every user key.
     private static final int USER_LOCK_STRIPES = 512;
     /**
@@ -1977,10 +1985,13 @@ public class CognitoService implements ResourceProvider {
     /**
      * AdminCreateUser with optional MessageAction.
      *
-     * <p>{@code messageAction = "RESEND"} resends the invitation for an existing
-     * user in {@code FORCE_CHANGE_PASSWORD} status without recreating it; floci
-     * has no email transport, so this only refreshes {@code lastModifiedDate}.
-     * {@code "SUPPRESS"} or {@code null} retain the default create behavior.</p>
+     * <p>Without a {@code temporaryPassword}, Cognito generates one, unless the pool offers
+     * passwordless sign-in, where the user is created {@code CONFIRMED} with no password. A user
+     * with a password starts in {@code FORCE_CHANGE_PASSWORD}.</p>
+     *
+     * <p>{@code messageAction = null} sends the invitation; {@code "SUPPRESS"} sends nothing.
+     * {@code "RESEND"} gives an existing {@code FORCE_CHANGE_PASSWORD} user a new temporary
+     * password, the requested one or a generated one, and sends the invitation again.</p>
      */
     public CognitoUser adminCreateUser(String userPoolId,
                                        String username,
@@ -1996,12 +2007,27 @@ public class CognitoService implements ResourceProvider {
                                        String temporaryPassword,
                                        String messageAction,
                                        boolean forceAliasCreation) {
+        return adminCreateUser(userPoolId, username, attributes, temporaryPassword, messageAction,
+                forceAliasCreation, null);
+    }
+
+    /**
+     * AdminCreateUser with the request's {@code DesiredDeliveryMediums} for the invitation;
+     * {@code null} or empty means AWS's default, {@code SMS}.
+     */
+    public CognitoUser adminCreateUser(String userPoolId,
+                                       String username,
+                                       Map<String, String> attributes,
+                                       String temporaryPassword,
+                                       String messageAction,
+                                       boolean forceAliasCreation,
+                                       List<String> desiredDeliveryMediums) {
         // Locked on the requested username/alias (not yet resolved to a canonical id, since
         // an alias pool doesn't have one until creation), so two concurrent requests for the
         // same identifier can't both pass the existence/alias check and create duplicates.
         synchronized (userLock(userPoolId, username)) {
             return adminCreateUserUnderUserLock(userPoolId, username, attributes,
-                    temporaryPassword, messageAction, forceAliasCreation);
+                    temporaryPassword, messageAction, forceAliasCreation, desiredDeliveryMediums);
         }
     }
 
@@ -2010,9 +2036,11 @@ public class CognitoService implements ResourceProvider {
                                        Map<String, String> attributes,
                                        String temporaryPassword,
                                        String messageAction,
-                                       boolean forceAliasCreation) {
+                                       boolean forceAliasCreation,
+                                       List<String> desiredDeliveryMediums) {
         UserPool pool = describeUserPool(userPoolId);
         boolean resend = "RESEND".equalsIgnoreCase(messageAction);
+        boolean suppress = "SUPPRESS".equalsIgnoreCase(messageAction);
         boolean aliasPool = usesAliasUsernames(pool);
 
         Map<String, String> resolvedAttributes = attributes == null
@@ -2035,8 +2063,14 @@ public class CognitoService implements ResourceProvider {
                         """.formatted(existing.getUserStatus());
                 throw new AwsException("UnsupportedUserStateException", userStateExceptionMessage, 400);
             }
+            // "RESEND ... to reset the temporary-password duration with a new temporary password".
+            String resentPassword = temporaryPassword != null && !temporaryPassword.isEmpty()
+                    ? temporaryPassword : generateTemporaryPassword(pool);
+            updateUserPassword(existing, resentPassword);
+            existing.setTemporaryPassword(true);
             existing.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             userStore.put(userKey(userPoolId, existing.getUsername()), existing);
+            deliverInvitation(pool, existing, resentPassword, desiredDeliveryMediums);
             LOG.infov("Resent invitation for user {0} in pool {1}", existing.getUsername(), userPoolId);
             return existing;
         }
@@ -2075,15 +2109,80 @@ public class CognitoService implements ResourceProvider {
             user.getAttributes().put("sub", UUID.randomUUID().toString());
         }
 
-        if (temporaryPassword != null && !temporaryPassword.isEmpty()) {
-            updateUserPassword(user, temporaryPassword);
+        String password = temporaryPassword != null && !temporaryPassword.isEmpty()
+                ? temporaryPassword
+                : passwordlessSignInAvailable(pool) ? null : generateTemporaryPassword(pool);
+        if (password != null) {
+            updateUserPassword(user, password);
             user.setTemporaryPassword(true);
             user.setUserStatus("FORCE_CHANGE_PASSWORD");
+        }
+
+        // Sent before the user is stored, so a failed delivery leaves no user behind.
+        if (!suppress) {
+            deliverInvitation(pool, user, password, desiredDeliveryMediums);
         }
 
         userStore.put(userKey(userPoolId, canonicalUsername), user);
         LOG.infov("Created user {0} in pool {1}", canonicalUsername, userPoolId);
         return user;
+    }
+
+    /** Sends the AdminCreateUser invitation when Floci has a message transport wired. */
+    private void deliverInvitation(UserPool pool, CognitoUser user, String temporaryPassword,
+                                   List<String> desiredDeliveryMediums) {
+        if (messageDispatcher == null) {
+            return;
+        }
+        try {
+            messageDispatcher.dispatchInvitation(pool, user, temporaryPassword, desiredDeliveryMediums);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Failed to deliver the invitation for user {0} in pool {1}",
+                    user.getUsername(), pool.getId());
+            throw new AwsException("CodeDeliveryFailureException", "Failed to deliver the message.", 400);
+        }
+    }
+
+    /**
+     * Whether the pool offers passwordless sign-in (an email or SMS one-time password as a first
+     * factor), in which case AdminCreateUser generates no password: "If you don't specify a value,
+     * Amazon Cognito generates one for you unless you have passwordless options active for your
+     * user pool." As in USER_AUTH, a Lite pool offers none.
+     */
+    private static boolean passwordlessSignInAvailable(UserPool pool) {
+        if ("LITE".equals(pool.getUserPoolTier())) {
+            return false;
+        }
+        List<String> factors = CognitoAuthFlowHandler.allowedFirstAuthFactors(pool);
+        return factors.contains("EMAIL_OTP") || factors.contains("SMS_OTP");
+    }
+
+    /**
+     * A temporary password that meets any password policy: the policy's minimum length (at least
+     * 8, AWS's default), with an uppercase letter, a lowercase letter, a digit and a symbol.
+     */
+    @SuppressWarnings("unchecked")
+    private String generateTemporaryPassword(UserPool pool) {
+        int minimumLength = 0;
+        if (pool.getPolicies() != null && pool.getPolicies().get("PasswordPolicy") instanceof Map<?, ?> policy) {
+            minimumLength = policyInt((Map<String, Object>) policy, "MinimumLength");
+        }
+        int length = Math.max(GENERATED_PASSWORD_MINIMUM_LENGTH, minimumLength);
+        SecureRandom random = new SecureRandom();
+        List<Character> characters = new ArrayList<>();
+        for (String characterClass : GENERATED_PASSWORD_CHARACTER_CLASSES) {
+            characters.add(characterClass.charAt(random.nextInt(characterClass.length())));
+        }
+        String all = String.join("", GENERATED_PASSWORD_CHARACTER_CLASSES);
+        while (characters.size() < length) {
+            characters.add(all.charAt(random.nextInt(all.length())));
+        }
+        Collections.shuffle(characters, random);
+        StringBuilder password = new StringBuilder(length);
+        for (Character character : characters) {
+            password.append(character);
+        }
+        return password.toString();
     }
 
     void adminCreateMigratedUser(String userPoolId, String username, String password,
