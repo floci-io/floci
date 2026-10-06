@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.cloudformation.model.CloudFormationExcept
 import software.amazon.awssdk.services.cloudformation.model.Output;
 import software.amazon.awssdk.services.cloudformation.model.Parameter;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
+import software.amazon.awssdk.services.cloudformation.model.StackEvent;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.GroupType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ResourceNotFoundException;
@@ -186,6 +187,37 @@ class CloudFormationCognitoUserPoolGroupTest {
     }
 
     @Test
+    @DisplayName("Declaring a generated group's name explicitly is refused as a custom-named replacement and rolls back")
+    void declaringAGeneratedGroupNameExplicitlyIsRefusedAndRollsBack() throws InterruptedException {
+        createStack(parameters("", p1, "d1", 1, false));
+        String generated = output("GroupRef");
+        assertGeneratedName(generated);
+        assertIdentity(generated);
+        GroupType created = group(p1, generated);
+
+        // GroupName is create-only, so declaring it requires a replacement, but the replacement
+        // would claim the same pool and name: CloudFormation refuses it before creating anything.
+        updateStack(parameters(generated, p1, "d1", 1, false), "UPDATE_ROLLBACK_COMPLETE");
+        List<String> failures = groupEvents().stream()
+                .filter(event -> "UPDATE_FAILED".equals(event.resourceStatusAsString()))
+                .map(StackEvent::resourceStatusReason)
+                .toList();
+        assertThat(failures).hasSize(1);
+        assertThat(failures.get(0)).contains("CloudFormation cannot update a stack when a custom-named resource"
+                + " requires replacing. Rename " + generated + " and update the stack again.");
+        assertIdentity(generated);
+        GroupType kept = group(p1, generated);
+        assertGroup(kept, p1, "d1", 1);
+        assertThat(kept.creationDate()).isEqualTo(created.creationDate());
+        assertThat(groupNames(p1)).containsExactly(generated);
+        assertThat(groupNames(p2)).isEmpty();
+
+        deleteStack();
+        assertThat(groupNames(p1)).isEmpty();
+        assertThat(groupNames(p2)).isEmpty();
+    }
+
+    @Test
     @DisplayName("Removing GroupName replaces the named group with a generated one and deletes the named group")
     void removingTheGroupNameReplacesTheGroupWithAGeneratedName() throws InterruptedException {
         String name = stackName + "-n1";
@@ -357,6 +389,12 @@ class CloudFormationCognitoUserPoolGroupTest {
             }
             return false;
         }, expected);
+    }
+
+    private List<StackEvent> groupEvents() {
+        return cfn.describeStackEvents(r -> r.stackName(stackId)).stackEvents().stream()
+                .filter(event -> "Group".equals(event.logicalResourceId()))
+                .toList();
     }
 
     private String failedEvents() {
