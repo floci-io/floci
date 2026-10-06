@@ -14,7 +14,9 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
 import java.util.function.IntConsumer;
@@ -172,7 +174,13 @@ public final class S3CopySimulator {
     }
 
     static void streamCopyInput(CopyInput input, List<String> discoveredColumns, OutputStream backendOut) throws IOException {
-        streamObjects(input.spec(), discoveredColumns, input.s3(), input.iamService(), input.roleSession(), input.keys(), backendOut);
+        streamCopyInput(input, discoveredColumns, null, backendOut);
+    }
+
+    static void streamCopyInput(CopyInput input, List<String> discoveredColumns,
+                                List<Integer> columnMaxBytes, OutputStream backendOut) throws IOException {
+        streamObjects(input.spec(), discoveredColumns, columnMaxBytes, input.s3(), input.iamService(),
+                input.roleSession(), input.keys(), backendOut);
     }
 
     static void releaseCopySession(CopyInput input) {
@@ -294,11 +302,21 @@ public final class S3CopySimulator {
         }
 
         try {
+            boolean noColumnList = spec.columns() == null || spec.columns().isEmpty();
+            boolean discoverForJson = spec.jsonAuto() && noColumnList;
+            boolean truncate = spec.transforms().truncateColumns();
             List<String> discoveredColumns = null;
-            if (spec.jsonAuto() && (spec.columns() == null || spec.columns().isEmpty())) {
-                discoveredColumns = discoverTableColumns(client, backend, spec, txStatus, onStatusChange);
-                if (discoveredColumns == null) {
+            List<Integer> columnMaxBytes = null;
+            if (discoverForJson || truncate) {
+                List<ColumnInfo> catalog = discoverColumnInfo(client, backend, spec, txStatus, onStatusChange);
+                if (catalog == null) {
                     return true;
+                }
+                if (discoverForJson) {
+                    discoveredColumns = catalog.stream().map(ColumnInfo::name).toList();
+                }
+                if (truncate) {
+                    columnMaxBytes = alignMaxBytes(spec, catalog);
                 }
             }
 
@@ -336,7 +354,7 @@ public final class S3CopySimulator {
             // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
             // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
             try {
-                streamCopyInput(input, discoveredColumns, backendOut);
+                streamCopyInput(input, discoveredColumns, columnMaxBytes, backendOut);
                 writeCopyDone(backendOut);
                 drainToReadyForQuery(backendDecoder, client, onStatusChange);
             } catch (RuntimeException | IOException e) {
@@ -431,8 +449,15 @@ public final class S3CopySimulator {
     }
 
     private static void streamObjects(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns,
-                                      S3Service s3, IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
+                                      List<Integer> columnMaxBytes, S3Service s3, IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
                                       List<String> keys, OutputStream backendOut) throws IOException {
+        if (spec.transforms().truncateColumns() && columnMaxBytes == null) {
+            // Extended Query fixes the statement at Parse time, so there is no catalog round trip to
+            // learn column lengths; same limitation and remedy as FORMAT AS JSON 'auto'.
+            throw new S3TransferException(SQLSTATE_INTERNAL,
+                    "COPY ... TRUNCATECOLUMNS needs catalog column lengths, which are only available over "
+                            + "the Simple Query protocol; connect with preferQueryMode=simple", null);
+        }
         byte[] buffer = new byte[CHUNK];
         for (int i = 0; i < keys.size(); i++) {
             if (roleSession != null) {
@@ -459,10 +484,15 @@ public final class S3CopySimulator {
                     if (i == 0 && spec.headerLines() > 0) {
                         skipLines(in, spec.headerLines());
                     }
+                    InputStream source = in;
+                    if (spec.transforms().any()) {
+                        source = new ByteArrayInputStream(
+                                new CopyRecordTransformer(spec, columnMaxBytes).apply(in.readAllBytes()));
+                    }
                     int read;
                     boolean endsWithNewline = false;
                     boolean hasData = false;
-                    while ((read = in.read(buffer)) != -1) {
+                    while ((read = source.read(buffer)) != -1) {
                         if (read > 0) {
                             hasData = true;
                             endsWithNewline = (buffer[read - 1] == '\n');
@@ -478,10 +508,50 @@ public final class S3CopySimulator {
         backendOut.flush();
     }
 
-    private static List<String> discoverTableColumns(Socket client, Socket backend,
-                                                     CopyStatementParser.S3CopyFrom spec,
-                                                     char txStatus, IntConsumer onStatusChange) throws IOException {
-        String query = "SELECT a.attname FROM pg_catalog.pg_attribute a "
+    record ColumnInfo(String name, Integer maxBytes) {
+    }
+
+    /** Positional max byte length per COPY column; null entries mean no limit. */
+    static List<Integer> alignMaxBytes(CopyStatementParser.S3CopyFrom spec, List<ColumnInfo> catalog) {
+        if (spec.columns() == null || spec.columns().isEmpty()) {
+            return catalog.stream().map(ColumnInfo::maxBytes).toList();
+        }
+        Map<String, Integer> byName = new HashMap<>();
+        for (ColumnInfo info : catalog) {
+            byName.put(info.name(), info.maxBytes());
+        }
+        List<Integer> aligned = new ArrayList<>();
+        for (String column : spec.columns()) {
+            String key = column.startsWith("\"") ? unquoteIdentifier(column) : column.toLowerCase(Locale.ROOT);
+            aligned.add(byName.get(key));
+        }
+        return aligned;
+    }
+
+    private static List<String> parseDataRow(byte[] body) {
+        int count = ((body[0] & 0xFF) << 8) | (body[1] & 0xFF);
+        List<String> values = new ArrayList<>(count);
+        int offset = 2;
+        for (int i = 0; i < count; i++) {
+            int length = ((body[offset] & 0xFF) << 24) | ((body[offset + 1] & 0xFF) << 16)
+                    | ((body[offset + 2] & 0xFF) << 8) | (body[offset + 3] & 0xFF);
+            offset += 4;
+            if (length < 0) {
+                values.add(null);
+                continue;
+            }
+            values.add(new String(body, offset, length, StandardCharsets.UTF_8));
+            offset += length;
+        }
+        return values;
+    }
+
+    private static List<ColumnInfo> discoverColumnInfo(Socket client, Socket backend,
+                                                       CopyStatementParser.S3CopyFrom spec,
+                                                       char txStatus, IntConsumer onStatusChange) throws IOException {
+        // 1042 = bpchar, 1043 = varchar; atttypmod carries the declared length plus a 4-byte header.
+        String query = "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
+                + "THEN a.atttypmod - 4 END FROM pg_catalog.pg_attribute a "
                 + "WHERE a.attrelid = to_regclass('" + quoteLiteral(spec.targetTable()) + "') "
                 + "AND a.attnum > 0 AND NOT a.attisdropped "
                 + "ORDER BY a.attnum";
@@ -491,21 +561,17 @@ public final class S3CopySimulator {
         backendOut.flush();
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
-        List<String> cols = new ArrayList<>();
+        List<ColumnInfo> cols = new ArrayList<>();
         PostgresWireDecoder.FrontendMessage msg;
         while ((msg = backendDecoder.nextMessage()) != null) {
             char type = msg.type();
             if (type == 'D') {
-                byte[] body = msg.body();
-                if (body.length >= 6) {
-                    int colCount = ((body[0] & 0xFF) << 8) | (body[1] & 0xFF);
-                    if (colCount >= 1) {
-                        int colLen = ((body[2] & 0xFF) << 24) | ((body[3] & 0xFF) << 16)
-                                | ((body[4] & 0xFF) << 8) | (body[5] & 0xFF);
-                        if (colLen > 0 && 6 + colLen <= body.length) {
-                            cols.add(new String(body, 6, colLen, StandardCharsets.UTF_8));
-                        }
-                    }
+                List<String> values = parseDataRow(msg.body());
+                if (!values.isEmpty() && values.get(0) != null) {
+                    Integer maxBytes = values.size() >= 2 && values.get(1) != null
+                            ? Integer.valueOf(values.get(1))
+                            : null;
+                    cols.add(new ColumnInfo(values.get(0), maxBytes));
                 }
             } else if (type == 'E') {
                 forward(client, msg);
@@ -1134,6 +1200,11 @@ public final class S3CopySimulator {
         String base = spec.parallel()
                 ? spec.prefix() + String.format("%04d_part_00", index)
                 : spec.prefix() + String.format("%03d", index);
+        if (spec.extension() != null) {
+            // AWS adds the compression suffix only when no extension is given (its example is
+            // EXTENSION 'txt.gz' GZIP), so the caller's extension is the whole suffix.
+            return spec.extension().startsWith(".") ? base + spec.extension() : base + "." + spec.extension();
+        }
         return spec.gzip() ? base + ".gz" : base;
     }
 
