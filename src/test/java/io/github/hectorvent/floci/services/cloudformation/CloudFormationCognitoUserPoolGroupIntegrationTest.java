@@ -421,8 +421,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
     }
 
     private static String output(String describeXml, String key) {
-        return describeXml.split("<OutputKey>" + key + "</OutputKey>")[1]
-                .split("<OutputValue>")[1].split("</OutputValue>")[0];
+        return XmlParser.extractPairs(describeXml, "Outputs", "OutputKey", "OutputValue").get(key);
     }
 
     private io.restassured.response.ValidatableResponse cognito(String target, String body) {
