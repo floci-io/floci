@@ -7,13 +7,16 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * Decodes an aws-chunked body as it is read, so a streaming upload is never held whole. Each chunk
  * header ({@code hex-size[;chunk-signature=...]}) is consumed and only the chunk data comes out, up
- * to the final empty chunk and the trailer lines and empty line after it. Chunk signatures and
- * trailing checksums are not checked, as they were not when the body was decoded in one piece. A
- * body that breaks the framing or ends early fails with S3's {@code IncompleteBody}.
+ * to the final empty chunk and the trailer lines and empty line after it. Chunk signatures are not
+ * checked. Trailer lines are kept so the caller can compare a trailing checksum once the body has
+ * been read. A body that breaks the framing or ends early fails with S3's {@code IncompleteBody}.
  */
 final class AwsChunkedInputStream extends InputStream {
 
@@ -22,6 +25,7 @@ final class AwsChunkedInputStream extends InputStream {
     private static final int MAX_LINE_LENGTH = 8192;
 
     private final InputStream in;
+    private final Map<String, String> trailers = new LinkedHashMap<>();
     private long remainingInChunk;
     private boolean finished;
 
@@ -60,6 +64,14 @@ final class AwsChunkedInputStream extends InputStream {
         in.close();
     }
 
+    /**
+     * Trailer lines of the final chunk, keyed by lower-case header name, once the body has been
+     * read to completion. Empty before then.
+     */
+    Map<String, String> trailers() {
+        return Map.copyOf(trailers);
+    }
+
     /** Reads the next chunk header; false once the final chunk and its trailer are consumed. */
     private boolean nextChunk() throws IOException {
         if (finished) {
@@ -85,6 +97,11 @@ final class AwsChunkedInputStream extends InputStream {
         // that ends the body.
         String trailer = readLine();
         while (!trailer.isEmpty()) {
+            int colon = trailer.indexOf(':');
+            if (colon > 0) {
+                trailers.put(trailer.substring(0, colon).trim().toLowerCase(Locale.ROOT),
+                        trailer.substring(colon + 1).trim());
+            }
             trailer = readLine();
         }
         finished = true;

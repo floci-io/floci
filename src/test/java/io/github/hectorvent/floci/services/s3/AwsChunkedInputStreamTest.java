@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -25,6 +26,18 @@ class AwsChunkedInputStreamTest {
     void skipsTrailerLinesAfterTheFinalChunk() throws IOException {
         assertEquals("hello", decode("5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n"
                 + "x-amz-trailer-signature:ghi\r\n\r\n"));
+    }
+
+    @Test
+    void exposesTrailerLinesOnceTheBodyIsRead() throws IOException {
+        try (AwsChunkedInputStream in = new AwsChunkedInputStream(new ByteArrayInputStream(
+                ("5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n"
+                        + "x-amz-trailer-signature:ghi\r\n\r\n").getBytes(StandardCharsets.US_ASCII)))) {
+            assertEquals("hello", new String(in.readAllBytes(), StandardCharsets.US_ASCII));
+            assertEquals(Map.of(
+                    "x-amz-checksum-crc32", "NhCmhg==",
+                    "x-amz-trailer-signature", "ghi"), in.trailers());
+        }
     }
 
     @Test

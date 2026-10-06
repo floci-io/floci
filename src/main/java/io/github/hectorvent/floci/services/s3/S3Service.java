@@ -656,15 +656,12 @@ public class S3Service implements Resettable, ResourceProvider {
         // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
         ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
                 : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
-        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
-        algorithms.addAll(checksums.algorithms());
-        if (computed != null) {
-            algorithms.add(computed);
-        }
-        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(body, checksums, computed));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
             S3Checksum checksum = null;
             if (computed != null) {
                 checksum = new S3Checksum();
@@ -3871,12 +3868,12 @@ public class S3Service implements Resettable, ResourceProvider {
                     sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
         }
         ChecksumAlgorithm algorithm = declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
-        Set<ChecksumAlgorithm> algorithms = EnumSet.of(algorithm);
-        algorithms.addAll(checksums.algorithms());
-        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(body, checksums, algorithm));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
             S3Checksum partChecksum = new S3Checksum();
             partChecksum.setValueFor(algorithm, digests.checksum(algorithm));
             return withMultipartOperationLock(bucket, uploadId, () -> {
@@ -3908,7 +3905,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * with EntityTooLarge once it outgrows the largest array the JDK allocates.
      */
     private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
-        DigestingInputStream digests = new DigestingInputStream(body, checksums.algorithms());
+        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(body, checksums, null));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[64 * 1024];
         try {
@@ -3920,7 +3917,32 @@ public class S3Service implements Resettable, ResourceProvider {
             throw new UncheckedIOException("Failed to read the upload body", e);
         }
         checksums.verify(digests.md5(), digests::checksum);
+        verifyChunkedTrailers(body, digests, checksums);
         return out.toByteArray();
+    }
+
+    /**
+     * Algorithms hashed as a body is read. An aws-chunked body is hashed with every algorithm, so a
+     * trailing checksum can be checked even when it is not the algorithm stored on the object.
+     */
+    private static Set<ChecksumAlgorithm> digestAlgorithms(InputStream body, UploadChecksums checksums,
+                                                           ChecksumAlgorithm stored) {
+        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
+        algorithms.addAll(checksums.algorithms());
+        if (stored != null) {
+            algorithms.add(stored);
+        }
+        if (body instanceof AwsChunkedInputStream) {
+            algorithms.addAll(EnumSet.allOf(ChecksumAlgorithm.class));
+        }
+        return algorithms;
+    }
+
+    private static void verifyChunkedTrailers(InputStream body, DigestingInputStream digests,
+                                              UploadChecksums checksums) {
+        if (body instanceof AwsChunkedInputStream chunked) {
+            checksums.verifyTrailers(chunked.trailers(), digests::checksum);
+        }
     }
 
     /**

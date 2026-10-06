@@ -3158,7 +3158,24 @@ public class S3Controller {
                 claimed.put(algorithm, value);
             }
         }
-        return new UploadChecksums(httpHeaders.getHeaderString("Content-MD5"), claimed);
+        return new UploadChecksums(httpHeaders.getHeaderString("Content-MD5"), claimed,
+                trailerChecksumAlgorithm(resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer")));
+    }
+
+    /** The checksum algorithm an {@code x-amz-trailer} value names, as {@code x-amz-checksum-crc32}. */
+    private static ChecksumAlgorithm trailerChecksumAlgorithm(String trailer) {
+        if (trailer == null || trailer.isBlank()) {
+            return null;
+        }
+        String prefix = "x-amz-checksum-";
+        for (String name : trailer.split(",")) {
+            String headerName = name.trim();
+            if (headerName.length() > prefix.length()
+                    && headerName.regionMatches(true, 0, prefix, 0, prefix.length())) {
+                return ChecksumAlgorithm.fromWireValue(headerName.substring(prefix.length()));
+            }
+        }
+        return null;
     }
 
     static boolean isWebsiteRequest(HttpHeaders httpHeaders, UriInfo uriInfo) {
