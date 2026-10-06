@@ -355,13 +355,13 @@ public class CloudFormationService implements ResourceProvider {
         // of throwing, so this failure is reported by the change set, not by a 400 on creation.
         String samTransformFailureReason = samTransformFailureReason(stackName, resolvedTemplate);
 
-        // Reject an unresolvable condition dependency graph up front, before any stack state is
+        // Reject an unresolvable or circular dependency graph up front, before any stack state is
         // created, so CreateStack/UpdateStack fail synchronously the way real CloudFormation does.
-        // Unconditional: validateConditionDependencies already returns immediately for any
+        // Unconditional: validateResourceDependencies already returns immediately for any
         // template declaring the SAM transform, whether or not that transform succeeded, so
         // gating this call on samTransformFailureReason == null duplicates that check for no
         // effect.
-        validateConditionDependencies(resolvedTemplate, parameters, region, accountId);
+        validateResourceDependencies(resolvedTemplate, parameters, region, accountId);
 
         // A CREATE change set against a name that already has a stack of any status - including
         // ROLLBACK_COMPLETE - is a real conflict: AWS requires an explicit DeleteStack before a
@@ -498,7 +498,7 @@ public class CloudFormationService implements ResourceProvider {
         try {
             template = parseTemplate(templateBody);
         } catch (Exception e) {
-            // Template parse failures are reported by validateConditionDependencies and by
+            // Template parse failures are reported by validateResourceDependencies and by
             // execution itself, with their own messages; not this transform-specific one.
             return null;
         }
@@ -2506,16 +2506,17 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * Fails a create/update before any stack state is mutated when a resource that will be created
-     * depends on a resource excluded by a false condition. Real CloudFormation rejects such a
-     * template synchronously ("Template format error: Unresolved resource dependencies [...]")
-     * rather than silently skipping the dependent, so mirror that instead of dropping the resource.
+     * depends on a resource excluded by a false condition, or when resources depend on each other
+     * in a cycle. Real CloudFormation rejects such a template synchronously ("Template format
+     * error: Unresolved resource dependencies [...]" or "Circular dependency between resources:
+     * [...]") rather than skipping the dependent or picking an arbitrary order, so mirror that.
      * Malformed or SAM templates are left for the execution path, which surfaces their own errors.
      * A template carrying an unexpanded {@code Fn::Transform}/{@code AWS::Include} is left for the
      * same reason: a {@code Conditions} section spliced in from a snippet is invisible here, since
      * the merge has not run yet, and treating it as absent would fail a template whose dependency
      * graph the execution path resolves correctly.
      */
-    private void validateConditionDependencies(String templateBody, Map<String, String> params,
+    private void validateResourceDependencies(String templateBody, Map<String, String> params,
                                                String region, String accountId) {
         JsonNode template;
         try {
@@ -2537,23 +2538,8 @@ public class CloudFormationService implements ResourceProvider {
         Map<String, Boolean> conditions =
                 resolveConditions(template, resolvedParams, null, region, accountId);
 
-        Set<String> allIds = new LinkedHashSet<>();
-        resources.fieldNames().forEachRemaining(allIds::add);
-        Set<String> activeIds = new LinkedHashSet<>();
-        Map<String, Set<String>> dependencies = new HashMap<>();
-        for (String logicalId : allIds) {
-            JsonNode resDef = resources.get(logicalId);
-            String condition = resDef.path("Condition").asText(null);
-            if (condition == null || conditions.getOrDefault(condition, false)) {
-                activeIds.add(logicalId);
-            }
-            dependencies.put(logicalId, collectResourceDependencies(resDef, allIds, conditions));
-        }
-
-        Set<String> unresolved = unresolvedConditionDependencies(activeIds, allIds, dependencies);
-        if (!unresolved.isEmpty()) {
-            throw unresolvedDependenciesError(unresolved);
-        }
+        // Throws the ValidationError for either case; the order itself is computed again on execution.
+        topologicalSort(resources, conditions);
     }
 
     private boolean evaluateCondition(JsonNode expr, Map<String, String> params,
@@ -3128,10 +3114,13 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
 
-        for (String id : activeIds) {
-            if (!sorted.contains(id)) {
-                sorted.add(id);
-            }
+        // A resource left unsorted is in a dependency cycle or depends on one, so no creation
+        // order exists; AWS rejects such a template instead of creating it in an arbitrary order.
+        if (sorted.size() < activeIds.size()) {
+            Set<String> unsorted = new LinkedHashSet<>(activeIds);
+            unsorted.removeAll(sorted);
+            throw new AwsException("ValidationError",
+                    "Circular dependency between resources: [" + String.join(", ", unsorted) + "]", 400);
         }
 
         return sorted;
