@@ -251,6 +251,20 @@ class CognitoUserPoolGroupCfnProvisionerTest {
     }
 
     @Test
+    void aLegacyResourceWithAGeneratedLookingExplicitNameUpdatesInPlace() {
+        // Persisted before the name mode was recorded: the shape cannot tell an explicit name from
+        // a generated one, so declaring the same name keeps the pre-mode in-place update.
+        StackResource r = resource("my-stack-AdminGroup-0123456789ab");
+        r.setAttributes(new HashMap<>(Map.of("UserPoolId", "us-east-1_a")));
+
+        provisioner.provision(r, props("us-east-1_a", "my-stack-AdminGroup-0123456789ab"),
+                ctx("my-stack-AdminGroup-0123456789ab"));
+
+        verify(cognito).updateGroup("us-east-1_a", "my-stack-AdminGroup-0123456789ab", null, null, null);
+        verify(cognito, never()).createGroup(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void droppingTheExplicitNameReplacesTheGroupUnderAGeneratedNameAndDeletesTheNamedOne() {
         StackResource r = resource(null);
         provisioner.provision(r, props("us-east-1_a", "admin"), ctx());
