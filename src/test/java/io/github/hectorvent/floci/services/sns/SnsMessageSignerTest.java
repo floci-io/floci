@@ -23,8 +23,12 @@ import java.util.Base64;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 class SnsMessageSignerTest {
@@ -56,6 +60,38 @@ class SnsMessageSignerTest {
         assertEquals(signer.certificateUrl(), sns.get("SigningCertUrl").asText());
         assertTrue(sns.get("UnsubscribeUrl").asText().startsWith(BASE_URL + "/?Action=Unsubscribe&SubscriptionArn="));
         assertTrue(verifies(signer, sns, "SigningCertUrl", "SHA1withRSA"));
+    }
+
+    @Test
+    void signingFailure_doesNotDeliverAnUnsignedPlaceholder() {
+        SnsMessageSigner signer = mock(SnsMessageSigner.class);
+        doThrow(new IllegalStateException("Failed to sign SNS message"))
+                .when(signer).sign(any(ObjectNode.class), anyString(), anyString());
+        LambdaService lambdaService = mock(LambdaService.class);
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), null, lambdaService, null, BASE_URL, MAPPER, signer);
+        Topic topic = service.createTopic("unsigned-lambda-topic", null, null, REGION);
+        String functionArn = "arn:aws:lambda:us-east-1:000000000000:function:unsigned";
+        service.subscribe(topic.getTopicArn(), "lambda", functionArn, REGION, Map.of());
+
+        service.publish(topic.getTopicArn(), null, "hello lambda", null, REGION);
+
+        verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any(InvocationType.class));
+    }
+
+    @Test
+    void reset_generatesANewKeyInsteadOfRestoringTheOldOne() {
+        AccountAwareStorageBackend<SnsSigningKey> store = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        SnsMessageSigner signer = newSigner(store);
+        String before = signer.certificateUrl();
+
+        store.clear();
+        signer.clear();
+        String after = signer.certificateUrl();
+
+        assertNotEquals(before, after);
+        assertEquals(after, newSigner(store).certificateUrl());
     }
 
     @Test

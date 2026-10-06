@@ -1,14 +1,15 @@
 package io.github.hectorvent.floci.services.sns;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.sns.model.SnsSigningKey;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -40,7 +41,7 @@ import java.util.Optional;
  * that caches certificates by URL can never verify against a stale one.
  */
 @ApplicationScoped
-public class SnsMessageSigner {
+public class SnsMessageSigner implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SnsMessageSigner.class);
 
@@ -121,6 +122,12 @@ public class SnsMessageSigner {
         return Optional.empty();
     }
 
+    /** Drops the cached key, so the next delivery after a reset generates and stores a new one. */
+    @Override
+    public synchronized void clear() {
+        material = null;
+    }
+
     static String canonicalString(JsonNode node) {
         String type = node.path("Type").asText("");
         List<String> fields = "Notification".equals(type) ? NOTIFICATION_FIELDS : CONFIRMATION_FIELDS;
@@ -153,9 +160,6 @@ public class SnsMessageSigner {
     private Material material() {
         Material current = material;
         if (current != null) {
-            if (keyStore.getForAccount(storeAccountId, STORE_KEY).isEmpty()) {
-                keyStore.putForAccount(storeAccountId, STORE_KEY, current.stored());
-            }
             return current;
         }
         synchronized (this) {

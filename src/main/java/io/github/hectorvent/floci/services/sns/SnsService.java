@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -2070,7 +2071,7 @@ public class SnsService implements Resettable, ResourceProvider {
             ObjectNode root = objectMapper.createObjectNode();
             root.putArray("Records").add(record);
             return objectMapper.writeValueAsString(root);
-        } catch (Exception e) {
+        } catch (JsonProcessingException e) {
             return "{\"Records\":[]}";
         }
     }
@@ -2155,7 +2156,7 @@ public class SnsService implements Resettable, ResourceProvider {
                 }
             }
             return objectMapper.writeValueAsString(node);
-        } catch (Exception e) {
+        } catch (JsonProcessingException e) {
             LOG.warnv("Failed to build SNS envelope for {0}: {1}", subscriptionArn, e.getMessage());
             return "{}";
         }
@@ -2201,7 +2202,7 @@ public class SnsService implements Resettable, ResourceProvider {
                 }
             }
             return objectMapper.writeValueAsString(node);
-        } catch (Exception e) {
+        } catch (JsonProcessingException e) {
             return "{}";
         }
     }

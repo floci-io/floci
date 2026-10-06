@@ -25,7 +25,7 @@ import java.util.List;
  * <p>GET  /_aws/sns?phone=X   — filter by phone number (URL-encoded)
  * <p>GET  /_aws/sns?id=X      — filter by message ID
  * <p>DELETE /_aws/sns         — clear all stored SMS
- * <p>GET  /_aws/sns/SimpleNotificationService-&lt;fingerprint&gt;.pem — the certificate deliveries
+ * <p>GET  /_aws/sns/SimpleNotificationService-&lt;fingerprint&gt;.pem: the certificate deliveries
  *     are signed with, the {@code SigningCertURL} of every signed message
  */
 @Path("/_aws/sns")

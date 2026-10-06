@@ -143,7 +143,8 @@ messages, Lambda records, and the JSON envelope SQS subscriptions receive withou
   `{base-url}/_aws/sns/SimpleNotificationService-<fingerprint>.pem`.
 
 The key is kept in SNS storage, so persistent storage keeps the same certificate across restarts
-and memory storage generates a new one per process. The fingerprint in the file name changes with
+and memory storage generates a new one per process. A state reset discards the key and the next
+delivery generates a new one. The fingerprint in the file name changes with
 the key, so a consumer that caches certificates by URL never verifies against a stale one. A
 consumer that also requires the certificate host to be an AWS SNS domain must relax that check
 locally.
