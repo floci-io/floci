@@ -37,6 +37,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -46,6 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -579,6 +584,102 @@ class CognitoLambdaTriggersTest {
         CognitoUser after = service.adminGetUser(pool.getId(), holder.getUsername());
         assertEquals("alice@example.com", after.getAttributes().get("email"));
         assertEquals("true", after.getAttributes().get("email_verified"));
+    }
+
+    @Test
+    void preSignUpFunctionCallingBackForTheSameUsernameIsNotBlocked() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    callFromFunction(() -> service.adminCreateUser(pool.getId(), "alice",
+                            Map.of("name", "created by the function"), null, "SUPPRESS"));
+                    return ok(Map.of());
+                })
+                .thenReturn(ok(Map.of()));
+
+        // The function's call needs the lock stripe of the username being created, so it would
+        // wait out the invocation if AdminCreateUser held that stripe while the function ran.
+        AwsException ex = assertTimeoutPreemptively(Duration.ofSeconds(10), () ->
+                assertThrows(AwsException.class, () -> service.adminCreateUser(pool.getId(), "alice",
+                        Map.of("name", "created by the request"), null, "SUPPRESS")));
+
+        assertEquals("UsernameExistsException", ex.getErrorCode());
+        assertEquals("created by the function",
+                service.adminGetUser(pool.getId(), "alice").getAttributes().get("name"));
+    }
+
+    @Test
+    void forcedAliasCreationDoesNotRestoreAHolderThePreSignUpFunctionDeleted() {
+        UserPool pool = createEmailUsernamePoolWithPreSignUp();
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), any()))
+                .thenReturn(ok(Map.of()))
+                .thenAnswer(invocation -> {
+                    callFromFunction(() -> {
+                        service.adminDeleteUser(pool.getId(), "alice@example.com");
+                        return null;
+                    });
+                    return ok(Map.of());
+                });
+        CognitoUser holder = service.adminCreateUser(pool.getId(), "alice@example.com",
+                Map.of("email_verified", "true"), null, "SUPPRESS");
+
+        CognitoUser created = service.adminCreateUser(pool.getId(), "alice@example.com",
+                Map.of("email_verified", "true"), null, "SUPPRESS", true);
+
+        AwsException lookup = assertThrows(AwsException.class, () ->
+                service.adminGetUser(pool.getId(), holder.getUsername()));
+        assertEquals("UserNotFoundException", lookup.getErrorCode());
+        assertEquals(created.getUsername(),
+                service.adminGetUser(pool.getId(), "alice@example.com").getUsername());
+    }
+
+    @Test
+    void forcedAliasCreationKeepsTheEmailThePreSignUpFunctionGaveTheHolder() {
+        UserPool pool = createEmailUsernamePoolWithPreSignUp();
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), any()))
+                .thenReturn(ok(Map.of()))
+                .thenAnswer(invocation -> {
+                    callFromFunction(() -> {
+                        service.adminUpdateUserAttributes(pool.getId(), "alice@example.com",
+                                Map.of("email", "alice.new@example.com"));
+                        return null;
+                    });
+                    return ok(Map.of());
+                });
+        CognitoUser holder = service.adminCreateUser(pool.getId(), "alice@example.com",
+                Map.of("email_verified", "true"), null, "SUPPRESS");
+
+        CognitoUser created = service.adminCreateUser(pool.getId(), "alice@example.com",
+                Map.of("email_verified", "true"), null, "SUPPRESS", true);
+
+        assertEquals("alice.new@example.com",
+                service.adminGetUser(pool.getId(), holder.getUsername()).getAttributes().get("email"));
+        assertEquals(created.getUsername(),
+                service.adminGetUser(pool.getId(), "alice@example.com").getUsername());
+    }
+
+    private UserPool createEmailUsernamePoolWithPreSignUp() {
+        Map<String, Object> poolRequest = new HashMap<>();
+        poolRequest.put("PoolName", "alias-trigger-pool");
+        poolRequest.put("UsernameAttributes", List.of("email"));
+        poolRequest.put("LambdaConfig", Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        return service.createUserPool(poolRequest, "us-east-1");
+    }
+
+    /**
+     * Makes {@code call} the way a trigger function's SDK call reaches Floci: from another thread,
+     * while the request that invoked the function waits for it to return.
+     */
+    private static <T> T callFromFunction(Callable<T> call) throws Exception {
+        ExecutorService functionThread = Executors.newSingleThreadExecutor();
+        try {
+            return functionThread.submit(call).get(30, TimeUnit.SECONDS);
+        } finally {
+            functionThread.shutdownNow();
+        }
     }
 
     // =========================================================================
