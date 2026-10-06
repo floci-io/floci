@@ -146,7 +146,7 @@ class CloudFormationStackIdUpdateIntegrationTest {
     }
 
     @Test
-    void aDeletedStacksIdDoesNotUpdateANewStackOfTheSameName() {
+    void aDeletedStackIdDoesNotUpdateANewStackOfTheSameName() {
         String stackName = "stack-id-stale-" + Long.toString(System.nanoTime(), 36);
         String staleStackId = createStack(stackName);
         given()
