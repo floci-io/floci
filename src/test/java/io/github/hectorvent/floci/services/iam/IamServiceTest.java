@@ -23,14 +23,18 @@ import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -39,6 +43,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiPredicate;
+import java.util.function.Predicate;
 
 import static io.github.hectorvent.floci.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
 import static org.junit.jupiter.api.Assertions.*;
@@ -239,6 +245,80 @@ class IamServiceTest {
                 service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
         // An expired session answers for neither, never for one and not the other.
         assertTrue(service.resolveCallerArns("ASIAEXPIREDSESSION").isEmpty());
+    }
+
+    @Test
+    void sessionExpiryFollowsTheInjectedClock() {
+        MutableClock clock = new MutableClock();
+        IamService service = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false, clock);
+        service.createRole("ClockRole", "/", "{}", null, 3600, null);
+        Map<String, Predicate<String>> lookups = new LinkedHashMap<>();
+        lookups.put("secret key", key -> service.findSecretKey(key, "token").isPresent());
+        lookups.put("account", key -> service.resolveAccountId(key).isPresent());
+        lookups.put("caller context", key -> service.resolveCallerContext(key) != null);
+        lookups.put("caller ARNs", key -> service.resolveCallerArns(key).isPresent());
+        lookups.put("user ID", key -> service.resolveCallerUserId(key, "token").isPresent());
+
+        int sessionNumber = 0;
+        for (Map.Entry<String, Predicate<String>> lookup : lookups.entrySet()) {
+            // A fresh session per lookup: some lookups delete a session they find expired.
+            String accessKeyId = "ASIACLOCKSESSION" + sessionNumber++;
+            service.registerSession(accessKeyId, "secret", "token", "arn:aws:iam::000000000000:role/ClockRole",
+                    clock.instant().plusSeconds(60), null, "000000000000", "s", "AROACLOCKROLE:s");
+            assertTrue(lookup.getValue().test(accessKeyId), lookup.getKey() + " before expiry");
+            clock.advance(Duration.ofSeconds(61));
+            assertFalse(lookup.getValue().test(accessKeyId), lookup.getKey() + " after expiry");
+        }
+    }
+
+    @Test
+    void aSessionIsExpiredFromTheInstantItsExpirationNames() {
+        // Every lookup, the enforcement check and the sweep draw the same boundary, so none of them
+        // accepts a session another one already treats as expired.
+        Instant expiration = Instant.parse("2026-01-01T00:01:00Z");
+        Map<String, BiPredicate<IamService, String>> expired = new LinkedHashMap<>();
+        expired.put("secret key", (service, key) -> service.findSecretKey(key, "token").isEmpty());
+        expired.put("account", (service, key) -> service.resolveAccountId(key).isEmpty());
+        expired.put("caller context", (service, key) -> service.resolveCallerContext(key) == null);
+        expired.put("caller ARNs", (service, key) -> service.resolveCallerArns(key).isEmpty());
+        expired.put("user ID", (service, key) -> service.resolveCallerUserId(key, "token").isEmpty());
+        expired.put("enforcement", (service, key) -> service.isExpiredSession(key, expiration));
+        expired.put("sweep", (service, key) -> service.sweepExpiredSessions() == 1);
+
+        for (Map.Entry<String, BiPredicate<IamService, String>> check : expired.entrySet()) {
+            // A fresh service per check: some checks delete a session they find expired.
+            IamService service = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                    new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                    new InMemoryStorage<>(), new InMemoryStorage<>(),
+                    new RegionResolver("us-east-1", "000000000000"), false, Clock.fixed(expiration, ZoneOffset.UTC));
+            service.createRole("ClockRole", "/", "{}", null, 3600, null);
+            service.registerSession("ASIABOUNDARYSESSION", "secret", "token",
+                    "arn:aws:iam::000000000000:role/ClockRole", expiration, null, "000000000000", "s",
+                    "AROACLOCKROLE:s");
+            assertTrue(check.getValue().test(service, "ASIABOUNDARYSESSION"), check.getKey());
+        }
+    }
+
+    @Test
+    void theExpiredSessionSweepFollowsTheInjectedClock() {
+        // The presigned URL generator sweeps every stored session on its first URL, so a session
+        // live on the clock, as a Sign-In session is in tests, has to survive it.
+        MutableClock clock = new MutableClock();
+        IamService service = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false, clock);
+        service.registerSession("ASIALIVESESSION", "secret", "token", "arn:aws:iam::000000000000:role/ClockRole",
+                clock.instant().plusSeconds(60), null, "000000000000", "s", "AROACLOCKROLE:s");
+        service.registerSession("ASIAPASTSESSION", "secret", "token", "arn:aws:iam::000000000000:role/ClockRole",
+                clock.instant().minusSeconds(1), null, "000000000000", "s", "AROACLOCKROLE:s");
+
+        assertEquals(1, service.sweepExpiredSessions());
+        assertTrue(service.findSecretKey("ASIALIVESESSION", "token").isPresent());
+
+        clock.advance(Duration.ofSeconds(61));
+        assertEquals(1, service.sweepExpiredSessions());
     }
 
     private static final String READ_S3 = """

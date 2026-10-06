@@ -1,23 +1,33 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
+import java.net.URI;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.Map;
+import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -27,7 +37,7 @@ import static org.hamcrest.Matchers.equalTo;
 
 /**
  * {@code floci.auth.validate-signatures} authenticates every signed S3 request, whichever
- * placement carries the signature, without authorizing it: a forged or unknown credential is
+ * placement carries the signature, without authorizing it: a forged, unknown or expired credential is
  * refused, while bucket policies are not evaluated and unsigned requests pass, as they do with
  * {@code enforce-auth} off. Shares {@link ValidateSignaturesProfile} with
  * {@link PreSignedUrlIntegrationTest}, which covers the presigned query-string placement.
@@ -47,8 +57,15 @@ class S3ValidateSignaturesIntegrationTest {
             "Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*"}]}
             """.formatted(BUCKET);
 
+    private static final String SIGNIN_CLIENT_ID = "arn:aws:signin:::devtools/same-device";
+    private static final String SIGNIN_REDIRECT_URI = "http://127.0.0.1:4567/oauth/callback";
+    private static final String SIGNIN_VERIFIER = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+
     private static String userAccessKeyId;
     private static String userSecretKey;
+
+    @Inject
+    MutableClock clock;
 
     @Test
     void layerContentLocationCanBeFetchedWithSignatureValidationEnabled() throws Exception {
@@ -294,6 +311,84 @@ class S3ValidateSignaturesIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("<Code>AuthorizationHeaderMalformed</Code>"));
+    }
+
+    @Test
+    @Order(34)
+    void headerSignedRequestsWithSigninCredentialsAreAcceptedUntilTheyExpire() throws Exception {
+        // Sign-In stamps its access token's expiry from the injected clock, so IAM measures it on the same one.
+        Response token = signIn();
+        S3RequestSigner signinSigner = S3RequestSigner.signedAs(token.path("accessToken.accessKeyId"),
+                token.path("accessToken.secretAccessKey"), token.path("accessToken.sessionToken"));
+        given()
+            .filter(signinSigner)
+        .when()
+            .get("/" + BUCKET + "/" + KEY)
+        .then()
+            .statusCode(200);
+
+        clock.advance(Duration.ofSeconds(token.<Integer>path("expiresIn") + 1L));
+        // A known gap from AWS, not the intended answer: S3 lists 400 ExpiredToken for a session past
+        // its expiry, which only IAM enforcement gives today. Signature validation still answers it
+        // as a key it does not know.
+        given()
+            .filter(signinSigner)
+        .when()
+            .get("/" + BUCKET + "/" + KEY)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", equalTo("InvalidAccessKeyId"));
+    }
+
+    /** Runs the AWS Sign-In authorization-code flow through its consent page and returns the token response. */
+    private static Response signIn() throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256")
+                .digest(SIGNIN_VERIFIER.getBytes(StandardCharsets.US_ASCII));
+        String consent = given()
+            .redirects().follow(false)
+            .queryParam("client_id", SIGNIN_CLIENT_ID)
+            .queryParam("code_challenge", Base64.getUrlEncoder().withoutPadding().encodeToString(digest))
+            .queryParam("code_challenge_method", "SHA-256")
+            .queryParam("redirect_uri", SIGNIN_REDIRECT_URI)
+            .queryParam("response_type", "code")
+            .queryParam("scope", "openid")
+            .queryParam("state", "validate-signatures")
+        .when()
+            .get("/v1/authorize")
+        .then()
+            .statusCode(302)
+            .extract().header("Location");
+        String callback = given()
+            .redirects().follow(false)
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("request_id", queryParams(URI.create(consent)).get("request_id"))
+            .formParam("action", "continue")
+        .when()
+            .post("/_floci/signin/consent")
+        .then()
+            .statusCode(302)
+            .extract().header("Location");
+        return given()
+            .contentType("application/json")
+            .body(Map.of(
+                    "clientId", SIGNIN_CLIENT_ID,
+                    "grantType", "authorization_code",
+                    "code", queryParams(URI.create(callback)).get("code"),
+                    "redirectUri", SIGNIN_REDIRECT_URI,
+                    "codeVerifier", SIGNIN_VERIFIER))
+        .when()
+            .post("/v1/token")
+        .then()
+            .statusCode(200)
+            .extract().response();
+    }
+
+    private static Map<String, String> queryParams(URI uri) {
+        return Arrays.stream(uri.getRawQuery().split("&"))
+                .map(pair -> pair.split("=", 2))
+                .collect(Collectors.toMap(
+                        parts -> URLDecoder.decode(parts[0], StandardCharsets.UTF_8),
+                        parts -> URLDecoder.decode(parts[1], StandardCharsets.UTF_8)));
     }
 
     private static void createIamUser(String userName) {

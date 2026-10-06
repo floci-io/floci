@@ -33,6 +33,7 @@ import org.jboss.logging.Logger;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -195,6 +196,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final Instance<ScpProvider> scpProvider;
     private final SessionAccountLookup sessionAccountLookup;
     private final Instance<ResourcePolicyProvider> resourcePolicyProviders;
+    /** The clock {@link IamService} measures session expiry on, so both read the same time. */
+    private final Clock clock;
     private final ResourceInfo resourceInfo;
 
     @Inject
@@ -213,6 +216,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 Instance<ScpProvider> scpProvider,
                                 SessionAccountLookup sessionAccountLookup,
                                 Instance<ResourcePolicyProvider> resourcePolicyProviders,
+                                Clock clock,
                                 @Context ResourceInfo resourceInfo) {
         this.config = config;
         this.accountResolver = accountResolver;
@@ -229,6 +233,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.scpProvider = scpProvider;
         this.sessionAccountLookup = sessionAccountLookup;
         this.resourcePolicyProviders = resourcePolicyProviders;
+        this.clock = clock;
         this.resourceInfo = resourceInfo;
     }
 
@@ -250,7 +255,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, resourcePolicyProviders, null);
+                scpProvider, sessionAccountLookup, resourcePolicyProviders, Clock.systemUTC(), null);
     }
 
     /** Package-private constructor for callers predating resourcePolicyProviders. */
@@ -270,7 +275,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, null, null);
+                scpProvider, sessionAccountLookup, null, Clock.systemUTC(), null);
     }
 
     @Override
@@ -339,7 +344,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         // Both lookups are asked about one moment, so a session that expires between them is not
         // deleted and then answered as a key that exists nowhere.
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         if (iamService.isExpiredSession(akid, now)) {
             LOG.debugv("Rejecting request signed with an expired session {0}", akid);
             ctx.abortWith(expiredTokenResponse(credentialScope, ctx));
@@ -861,7 +866,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             // One moment for both lookups, as in filter(): a session expiring between them would
             // otherwise be deleted and then allowed below as a credential with no context.
-            Instant now = Instant.now();
+            Instant now = clock.instant();
             if (iamService.isExpiredSession(akid, now)) {
                 throw expiredTokenException(credentialScope);
             }

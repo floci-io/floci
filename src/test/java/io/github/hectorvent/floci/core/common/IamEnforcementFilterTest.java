@@ -34,7 +34,9 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -126,6 +128,10 @@ class IamEnforcementFilterTest {
     }
 
     private IamEnforcementFilter newFilter(ResourceInfo resourceInfo) {
+        return newFilter(resourceInfo, Clock.systemUTC());
+    }
+
+    private IamEnforcementFilter newFilter(ResourceInfo resourceInfo, Clock clock) {
         @SuppressWarnings("unchecked")
         Instance<ScpProvider> scpProvider = mock(Instance.class);
         when(scpProvider.isResolvable()).thenReturn(false);
@@ -134,7 +140,7 @@ class IamEnforcementFilterTest {
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, mock(CloudTrailService.class),
                 mock(CurrentVertxRequest.class),
-                catalog, scpProvider, sessionAccountLookup, null, resourceInfo);
+                catalog, scpProvider, sessionAccountLookup, null, clock, resourceInfo);
     }
 
     @Test
@@ -613,6 +619,28 @@ class IamEnforcementFilterTest {
         verify(iamService).isExpiredSession(eq("ASIASESSION"), checked.capture());
         verify(iamService).resolveCallerContext(eq("ASIASESSION"), resolved.capture());
         assertSame(checked.getValue(), resolved.getValue());
+    }
+
+    @Test
+    void theMomentBothLookupsAreAskedAboutIsReadFromTheInjectedClock() {
+        // IamService measures session expiry on the injected clock, as AWS Sign-In stamps it, so a
+        // moment read from the system clock would find a live Sign-In session expired in tests.
+        Instant moment = Instant.parse("2026-01-01T00:00:00Z");
+        IamEnforcementFilter filter = newFilter(null, Clock.fixed(moment, ZoneOffset.UTC));
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260101/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+
+        filter.filter(containerRequest);
+        // A presigned POST's credential reaches enforcement only through this call.
+        filter.authorizeAdditionalResource(auth, "s3:PutObject", "arn:aws:s3:::bucket/key");
+
+        verify(iamService, times(2)).isExpiredSession("ASIASESSION", moment);
+        verify(iamService, times(2)).resolveCallerContext("ASIASESSION", moment);
     }
 
     @Test

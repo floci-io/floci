@@ -219,9 +219,10 @@ public class PreSignedUrlGenerator {
                                                     String method, Instant signedAt, int expiry) {
         // The in-memory retirement list cannot survive a restart. Sweep persisted expired
         // sessions once on first use, then retire this process's replacements as they expire.
+        // IamService judges which sessions have expired on its own clock, as it does everywhere.
         if (expiredSessionsSwept.compareAndSet(false, true)) {
             try {
-                iamService.sweepExpiredSessions(signedAt);
+                iamService.sweepExpiredSessions();
             } catch (RuntimeException failure) {
                 expiredSessionsSwept.set(false);
                 throw failure;
