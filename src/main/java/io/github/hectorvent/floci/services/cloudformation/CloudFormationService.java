@@ -3068,9 +3068,9 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The template's resources, dependencies first, and those that have no such order because they
-     * are in a dependency cycle or depend on one. Those are still placed in {@code sorted}, with a
-     * cycle broken where it starts, so everything outside the cycle keeps its dependency order.
+     * The template's resources, dependencies first, and those in a dependency cycle. Resources in or
+     * depending on a cycle are still placed in {@code sorted}, each cycle after the cycles it depends
+     * on, so every dependency outside a cycle keeps its order.
      */
     private record CreationOrder(List<String> sorted, Set<String> circular) {
     }
@@ -3121,24 +3121,9 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         List<String> sorted = new ArrayList<>();
-        Set<String> placed = new HashSet<>();
-        Set<String> circular = new LinkedHashSet<>();
-        while (sorted.size() < activeIds.size()) {
-            if (queue.isEmpty()) {
-                // Every resource left waits on another one left. Note them all as circular, then
-                // release one on a cycle that depends on no other cycle, so whatever depends on it
-                // is still ordered by its dependencies after it.
-                if (circular.isEmpty()) {
-                    circular.addAll(activeIds);
-                    circular.removeAll(placed);
-                }
-                String onCycle = resourceOnCycle(circular, placed, dependencies);
-                inDegree.put(onCycle, 0);
-                queue.add(onCycle);
-            }
+        while (!queue.isEmpty()) {
             String current = queue.poll();
             sorted.add(current);
-            placed.add(current);
             for (var entry : dependencies.entrySet()) {
                 if (entry.getValue().contains(current)) {
                     int newDegree = inDegree.get(entry.getKey()) - 1;
@@ -3150,43 +3135,81 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
 
+        // Every resource left waits on another one left. Ordering their strongly connected
+        // components dependencies first still respects every dependency outside a cycle; only the
+        // components that are cycles themselves are circular.
+        Set<String> circular = new LinkedHashSet<>();
+        if (sorted.size() < activeIds.size()) {
+            Set<String> placed = new HashSet<>(sorted);
+            for (List<String> component : componentsDependenciesFirst(activeIds, placed, dependencies)) {
+                sorted.addAll(component);
+                String first = component.get(0);
+                if (component.size() > 1 || dependencies.get(first).contains(first)) {
+                    circular.addAll(component);
+                }
+            }
+        }
         return new CreationOrder(sorted, circular);
     }
 
     /**
-     * A resource on a cycle whose unplaced dependencies all lie on that cycle. Tarjan's algorithm
-     * completes a strongly connected component only after every component it depends on, so the
-     * first one it completes over the unplaced resources depends on no other; as each resource
-     * left still waits on an unplaced dependency, that component is a cycle.
+     * The strongly connected components of the resources not yet placed, each after every component
+     * it depends on: Tarjan's algorithm completes a component only once those are complete. The
+     * search keeps its own stack so a long dependency chain cannot exhaust the thread's.
      */
-    private static String resourceOnCycle(Set<String> circular, Set<String> placed,
-                                          Map<String, Set<String>> dependencies) {
-        String start = circular.stream().filter(id -> !placed.contains(id)).findFirst().orElseThrow();
-        return firstCompletedComponentRoot(start, placed, dependencies, new HashMap<>(), new HashMap<>());
-    }
-
-    // Tarjan's depth-first search, stopped at the first completed component. Nothing is popped
-    // before that, so every visited resource is still on the search stack.
-    private static String firstCompletedComponentRoot(String id, Set<String> placed,
-                                                      Map<String, Set<String>> dependencies,
-                                                      Map<String, Integer> index, Map<String, Integer> lowLink) {
-        index.put(id, index.size());
-        lowLink.put(id, index.get(id));
-        for (String dep : dependencies.get(id)) {
-            if (!dependencies.containsKey(dep) || placed.contains(dep)) {
+    private static List<List<String>> componentsDependenciesFirst(Set<String> activeIds, Set<String> placed,
+                                                                  Map<String, Set<String>> dependencies) {
+        Map<String, Integer> index = new HashMap<>();
+        Map<String, Integer> lowLink = new HashMap<>();
+        Deque<String> open = new ArrayDeque<>();
+        Set<String> onOpen = new HashSet<>();
+        List<List<String>> components = new ArrayList<>();
+        Deque<Map.Entry<String, Iterator<String>>> path = new ArrayDeque<>();
+        for (String root : activeIds) {
+            if (placed.contains(root) || index.containsKey(root)) {
                 continue;
             }
-            if (!index.containsKey(dep)) {
-                String root = firstCompletedComponentRoot(dep, placed, dependencies, index, lowLink);
-                if (root != null) {
-                    return root;
+            String next = root;
+            while (next != null || !path.isEmpty()) {
+                if (next != null) {
+                    index.put(next, index.size());
+                    lowLink.put(next, index.get(next));
+                    open.push(next);
+                    onOpen.add(next);
+                    path.push(Map.entry(next, dependencies.get(next).iterator()));
+                    next = null;
                 }
-                lowLink.put(id, Math.min(lowLink.get(id), lowLink.get(dep)));
-            } else {
-                lowLink.put(id, Math.min(lowLink.get(id), index.get(dep)));
+                String id = path.peek().getKey();
+                Iterator<String> deps = path.peek().getValue();
+                if (deps.hasNext()) {
+                    String dep = deps.next();
+                    if (!dependencies.containsKey(dep) || placed.contains(dep)) {
+                        continue;
+                    }
+                    if (!index.containsKey(dep)) {
+                        next = dep;
+                    } else if (onOpen.contains(dep)) {
+                        lowLink.merge(id, index.get(dep), Math::min);
+                    }
+                    continue;
+                }
+                path.pop();
+                if (!path.isEmpty()) {
+                    lowLink.merge(path.peek().getKey(), lowLink.get(id), Math::min);
+                }
+                if (lowLink.get(id).equals(index.get(id))) {
+                    List<String> component = new ArrayList<>();
+                    String member;
+                    do {
+                        member = open.pop();
+                        onOpen.remove(member);
+                        component.add(member);
+                    } while (!member.equals(id));
+                    components.add(component);
+                }
             }
         }
-        return lowLink.get(id).equals(index.get(id)) ? id : null;
+        return components;
     }
 
     private static final Pattern SUB_VAR_PATTERN = Pattern.compile("\\$\\{([^}]+)}");

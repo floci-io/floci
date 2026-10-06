@@ -23,6 +23,7 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -302,6 +303,53 @@ class CloudFormationServiceRollbackTest {
         deletes.verify(provisioner).delete(consumer, REGION);
         deletes.verify(provisioner).delete(firstQueue, REGION);
         assertEquals("DELETE_COMPLETE", stack.getStatus());
+    }
+
+    @Test
+    void deleteStack_savedWithLongChainIntoCycle_deletesWithoutExhaustingTheThreadStack() throws InterruptedException {
+        // Each resource depends on the next and the last one on a cycle, so finding the cycle has
+        // to follow the whole chain; a small thread stack makes a recursive search overflow.
+        int chainLength = 5_000;
+        StringBuilder resources = new StringBuilder();
+        Stack stack = new Stack();
+        stack.setStackName("delete-saved-long-chain");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_COMPLETE");
+        StackResource[] chain = new StackResource[chainLength];
+        for (int i = 0; i < chainLength; i++) {
+            String next = i + 1 < chainLength ? "Link" + (i + 1) : "FirstQueue";
+            resources.append("\"Link").append(i).append("\": {\"Type\": \"AWS::SQS::Queue\", \"DependsOn\": \"")
+                    .append(next).append("\"},");
+            chain[i] = resource("Link" + i, "link-" + i, "AWS::SQS::Queue", "CREATE_COMPLETE");
+            stack.getResources().put(chain[i].getLogicalId(), chain[i]);
+        }
+        stack.setTemplateBody("{\"Resources\": {" + resources
+                + "\"FirstQueue\": {\"Type\": \"AWS::SQS::Queue\", \"DependsOn\": \"SecondQueue\"},"
+                + "\"SecondQueue\": {\"Type\": \"AWS::SQS::Queue\", \"DependsOn\": \"FirstQueue\"}}}");
+        StackResource firstQueue = resource("FirstQueue", "first-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource secondQueue = resource("SecondQueue", "second-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        stack.getResources().put(firstQueue.getLogicalId(), firstQueue);
+        stack.getResources().put(secondQueue.getLogicalId(), secondQueue);
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread deleter = new Thread(null, () -> {
+            try {
+                service.deleteStackResources(stack, REGION, ACCOUNT);
+            } catch (Throwable t) {
+                failure.set(t);
+            }
+        }, "small-stack-delete", 256 * 1024);
+        deleter.start();
+        deleter.join();
+
+        assertNull(failure.get());
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(chain[0], REGION);
+        deletes.verify(provisioner).delete(chain[chainLength - 1], REGION);
+        deletes.verify(provisioner).delete(firstQueue, REGION);
     }
 
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {
