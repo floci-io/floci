@@ -197,6 +197,48 @@ class LambdaCfnProvisionerTest {
         verify(lambda, never()).updateFunctionConfiguration(anyString(), anyString(), anyMap());
     }
 
+    @Test
+    void aDurableConfigThatNoValueRemovedIsLeftOut() {
+        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("my-fn"));
+        ObjectNode props = props("my-fn");
+        // What the engine resolves Fn::If to when the branch is AWS::NoValue.
+        props.put("DurableConfig", "");
+
+        provisioner.provision(function(null), props, ctx());
+
+        assertFalse(capturedCreateRequest().containsKey("DurableConfig"));
+    }
+
+    @Test
+    void anExecutionTimeoutBeyondAnIntegerReachesLambdaUnchanged() {
+        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("my-fn"));
+        ObjectNode props = props("my-fn");
+        props.putObject("DurableConfig").put("ExecutionTimeout", 4_294_967_356L);
+
+        provisioner.provision(function(null), props, ctx());
+
+        assertEquals(4_294_967_356L, ((Map<?, ?>) capturedCreateRequest().get("DurableConfig")).get("ExecutionTimeout"));
+    }
+
+    @Test
+    void aKmsKeyArnTheTemplateDropsIsClearedOnUpdate() {
+        LambdaFunction existing = lambdaFunction("my-fn");
+        existing.setDurableExecutionTimeout(60);
+        existing.setDurableRetentionPeriodInDays(14);
+        existing.setDurableKmsKeyArn("arn:aws:kms:us-east-1:000000000000:key/k1");
+        when(lambda.getFunction(REGION, "my-fn")).thenReturn(existing);
+        when(lambda.updateFunctionConfiguration(anyString(), anyString(), anyMap())).thenReturn(existing);
+        when(lambda.updateFunctionCode(anyString(), anyString(), anyMap())).thenReturn(existing);
+        when(lambda.listTags(FUNCTION_ARN + "my-fn")).thenReturn(new HashMap<>());
+        ObjectNode props = props("my-fn");
+        props.putObject("DurableConfig").put("ExecutionTimeout", 60);
+
+        provisioner.provision(function("my-fn"), props, updateCtx("my-fn"));
+
+        verify(lambda).updateFunctionConfiguration(eq(REGION), eq("my-fn"),
+                argThat(request -> "".equals(((Map<?, ?>) request.get("DurableConfig")).get("KMSKeyArn"))));
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> capturedCreateRequest() {
         ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);

@@ -588,7 +588,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                     Map<?, ?> config = (Map<?, ?>) desired;
                     if (!Objects.equals(fn.getDurableExecutionTimeout(), config.get("ExecutionTimeout"))
                             || !Objects.equals(fn.getDurableRetentionPeriodInDays(), config.get("RetentionPeriodInDays"))
-                            || !Objects.equals(fn.getDurableKmsKeyArn(), config.get("KMSKeyArn"))) {
+                            || !Objects.equals(Objects.requireNonNullElse(fn.getDurableKmsKeyArn(), ""),
+                                    config.get("KMSKeyArn"))) {
                         return true;
                     }
                 }
@@ -706,35 +707,38 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Null when the template has no DurableConfig. RetentionPeriodInDays takes the schema default,
-     * 14, when the template leaves it out, on update too. A number from a parameter arrives as text.
+     * Null when the template has no DurableConfig, or one that AWS::NoValue removed. As on AWS,
+     * RetentionPeriodInDays takes the schema default, 14, when the template leaves it out, on update
+     * too, and a KMSKeyArn left out clears the key. A number from a parameter arrives as text.
      */
     private Map<String, Object> resolveDurableConfig(JsonNode props, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has("DurableConfig")) {
             return null;
         }
         JsonNode node = engine.resolveNode(props.get("DurableConfig"));
+        if (node == null || !node.isObject()) {
+            return null;
+        }
         Map<String, Object> config = new LinkedHashMap<>();
         if (node.hasNonNull("ExecutionTimeout")) {
             config.put("ExecutionTimeout", integerOrRaw(node.get("ExecutionTimeout")));
         }
         config.put("RetentionPeriodInDays", node.hasNonNull("RetentionPeriodInDays")
                 ? integerOrRaw(node.get("RetentionPeriodInDays")) : LAMBDA_DEFAULT_DURABLE_RETENTION_DAYS);
-        String kmsKeyArn = node.path("KMSKeyArn").asText(null);
-        if (kmsKeyArn != null && !kmsKeyArn.isBlank()) {
-            config.put("KMSKeyArn", kmsKeyArn);
-        }
+        // Lambda keeps a stored key when the update leaves the member out, and clears it on "".
+        config.put("KMSKeyArn", node.path("KMSKeyArn").asText(""));
         return config;
     }
 
-    /** Anything else goes to Lambda as is, which rejects it with its own error. */
+    /** A long stays a long so Lambda's range check rejects it. Anything else reaches Lambda as is. */
     private Object integerOrRaw(JsonNode value) {
         if (value.isIntegralNumber()) {
-            return value.intValue();
+            return value.canConvertToInt() ? (Object) value.intValue() : (Object) value.longValue();
         }
         if (value.isTextual()) {
             try {
-                return Integer.parseInt(value.asText());
+                long number = Long.parseLong(value.asText());
+                return number == (int) number ? (Object) (int) number : (Object) number;
             } catch (NumberFormatException ignored) {
                 // Not a number. Lambda answers it with the error AWS gives.
                 return value.asText();

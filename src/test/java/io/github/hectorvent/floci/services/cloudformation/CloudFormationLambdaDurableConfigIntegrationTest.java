@@ -74,6 +74,40 @@ class CloudFormationLambdaDurableConfigIntegrationTest {
             .statusCode(404);
     }
 
+    @Test
+    void aDurableConfigRemovedWithNoValueLeavesTheFunctionPlain() {
+        String stackName = "cfn-lambda-novalue-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {
+                  "Parameters": {"ExecutionTimeout": {"Type": "Number"}},
+                  "Conditions": {"Durable": {"Fn::Equals": ["yes", "no"]}},
+                  "Resources": {
+                    "Fn": {
+                      "Type": "AWS::Lambda::Function",
+                      "Properties": {
+                        "Runtime": "python3.14",
+                        "Handler": "index.handler",
+                        "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                        "Code": {"ZipFile": "def handler(e, c): return 'ok'"},
+                        "DurableConfig": {"Fn::If": ["Durable", {"ExecutionTimeout": {"Ref": "ExecutionTimeout"}},
+                                                     {"Ref": "AWS::NoValue"}]}
+                      }
+                    }
+                  },
+                  "Outputs": {"Name": {"Value": {"Ref": "Fn"}}}
+                }
+                """;
+
+        deploy("CreateStack", stackName, template, "60");
+
+        given()
+        .when()
+            .get(LAMBDA + functionName(stackName) + "/configuration")
+        .then()
+            .statusCode(200)
+            .body("DurableConfig", nullValue());
+    }
+
     private static String template(String functionProperty) {
         return """
                 {
