@@ -746,14 +746,7 @@ class CognitoIntegrationTest {
                 .statusCode(200)
                 .body("User.UserStatus", equalTo("FORCE_CHANGE_PASSWORD"));
 
-        JsonNode messages = OBJECT_MAPPER.readTree(given()
-                .queryParam("email", invitee)
-                .when()
-                .get("/_aws/ses")
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString()).path("messages");
+        List<JsonNode> messages = sesMessagesTo(invitee);
         assertEquals(1, messages.size());
         assertEquals("Your temporary password", messages.get(0).path("Subject").asText());
         String body = messages.get(0).path("Body").path("text_part").asText();
@@ -795,13 +788,28 @@ class CognitoIntegrationTest {
                 .statusCode(200)
                 .body("User.UserStatus", equalTo("FORCE_CHANGE_PASSWORD"));
 
-        given()
-                .queryParam("email", invitee)
+        assertEquals(0, sesMessagesTo(invitee).size());
+    }
+
+    /** Captured SES messages whose To addresses include {@code recipient}; reads the whole mailbox. */
+    private static List<JsonNode> sesMessagesTo(String recipient) throws Exception {
+        JsonNode mailbox = OBJECT_MAPPER.readTree(given()
                 .when()
                 .get("/_aws/ses")
                 .then()
                 .statusCode(200)
-                .body("messages", hasSize(0));
+                .extract()
+                .asString()).path("messages");
+        List<JsonNode> matching = new ArrayList<>();
+        for (JsonNode message : mailbox) {
+            for (JsonNode to : message.path("Destination").path("ToAddresses")) {
+                if (recipient.equals(to.asText())) {
+                    matching.add(message);
+                    break;
+                }
+            }
+        }
+        return matching;
     }
 
     @Test
