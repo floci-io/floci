@@ -371,6 +371,23 @@ the result to S3 as one or more objects under `<prefix>`.
   `/` is not intercepted. AWS does not document whether it inserts the dot itself.
 - `REGION` and the credential clauses (`CREDENTIALS`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`,
   `SESSION_TOKEN`) behave as described for COPY.
+- `ESCAPE` is accepted and relies on PostgreSQL text framing, which already escapes the backslash,
+  newline, carriage return and the delimiter. It is only valid with text framing: combined with
+  `CSV`, `ADDQUOTES` or `HEADER` (which switch the framing to CSV here) the statement is not
+  intercepted. Unlike Redshift, PostgreSQL also writes a tab as `\t`.
+- `CLEANPATH` deletes every object whose key starts with the target prefix. The objects are listed and
+  every delete is authorized up front, like the writes (with `FLOCI_SERVICES_S3_ENFORCE_AUTH` on, the
+  role needs list and delete permission, and a denial fails the UNLOAD before anything is removed or
+  written). The deletes themselves run when the first output arrives, so a query that PostgreSQL
+  rejects leaves the previous export in place; objects already deleted are not restored if the UNLOAD
+  fails later. The match is a plain string prefix, so `TO 's3://b/sales_' CLEANPATH` also removes
+  `sales_archive/...`; end the prefix with `/` to limit it to one folder. It cannot be combined with
+  `ALLOWOVERWRITE`, and an empty prefix (the bucket root) is not intercepted so a typo cannot wipe a
+  bucket.
+- `ENCRYPTED AUTO` is accepted and writes objects as usual. `ENCRYPTED KMS_KEY_ID '<key>'` stores the
+  data and manifest objects with `aws:kms` server-side encryption and that key id; Floci does not
+  encrypt the data beyond what its S3 service does for those headers. `ENCRYPTED` without `AUTO` or
+  `KMS_KEY_ID` (client-side encryption) and `MASTER_SYMMETRIC_KEY` are not intercepted.
 - `MANIFEST` writes `<prefix>manifest` listing every object with its
   `content_length`.
 - Without `ALLOWOVERWRITE`, a non-empty target prefix fails with SQL error XX000 and the select
@@ -383,8 +400,8 @@ the result to S3 as one or more objects under `<prefix>`.
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
-- Any other option (`PARQUET`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`, `KMS_KEY_ID`,
-  `ZSTD`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
+- Any other option (`PARQUET`, `JSON`, `FIXEDWIDTH`, `MASTER_SYMMETRIC_KEY`, `MANIFEST VERBOSE`,
+  `ZSTD`, `BZIP2`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
 - Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no
   bind parameters. Parameterized statements are forwarded unchanged.

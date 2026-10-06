@@ -124,7 +124,32 @@ public final class CopyStatementParser {
             boolean parallel,
             long maxFileSizeBytes,
             String iamRoleArn,
-            String extension) implements S3Statement {
+            String extension,
+            boolean escape,
+            boolean cleanPath,
+            boolean encrypted,
+            String sseKmsKeyId) implements S3Statement {
+
+        public S3Unload(
+                String selectQuery,
+                String bucket,
+                String prefix,
+                String delimiter,
+                boolean header,
+                boolean gzip,
+                boolean csv,
+                boolean addQuotes,
+                String nullAs,
+                boolean manifest,
+                boolean allowOverwrite,
+                boolean parallel,
+                long maxFileSizeBytes,
+                String iamRoleArn,
+                String extension) {
+            this(selectQuery, bucket, prefix, delimiter, header, gzip, csv, addQuotes, nullAs, manifest,
+                    allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
+                    false, false, false, null);
+        }
 
         public S3Unload(
                 String selectQuery,
@@ -161,18 +186,23 @@ public final class CopyStatementParser {
     private static final Pattern ADDQUOTES_PATTERN = Pattern.compile("(?i)\\bADDQUOTES\\b");
     private static final Pattern MANIFEST_PATTERN = Pattern.compile("(?i)\\bMANIFEST\\b");
     private static final Pattern ALLOWOVERWRITE_PATTERN = Pattern.compile("(?i)\\bALLOWOVERWRITE\\b");
+    private static final Pattern ESCAPE_PATTERN = Pattern.compile("(?i)\\bESCAPE\\b");
+    private static final Pattern CLEANPATH_PATTERN = Pattern.compile("(?i)\\bCLEANPATH\\b");
+    private static final Pattern ENCRYPTED_PATTERN = Pattern.compile("(?i)\\bENCRYPTED(?:\\s+(AUTO)\\b)?");
+    private static final Pattern KMS_KEY_ID_PATTERN = Pattern.compile(
+            "(?i)\\bKMS_KEY_ID\\s+(?:'((?:[^']|'')*)'|\"([^\"]*)\")");
     private static final Pattern EXTENSION_PATTERN = Pattern.compile(
             "(?i)\\bEXTENSION\\s+(?:'((?:[^']|'')*)'|\"([^\"]*)\")");
 
     /**
      * UNLOAD options this simulator cannot honour. Distinct from the COPY set:
-     * MANIFEST / ALLOWOVERWRITE / PARALLEL / MAXFILESIZE are UNLOAD-supported here,
-     * while EXTENSION / CLEANPATH / PARTITION are UNLOAD-only and unsupported.
+     * MANIFEST / ALLOWOVERWRITE / PARALLEL / MAXFILESIZE / EXTENSION / CLEANPATH are
+     * UNLOAD-supported here, while PARTITION is UNLOAD-only and unsupported.
      */
     private static final Pattern UNLOAD_UNSUPPORTED_CLAUSE = Pattern.compile(
             "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|JSON|SHAPEFILE|BZIP2|LZOP|ZSTD"
-                    + "|ENCRYPTED|ENCODING|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
-                    + "|CLEANPATH|PARTITION|MAXFILESIZE\\s+\\d+\\s*(?:TB|PB))\\b");
+                    + "|ENCODING|MASTER_SYMMETRIC_KEY"
+                    + "|PARTITION|MAXFILESIZE\\s+\\d+\\s*(?:TB|PB))\\b");
 
     private static final Pattern QUALIFIED_NAME = Pattern.compile(
             "(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\")(?:\\.(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\"))?");
@@ -281,7 +311,16 @@ public final class CopyStatementParser {
         String delimiter = null;
         long maxFileSizeBytes = 0L;
         String extension = null;
+        boolean escape = false;
+        boolean cleanPath = false;
+        boolean encrypted = false;
+        boolean encryptedAuto = false;
+        String kmsKeyId = null;
 
+        boolean seenEscape = false;
+        boolean seenCleanPath = false;
+        boolean seenEncrypted = false;
+        boolean seenKmsKeyId = false;
         boolean seenExtension = false;
         boolean seenCsv = false;
         boolean seenGzip = false;
@@ -305,6 +344,10 @@ public final class CopyStatementParser {
         Matcher nullM = NULL_AS_PATTERN.matcher(options);
         Matcher maxFileSizeM = MAXFILESIZE_PATTERN.matcher(options);
         Matcher extensionM = EXTENSION_PATTERN.matcher(options);
+        Matcher escapeM = ESCAPE_PATTERN.matcher(options);
+        Matcher cleanPathM = CLEANPATH_PATTERN.matcher(options);
+        Matcher encryptedM = ENCRYPTED_PATTERN.matcher(options);
+        Matcher kmsKeyIdM = KMS_KEY_ID_PATTERN.matcher(options);
         AuthClauses auth = new AuthClauses(options);
 
         int next;
@@ -327,6 +370,35 @@ public final class CopyStatementParser {
                     return null;
                 }
                 offset = extensionM.end();
+            } else if (matchClause(escapeM, offset, len)) {
+                if (seenEscape) {
+                    return null;
+                }
+                seenEscape = true;
+                escape = true;
+                offset = escapeM.end();
+            } else if (matchClause(cleanPathM, offset, len)) {
+                if (seenCleanPath) {
+                    return null;
+                }
+                seenCleanPath = true;
+                cleanPath = true;
+                offset = cleanPathM.end();
+            } else if (matchClause(encryptedM, offset, len)) {
+                if (seenEncrypted) {
+                    return null;
+                }
+                seenEncrypted = true;
+                encrypted = true;
+                encryptedAuto = encryptedM.group(1) != null;
+                offset = encryptedM.end();
+            } else if (matchClause(kmsKeyIdM, offset, len)) {
+                if (seenKmsKeyId) {
+                    return null;
+                }
+                seenKmsKeyId = true;
+                kmsKeyId = extractNullValue(kmsKeyIdM);
+                offset = kmsKeyIdM.end();
             } else if (matchClause(maxFileSizeM, offset, len)) {
                 if (seenMaxFileSize) {
                     return null;
@@ -420,8 +492,24 @@ public final class CopyStatementParser {
         if (delimiter == null) {
             delimiter = csv ? "," : "|";
         }
+        // ESCAPE relies on PostgreSQL text framing, which CSV, ADDQUOTES and HEADER all replace here.
+        if (escape && (csv || addQuotes || header)) {
+            return null;
+        }
+        // An empty prefix would make CLEANPATH delete the whole bucket.
+        if (cleanPath && (allowOverwrite || prefix.isEmpty())) {
+            return null;
+        }
+        // Only server-side encryption is emulated: client-side ENCRYPTED needs MASTER_SYMMETRIC_KEY.
+        if (kmsKeyId != null && (kmsKeyId.isBlank() || !encrypted || encryptedAuto)) {
+            return null;
+        }
+        if (encrypted && !encryptedAuto && kmsKeyId == null) {
+            return null;
+        }
         return new S3Unload(select, bucket, prefix, delimiter, header, gzip, csv,
-                addQuotes, nullAs, manifest, allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension);
+                addQuotes, nullAs, manifest, allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
+                escape, cleanPath, encrypted, kmsKeyId);
     }
 
     private static S3CopyFrom parseCopy(String cleaned) {

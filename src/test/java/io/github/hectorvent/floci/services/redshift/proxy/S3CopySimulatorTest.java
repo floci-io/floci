@@ -4,10 +4,13 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -38,6 +41,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -330,6 +334,99 @@ class S3CopySimulatorTest {
     private CopyStatementParser.S3Unload unloadSpecWithExtension(boolean gzip, boolean manifest, String extension) {
         return new CopyStatementParser.S3Unload("select a,b from t", "wh", "out/",
                 "|", false, gzip, false, false, null, manifest, true, true, 0, null, extension);
+    }
+
+    private CopyStatementParser.S3Unload unloadSpecWithOptions(
+            boolean manifest, boolean cleanPath, boolean encrypted, String kmsKeyId) {
+        return new CopyStatementParser.S3Unload("select a,b from t", "wh", "out/", "|", false, false, false,
+                false, null, manifest, false, true, 0, null, null, false, cleanPath, encrypted, kmsKeyId);
+    }
+
+    @Test
+    void cleanPathDeletesOnlyObjectsUnderThePrefixBeforeWriting() throws Exception {
+        S3Object old1 = new S3Object("wh", "out/old1", new byte[0], "text/plain");
+        S3Object old2 = new S3Object("wh", "out/old2", new byte[0], "text/plain");
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(old1, old2), List.of(), false, null));
+        Map<String, byte[]> written = new ConcurrentHashMap<>();
+        when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
+            written.put(inv.getArgument(1), inv.getArgument(2));
+            return null;
+        });
+
+        Thread backend = backendThread(() -> playUnloadBackend("1|alice\n"));
+        S3CopySimulator.runUnload(simClient, simBackend, unloadSpecWithOptions(false, true, false, null),
+                s3, null, 'I');
+        joinBackend(backend);
+
+        verify(s3).deleteObject("wh", "out/old1");
+        verify(s3).deleteObject("wh", "out/old2");
+        verify(s3, times(2)).deleteObject(eq("wh"), any());
+        assertTrue(written.containsKey("out/0000_part_00"), written.keySet().toString());
+    }
+
+    @Test
+    void cleanPathDeletesNothingUntilOutputArrivesAndDeletesBeforeTheFirstWrite() throws Exception {
+        S3Object old1 = new S3Object("wh", "out/old1", new byte[0], "text/plain");
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(old1), List.of(), false, null));
+
+        try (S3CopySimulator.UnloadCollector collector =
+                     S3CopySimulator.prepareUnload(unloadSpecWithOptions(false, true, false, null), s3, null)) {
+            verify(s3, never()).deleteObject(any(), any());
+            collector.complete();
+        }
+
+        InOrder order = inOrder(s3);
+        order.verify(s3).deleteObject("wh", "out/old1");
+        order.verify(s3).putObject(eq("wh"), eq("out/0000_part_00"), any(), any(), any());
+    }
+
+    @Test
+    void cleanPathKeepsObjectsWhenTheQueryNeverProducesOutput() throws Exception {
+        S3Object old1 = new S3Object("wh", "out/old1", new byte[0], "text/plain");
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(old1), List.of(), false, null));
+
+        // Closed without complete(): the backend rejected the query, e.g. an unknown column.
+        try (S3CopySimulator.UnloadCollector collector =
+                     S3CopySimulator.prepareUnload(unloadSpecWithOptions(false, true, false, null), s3, null)) {
+            assertNotNull(collector);
+        }
+
+        verify(s3, never()).deleteObject(any(), any());
+    }
+
+    @Test
+    void cleanPathDeniedDeleteFailsBeforeAnythingIsWritten() {
+        S3Object old1 = new S3Object("wh", "out/old1", new byte[0], "text/plain");
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(old1), List.of(), false, null));
+        doThrow(new AwsException("AccessDenied", "denied", 403))
+                .when(s3).authorizeAnonymousDeleteObject("wh", "out/old1");
+
+        assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareUnload(unloadSpecWithOptions(false, true, false, null), s3, null));
+
+        verify(s3, never()).deleteObject(any(), any());
+        verify(s3, never()).putObject(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void kmsKeyIdIsStoredOnDataAndManifestObjects() throws Exception {
+        ArgumentCaptor<PutObjectOptions> options = ArgumentCaptor.forClass(PutObjectOptions.class);
+        when(s3.putObject(eq("wh"), any(), any(), any(), any(), options.capture())).thenReturn(null);
+
+        Thread backend = backendThread(() -> playUnloadBackend("1|alice\n"));
+        S3CopySimulator.runUnload(simClient, simBackend, unloadSpecWithOptions(true, false, true, "key-1"),
+                s3, null, 'I');
+        joinBackend(backend);
+
+        assertEquals(2, options.getAllValues().size());
+        for (PutObjectOptions captured : options.getAllValues()) {
+            assertEquals("aws:kms", captured.getServerSideEncryption());
+            assertEquals("key-1", captured.getSseKmsKeyId());
+        }
     }
 
     @Test

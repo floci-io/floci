@@ -259,6 +259,43 @@ class RedshiftInterceptorIntegrationTest {
     }
 
     @Test
+    void unloadCleanPathRemovesOnlyObjectsUnderThePrefix() throws Exception {
+        String bucket = "redshift-unload-cleanpath";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "clean/old.txt", "old\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        s3.putObject(bucket, "clean2/keep.txt", "keep\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+
+        try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
+                Statement statement = connection.createStatement()) {
+            statement.execute("UNLOAD ('select 1') TO 's3://" + bucket + "/clean/' CLEANPATH");
+        }
+
+        List<S3Object> cleaned = s3.listObjects(bucket, "clean/", null, 100);
+        assertEquals(1, cleaned.size());
+        assertEquals("clean/0000_part_00", cleaned.get(0).getKey());
+        assertTrue(s3.objectExists(bucket, "clean2/keep.txt"));
+    }
+
+    @Test
+    void unloadEscapeEscapesTheDelimiterInData() throws Exception {
+        String bucket = "redshift-unload-escape";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE unload_escape (v text)");
+            statement.execute("INSERT INTO unload_escape VALUES ('a|b')");
+            statement.execute("UNLOAD ('select v from unload_escape') TO 's3://" + bucket
+                    + "/esc/' ESCAPE ALLOWOVERWRITE");
+        }
+
+        List<S3Object> objects = s3.listObjects(bucket, "esc/", null, 100);
+        assertEquals(1, objects.size());
+        assertEquals("a\\|b\n", new String(
+                s3.getObject(bucket, objects.get(0).getKey()).getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
     void namedPreparedCopyAndUnloadCanBeExecutedTwice() throws Exception {
         Cluster cluster = sharedCluster;
         String bucket = "redshift-extended-named";

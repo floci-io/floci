@@ -447,6 +447,51 @@ class CopyStatementParserTest {
     }
 
     @Test
+    void unloadParsesEscapeOnlyWhenFramingStaysText() {
+        assertTrue(unload("UNLOAD ('select 1') TO 's3://b/out/' ESCAPE").escape());
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' CSV ESCAPE"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' ADDQUOTES ESCAPE"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' HEADER ESCAPE"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' ESCAPE ESCAPE"));
+    }
+
+    @Test
+    void unloadParsesCleanPathAndFailsOpenWhenItCouldBeUnsafe() {
+        assertTrue(unload("UNLOAD ('select 1') TO 's3://b/out/' CLEANPATH").cleanPath());
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' CLEANPATH ALLOWOVERWRITE"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/' CLEANPATH"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' CLEANPATH CLEANPATH"));
+    }
+
+    @Test
+    void unloadParsesServerSideEncryptionOptions() {
+        CopyStatementParser.S3Unload kms = unload(
+                "UNLOAD ('select 1') TO 's3://b/out/' ENCRYPTED KMS_KEY_ID 'key-1'");
+        assertTrue(kms.encrypted());
+        assertEquals("key-1", kms.sseKmsKeyId());
+
+        CopyStatementParser.S3Unload reversed = unload(
+                "UNLOAD ('select 1') TO 's3://b/out/' KMS_KEY_ID 'key-2' ENCRYPTED");
+        assertEquals("key-2", reversed.sseKmsKeyId());
+
+        CopyStatementParser.S3Unload auto = unload("UNLOAD ('select 1') TO 's3://b/out/' ENCRYPTED AUTO");
+        assertTrue(auto.encrypted());
+        assertNull(auto.sseKmsKeyId());
+        assertFalse(unload("UNLOAD ('select 1') TO 's3://b/out/'").encrypted());
+    }
+
+    @Test
+    void unloadEncryptionFailsOpenWhenItWouldNeedClientSideKeys() {
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' ENCRYPTED"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' KMS_KEY_ID 'k'"));
+        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/out/' ENCRYPTED KMS_KEY_ID '  '"));
+        assertNull(CopyStatementParser.parse(
+                "UNLOAD ('select 1') TO 's3://b/out/' ENCRYPTED AUTO KMS_KEY_ID 'k'"));
+        assertNull(CopyStatementParser.parse(
+                "UNLOAD ('select 1') TO 's3://b/out/' ENCRYPTED MASTER_SYMMETRIC_KEY 'k'"));
+    }
+
+    @Test
     void unloadRejectsConflictingAuthorization() {
         assertNull(CopyStatementParser.parse(
                 "UNLOAD ('select 1') TO 's3://b/out/' IAM_ROLE 'arn:aws:iam::000000000000:role/r' "

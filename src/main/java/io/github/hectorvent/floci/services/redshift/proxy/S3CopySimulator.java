@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
 
@@ -202,6 +203,7 @@ public final class S3CopySimulator {
                 ? RedshiftRoleAccess.resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId, associatedRoleArns)
                 : null;
         String probeKey = unloadDataKey(spec, 0);
+        List<String> cleanPathKeys = List.of();
         try {
             if (roleSession != null) {
                 RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject",
@@ -213,7 +215,7 @@ public final class S3CopySimulator {
                             RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), manifestKey));
                     s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), manifestKey);
                 }
-                if (!spec.allowOverwrite()) {
+                if (!spec.allowOverwrite() && !spec.cleanPath()) {
                     RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket",
                             RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket()));
                     s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
@@ -228,7 +230,7 @@ public final class S3CopySimulator {
                 if (spec.manifest()) {
                     s3.authorizeAnonymousPutObject(spec.bucket(), spec.prefix() + "manifest");
                 }
-                if (!spec.allowOverwrite()) {
+                if (!spec.allowOverwrite() && !spec.cleanPath()) {
                     s3.authorizeAnonymousListBucket(spec.bucket());
                     if (targetPrefixHasObjects(spec, s3)) {
                         throw new S3TransferException(SQLSTATE_INTERNAL,
@@ -236,6 +238,9 @@ public final class S3CopySimulator {
                                         + " is not empty; specify ALLOWOVERWRITE to overwrite", null);
                     }
                 }
+            }
+            if (spec.cleanPath()) {
+                cleanPathKeys = collectCleanPathKeys(spec, s3, iamService, roleSession);
             }
         } catch (AwsException e) {
             RedshiftRoleAccess.releaseRoleSession(roleSession, spec.iamRoleArn(), iamService);
@@ -251,7 +256,7 @@ public final class S3CopySimulator {
                     "UNLOAD memory budget exhausted; retry shortly", null);
         }
         try {
-            return new S3UnloadCollector(spec, s3, iamService, roleSession);
+            return new S3UnloadCollector(spec, s3, iamService, roleSession, cleanPathKeys);
         } catch (IOException e) {
             UNLOAD_HEAP_MIB.release(UNLOAD_INITIAL_MIB);
             RedshiftRoleAccess.releaseRoleSession(roleSession, spec.iamRoleArn(), iamService);
@@ -952,6 +957,68 @@ public final class S3CopySimulator {
         return true;
     }
 
+    /**
+     * CLEANPATH, first half: lists every object under the target prefix and authorizes the delete of
+     * each, so a denial fails the UNLOAD before anything is removed or written. Nothing is deleted
+     * here: the collector removes the keys when the first output arrives, so a query the backend
+     * rejects, or a failed memory reservation, leaves the previous export in place.
+     */
+    private static List<String> collectCleanPathKeys(CopyStatementParser.S3Unload spec, S3Service s3,
+                                                     IamService iamService,
+                                                     RedshiftRoleAccess.RoleSession roleSession) {
+        if (roleSession != null) {
+            RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket",
+                    RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket()));
+            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
+        } else {
+            s3.authorizeAnonymousListBucket(spec.bucket());
+        }
+        List<String> keys = new ArrayList<>();
+        String continuationToken = null;
+        do {
+            S3Service.ListObjectsResult result = s3.listObjectsWithPrefixes(
+                    spec.bucket(), spec.prefix(), null, LIST_PAGE_SIZE, continuationToken, null);
+            if (result != null && result.objects() != null) {
+                for (S3Object object : result.objects()) {
+                    keys.add(object.getKey());
+                }
+            }
+            continuationToken = (result != null && result.isTruncated()) ? result.nextContinuationToken() : null;
+        } while (continuationToken != null);
+
+        for (String key : keys) {
+            if (roleSession != null) {
+                RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:DeleteObject",
+                        RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), key));
+                s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), roleSession.sessionToken(),
+                        spec.bucket(), key);
+            } else {
+                s3.authorizeAnonymousDeleteObject(spec.bucket(), key);
+            }
+        }
+        return keys;
+    }
+
+    /** Server-side encryption headers requested by ENCRYPTED KMS_KEY_ID, or null when none apply. */
+    private static PutObjectOptions unloadObjectOptions(CopyStatementParser.S3Unload spec) {
+        if (spec.sseKmsKeyId() == null) {
+            return null;
+        }
+        return new PutObjectOptions()
+                .withServerSideEncryption("aws:kms")
+                .withSseKmsKeyId(spec.sseKmsKeyId());
+    }
+
+    private static void putUnloadObject(S3Service s3, CopyStatementParser.S3Unload spec, String key,
+                                        byte[] payload, String contentType) {
+        PutObjectOptions options = unloadObjectOptions(spec);
+        if (options == null) {
+            s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
+        } else {
+            s3.putObject(spec.bucket(), key, payload, contentType, Map.of(), options);
+        }
+    }
+
     private static boolean targetPrefixHasObjects(CopyStatementParser.S3Unload spec, S3Service s3) {
         S3Service.ListObjectsResult r = s3.listObjectsWithPrefixes(
                 spec.bucket(), spec.prefix(), null, 1, null, null);
@@ -986,6 +1053,8 @@ public final class S3CopySimulator {
         private final String contentType;
         private final List<String> writtenKeys = new ArrayList<>();
         private final List<Integer> writtenLengths = new ArrayList<>();
+        private final List<String> pendingCleanPathKeys;
+        private boolean cleanPathDone;
 
         private ByteArrayOutputStream sink = new ByteArrayOutputStream();
         private OutputStream acc;
@@ -1004,8 +1073,10 @@ public final class S3CopySimulator {
         private int heldMib = UNLOAD_INITIAL_MIB;
 
         private S3UnloadCollector(CopyStatementParser.S3Unload spec, S3Service s3,
-                                  IamService iamService, RedshiftRoleAccess.RoleSession roleSession) throws IOException {
+                                  IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
+                                  List<String> cleanPathKeys) throws IOException {
             this.spec = spec;
+            this.pendingCleanPathKeys = cleanPathKeys;
             this.s3 = s3;
             this.iamService = iamService;
             this.roleSession = roleSession;
@@ -1019,6 +1090,7 @@ public final class S3CopySimulator {
         @Override
         public void accept(byte[] body) throws IOException {
             ensureOpen();
+            runCleanPath();
             int dataStart = 0;
             if (capturingHeader) {
                 int newline = -1;
@@ -1067,6 +1139,7 @@ public final class S3CopySimulator {
         @Override
         public void complete() throws IOException {
             ensureOpen();
+            runCleanPath();
             byte[] payload = finishSlice(acc, sink);
             if (slicePayload > 0 || writtenKeys.isEmpty()) {
                 writePayload(payload, sliceIndex);
@@ -1081,10 +1154,10 @@ public final class S3CopySimulator {
                     } else {
                         s3.authorizeAnonymousPutObject(spec.bucket(), key);
                     }
-                    s3.putObject(spec.bucket(), key,
+                    putUnloadObject(s3, spec, key,
                             manifestJson(spec.bucket(), writtenKeys, writtenLengths)
                                     .getBytes(StandardCharsets.UTF_8),
-                            "application/json", Map.of());
+                            "application/json");
                 } catch (RuntimeException e) {
                     fail(SQLSTATE_INTERNAL, "UNLOAD manifest write failed", e);
                 }
@@ -1118,6 +1191,21 @@ public final class S3CopySimulator {
             closed = true;
         }
 
+        /** CLEANPATH, second half: removes the keys collected up front, once, before the first write. */
+        private void runCleanPath() {
+            if (cleanPathDone) {
+                return;
+            }
+            cleanPathDone = true;
+            try {
+                for (String key : pendingCleanPathKeys) {
+                    s3.deleteObject(spec.bucket(), key);
+                }
+            } catch (RuntimeException e) {
+                fail(SQLSTATE_INTERNAL, "UNLOAD CLEANPATH failed", e);
+            }
+        }
+
         private void acquireForCurrentSlice() {
             int wantedMib = (int) ((rawSlice * 3) / (1024 * 1024)) + 1;
             while (heldMib < wantedMib) {
@@ -1145,7 +1233,7 @@ public final class S3CopySimulator {
                 } else {
                     s3.authorizeAnonymousPutObject(spec.bucket(), key);
                 }
-                s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
+                putUnloadObject(s3, spec, key, payload, contentType);
             } catch (AwsException e) {
                 fail(unloadWriteSqlState(e), unloadWriteMessage(e, spec), e);
             } catch (RuntimeException e) {
