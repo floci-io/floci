@@ -79,6 +79,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
@@ -148,6 +149,10 @@ public class CognitoService implements ResourceProvider {
     private final CognitoMessageDispatcher messageDispatcher;
     private final TlsCertificateManager certificateManager;
     private final Object[] userLocks = newUserLockStripes();
+    // The userKey of each username an AdminCreateUser is creating, from before its existence check
+    // until it stores the user or fails, so an overlapping request for the same username is refused
+    // instead of invoking the PreSignUp trigger again. Only the request that adds a key removes it.
+    private final Set<String> adminCreatesInFlight = ConcurrentHashMap.newKeySet();
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
@@ -2027,15 +2032,26 @@ public class CognitoService implements ResourceProvider {
         // A taken username or alias is refused before the trigger sees the request, and checked
         // again under the lock once the trigger accepts, since users can change while it runs.
         UserPool pool = describeUserPool(userPoolId);
-        aliasHolderToMove(pool, username, forceAliasCreation);
-        CognitoUser user = newAdminCreatedUser(pool, username, attributes, temporaryPassword);
+        // Claimed before the username is checked, so an overlapping request for it is refused here
+        // rather than passing the check while this one is in its trigger and invoking the trigger
+        // again. That includes a function calling back for the username it was given.
+        String inFlightKey = userKey(userPoolId, username);
+        if (!adminCreatesInFlight.add(inFlightKey)) {
+            throw new AwsException("UsernameExistsException", "User already exists", 400);
+        }
+        try {
+            aliasHolderToMove(pool, username, forceAliasCreation);
+            CognitoUser user = newAdminCreatedUser(pool, username, attributes, temporaryPassword);
 
-        // Before anything is stored, so a trigger that refuses the user leaves the pool unchanged,
-        // including the alias a ForceAliasCreation request would move.
-        authFlowHandler.firePreSignUpForAdminCreateUser(pool, user, validationData, clientMetadata);
+            // Before anything is stored, so a trigger that refuses the user leaves the pool unchanged,
+            // including the alias a ForceAliasCreation request would move.
+            authFlowHandler.firePreSignUpForAdminCreateUser(pool, user, validationData, clientMetadata);
 
-        synchronized (lock) {
-            return storeAdminCreatedUserUnderUserLock(userPoolId, username, forceAliasCreation, user);
+            synchronized (lock) {
+                return storeAdminCreatedUserUnderUserLock(userPoolId, username, forceAliasCreation, user);
+            }
+        } finally {
+            adminCreatesInFlight.remove(inFlightKey);
         }
     }
 

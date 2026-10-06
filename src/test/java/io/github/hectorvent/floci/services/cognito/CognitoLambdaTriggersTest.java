@@ -29,7 +29,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.invocation.InvocationOnMock;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
@@ -38,14 +40,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -589,24 +597,119 @@ class CognitoLambdaTriggersTest {
     @Test
     void preSignUpFunctionCallingBackForTheSameUsernameIsNotBlocked() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
                 any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenAnswer(invocation -> {
-                    callFromFunction(() -> service.adminCreateUser(pool.getId(), "alice",
-                            Map.of("name", "created by the function"), null, "SUPPRESS"));
+                    try {
+                        callFromFunction(() -> service.adminCreateUser(pool.getId(), "alice",
+                                Map.of("name", "created by the function"), null, "SUPPRESS"));
+                    } catch (ExecutionException e) {
+                        callbackFailure.set(e.getCause());
+                    }
                     return ok(Map.of());
                 })
                 .thenReturn(ok(Map.of()));
 
-        // The function's call needs the lock stripe of the username being created, so it would
-        // wait out the invocation if AdminCreateUser held that stripe while the function ran.
-        AwsException ex = assertTimeoutPreemptively(Duration.ofSeconds(10), () ->
-                assertThrows(AwsException.class, () -> service.adminCreateUser(pool.getId(), "alice",
-                        Map.of("name", "created by the request"), null, "SUPPRESS")));
+        // The function's call is for the username the request is creating. It would wait out the
+        // invocation if the request held that username's lock stripe while the function ran, and
+        // it is refused rather than invoking the trigger a second time for the same username.
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> service.adminCreateUser(pool.getId(), "alice",
+                Map.of("name", "created by the request"), null, "SUPPRESS"));
 
-        assertEquals("UsernameExistsException", ex.getErrorCode());
-        assertEquals("created by the function",
+        assertEquals("UsernameExistsException",
+                assertInstanceOf(AwsException.class, callbackFailure.get()).getErrorCode());
+        assertEquals("created by the request",
                 service.adminGetUser(pool.getId(), "alice").getAttributes().get("name"));
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void overlappingAdminCreateUserForTheSameUsernameInvokesPreSignUpOnce() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        List<String> invokedFor = new CopyOnWriteArrayList<>();
+        CountDownLatch firstInTrigger = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    String request = nameAttributeOf(invocation);
+                    invokedFor.add(request);
+                    if ("first".equals(request)) {
+                        firstInTrigger.countDown();
+                        assertTrue(releaseFirst.await(10, TimeUnit.SECONDS));
+                    }
+                    return ok(Map.of());
+                });
+
+        ExecutorService firstRequest = Executors.newSingleThreadExecutor();
+        try {
+            Future<CognitoUser> first = firstRequest.submit(() -> service.adminCreateUser(pool.getId(), "alice",
+                    Map.of("name", "first"), null, "SUPPRESS"));
+            assertTrue(firstInTrigger.await(10, TimeUnit.SECONDS));
+
+            // The first request is still in its trigger, so no user named alice is stored yet.
+            AwsException second = assertThrows(AwsException.class, () -> service.adminCreateUser(pool.getId(),
+                    "alice", Map.of("name", "second"), null, "SUPPRESS"));
+            assertEquals("UsernameExistsException", second.getErrorCode());
+            assertEquals("User already exists", second.getMessage());
+
+            releaseFirst.countDown();
+            assertEquals("alice", first.get(10, TimeUnit.SECONDS).getUsername());
+        } finally {
+            releaseFirst.countDown();
+            firstRequest.shutdownNow();
+        }
+
+        assertEquals(List.of("first"), invokedFor);
+        assertEquals("first", service.adminGetUser(pool.getId(), "alice").getAttributes().get("name"));
+    }
+
+    @Test
+    void adminCreateUserOverlappingAFailingPreSignUpIsRefusedAndTheUsernameIsFreedAfterwards() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        List<String> invokedFor = new CopyOnWriteArrayList<>();
+        CountDownLatch firstInTrigger = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        // The function refuses every user but the retried one, so a second request that reached it
+        // would fail with the function's error instead of UsernameExistsException.
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    String request = nameAttributeOf(invocation);
+                    invokedFor.add(request);
+                    if ("first".equals(request)) {
+                        firstInTrigger.countDown();
+                        assertTrue(releaseFirst.await(10, TimeUnit.SECONDS));
+                    }
+                    return "retry".equals(request) ? ok(Map.of()) : lambdaError("Unhandled", "Refused");
+                });
+
+        ExecutorService firstRequest = Executors.newSingleThreadExecutor();
+        try {
+            Future<CognitoUser> first = firstRequest.submit(() -> service.adminCreateUser(pool.getId(), "alice",
+                    Map.of("name", "first"), null, "SUPPRESS"));
+            assertTrue(firstInTrigger.await(10, TimeUnit.SECONDS));
+
+            AwsException second = assertThrows(AwsException.class, () -> service.adminCreateUser(pool.getId(),
+                    "alice", Map.of("name", "second"), null, "SUPPRESS"));
+            assertEquals("UsernameExistsException", second.getErrorCode());
+
+            releaseFirst.countDown();
+            ExecutionException firstFailure = assertThrows(ExecutionException.class,
+                    () -> first.get(10, TimeUnit.SECONDS));
+            assertEquals("UserLambdaValidationException",
+                    assertInstanceOf(AwsException.class, firstFailure.getCause()).getErrorCode());
+        } finally {
+            releaseFirst.countDown();
+            firstRequest.shutdownNow();
+        }
+
+        service.adminCreateUser(pool.getId(), "alice", Map.of("name", "retry"), null, "SUPPRESS");
+
+        assertEquals(List.of("first", "retry"), invokedFor);
+        assertEquals("retry", service.adminGetUser(pool.getId(), "alice").getAttributes().get("name"));
     }
 
     @Test
@@ -680,6 +783,15 @@ class CognitoLambdaTriggersTest {
         } finally {
             functionThread.shutdownNow();
         }
+    }
+
+    /**
+     * The {@code name} attribute of the user a trigger invocation is for, which tells the tests'
+     * requests apart.
+     */
+    private static String nameAttributeOf(InvocationOnMock invocation) throws IOException {
+        byte[] event = invocation.getArgument(2);
+        return MAPPER.readTree(event).path("request").path("userAttributes").path("name").asText();
     }
 
     // =========================================================================
