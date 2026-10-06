@@ -455,6 +455,10 @@
   "AWS::IAM::User": [
     "UserName"
   ],
+  "AWS::IoT::Authorizer": [
+    "SigningDisabled",
+    "AuthorizerName"
+  ],
   "AWS::IoT::DomainConfiguration": [
     "DomainConfigurationName",
     "DomainName",

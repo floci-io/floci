@@ -379,6 +379,17 @@ Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` r
 - **Request** — the body is the rendered `requestTemplates` entry selected by the incoming `Content-Type` (falling back to the type without its charset), subject to `passthroughBehavior` (`NEVER` and `WHEN_NO_TEMPLATES` return `415`). Only headers and query parameters named by `integration.request.*` mappings are forwarded; unmapped inbound headers are **not** passed through — that passthrough is `HTTP_PROXY`'s job.
 - **Response** — the backend's reply runs through the method's integration responses. As in AWS, `selectionPattern` is matched against the backend's **HTTP status code** (for `AWS`/Lambda integrations it is matched against the error message instead), so `"5\\d{2}"` on a `502` integration response remaps any backend `5xx` to `502`. The matched response's `responseTemplates` render the body, `responseParameters` map `integration.response.header.*` (case-insensitively) or `integration.response.body.<jsonpath>` onto `method.response.header.*`, and `$context.responseOverride` assignments take precedence. With no integration responses configured, the backend's status and body are relayed as-is.
 
+### Resource Method Introspection
+
+`GetResources` and `GetResource` return the configured HTTP method names in `resourceMethods`,
+with empty objects by default. Request `embed=methods` to include the supported method fields:
+authorization settings, request parameters and models, method responses, and integration
+configuration. Resources without methods omit `resourceMethods`.
+
+For example, `aws apigateway get-resources --rest-api-id <id> --embed methods` lists method
+metadata without a separate `get-method` call for each operation. Stage OpenAPI export
+(`GetExport`) is not implemented.
+
 ### Integration Settings
 
 `PutIntegration` persists and `GetIntegration` returns the full configuration, including the mapping templates and integration responses that IaC tools diff against:

@@ -47,7 +47,9 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
  * Reads and the single-domain attribute writes call
  * {@link SesIdentityService} directly; create, delete, the policy operations and the default
  * configuration set go through the {@link SesService} facade, which checks the configuration set
- * exists, guards the delete against tenant associations and cascades the identity's policies.
+ * exists, guards the delete against tenant and certificate associations and cascades the
+ * identity's policies. The S/MIME certificate associations ({@code /v2/email/identity/certificates})
+ * call {@link SesIdentityCertificateService}.
  */
 @Path("/v2/email")
 @Produces(MediaType.APPLICATION_JSON)
@@ -62,14 +64,17 @@ public class SesIdentityController {
 
     private final SesIdentityService identityService;
     private final SesService sesService;
+    private final SesIdentityCertificateService certificateService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public SesIdentityController(SesIdentityService identityService, SesService sesService,
+                                 SesIdentityCertificateService certificateService,
                                  RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.identityService = identityService;
         this.sesService = sesService;
+        this.certificateService = certificateService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -449,6 +454,60 @@ public class SesIdentityController {
         } catch (JsonProcessingException e) {
             throw new AwsException("SerializationException", null, 400);
         }
+    }
+
+    @POST
+    @Path("/identity/certificates")
+    public Response associateEmailIdentityCertificate(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode request = readOptionBody(objectMapper, body);
+        try {
+            certificateService.associate(stringMemberOrAbsent(request, "EmailIdentity"),
+                    stringMemberOrAbsent(request, "FromAddress"), stringMemberOrAbsent(request, "CertificateArn"),
+                    region);
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/identity/certificates/delete")
+    public Response disassociateEmailIdentityCertificate(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode request = readOptionBody(objectMapper, body);
+        try {
+            certificateService.disassociate(stringMemberOrAbsent(request, "EmailIdentity"),
+                    stringMemberOrAbsent(request, "FromAddress"), region);
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/identity/certificates/list")
+    public Response listEmailIdentityCertificates(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode request = readOptionBody(objectMapper, body);
+        PaginatedResult<SesIdentityCertificateService.Entry> page;
+        try {
+            page = certificateService.list(stringMemberOrAbsent(request, "EmailIdentity"),
+                    intMemberOrAbsent(request, "PageSize"), stringMemberOrAbsent(request, "NextToken"), region);
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode certificates = result.putArray("Certificates");
+        for (SesIdentityCertificateService.Entry entry : page.items()) {
+            ObjectNode item = certificates.addObject();
+            item.put("FromAddress", entry.fromAddress());
+            item.put("Status", entry.status());
+            item.put("CertificateArn", entry.certificateArn());
+            putTimestamp(item, "CertificateExpiryTime", entry.expiryTime());
+        }
+        result.put("NextToken", page.nextToken());
+        return Response.ok(result).build();
     }
 
     private ObjectNode buildFullIdentityResponse(Identity identity, String region) {

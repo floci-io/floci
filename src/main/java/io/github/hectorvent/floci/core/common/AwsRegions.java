@@ -72,6 +72,18 @@ public final class AwsRegions {
         return AwsPartitions.forRegionOrCommercial(region).dnsSuffix();
     }
 
+    /** The private EC2 DNS domain shared by instances, network interfaces, ECS and EKS. */
+    public static String ec2PrivateDnsDomain(String region) {
+        String effectiveRegion = region == null || region.isBlank() ? "us-east-1" : region; // partition-literal: legacy private DNS domain
+        return "us-east-1".equals(effectiveRegion) // partition-literal: ec2.internal is specific to us-east-1
+                ? "ec2.internal" : effectiveRegion + ".compute.internal";
+    }
+
+    /** The private DNS name for an IPv4 EC2 address in the request's region. */
+    public static String ec2PrivateIpDnsName(String address, String region) {
+        return "ip-" + address.replace('.', '-') + "." + ec2PrivateDnsDomain(region);
+    }
+
     private AwsRegions() {
     }
 }

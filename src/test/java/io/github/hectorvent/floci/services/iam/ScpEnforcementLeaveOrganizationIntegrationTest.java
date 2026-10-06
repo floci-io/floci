@@ -86,6 +86,21 @@ class ScpEnforcementLeaveOrganizationIntegrationTest {
         org(memberId, "DescribeOrganization", "{}")
                 .then()
                 .statusCode(200);
+
+        // A GetSessionToken session the member's root minted is bounded by the same SCP.
+        String sessionKey = given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + memberId + "/20260629/" + REGION
+                        + "/sts/aws4_request, SignedHeaders=host, Signature=abc")
+                .formParam("Action", "GetSessionToken")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("GetSessionTokenResponse.GetSessionTokenResult.Credentials.AccessKeyId");
+        org(sessionKey, "LeaveOrganization", "{}")
+                .then()
+                .statusCode(400)
+                .body(containsString("AccessDeniedException"));
     }
 
     private static Response org(String account, String action, String body) {

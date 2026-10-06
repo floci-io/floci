@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
@@ -8389,6 +8390,42 @@ class RdsServiceTest {
         AwsException taken = assertThrows(AwsException.class, () ->
                 rdsService.modifyGlobalCluster("gdb-renamed", "other", null, null, null));
         assertEquals("GlobalClusterAlreadyExistsFault", taken.getErrorCode());
+    }
+
+    @Test
+    void customClusterEndpointFollowsTheClusterNamesWriterAndAddress() {
+        rdsService.createDbCluster("Mixed-Cluster", "aurora-postgresql", "16.3", "admin", "password", "appdb", false, null);
+        for (String member : List.of("Writer-1", "Reader-1")) {
+            rdsService.createDbInstance(member, "aurora-postgresql", "16.3",
+                    "admin", "password", "appdb", "db.r5.large",
+                    20, false, null, null, "Mixed-Cluster", null, false, false, null,
+                    Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+        }
+
+        // The cluster is found under its own spelling, and a member named in other capitals is
+        // stored as the cluster spells it.
+        DbClusterEndpoint created = rdsService.createDbClusterEndpoint("us-east-1", "Mixed-Cluster", "reports",
+                "READER", List.of("READER-1"), null, Map.of());
+        assertEquals(List.of("Reader-1"), created.getStaticMembers());
+
+        // After a failover the new writer drops out of the READER endpoint, as Aurora adjusts it.
+        rdsService.failoverDbCluster("Mixed-Cluster", "Reader-1", "us-east-1");
+        DbClusterEndpoint afterFailover = rdsService.describeDbClusterEndpoints("us-east-1", null, "reports",
+                Map.of(), null, null).endpoints().getFirst();
+        assertEquals(List.of(), afterFailover.getStaticMembers());
+        // A modify that leaves the lists alone still succeeds, and a failback makes the member a
+        // reader of the endpoint again, since failover never removed it from the stored list.
+        DbClusterEndpoint retyped = rdsService.modifyDbClusterEndpoint("us-east-1", "reports", "READER", null, null);
+        assertEquals(List.of(), retyped.getStaticMembers());
+        rdsService.failoverDbCluster("Mixed-Cluster", "Writer-1", "us-east-1");
+        assertEquals(List.of("Reader-1"), rdsService.describeDbClusterEndpoints("us-east-1", null, "reports",
+                Map.of(), null, null).endpoints().getFirst().getStaticMembers());
+
+        // The address follows the cluster's endpoint rather than the one stored at create.
+        rdsService.getDbCluster("Mixed-Cluster").setEndpoint(new DbEndpoint("moved.example", 7099));
+        DbClusterEndpoint moved = rdsService.describeDbClusterEndpoints("us-east-1", null, "reports",
+                Map.of(), null, null).endpoints().getFirst();
+        assertEquals("moved.example", moved.getEndpoint());
     }
 
     @Test

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
@@ -97,6 +98,10 @@ public class RdsQueryHandler {
                 case "DescribeEventSubscriptions" -> handleDescribeEventSubscriptions(params, region);
                 case "ModifyEventSubscription" -> handleModifyEventSubscription(params, region);
                 case "DeleteEventSubscription" -> handleDeleteEventSubscription(params, region);
+                case "CreateDBClusterEndpoint" -> handleCreateDbClusterEndpoint(params, region);
+                case "DescribeDBClusterEndpoints" -> handleDescribeDbClusterEndpoints(params, region);
+                case "ModifyDBClusterEndpoint" -> handleModifyDbClusterEndpoint(params, region);
+                case "DeleteDBClusterEndpoint" -> handleDeleteDbClusterEndpoint(params, region);
                 case "AddSourceIdentifierToSubscription" ->
                         handleAddSourceIdentifierToSubscription(params, region);
                 case "RemoveSourceIdentifierFromSubscription" ->
@@ -341,6 +346,93 @@ public class RdsQueryHandler {
                 params.getFirst("SubscriptionName"));
         return Response.ok(AwsQueryResponse.envelope("DeleteEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleCreateDbClusterEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbClusterEndpoint endpoint = service.createDbClusterEndpoint(region,
+                params.getFirst("DBClusterIdentifier"),
+                params.getFirst("DBClusterEndpointIdentifier"),
+                params.getFirst("EndpointType"),
+                memberList(params, "StaticMembers"),
+                memberList(params, "ExcludedMembers"),
+                parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("CreateDBClusterEndpoint", AwsNamespaces.RDS,
+                dbClusterEndpointInnerXml(endpoint))).build();
+    }
+
+    private Response handleModifyDbClusterEndpoint(MultivaluedMap<String, String> params, String region) {
+        // A list left out of the request keeps the endpoint's lists; one given replaces them.
+        DbClusterEndpoint endpoint = service.modifyDbClusterEndpoint(region,
+                params.getFirst("DBClusterEndpointIdentifier"),
+                params.getFirst("EndpointType"),
+                hasMemberKeys(params, "StaticMembers") ? memberList(params, "StaticMembers") : null,
+                hasMemberKeys(params, "ExcludedMembers") ? memberList(params, "ExcludedMembers") : null);
+        return Response.ok(AwsQueryResponse.envelope("ModifyDBClusterEndpoint", AwsNamespaces.RDS,
+                dbClusterEndpointInnerXml(endpoint))).build();
+    }
+
+    private Response handleDeleteDbClusterEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbClusterEndpoint endpoint = service.deleteDbClusterEndpoint(region,
+                params.getFirst("DBClusterEndpointIdentifier"));
+        return Response.ok(AwsQueryResponse.envelope("DeleteDBClusterEndpoint", AwsNamespaces.RDS,
+                dbClusterEndpointInnerXml(endpoint))).build();
+    }
+
+    private Response handleDescribeDbClusterEndpoints(MultivaluedMap<String, String> params, String region) {
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (String name : List.of("db-cluster-endpoint-type", "db-cluster-endpoint-custom-type",
+                "db-cluster-endpoint-id", "db-cluster-endpoint-status")) {
+            List<String> values = extractRdsFilterValues(params, name);
+            if (!values.isEmpty()) {
+                filters.put(name, values);
+            }
+        }
+        RdsService.ClusterEndpointPage page = service.describeDbClusterEndpoints(region,
+                params.getFirst("DBClusterIdentifier"),
+                params.getFirst("DBClusterEndpointIdentifier"),
+                filters,
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("DBClusterEndpoints");
+        for (DbClusterEndpoint endpoint : page.endpoints()) {
+            xml.start("DBClusterEndpointList").raw(dbClusterEndpointInnerXml(endpoint)).end("DBClusterEndpointList");
+        }
+        xml.end("DBClusterEndpoints");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterEndpoints", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    /** The DBClusterEndpoint members; a built-in endpoint has no identifier, ARN, custom type or lists. */
+    private static String dbClusterEndpointInnerXml(DbClusterEndpoint e) {
+        XmlBuilder xml = new XmlBuilder();
+        if (e.getDbClusterEndpointIdentifier() != null) {
+            xml.elem("DBClusterEndpointIdentifier", e.getDbClusterEndpointIdentifier());
+        }
+        xml.elem("DBClusterIdentifier", e.getDbClusterIdentifier());
+        if (e.getDbClusterEndpointResourceIdentifier() != null) {
+            xml.elem("DBClusterEndpointResourceIdentifier", e.getDbClusterEndpointResourceIdentifier());
+        }
+        if (e.getEndpoint() != null) {
+            xml.elem("Endpoint", e.getEndpoint());
+        }
+        xml.elem("Status", e.getStatus())
+           .elem("EndpointType", e.getEndpointType());
+        if (e.getCustomEndpointType() != null) {
+            xml.elem("CustomEndpointType", e.getCustomEndpointType());
+            xml.start("StaticMembers");
+            e.getStaticMembers().forEach(member -> xml.elem("member", member));
+            xml.end("StaticMembers");
+            xml.start("ExcludedMembers");
+            e.getExcludedMembers().forEach(member -> xml.elem("member", member));
+            xml.end("ExcludedMembers");
+        }
+        if (e.getDbClusterEndpointArn() != null) {
+            xml.elem("DBClusterEndpointArn", e.getDbClusterEndpointArn());
+        }
+        return xml.build();
     }
 
     private Response handleDescribeEventSubscriptions(MultivaluedMap<String, String> params, String region) {

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.EksPodIdentityCredentialsResponse;
 import io.github.hectorvent.floci.services.eks.model.PodIdentityAssociation;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -133,8 +134,15 @@ public class EksPodIdentityCredentialsController {
         String sessionToken = randomSecret(200);
         Instant expiration = Instant.now().plus(Duration.ofHours(1));
 
+        String sessionName = podIdentitySessionName(cluster.getName(), association.serviceAccount());
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        String assumedRoleId = role.map(IamRole::getRoleId).filter(id -> !id.isBlank())
+                .map(id -> id + ":" + sessionName)
+                .orElse(null);
+
         iamService.registerSession(accessKeyId, secretAccessKey, sessionToken, roleArn,
-                expiration, association.policy(), callerAccountId);
+                expiration, association.policy(), callerAccountId, sessionName, assumedRoleId);
 
         EksPodIdentityCredentialsResponse response = new EksPodIdentityCredentialsResponse(
                 accessKeyId,
@@ -168,5 +176,16 @@ public class EksPodIdentityCredentialsController {
             sb.append(CHARS.charAt(secureRandom.nextInt(CHARS.length())));
         }
         return sb.toString();
+    }
+
+    private String podIdentitySessionName(String clusterName, String serviceAccount) {
+        String randomSuffix = randomId(8);
+        String prefix = "eks-";
+        String base = prefix + (clusterName != null && !clusterName.isBlank() ? clusterName + "-" : "") + serviceAccount;
+        int maxBaseLen = 64 - 1 - randomSuffix.length();
+        if (base.length() > maxBaseLen) {
+            base = base.substring(0, maxBaseLen);
+        }
+        return base + "-" + randomSuffix;
     }
 }

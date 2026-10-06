@@ -208,13 +208,13 @@ public class VpcNetworkManager {
 
     private VpcBinding planVpc(String region, String vpcId, String declaredCidr) {
         Optional<Cidr4> declared = Cidr4.parse(declaredCidr);
-        String rejection = rejectionReason(vpcId, declared, declaredCidr, List.of());
+        String rejection = rejectionReason(region, vpcId, declared, declaredCidr, List.of());
         Cidr4 effective;
         if (rejection == null) {
             effective = declared.orElseThrow();
         }
         else {
-            effective = allocateFromFallbackPool(vpcId, declared.map(Cidr4::prefix).orElse(null));
+            effective = allocateFromFallbackPool(region, vpcId, declared.map(Cidr4::prefix).orElse(null));
             if (effective == null) {
                 LOG.warnv("VPC {0} in {1}: declared CIDR {2} is unusable ({3}) and the fallback pool {4} "
                                 + "is exhausted. This VPC gets no Docker network; its instances keep "
@@ -237,7 +237,7 @@ public class VpcNetworkManager {
      * @return null when the block can be used as declared, otherwise a human-readable reason
      *         it cannot, which goes verbatim into the substitution WARN.
      */
-    private String rejectionReason(String vpcId, Optional<Cidr4> declared, String declaredText,
+    private String rejectionReason(String region, String vpcId, Optional<Cidr4> declared, String declaredText,
                                    Collection<Cidr4> extraTaken) {
         if (declared.isEmpty()) {
             return declaredText == null || declaredText.isBlank()
@@ -247,11 +247,11 @@ public class VpcNetworkManager {
         if (!cidr.isRfc1918()) {
             return "outside RFC 1918 private space (10/8, 172.16/12, 192.168/16)";
         }
-        Optional<String> clash = firstClash(vpcId, cidr, extraTaken);
+        Optional<String> clash = firstClash(region, vpcId, cidr, extraTaken);
         return clash.orElse(null);
     }
 
-    private Optional<String> firstClash(String vpcId, Cidr4 candidate, Collection<Cidr4> extraTaken) {
+    private Optional<String> firstClash(String region, String vpcId, Cidr4 candidate, Collection<Cidr4> extraTaken) {
         for (Cidr4 taken : extraTaken) {
             if (candidate.overlaps(taken)) {
                 return Optional.of("overlaps an address range already in use (" + taken + ")");
@@ -264,7 +264,7 @@ public class VpcNetworkManager {
                         + "cannot route two identical ranges");
             }
         }
-        for (Cidr4 taken : dockerNetworkSubnets(vpcId)) {
+        for (Cidr4 taken : dockerNetworkSubnets(region, vpcId)) {
             if (candidate.overlaps(taken)) {
                 return Optional.of("overlaps an existing Docker network (" + taken + ")");
             }
@@ -352,7 +352,7 @@ public class VpcNetworkManager {
         return null;
     }
 
-    private Cidr4 allocateFromFallbackPool(String vpcId, Integer declaredPrefix) {
+    private Cidr4 allocateFromFallbackPool(String region, String vpcId, Integer declaredPrefix) {
         EmulatorConfig.VpcNetworksConfig cfg = config.services().ec2().vpcNetworks();
         Optional<Cidr4> pool = Cidr4.parse(cfg.fallbackPool());
         if (pool.isEmpty() || !pool.get().isRfc1918()) {
@@ -366,7 +366,7 @@ public class VpcNetworkManager {
             // asked for, not a /16 that wastes fifteen sixteenths of the pool per VPC.
             prefix = Math.min(declaredPrefix, MAX_ALLOCATABLE_PREFIX);
         }
-        List<Cidr4> taken = new ArrayList<>(dockerNetworkSubnets(vpcId));
+        List<Cidr4> taken = new ArrayList<>(dockerNetworkSubnets(region, vpcId));
         bindings.values().stream().map(b -> b.effective).filter(c -> c != null).forEach(taken::add);
         return allocateSubBlock(pool.get(), prefix, taken);
     }
@@ -938,16 +938,20 @@ public class VpcNetworkManager {
     /**
      * Every IPv4 range the daemon has already reserved, so a declared CIDR can be checked before use.
      *
+     * @param ownRegion the Region of the VPC being planned
      * @param ownVpcId the VPC being planned; this instance's surviving network for that same VPC is
      *                 excluded, so a Floci restart re-planning a VPC whose bridge is still up does
-     *                 not read its own network as a collision and substitute a CIDR it already has
+     *                 not read its own network as a collision and substitute a CIDR it already has.
+     *                 Two Regions can hold a VPC with the same id (the legacy {@code vpc-default}),
+     *                 so the network must be for that VPC in the same Region
      */
-    private Set<Cidr4> dockerNetworkSubnets(String ownVpcId) {
+    private Set<Cidr4> dockerNetworkSubnets(String ownRegion, String ownVpcId) {
         Set<Cidr4> taken = new java.util.LinkedHashSet<>();
         try {
             for (Network network : dockerClient.listNetworksCmd().exec()) {
                 Map<String, String> labels = network.getLabels() == null ? Map.of() : network.getLabels();
                 if (ownVpcId != null && ALIASES.matches(labels, ContainerStorageHelper.RESOURCE_ID_LABEL, ownVpcId)
+                        && ALIASES.matches(labels, ContainerStorageHelper.REGION_LABEL, ownRegion)
                         && ownedByThisDeployment(labels)) {
                     continue;
                 }

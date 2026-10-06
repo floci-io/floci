@@ -844,7 +844,7 @@ FLOCI_DNS_EXTRA_SUFFIXES=localhost.localstack.cloud,localhost.example.internal
 
 ### Real AWS Credentials
 
-By default, a Lambda function whose execution role exists in Floci's IAM store receives temporary credentials for that role. SDK calls made by the function identify as `assumed-role/<role>/floci-session`, and IAM enforcement evaluates the role's policies. If the role is unknown to Floci, the container keeps the compatibility fallback described below.
+By default, a Lambda function whose execution role exists in Floci's IAM store receives temporary credentials for that role. SDK calls made by the function identify as `assumed-role/<role>/<function-name>`, and IAM enforcement evaluates the role's policies. If the role is unknown to Floci, the container keeps the compatibility fallback described below.
 
 For hybrid local/cloud testing, where some services are emulated and others hit real AWS, you can mount your host `~/.aws` directory into Lambda containers:
 

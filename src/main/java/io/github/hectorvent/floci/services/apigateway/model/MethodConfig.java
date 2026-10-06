@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @RegisterForReflection
@@ -21,7 +22,7 @@ public class MethodConfig {
     private boolean apiKeyRequired;
     private Map<String, Boolean> requestParameters = new HashMap<>();
     private Map<String, String> requestModels = new HashMap<>();
-    private Map<String, MethodResponse> methodResponses = new HashMap<>();
+    private Map<String, MethodResponse> methodResponses = new ConcurrentHashMap<>();
     private Integration methodIntegration;
 
     public String getHttpMethod() { return httpMethod; }
@@ -56,7 +57,7 @@ public class MethodConfig {
 
     public Map<String, MethodResponse> getMethodResponses() { return methodResponses; }
     public void setMethodResponses(Map<String, MethodResponse> methodResponses) {
-        this.methodResponses = methodResponses != null ? methodResponses : new HashMap<>();
+        this.methodResponses = methodResponses != null ? new ConcurrentHashMap<>(methodResponses) : new ConcurrentHashMap<>();
     }
 
     public Integration getMethodIntegration() { return methodIntegration; }

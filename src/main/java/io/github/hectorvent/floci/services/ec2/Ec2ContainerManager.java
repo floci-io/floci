@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -1283,7 +1284,7 @@ public class Ec2ContainerManager {
             return;
         }
 
-        String privateDnsName = "ip-" + privateIp.replace('.', '-') + ".ec2.internal";
+        String privateDnsName = AwsRegions.ec2PrivateIpDnsName(privateIp, instance.getRegion());
         instance.setPrivateIpAddress(privateIp);
         instance.setPrivateDnsName(privateDnsName);
         if (instance.getNetworkInterfaces() != null) {

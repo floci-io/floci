@@ -5,11 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.services.dms.model.DmsResource;
 import io.github.hectorvent.floci.services.dms.model.ReplicationSubnetGroup;
 import io.github.hectorvent.floci.services.dms.model.ResourceTag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
+
+import java.util.function.Function;
 
 @ApplicationScoped
 public class DmsJsonHandler {
@@ -62,8 +65,64 @@ public class DmsJsonHandler {
                 service.removeTagsFromResource(request, region);
                 yield Response.ok(objectMapper.createObjectNode()).build();
             }
+            case "CreateEndpoint" -> single("Endpoint", service.createEndpoint(request, region).getAttributes());
+            case "DescribeEndpoints" -> page("Endpoints", service.describeEndpoints(request, region),
+                    DmsResource::getAttributes);
+            case "ModifyEndpoint" -> single("Endpoint", service.modifyEndpoint(request, region).getAttributes());
+            case "DeleteEndpoint" -> single("Endpoint", service.deleteEndpoint(request, region).getAttributes());
+            case "CreateReplicationInstance" -> single("ReplicationInstance",
+                    instance(service.createReplicationInstance(request, region), region));
+            case "DescribeReplicationInstances" -> page("ReplicationInstances",
+                    service.describeReplicationInstances(request, region), item -> instance(item, region));
+            case "ModifyReplicationInstance" -> single("ReplicationInstance",
+                    instance(service.modifyReplicationInstance(request, region), region));
+            case "DeleteReplicationInstance" -> single("ReplicationInstance",
+                    instance(service.deleteReplicationInstance(request, region), region));
+            case "CreateReplicationTask" -> single("ReplicationTask",
+                    service.createReplicationTask(request, region).getAttributes());
+            case "DescribeReplicationTasks" -> page("ReplicationTasks",
+                    service.describeReplicationTasks(request, region), DmsResource::getAttributes);
+            case "ModifyReplicationTask" -> single("ReplicationTask",
+                    service.modifyReplicationTask(request, region).getAttributes());
+            case "DeleteReplicationTask" -> single("ReplicationTask",
+                    service.deleteReplicationTask(request, region).getAttributes());
+            case "StartReplicationTask" -> single("ReplicationTask",
+                    service.startReplicationTask(request, region).getAttributes());
+            case "StopReplicationTask" -> single("ReplicationTask",
+                    service.stopReplicationTask(request, region).getAttributes());
             default -> null;
         };
+    }
+
+    private Response single(String member, ObjectNode item) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set(member, item);
+        return Response.ok(response).build();
+    }
+
+    private Response page(String member, PaginatedResult<DmsResource> page,
+                          Function<DmsResource, ObjectNode> render) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray(member);
+        page.items().forEach(item -> items.add(render.apply(item)));
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    /**
+     * Expands the stored subnet group identifier into the full {@code ReplicationSubnetGroup}
+     * structure DMS returns, read at describe time so it reflects the group as it is now.
+     */
+    private ObjectNode instance(DmsResource resource, String region) {
+        ObjectNode node = resource.getAttributes().deepCopy();
+        String groupId = node.path("ReplicationSubnetGroup").path("ReplicationSubnetGroupIdentifier").asText(null);
+        if (groupId != null) {
+            service.findReplicationSubnetGroup(region, groupId)
+                    .ifPresent(group -> node.set("ReplicationSubnetGroup", subnetGroup(group)));
+        }
+        return node;
     }
 
     private ObjectNode tagNode(ResourceTag tag) {

@@ -11,16 +11,20 @@ import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.DescribeSubnetsResponse;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo;
+import software.amazon.awssdk.services.rds.model.CreateDbClusterEndpointResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbClusterResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.DBCluster;
+import software.amazon.awssdk.services.rds.model.DBClusterEndpoint;
 import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
 import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DBSnapshot;
+import software.amazon.awssdk.services.rds.model.DbClusterEndpointAlreadyExistsException;
+import software.amazon.awssdk.services.rds.model.DbClusterEndpointNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
@@ -34,6 +38,7 @@ import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOpti
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
 import software.amazon.awssdk.services.rds.model.InvalidRestoreException;
 import software.amazon.awssdk.services.rds.model.ListTagsForResourceResponse;
+import software.amazon.awssdk.services.rds.model.ModifyDbClusterEndpointResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbClusterResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbProxyTargetGroupResponse;
@@ -672,6 +677,78 @@ class RdsControlPlaneTest {
                 } catch (Exception e) {
                     LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + name, e);
                 }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Custom cluster endpoints round-trip with the built-in writer and reader endpoints")
+    void sdkRoundTripsCustomClusterEndpoints() {
+        String clusterName = TestFixtures.uniqueName("rds-cep-cluster");
+        String writerName = clusterName + "-w";
+        String readerName = clusterName + "-r";
+        String endpointName = TestFixtures.uniqueName("rds-cep");
+        try {
+            rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("cep-secret"));
+            for (String instance : List.of(writerName, readerName)) {
+                rds.createDBInstance(b -> b
+                        .dbInstanceIdentifier(instance)
+                        .dbClusterIdentifier(clusterName)
+                        .engine("aurora-postgresql")
+                        .dbInstanceClass("db.r6g.large"));
+            }
+
+            CreateDbClusterEndpointResponse created = rds.createDBClusterEndpoint(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .dbClusterEndpointIdentifier(endpointName)
+                    .endpointType("READER")
+                    .staticMembers(readerName)
+                    .tags(Tag.builder().key("team").value("analytics").build()));
+            assertThat(created.endpointType()).isEqualTo("CUSTOM");
+            assertThat(created.customEndpointType()).isEqualTo("READER");
+            assertThat(created.staticMembers()).containsExactly(readerName);
+            assertThat(created.dbClusterEndpointArn()).endsWith(":cluster-endpoint:" + endpointName);
+
+            List<DBClusterEndpoint> endpoints = rds.describeDBClusterEndpoints(b -> b
+                    .dbClusterIdentifier(clusterName)).dbClusterEndpoints();
+            assertThat(endpoints).extracting(DBClusterEndpoint::endpointType)
+                    .containsExactly("WRITER", "READER", "CUSTOM");
+
+            ModifyDbClusterEndpointResponse modified = rds.modifyDBClusterEndpoint(b -> b
+                    .dbClusterEndpointIdentifier(endpointName)
+                    .endpointType("ANY")
+                    .excludedMembers(writerName));
+            assertThat(modified.customEndpointType()).isEqualTo("ANY");
+            assertThat(modified.staticMembers()).isEmpty();
+            assertThat(modified.excludedMembers()).containsExactly(writerName);
+
+            assertThatThrownBy(() -> rds.createDBClusterEndpoint(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .dbClusterEndpointIdentifier(endpointName)
+                    .endpointType("ANY")))
+                    .isInstanceOf(DbClusterEndpointAlreadyExistsException.class);
+
+            assertThat(rds.deleteDBClusterEndpoint(b -> b.dbClusterEndpointIdentifier(endpointName)).status())
+                    .isEqualTo("deleting");
+            assertThatThrownBy(() -> rds.deleteDBClusterEndpoint(b -> b.dbClusterEndpointIdentifier(endpointName)))
+                    .isInstanceOf(DbClusterEndpointNotFoundException.class);
+        } finally {
+            try {
+                rds.deleteDBClusterEndpoint(b -> b.dbClusterEndpointIdentifier(endpointName));
+            } catch (DbClusterEndpointNotFoundException expected) {
+                // Already deleted by the test body.
+            }
+            deleteDbInstance(rds, readerName);
+            deleteDbInstance(rds, writerName);
+            try {
+                rds.deleteDBCluster(b -> b.dbClusterIdentifier(clusterName).skipFinalSnapshot(true));
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
             }
         }
     }

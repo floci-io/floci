@@ -224,7 +224,8 @@ public class SqsJsonHandler {
                 .path("AWSTraceHeader").path("StringValue").asText(null);
 
         Message msg = sqsService.sendMessage(queueUrl, messageBody, delaySeconds,
-                messageGroupId, messageDeduplicationId, messageAttributes, awsTraceHeader, region);
+                messageGroupId, messageDeduplicationId, messageAttributes, awsTraceHeader,
+                sqsService.resolveCallerSenderId(queueUrl), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("MessageId", msg.getMessageId());
@@ -263,7 +264,7 @@ public class SqsJsonHandler {
 
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages,
                 visibilityTimeout, waitTimeSeconds, region);
-        String senderId = sqsService.senderIdFor(queueUrl);
+        String defaultSenderId = sqsService.senderIdFor(queueUrl);
 
         ObjectNode response = objectMapper.createObjectNode();
         // Match AWS: omit the Messages field entirely when no messages are
@@ -286,6 +287,7 @@ public class SqsJsonHandler {
             }
             msgNode.put("Body", msg.getBody());
 
+            String senderId = msg.getSenderId() != null ? msg.getSenderId() : defaultSenderId;
             writeSystemAttributesJson(msgNode, msg, requestedAttrs, senderId);
 
             if (!selectedMessageAttrs.isEmpty()) {
@@ -409,12 +411,13 @@ public class SqsJsonHandler {
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
 
+        String senderId = sqsService.resolveCallerSenderId(queueUrl);
         for (ParsedEntry parsed : parsedEntries) {
                 String id = parsed.id();
                 try {
                     Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                             parsed.groupId(), parsed.dedupId(), parsed.attributes(),
-                            parsed.awsTraceHeader(), region);
+                            parsed.awsTraceHeader(), senderId, region);
                     ObjectNode success = objectMapper.createObjectNode();
                     success.put("Id", id);
                     success.put("MessageId", msg.getMessageId());

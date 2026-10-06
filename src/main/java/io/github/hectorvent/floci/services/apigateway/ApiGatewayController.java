@@ -419,12 +419,14 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis/{apiId}/resources")
-    public Response getResources(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+    public Response getResources(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                 @QueryParam("embed") List<String> embed) {
         String region = regionResolver.resolveRegion(headers);
         List<ApiGatewayResource> resources = service.getResources(region, apiId);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        resources.forEach(r -> items.add(toResourceNode(r)));
+        boolean embedMethods = embed != null && embed.contains("methods");
+        resources.forEach(r -> items.add(toResourceNode(r, embedMethods)));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -432,9 +434,11 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/resources/{resourceId}")
     public Response getResource(@Context HttpHeaders headers,
                                 @PathParam("apiId") String apiId,
-                                @PathParam("resourceId") String resourceId) {
+                                @PathParam("resourceId") String resourceId,
+                                @QueryParam("embed") List<String> embed) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(toResourceNode(service.getResource(region, apiId, resourceId))).build();
+        boolean embedMethods = embed != null && embed.contains("methods");
+        return Response.ok(toResourceNode(service.getResource(region, apiId, resourceId), embedMethods)).build();
     }
 
     @PATCH
@@ -2215,11 +2219,20 @@ public class ApiGatewayController {
     }
 
     private ObjectNode toResourceNode(ApiGatewayResource r) {
+        return toResourceNode(r, false);
+    }
+
+    private ObjectNode toResourceNode(ApiGatewayResource r, boolean embedMethods) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("id", r.getId());
         if (r.getParentId() != null) node.put("parentId", r.getParentId());
         if (r.getPathPart() != null) node.put("pathPart", r.getPathPart());
         node.put("path", r.getPath());
+        if (!r.getResourceMethods().isEmpty()) {
+            ObjectNode methods = node.putObject("resourceMethods");
+            r.getResourceMethods().forEach((httpMethod, method) -> methods.set(httpMethod,
+                    embedMethods ? toMethodNode(method, r.getId()) : objectMapper.createObjectNode()));
+        }
         return node;
     }
 
@@ -2244,6 +2257,10 @@ public class ApiGatewayController {
         }
         if (m.getMethodIntegration() != null) {
             node.set("methodIntegration", toIntegrationNode(m.getMethodIntegration(), resourceId));
+        }
+        if (!m.getMethodResponses().isEmpty()) {
+            ObjectNode responses = node.putObject("methodResponses");
+            m.getMethodResponses().forEach((status, response) -> responses.set(status, toMethodResponseNode(response)));
         }
         return node;
     }

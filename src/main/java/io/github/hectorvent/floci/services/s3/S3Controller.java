@@ -47,12 +47,14 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -64,6 +66,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -416,7 +419,7 @@ public class S3Controller {
                                     ? Integer.parseInt(uriInfo.getQueryParameters().getFirst("partNumber")) : null,
                             uriInfo,
                             httpHeaders,
-                            body);
+                            body != null ? new ByteArrayInputStream(body) : null);
                 }
                 if (bucket.length() > 63) {
                     throw new AwsException("InvalidBucketName", "The specified bucket is not valid.", 400);
@@ -798,7 +801,7 @@ public class S3Controller {
                               @QueryParam("partNumber") Integer partNumber,
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders,
-                              byte[] body) {
+                              InputStream body) {
         try {
             key = extractObjectKey(uriInfo, bucket, key);
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
@@ -806,7 +809,7 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectTagging", authorization);
-                return handlePutObjectTagging(bucket, key, body);
+                return handlePutObjectTagging(bucket, key, readWholeBody(body));
             }
             if (hasQueryParam(uriInfo, "retention")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectRetention", authorization);
@@ -814,17 +817,17 @@ public class S3Controller {
                     s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
                 }
                 return handlePutObjectRetention(bucket, key,
-                        uriInfo.getQueryParameters().getFirst("versionId"), httpHeaders, body);
+                        uriInfo.getQueryParameters().getFirst("versionId"), httpHeaders, readWholeBody(body));
             }
             if (hasQueryParam(uriInfo, "legal-hold")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectLegalHold", authorization);
                 return handlePutObjectLegalHold(bucket, key,
-                        uriInfo.getQueryParameters().getFirst("versionId"), body);
+                        uriInfo.getQueryParameters().getFirst("versionId"), readWholeBody(body));
             }
             if (hasQueryParam(uriInfo, "acl")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectAcl", authorization);
                 s3Service.putObjectAcl(bucket, key, uriInfo.getQueryParameters().getFirst("versionId"),
-                        new String(body, StandardCharsets.UTF_8),
+                        new String(readWholeBody(body), StandardCharsets.UTF_8),
                         httpHeaders.getHeaderString("x-amz-acl"),
                         httpHeaders.getHeaderString("x-amz-grant-read"),
                         httpHeaders.getHeaderString("x-amz-grant-write"),
@@ -836,7 +839,7 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "annotation")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectAnnotation", authorization);
-                return handlePutObjectAnnotation(bucket, key, body, uriInfo, httpHeaders);
+                return handlePutObjectAnnotation(bucket, key, readWholeBody(body), uriInfo, httpHeaders);
             }
 
             if (uploadId != null && partNumber != null) {
@@ -845,9 +848,8 @@ public class S3Controller {
                     return handleUploadPartCopy(
                             copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
                 }
-                byte[] partData = decodeAwsChunked(body, contentEncoding, contentSha256);
-                validateChecksumHeaders(httpHeaders, uriInfo, partData, getChecksumAlgorithm(httpHeaders, uriInfo));
-                Part part = s3Service.storePart(bucket, key, uploadId, partNumber, partData,
+                Part part = s3Service.storePart(bucket, key, uploadId, partNumber,
+                        decodedBody(body, contentEncoding, contentSha256), uploadChecksums(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -875,9 +877,7 @@ public class S3Controller {
             String legalHold = httpHeaders.getHeaderString("x-amz-object-lock-legal-hold");
             Instant retainUntil = retainUntilStr != null ? Instant.parse(retainUntilStr) : null;
 
-            byte[] data = decodeAwsChunked(body, contentEncoding, contentSha256);
             String checksumAlgorithm = getChecksumAlgorithm(httpHeaders, uriInfo);
-            validateChecksumHeaders(httpHeaders, uriInfo, data, checksumAlgorithm);
             String persistedEncoding = toPersistedContentEncoding(contentEncoding);
             String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
             String cacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -888,7 +888,8 @@ public class S3Controller {
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
             s3Service.authorizePutObject(bucket, key, authorization);
-            S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders, uriInfo),
+            S3Object obj = s3Service.putObject(bucket, key, decodedBody(body, contentEncoding, contentSha256),
+                    uploadChecksums(httpHeaders, uriInfo), contentType, extractUserMetadata(httpHeaders, uriInfo),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                             .withContentEncoding(persistedEncoding)
@@ -918,7 +919,7 @@ public class S3Controller {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
             appendPutObjectResponseHeaders(resp, obj);
-            emitCloudTrailEvent("PutObject", bucket, key, data == null ? 0 : data.length, 0L, null, null);
+            emitCloudTrailEvent("PutObject", bucket, key, obj.getSize(), 0L, null, null);
             return resp.build();
         } catch (AwsException e) {
             emitCloudTrailEvent("PutObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
@@ -2098,21 +2099,60 @@ public class S3Controller {
     // --- AWS Chunked Decoding ---
 
     /**
+     * The object data of an upload body, read as it arrives. A streaming payload is decoded from its
+     * aws-chunked framing on the way through. A Content-Encoding naming aws-chunked without that
+     * declaration does not guarantee framing, so that body is read whole and kept as sent when it
+     * does not decode.
+     */
+    private InputStream decodedBody(InputStream body, String contentEncoding, String contentSha256) {
+        InputStream raw = body != null ? body : InputStream.nullInputStream();
+        if (declaresStreamingPayload(contentSha256)) {
+            return new AwsChunkedInputStream(raw);
+        }
+        if (contentEncoding != null && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked")) {
+            return new ByteArrayInputStream(decodeAwsChunked(readWholeBody(raw), contentEncoding, contentSha256));
+        }
+        return raw;
+    }
+
+    /** The whole of a body that is small by nature, such as a subresource's XML, or must be read whole to be decoded. */
+    private static byte[] readWholeBody(InputStream body) {
+        if (body == null) {
+            return new byte[0];
+        }
+        try {
+            return body.readAllBytes();
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the request body", e);
+        }
+    }
+
+    /**
      * Decodes aws-chunked transfer encoding used by AWS SDK v2 with SigV4 chunk signing.
      * Format: hex-size;chunk-signature=sig\r\n data \r\n ... 0;chunk-signature=sig\r\n
      */
     private byte[] decodeAwsChunked(byte[] body, String contentEncoding, String contentSha256) {
-        boolean declaresStreamingPayload = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".equals(contentSha256)
-                || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
-                || "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD".equals(contentSha256)
-                || "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
-                || "STREAMING-UNSIGNED-PAYLOAD-TRAILER".equals(contentSha256);
+        boolean declaresStreamingPayload = declaresStreamingPayload(contentSha256);
         boolean isAwsChunked = declaresStreamingPayload || (contentEncoding != null
                 && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked"));
         if (!isAwsChunked) {
             return body;
         }
+        if (declaresStreamingPayload) {
+            // A streaming payload is always framed, so a body that breaks the framing is rejected
+            // rather than stored with its chunk headers as the object's content.
+            try (AwsChunkedInputStream decoded = new AwsChunkedInputStream(new ByteArrayInputStream(body))) {
+                return decoded.readAllBytes();
+            } catch (AwsException e) {
+                LOG.debugv("Rejecting malformed aws-chunked body: {0}", e.getMessage());
+                throw e;
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to decode an aws-chunked body", e);
+            }
+        }
 
+        // Without that declaration, a Content-Encoding naming aws-chunked does not guarantee
+        // framing, so a body that does not decode is kept as sent.
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             String raw = new String(body, StandardCharsets.ISO_8859_1);
@@ -2126,8 +2166,7 @@ public class S3Controller {
                 String hexSize = semiColon >= 0 ? line.substring(0, semiColon) : line;
                 int chunkSize = Integer.parseInt(hexSize.trim(), 16);
                 if (chunkSize == 0) {
-                    // A streaming body ends with an empty line, after any trailer headers.
-                    complete = !declaresStreamingPayload || reachesEmptyLine(raw, lineEnd + 1);
+                    complete = true;
                     break;
                 }
 
@@ -2138,43 +2177,25 @@ public class S3Controller {
 
                 pos = dataStart + chunkSize;
                 if (pos < raw.length() && raw.charAt(pos) == '\r') pos++;
-                boolean lineBreak = pos < raw.length() && raw.charAt(pos) == '\n';
-                if (lineBreak) pos++;
-                if (declaresStreamingPayload && !lineBreak) {
-                    throw new IllegalArgumentException("aws-chunked chunk is not followed by a line break");
-                }
+                if (pos < raw.length() && raw.charAt(pos) == '\n') pos++;
             }
             if (!complete) {
                 throw new IllegalArgumentException("aws-chunked body ends before its final chunk");
             }
             return out.toByteArray();
         } catch (Exception e) {
-            // A streaming payload is always framed, so storing it raw would save the chunk
-            // headers as the object's content. Without that declaration, a Content-Encoding
-            // naming aws-chunked does not guarantee framing, and the body is kept as sent.
-            if (declaresStreamingPayload) {
-                LOG.debugv("Rejecting malformed aws-chunked body: {0}", e.getMessage());
-                throw new AwsException("IncompleteBody",
-                        "You did not provide the number of bytes specified by the Content-Length HTTP header.",
-                        400);
-            }
             LOG.debugv("Failed to decode aws-chunked body, using raw: {0}", e.getMessage());
             return body;
         }
     }
 
-    private static boolean reachesEmptyLine(String raw, int pos) {
-        while (pos < raw.length()) {
-            int lineEnd = raw.indexOf('\n', pos);
-            if (lineEnd < 0) {
-                return false;
-            }
-            if (raw.substring(pos, lineEnd).trim().isEmpty()) {
-                return true;
-            }
-            pos = lineEnd + 1;
-        }
-        return false;
+    /** Whether x-amz-content-sha256 declares a streaming payload, which is always aws-chunked. */
+    static boolean declaresStreamingPayload(String contentSha256) {
+        return "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".equals(contentSha256)
+                || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
+                || "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD".equals(contentSha256)
+                || "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
+                || "STREAMING-UNSIGNED-PAYLOAD-TRAILER".equals(contentSha256);
     }
 
     /**
@@ -2406,7 +2427,7 @@ public class S3Controller {
             String versionId = uriInfo.getQueryParameters().getFirst("versionId");
             String algorithmHeader = getChecksumAlgorithm(httpHeaders, uriInfo);
             ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(algorithmHeader);
-            validateChecksumHeaders(httpHeaders, uriInfo, payload, algorithmHeader);
+            validateChecksumHeaders(httpHeaders, uriInfo, payload);
             ObjectAnnotation annotation = s3Service.putObjectAnnotation(bucket, key, annotationName,
                     versionId, payload, httpHeaders.getHeaderString("x-amz-object-if-match"), algorithm);
             Response.ResponseBuilder response = Response.ok(putObjectAnnotationXml(annotation))
@@ -3114,59 +3135,27 @@ public class S3Controller {
         return algorithm;
     }
 
-    private void validateChecksumHeaders(HttpHeaders httpHeaders, UriInfo uriInfo, byte[] data, String algorithm) {
-        validateContentMd5(httpHeaders.getHeaderString("Content-MD5"), data);
-
-        String sha1 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha1");
-        if (sha1 != null && !sha1.equals(S3Checksum.sha1Base64(data))) {
-            throw new AwsException("BadDigest", "The SHA1 checksum you specified did not match the payload.", 400);
-        }
-
-        String sha256 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha256");
-        if (sha256 != null && !sha256.equals(S3Checksum.sha256Base64(data))) {
-            throw new AwsException("BadDigest", "The SHA256 checksum you specified did not match the payload.", 400);
-        }
-
-        String crc32 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32");
-        if (crc32 != null && !crc32.equals(S3Checksum.crc32Base64(data))) {
-            throw new AwsException("BadDigest", "The CRC32 checksum you specified did not match the payload.", 400);
-        }
-
-        String crc32c = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32c");
-        if (crc32c != null && !crc32c.equals(S3Checksum.crc32cBase64(data))) {
-            throw new AwsException("BadDigest", "The CRC32C checksum you specified did not match the payload.", 400);
-        }
-
-        String crc64nvme = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc64nvme");
-        if (crc64nvme != null && !crc64nvme.equals(S3Checksum.crc64NvmeBase64(data))) {
-            throw new AwsException("BadDigest", "The CRC64NVME checksum you specified did not match the payload.", 400);
-        }
-    }
-
-    // S3 answers InvalidDigest for a Content-MD5 that is not the base64 of a 16-byte digest, and
-    // BadDigest for a well-formed one that does not match the payload.
-    private static void validateContentMd5(String contentMd5, byte[] data) {
-        if (contentMd5 == null) {
-            return;
-        }
-        byte[] expected;
+    private void validateChecksumHeaders(HttpHeaders httpHeaders, UriInfo uriInfo, byte[] data) {
+        UploadChecksums checksums = uploadChecksums(httpHeaders, uriInfo);
+        checksums.requireWellFormedContentMd5();
+        byte[] md5;
         try {
-            expected = Base64.getDecoder().decode(contentMd5.trim());
-        } catch (IllegalArgumentException e) {
-            expected = null;
-        }
-        if (expected == null || expected.length != 16) {
-            throw new AwsException("InvalidDigest", "The Content-MD5 you specified is not valid.", 400);
-        }
-        byte[] actual;
-        try {
-            actual = MessageDigest.getInstance("MD5").digest(data);
+            md5 = MessageDigest.getInstance("MD5").digest(data);
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("MD5 algorithm is not available", e);
         }
-        if (!MessageDigest.isEqual(expected, actual)) {
-            throw new AwsException("BadDigest", "The Content-MD5 you specified did not match what we received.", 400);
+        checksums.verify(md5, claimedAlgorithm -> claimedAlgorithm.compute(data));
+    }
+
+    private UploadChecksums uploadChecksums(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        Map<ChecksumAlgorithm, String> claimed = new EnumMap<>(ChecksumAlgorithm.class);
+        for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
+            String value = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-" + algorithm.wireValue());
+            if (value != null) {
+                claimed.put(algorithm, value);
+            }
         }
+        return new UploadChecksums(httpHeaders.getHeaderString("Content-MD5"), claimed);
     }
 
     static boolean isWebsiteRequest(HttpHeaders httpHeaders, UriInfo uriInfo) {

@@ -3132,7 +3132,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                 ? associatePublicIp
                                 : subnet != null && subnet.isMapPublicIpOnLaunch());
                         inst.setPrivateIpAddress(privateIp);
-                        inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
+                        inst.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(privateIp, region));
                         inst.setKeyName(keyName);
                         inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
                         inst.setArchitecture(architecture);
@@ -9936,7 +9936,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             String eniId = "eni-" + randomHex(17);
             String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
                     ? privateIpAddress : assignPrivateIp(region, subnetId);
-            String primaryDns = "ip-" + primaryIp.replace('.', '-') + ".ec2.internal";
+            String primaryDns = AwsRegions.ec2PrivateIpDnsName(primaryIp, region);
 
             NetworkInterface ni = new NetworkInterface();
             ni.setNetworkInterfaceId(eniId);
@@ -9967,7 +9967,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     }
                     NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
                     secondary.setPrivateIpAddress(extra);
-                    secondary.setPrivateDnsName("ip-" + extra.replace('.', '-') + ".ec2.internal");
+                    secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
                     secondary.setPrimary(false);
                     ipList.add(secondary);
                 }
