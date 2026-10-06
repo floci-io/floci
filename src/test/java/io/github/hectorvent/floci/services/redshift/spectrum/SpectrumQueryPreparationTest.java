@@ -135,6 +135,16 @@ class SpectrumQueryPreparationTest {
     }
 
     @Test
+    void transactionalTableCreateInUnboundSchemaIsRejectedAndRoutedToPreparation() {
+        String legacy = "CREATE EXTERNAL TABLE legacy.sales (id INTEGER) STORED AS TEXTFILE LOCATION 's3://bucket/'";
+        assertTrue(preparation.handlesDdl(legacy, TRANSACTION));
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> preparation.prepare(legacy, TRANSACTION, backend));
+        assertEquals("25001", error.sqlState());
+        verifyNoInteractions(glue, backend);
+    }
+
+    @Test
     void tableCreatedOutsideTransactionIsStoredInGlue() {
         assertTrue(preparation.prepare(CREATE_SALES, SESSION, backend));
         verify(glue).createTable(eq("analytics"), any());

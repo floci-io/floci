@@ -60,7 +60,7 @@ public class SpectrumQueryPreparation {
         Optional<ExternalStatement> statement = parser.parse(sql);
         return statement.orElse(null) instanceof ExternalStatement.CreateSchema
                 || statement.orElse(null) instanceof ExternalStatement.CreateTable table
-                && bindings(session).containsKey(table.schemaName());
+                && (session.inTransaction() || bindings(session).containsKey(table.schemaName()));
     }
 
     private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend) {
@@ -69,10 +69,11 @@ public class SpectrumQueryPreparation {
             return createSchema(schema, session, backend);
         }
         Map<String, ExternalSchemaBinding> bindings = bindings(session);
+        if (statement.orElse(null) instanceof ExternalStatement.CreateTable && session.inTransaction()) {
+            // Legacy-catalog tables are saved immediately too, so a rollback would leave them behind.
+            throw new SpectrumSqlException("25001", "CREATE EXTERNAL TABLE cannot run inside a transaction block");
+        }
         if (statement.orElse(null) instanceof ExternalStatement.CreateTable table && bindings.containsKey(table.schemaName())) {
-            if (session.inTransaction()) {
-                throw new SpectrumSqlException("25001", "CREATE EXTERNAL TABLE cannot run inside a transaction block");
-            }
             ExternalSchemaBinding binding = bindings.get(table.schemaName());
             glue.createTable(binding.glueDatabase(), GlueTableBuilder.toGlueTable(table));
             metadata.refresh(backend, session.accountId(), binding);
