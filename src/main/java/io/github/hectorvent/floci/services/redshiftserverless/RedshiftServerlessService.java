@@ -373,6 +373,18 @@ public class RedshiftServerlessService implements Resettable {
                         "The snapshot " + snapshotName + " was not found.", 404));
     }
 
+    /**
+     * Recovers the snapshot name from a snapshot ARN, rejecting one that names another account,
+     * Region or resource type rather than resolving it to a local snapshot of the same name.
+     */
+    public String snapshotNameFromArn(String snapshotArn, String region) {
+        String prefix = regionResolver.buildArn("redshift-serverless", region, "snapshot/");
+        if (snapshotArn == null || !snapshotArn.startsWith(prefix) || snapshotArn.length() == prefix.length()) {
+            throw validation("snapshotArn does not identify a snapshot in this account and Region.");
+        }
+        return snapshotArn.substring(prefix.length());
+    }
+
     public synchronized RedshiftServerlessSnapshot deleteSnapshot(String snapshotName, String region) {
         RedshiftServerlessSnapshot deleted = getSnapshot(snapshotName, region);
         snapshots.delete(storageKey(region, snapshotName));
@@ -391,12 +403,18 @@ public class RedshiftServerlessService implements Resettable {
 
     /**
      * Restores into the already-existing namespace and workgroup in {@code region} and never
-     * creates either, mirroring real {@code RestoreFromSnapshot}.
+     * creates either, mirroring real {@code RestoreFromSnapshot}. Floci snapshots carry metadata
+     * only, so the restore validates its inputs and reports the namespace {@code AVAILABLE}
+     * without rewinding the workgroup's database contents.
      */
     public synchronized Namespace restoreFromSnapshot(String namespaceName, String workgroupName,
                                                       String snapshotName, String region) {
         getSnapshot(snapshotName, region);
-        getWorkgroup(workgroupName, region);
+        Workgroup workgroup = getWorkgroup(workgroupName, region);
+        if (!namespaceName.equals(workgroup.getNamespaceName())) {
+            throw validation("The workgroup " + workgroupName + " does not belong to the namespace "
+                    + namespaceName + ".");
+        }
         Namespace restored = new Namespace(getNamespace(namespaceName, region));
         restored.setStatus("AVAILABLE");
         namespaces.put(storageKey(region, namespaceName), restored);

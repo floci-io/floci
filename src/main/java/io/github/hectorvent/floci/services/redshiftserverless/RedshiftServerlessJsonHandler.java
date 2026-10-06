@@ -211,14 +211,13 @@ public class RedshiftServerlessJsonHandler {
     }
 
     /**
-     * GetSnapshot also accepts {@code snapshotArn}. Floci's snapshot ARNs end in the snapshot
-     * name, so the name is recovered from the ARN rather than tracked in a second index.
+     * GetSnapshot also accepts {@code snapshotArn}, which must name a snapshot of this account
+     * and Region.
      */
     private Response handleGetSnapshot(JsonNode request, String region) {
         String snapshotName = text(request, "snapshotName");
         if (snapshotName == null) {
-            String arn = text(request, "snapshotArn");
-            snapshotName = arn != null && arn.contains("/") ? arn.substring(arn.lastIndexOf('/') + 1) : null;
+            snapshotName = service.snapshotNameFromArn(text(request, "snapshotArn"), region);
         }
         return snapshotResponse(service.getSnapshot(snapshotName, region));
     }

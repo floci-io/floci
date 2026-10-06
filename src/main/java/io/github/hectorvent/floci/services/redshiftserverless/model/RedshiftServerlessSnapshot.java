@@ -1,14 +1,18 @@
 package io.github.hectorvent.floci.services.redshiftserverless.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 
 /**
- * A Redshift Serverless snapshot. Floci does not model real async cross-region copy
- * (SPE-71256 design doc §floci: "pre-seed state rather than modelling the full lifecycle") —
- * a snapshot created via {@code CreateSnapshot} in the standby region is immediately
- * {@code AVAILABLE} there, standing in for what a real {@code SnapshotCopyConfiguration}
- * would eventually produce.
+ * A Redshift Serverless snapshot. Floci stores snapshot metadata only and does not model async
+ * cross-region copy: a snapshot created via {@code CreateSnapshot} in the standby region is
+ * immediately {@code AVAILABLE} there, standing in for what a real
+ * {@code SnapshotCopyConfiguration} would eventually produce.
  */
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class RedshiftServerlessSnapshot {
 
     private String snapshotName;

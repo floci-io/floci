@@ -833,6 +833,34 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void restoreRejectsAWorkgroupOfAnotherNamespace() {
+        create("rest-a");
+        create("rest-b");
+        service.createSnapshot("rest-snap", "rest-a", REGION);
+        createWorkgroup("rest-b-wg", "rest-b");
+
+        AwsException mismatch = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot("rest-a", "rest-b-wg", "rest-snap", REGION));
+        assertEquals("ValidationException", mismatch.getErrorCode());
+    }
+
+    @Test
+    void snapshotNameFromArnRejectsAnArnOutsideThisAccountAndRegion() {
+        create("arn-ns");
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("arn-snap", "arn-ns", REGION);
+
+        assertEquals("arn-snap", service.snapshotNameFromArn(snapshot.getSnapshotArn(), REGION));
+        for (String foreign : List.of(
+                "arn:aws:redshift-serverless:eu-west-1:" + ACCOUNT_ID + ":snapshot/arn-snap",
+                "arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/arn-snap",
+                "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/arn-snap")) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.snapshotNameFromArn(foreign, REGION));
+            assertEquals("ValidationException", rejected.getErrorCode());
+        }
+    }
+
+    @Test
     void deleteSnapshotRemovesIt() {
         create("snapdel-ns");
         service.createSnapshot("snapdel", "snapdel-ns", REGION);
