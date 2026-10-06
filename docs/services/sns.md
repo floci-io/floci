@@ -125,6 +125,29 @@ address is not screened at delivery: Floci's HTTP client resolves the name itsel
 and cannot be given the result of an earlier check, so a lookup there could not decide where the
 request goes. Treat the `Subscribe` check as the boundary, not the delivery one.
 
+## Message signatures
+
+Floci signs deliveries the way AWS does, so a consumer can keep its standard SNS signature check
+switched on locally. Signed messages are HTTP/HTTPS notifications and `SubscriptionConfirmation`
+messages, Lambda records, and the JSON envelope SQS subscriptions receive without
+`RawMessageDelivery`.
+
+- `Signature` is the base64 RSA signature of the canonical string AWS documents: `Name\nValue\n`
+  for `Message`, `MessageId`, `Subject` (only when present), `Timestamp`, `TopicArn` and `Type` on a
+  notification, and `Message`, `MessageId`, `SubscribeURL`, `Timestamp`, `Token`, `TopicArn` and
+  `Type` on a confirmation.
+- `SignatureVersion` follows the topic attribute of the same name: `1` (default) is SHA1withRSA,
+  `2` is SHA256withRSA.
+- `SigningCertURL` (`SigningCertUrl` in Lambda records) points at a self-signed RSA 2048
+  certificate Floci serves itself:
+  `{base-url}/_aws/sns/SimpleNotificationService-<fingerprint>.pem`.
+
+The key is kept in SNS storage, so persistent storage keeps the same certificate across restarts
+and memory storage generates a new one per process. The fingerprint in the file name changes with
+the key, so a consumer that caches certificates by URL never verifies against a stale one. A
+consumer that also requires the certificate host to be an AWS SNS domain must relax that check
+locally.
+
 ## Message size
 
 `MaximumMessageSize` is the per-topic limit, in bytes, on a published payload. It accepts `1024`
