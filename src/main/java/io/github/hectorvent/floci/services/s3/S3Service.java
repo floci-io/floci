@@ -79,6 +79,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -119,6 +120,8 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static final Logger LOG = Logger.getLogger(S3Service.class);
+    /** Last {@code s3.object.sequencer} handed out, in microseconds since the epoch. */
+    private final AtomicLong lastEventSequencer = new AtomicLong();
 
     record RequestAuthorization(boolean signed, String accessKeyId, String sessionToken) {
         static RequestAuthorization unsigned() {
@@ -5546,13 +5549,14 @@ public class S3Service implements Resettable, ResourceProvider {
             bucketNode.put("arn", AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString());
 
             ObjectNode objectNode = objectMapper.createObjectNode();
-            objectNode.put("key", key);
+            objectNode.put("key", eventRecordKey(key));
             objectNode.put("size", size);
             objectNode.put("eTag", eTag);
             if(isVersionEnabled) {
                 String versionId = obj !=null && obj.getVersionId()!=null ? obj.getVersionId() : "";
                 objectNode.put("versionId", versionId);
             }
+            objectNode.put("sequencer", nextEventSequencer());
             ObjectNode s3Node = objectMapper.createObjectNode();
             s3Node.put("s3SchemaVersion", "1.0");
             s3Node.put("configurationId", "emulator");
@@ -5576,6 +5580,29 @@ public class S3Service implements Resettable, ResourceProvider {
         } catch (Exception e) {
             return "{\"Records\":[]}";
         }
+    }
+
+    /**
+     * The key as S3 writes it into an event record: form URL-encoded (a space is {@code +}, a
+     * {@code +} is {@code %2B}) with {@code /} left as is, so consumers decode it the documented
+     * way, with {@code unquote_plus} or {@code URLDecoder}.
+     */
+    static String eventRecordKey(String key) {
+        if (key == null) {
+            return null;
+        }
+        return URLEncoder.encode(key, StandardCharsets.UTF_8).replace("%2F", "/");
+    }
+
+    /**
+     * An 18-digit uppercase hex value that increases with every event this process emits, so two
+     * events for one key compare in the order they happened, as S3's sequencer does. It is seeded
+     * from the clock, so values keep increasing across a restart too.
+     */
+    private String nextEventSequencer() {
+        long nowMicros = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now());
+        long value = lastEventSequencer.updateAndGet(last -> Math.max(last + 1, nowMicros));
+        return String.format(Locale.ROOT, "%018X", value);
     }
 
     private void cleanupMultipart(String uploadId) {
