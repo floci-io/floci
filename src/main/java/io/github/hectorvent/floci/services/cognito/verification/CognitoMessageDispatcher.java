@@ -7,6 +7,10 @@ import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
 import io.github.hectorvent.floci.services.sns.SnsService;
+import org.apache.james.mime4j.dom.address.Mailbox;
+import org.apache.james.mime4j.field.address.DefaultAddressParser;
+import org.apache.james.mime4j.field.address.ParseException;
+import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
@@ -21,10 +25,12 @@ import java.util.Map;
  * whose {@code emailSubject}/{@code emailMessage}/{@code smsMessage} take precedence
  * over the pool's own template.
  *
- * Email is sent from the address the pool's {@code EmailConfiguration} names, or from
- * {@code no-reply@verificationemail.com} when it names none.
+ * Email is sent from the address the pool's {@code EmailConfiguration} names when SES has verified
+ * it for the pool's account, or from {@code no-reply@verificationemail.com} otherwise.
  */
 public final class CognitoMessageDispatcher {
+
+    private static final Logger LOG = Logger.getLogger(CognitoMessageDispatcher.class);
 
     // Defaults match AWS Cognito's out-of-the-box verification messages (used only when the
     // user pool configures no VerificationMessageTemplate).
@@ -32,6 +38,7 @@ public final class CognitoMessageDispatcher {
     private static final String DEFAULT_EMAIL_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_SMS_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_FROM = "no-reply@verificationemail.com";
+    private static final Sender DEFAULT_SENDER = new Sender(DEFAULT_FROM, DEFAULT_FROM);
     private static final String DEVELOPER_SENDING_ACCOUNT = "DEVELOPER";
     private static final String SES_IDENTITY_RESOURCE_PREFIX = "identity/";
     private static final String CODE_PLACEHOLDER = "{####}";
@@ -78,8 +85,12 @@ public final class CognitoMessageDispatcher {
                 String rawBody = stringOrNull(customMessageResponse, "emailMessage");
                 if (rawBody == null) rawBody = stringOr(template.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
                 String body = renderTemplate(rawBody, code);
+                Sender sender = sender(pool, region);
                 ses.sendEmail(SendEmailRequest.builder()
-                    .source(fromAddress(pool))
+                    .source(sender.from())
+                    // SES takes Source as the default return path, the envelope sender it records
+                    // and hands to the SMTP relay, which takes a bare address.
+                    .returnPath(sender.from().equals(sender.address()) ? null : sender.address())
                     .toAddresses(List.of(email))
                     .region(region)
                     .content(new EmailContent.Simple(subject, body, null, List.of()))
@@ -101,7 +112,7 @@ public final class CognitoMessageDispatcher {
     }
 
     /**
-     * The FROM address for the pool's {@code EmailConfiguration} (EmailConfigurationType):
+     * The sender for the pool's {@code EmailConfiguration} (EmailConfigurationType):
      * <ul>
      *   <li>{@code DEVELOPER}: {@code From}, a sender's address or name and address, when set.
      *   Only this sending account takes a sender name.</li>
@@ -110,24 +121,82 @@ public final class CognitoMessageDispatcher {
      *   so {@code From} supplies it.</li>
      *   <li>Without either, {@code no-reply@verificationemail.com}.</li>
      * </ul>
+     * A configured sender is used only when the {@code SourceArn} names an SES identity that is
+     * verified in the pool's account, in the {@code SourceArn} Region (the pool's own for a
+     * wildcard Region), and {@code From}, when it supplies the sender, is one mailbox at that
+     * address or in that domain. Anything else falls back to {@code no-reply@verificationemail.com},
+     * so a pool cannot send as an address its account has not verified.
      */
-    private String fromAddress(UserPool pool) {
+    private Sender sender(UserPool pool, String sendRegion) {
         Map<String, Object> config = pool.getEmailConfiguration();
         if (config == null) {
-            return DEFAULT_FROM;
+            return DEFAULT_SENDER;
         }
         String from = stringOrNull(config, "From");
-        if (DEVELOPER_SENDING_ACCOUNT.equals(config.get("EmailSendingAccount")) && from != null) {
-            return from;
-        }
-        String identity = sesIdentity(stringOrNull(config, "SourceArn"));
+        boolean developer = DEVELOPER_SENDING_ACCOUNT.equals(config.get("EmailSendingAccount"));
+        String sourceArn = stringOrNull(config, "SourceArn");
+        String identity = sesIdentity(sourceArn);
         if (identity == null) {
-            return DEFAULT_FROM;
+            if (sourceArn != null) {
+                LOG.warnv("User pool {0} SourceArn {1} names no SES identity; sending from {2}",
+                    pool.getId(), sourceArn, DEFAULT_FROM);
+            } else if (developer && from != null) {
+                LOG.warnv("User pool {0} sets From {1} without a SourceArn; sending from {2}",
+                    pool.getId(), from, DEFAULT_FROM);
+            }
+            return DEFAULT_SENDER;
         }
-        if (identity.contains("@")) {
-            return identity;
+        if (!isVerifiedForPool(AwsArnUtils.parse(sourceArn), identity, pool, sendRegion)) {
+            LOG.warnv("User pool {0} SourceArn {1} is not an SES identity verified for the pool''s account"
+                + " in that Region; sending from {2}", pool.getId(), sourceArn, DEFAULT_FROM);
+            return DEFAULT_SENDER;
         }
-        return from != null ? from : DEFAULT_FROM;
+        boolean identityIsAddress = identity.contains("@");
+        if (identityIsAddress && !(developer && from != null)) {
+            return new Sender(identity, identity);
+        }
+        Mailbox mailbox = from == null ? null : parseMailbox(from);
+        if (mailbox == null || !isCoveredBy(mailbox, identity)) {
+            LOG.warnv("User pool {0} From {1} is not an address of the SES identity {2}; sending from {3}",
+                pool.getId(), from, identity, DEFAULT_FROM);
+            return DEFAULT_SENDER;
+        }
+        return new Sender(from, mailbox.getAddress());
+    }
+
+    /**
+     * True when the identity is verified in SES for the pool's account. The identity store is read
+     * in the caller's account, which is the pool's, so the ARN's account must be the pool's too.
+     */
+    private boolean isVerifiedForPool(AwsArnUtils.Arn sourceArn, String identity, UserPool pool,
+                                      String sendRegion) {
+        String poolAccount = AwsArnUtils.accountOrDefault(pool.getArn(), null);
+        if (poolAccount == null || !poolAccount.equals(sourceArn.accountId())) {
+            return false;
+        }
+        String region = sourceArn.region().isEmpty() || "*".equals(sourceArn.region())
+            ? sendRegion : sourceArn.region();
+        return ses.isVerifiedIdentity(identity, region);
+    }
+
+    /** One RFC 5322 mailbox, {@code addr} or {@code Name <addr>}, or {@code null} for anything else. */
+    private static Mailbox parseMailbox(String value) {
+        try {
+            Mailbox mailbox = DefaultAddressParser.DEFAULT.parseMailbox(value);
+            return mailbox.getDomain() == null ? null : mailbox;
+        } catch (ParseException e) {
+            return null;
+        }
+    }
+
+    /** True when the mailbox is the email address identity, or an address in the domain identity. */
+    private static boolean isCoveredBy(Mailbox mailbox, String identity) {
+        int at = identity.lastIndexOf('@');
+        if (at < 0) {
+            return identity.equalsIgnoreCase(mailbox.getDomain());
+        }
+        return identity.substring(0, at).equals(mailbox.getLocalPart())
+            && identity.substring(at + 1).equalsIgnoreCase(mailbox.getDomain());
     }
 
     /** The identity an SES {@code identity/<name>} ARN names, or {@code null} for anything else. */
@@ -135,8 +204,12 @@ public final class CognitoMessageDispatcher {
         return AwsArnUtils.resourceIfArnFor(sourceArn, "ses")
             .filter(resource -> resource.startsWith(SES_IDENTITY_RESOURCE_PREFIX))
             .map(resource -> resource.substring(SES_IDENTITY_RESOURCE_PREFIX.length()))
-            .filter(identity -> !identity.isEmpty())
+            .filter(identity -> !identity.isEmpty() && identity.chars().noneMatch(Character::isWhitespace))
             .orElse(null);
+    }
+
+    /** The From header, and the bare address SES uses as the envelope sender. */
+    private record Sender(String from, String address) {
     }
 
     /**

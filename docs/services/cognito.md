@@ -56,7 +56,18 @@ at `/_aws/ses`) from the sender the pool's `EmailConfiguration` names:
 - When the `SourceArn` identity is a domain, `From` gives the address.
 - Otherwise `no-reply@verificationemail.com`.
 
-Differences from AWS: Floci does not check that the identity is verified in SES, sends in the user
+A configured sender is used only when SES has verified it for the pool. The `SourceArn` must name
+an identity in the user pool's account that SES has verified in the `SourceArn` Region (the pool's
+Region when the ARN has `*` there), and a `From` that gives the sender must be a single mailbox at
+that email address or in that domain. Otherwise the email goes from
+`no-reply@verificationemail.com` and Floci logs a warning. Verify the identity first with
+`VerifyEmailIdentity` or `CreateEmailIdentity`, or as a domain whose DKIM records are in Route 53.
+When `From` has a sender name, the captured message keeps it in `Source`, and its `ReturnPath`,
+which the SMTP relay uses as the envelope sender, is the bare address.
+
+Differences from AWS: Floci accepts an unverified `SourceArn` when a pool is created or updated,
+where AWS can fail with `InvalidEmailRoleAccessPolicyException`. It does not check the sending
+authorization policy that a custom FROM address needs with `COGNITO_DEFAULT`, sends in the user
 pool's Region rather than the `SourceArn` Region, and does not apply `ReplyToEmailAddress` or
 `ConfigurationSet`.
 
