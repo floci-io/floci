@@ -2309,4 +2309,18 @@ class LambdaServiceTest {
         assertEquals(10, updatedFn.getTimeout());
     }
 
+    @Test
+    void updateFunctionConfigurationValidatesFieldsBeforeCheckingRevisionId() {
+        // Catches: a stale RevisionId answers 412 ahead of the ValidationException an over-long Description earns
+        service.createFunction(REGION, baseRequest("validation-order-function"));
+
+        Map<String, Object> updateRequest = Map.of(
+                "RevisionId", "stale-id",
+                "Description", "d".repeat(300));
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "validation-order-function", updateRequest));
+        assertEquals("ValidationException", thrown.getErrorCode());
+        assertEquals(400, thrown.getHttpStatus());
+    }
 }
