@@ -255,6 +255,34 @@ class CloudFormationCognitoUserPoolGroupTest {
         assertThat(groupNames(p2)).isEmpty();
     }
 
+    @Test
+    @DisplayName("A failed update after moving a named group keeps the old pool's group and leaves the new one behind")
+    void failedUpdateAfterMovingANamedGroupKeepsTheOldPoolGroupAndLeavesTheNewOneBehind()
+            throws InterruptedException {
+        String name = stackName + "-n1";
+        createStack(parameters(name, p1, "d1", 1, false));
+        assertIdentity(name);
+        GroupType created = group(p1, name);
+
+        // Duplicate depends on Group and claims the new pool and the same name, so it fails after
+        // the group exists in the new pool and the update rolls back.
+        updateStack(parameters(name, p2, "d1", 1, true), "UPDATE_ROLLBACK_COMPLETE");
+        assertIdentity(name);
+        GroupType kept = group(p1, name);
+        assertGroup(kept, p1, "d1", 1);
+        assertThat(kept.creationDate()).isEqualTo(created.creationDate());
+        assertThat(groupNames(p1)).containsExactly(name);
+        assertThat(groupNames(p2))
+                .as("the rollback skips deleting the group the failed update created: its physical id,"
+                        + " the bare group name, did not change")
+                .containsExactly(name);
+
+        deleteStack();
+        assertThat(groupNames(p1)).as("the stack delete removes the group it owns again").isEmpty();
+        assertThat(groupNames(p2)).as("the group left in the new pool is not owned by the stack")
+                .containsExactly(name);
+    }
+
     private static List<Parameter> parameters(String groupName, String userPoolId, String description,
                                               int precedence, boolean fail) {
         return List.of(
