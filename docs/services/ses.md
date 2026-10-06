@@ -234,11 +234,14 @@ adds two fields: `Attachments`, one entry per attachment with `FileName`,
 `ContentType`, `ContentDisposition` (`ATTACHMENT` or `INLINE`), `ContentId`
 (angle-bracketed, when given), `ContentDescription` (when given) and `Size`
 in decoded bytes; and `RawData`, the assembled MIME message, base64-encoded,
-as relayed over SMTP but without a `Bcc` header. The content scan runs over
+as the request addressed it: every `To` and `Cc` recipient the request named,
+including any suppression later kept from delivery, and no `Bcc` header. The content scan runs over
 that MIME message as it does for a raw send. An `INLINE` attachment with a
 `ContentId` is placed in a `multipart/related` part next to the HTML body.
 A `ContentType` that is not given is guessed from the file name, falling back
 to `application/octet-stream`.
+`ContentTransferEncoding` is validated but not applied: every attachment part
+is base64-encoded, whatever the request asks for.
 
 ## Examples
 
