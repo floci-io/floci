@@ -3197,9 +3197,15 @@ public class ApiGatewayService implements ResourceProvider {
         for (var entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
             String schemeName = entry.getKey();
             SecurityScheme scheme = entry.getValue();
-            importedAuthorizationType(scheme, schemeName);
+            String authorizationType = importedAuthorizationType(scheme, schemeName);
             Map<String, Object> authDef = importedAuthorizerDefinition(scheme, schemeName);
             if (authDef == null) {
+                if ("custom".equalsIgnoreCase(authorizationType)
+                        || "cognito_user_pools".equalsIgnoreCase(authorizationType)) {
+                    throw new AwsException("BadRequestException",
+                            "Missing authorizer definition for security scheme " + schemeName
+                                    + ". Export with extensions=authorizers or extensions=apigateway before importing.", 400);
+                }
                 continue;
             }
             String type = importedAuthorizerType(authDef, schemeName);

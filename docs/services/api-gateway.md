@@ -400,9 +400,14 @@ aws apigateway get-export --rest-api-id <id> --stage-name dev --export-type oas3
   --parameters extensions=apigateway --accepts application/json api.json
 ```
 
-By default, integration and authorizer extensions are omitted. Request `extensions=integrations`
-or `extensions=authorizers` for the respective definitions; `extensions=apigateway` includes both,
-request validators, customized gateway responses, API policy and binary media types. Exports include stored methods (including ANY),
+By default, integration and authorizer definitions are omitted, while the authorization-type marker
+remains in each security scheme. A protected API exported without authorizer definitions cannot be
+safely re-imported: Floci returns `BadRequestException` before changing resources. For an importable
+protected definition, include `extensions=authorizers` or `extensions=apigateway`.
+
+Request `extensions=integrations` or `extensions=authorizers` for the respective definitions;
+`extensions=apigateway` includes both, request validators, customized gateway responses, API policy
+and binary media types. Exports include stored methods (including ANY),
 request parameters and JSON models, response headers, security requirements, and supported integration
 settings. Exported integration types and passthrough settings use OpenAPI's lowercase spelling;
 import normalizes them to management API enum values.
@@ -413,10 +418,12 @@ persisted deployments without a snapshot must be redeployed before export; Floci
 `BadRequestException` rather than exporting the live definition.
 
 This exports Floci's stored configuration, not the original uploaded document. Unsupported metadata,
-Postman extensions and full documentation exports are outside
-this operation's scope. Non-JSON models are rejected. Swagger supports only one body schema per
+Postman extensions and full documentation exports are outside this operation's scope. Non-JSON models are rejected. Swagger supports only one body schema per
 operation, so methods using different request models per content type cannot be exported as Swagger;
 use `oas30` instead. Swagger response headers do not retain the method-response required flag.
+Integration responses must have distinct selection patterns to fit OpenAPI's response map. Duplicate
+patterns (including multiple default responses) and the literal regex `default`, which is reserved
+in that map, return `BadRequestException` rather than silently discarding or changing a response.
 
 ### Integration Settings
 

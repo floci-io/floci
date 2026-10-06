@@ -64,9 +64,9 @@ final class RestApiOpenApiExporter {
             String source = authorizer.getIdentitySource();
             scheme.put("name", source != null && source.startsWith("method.request.header.")
                     ? source.substring("method.request.header.".length()) : "Authorization");
+            scheme.put("x-amazon-apigateway-authtype", "COGNITO_USER_POOLS".equals(authorizer.getType())
+                    ? "cognito_user_pools" : "custom");
             if (authorizers) {
-                scheme.put("x-amazon-apigateway-authtype", "COGNITO_USER_POOLS".equals(authorizer.getType())
-                        ? "cognito_user_pools" : "custom");
                 ObjectNode definition = scheme.putObject("x-amazon-apigateway-authorizer");
                 definition.put("type", authorizer.getType().toLowerCase(Locale.ROOT));
                 put(definition, "authorizerUri", authorizer.getAuthorizerUri());
@@ -113,9 +113,14 @@ final class RestApiOpenApiExporter {
                     scheme.put("in", "header");
                     scheme.put("x-amazon-apigateway-authtype", "awsSigv4");
                     requirement.putArray(iamScheme);
-                } else if (authorizerNames.containsKey(method.getAuthorizerId())) {
-                    requirement.set(authorizerNames.get(method.getAuthorizerId()),
-                            JSON.valueToTree(method.getAuthorizationScopes()));
+                } else if ("CUSTOM".equals(method.getAuthorizationType())
+                        || "COGNITO_USER_POOLS".equals(method.getAuthorizationType())) {
+                    String name = authorizerNames.get(method.getAuthorizerId());
+                    if (name == null) {
+                        throw new AwsException("BadRequestException",
+                                "Missing authorizer for protected method " + entry.getKey() + " " + resource.getPath(), 400);
+                    }
+                    requirement.set(name, JSON.valueToTree(method.getAuthorizationScopes()));
                 }
                 if (method.isApiKeyRequired()) {
                     ObjectNode scheme = securitySchemes.putObject(keyScheme);
@@ -245,7 +250,16 @@ final class RestApiOpenApiExporter {
         ObjectNode responses = node.putObject("responses");
         for (IntegrationResponse response : new TreeMap<>(integration.getIntegrationResponses()).values()) {
             String pattern = response.selectionPattern();
-            ObjectNode definition = responses.putObject(pattern == null || pattern.isEmpty() ? "default" : pattern);
+            if ("default".equals(pattern)) {
+                throw new AwsException("BadRequestException",
+                        "Cannot export the reserved integration response selection pattern 'default'", 400);
+            }
+            String key = pattern == null || pattern.isEmpty() ? "default" : pattern;
+            if (responses.has(key)) {
+                throw new AwsException("BadRequestException",
+                        "Cannot export duplicate integration response selection pattern '" + key + "'", 400);
+            }
+            ObjectNode definition = responses.putObject(key);
             definition.put("statusCode", response.statusCode());
             definition.set("responseParameters", JSON.valueToTree(response.responseParameters()));
             definition.set("responseTemplates", JSON.valueToTree(response.responseTemplates()));
