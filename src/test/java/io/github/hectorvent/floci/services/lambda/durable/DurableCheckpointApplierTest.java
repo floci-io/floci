@@ -123,14 +123,19 @@ class DurableCheckpointApplierTest {
                 null)), "Update for CHAINED_INVOKE operation requires ChainedInvokeOptions.");
         assertRejected(List.of(chainedStart("i1", "\"" + "x".repeat(1024 * 1024) + "\"")),
                 "CHAINED_INVOKE input payload size must be less than or equal to 1048576 bytes.");
+        assertRejected(List.of(chainedStart("i1", "arn:aws:lambda:us-east-1:111111111111:function:fn", null)),
+                "Cannot start a CHAINED_INVOKE on a function in another account.");
+        assertRejected(List.of(chainedStart("i1", "arn:aws:lambda:eu-west-1:000000000000:function:fn", null)),
+                "Cannot start a CHAINED_INVOKE on a function in another region.");
 
         DurableExecution execution = execution();
         DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution,
-                List.of(chainedStart("i1", "\"" + "x".repeat(300 * 1024) + "\"")), NOW);
+                List.of(chainedStart("i1", "arn:aws:lambda:us-east-1:000000000000:function:target-fn",
+                        "\"" + "x".repeat(300 * 1024) + "\"")), NOW);
         assertEquals(List.of("i1"), outcome.chainedInvokes(), "the service runs what the batch started");
         DurableOperation invoke = execution.getOperations().get("i1");
         assertEquals(DurableOperationStatus.STARTED, invoke.getStatus());
-        assertEquals("target-fn", invoke.getChainedFunctionName());
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:target-fn", invoke.getChainedFunctionName());
         assertEquals("Invalid action for the given operation type.", reject(execution, List.of(
                 update("i1", null, DurableOperationType.CHAINED_INVOKE, DurableOperationAction.SUCCEED, "1"))));
     }
@@ -202,6 +207,8 @@ class DurableCheckpointApplierTest {
         DurableExecution execution = new DurableExecution();
         execution.setExecutionId("exec-id");
         execution.setExecutionArn(EXECUTION_ARN);
+        execution.setAccountId("000000000000");
+        execution.setRegion("us-east-1");
         execution.setName("exec");
         execution.setMaxResultBytes(DurableExecutionService.ASYNC_PAYLOAD_LIMIT);
         DurableOperation root = new DurableOperation();
@@ -229,8 +236,12 @@ class DurableCheckpointApplierTest {
     }
 
     private static DurableOperationUpdate chainedStart(String id, String payload) {
+        return chainedStart(id, "target-fn", payload);
+    }
+
+    private static DurableOperationUpdate chainedStart(String id, String functionName, String payload) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CHAINED_INVOKE, "ChainedInvoke",
-                DurableOperationAction.START, payload, null, null, null, null, null, null, "target-fn", null);
+                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null);
     }
 
     private static DurableOperationUpdate executionSucceed() {

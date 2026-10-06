@@ -782,10 +782,11 @@ public class DurableExecutionService implements Resettable {
         DurableHistory.operationEvent(execution, operation, "ChainedInvokeStarted", now, details);
     }
 
+    /** The checkpoint already rejected a target in another account or region. */
     private ResolvedDurableTarget resolveChainedTarget(DurableExecution execution, String functionName) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
-        String accountId = ref.account() != null ? ref.account() : execution.getAccountId();
-        String region = ref.region() != null ? ref.region() : execution.getRegion();
+        String accountId = execution.getAccountId();
+        String region = execution.getRegion();
         ResolvedDurableTarget target;
         try {
             target = invoker.resolve(accountId, region, ref.name(), ref.qualifier());

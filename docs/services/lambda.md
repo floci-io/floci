@@ -186,7 +186,8 @@ A chained invoke (`context.invoke`) runs another function with an input of up to
 target needs a version or alias and runs as its own durable execution, and its close completes the
 operation as `SUCCEEDED`, `FAILED`, `TIMED_OUT` or `STOPPED`. Any other function is invoked once,
 and an output over 1 MB fails the operation. A missing function or an unqualified durable one
-fails the operation at once. Stopping the parent leaves the child running, as on AWS.
+fails the operation at once, and a target in another account or Region is rejected at checkpoint.
+Stopping the parent leaves the child running, as on AWS.
 
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.

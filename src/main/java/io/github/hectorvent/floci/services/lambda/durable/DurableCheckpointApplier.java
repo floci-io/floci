@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.durable;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecution;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecutionStatus;
@@ -387,11 +388,28 @@ final class DurableCheckpointApplier {
             if (existing != null) {
                 throw invalid("Cannot start a CHAINED_INVOKE that already exist.");
             }
+            requireSameAccountAndRegion(update.chainedFunctionName());
             DurableOperation operation = create(update);
             operation.setChainedFunctionName(update.chainedFunctionName());
             operation.setChainedTenantId(update.chainedTenantId());
             operation.setInputPayload(update.payload());
             chainedInvokes.add(update.id());
+        }
+
+        /** A name that does not parse is left to the target lookup, which fails the operation. */
+        private void requireSameAccountAndRegion(String functionName) {
+            LambdaArnUtils.ResolvedFunctionRef ref;
+            try {
+                ref = LambdaArnUtils.resolve(functionName);
+            } catch (AwsException e) {
+                return;
+            }
+            if (ref.account() != null && !ref.account().equals(execution.getAccountId())) {
+                throw invalid("Cannot start a CHAINED_INVOKE on a function in another account.");
+            }
+            if (ref.region() != null && !ref.region().equals(execution.getRegion())) {
+                throw invalid("Cannot start a CHAINED_INVOKE on a function in another region.");
+            }
         }
 
         /** Only the function starts a callback. SendDurableExecutionCallback* completes it. */
