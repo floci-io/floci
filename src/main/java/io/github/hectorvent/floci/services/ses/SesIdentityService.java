@@ -183,7 +183,7 @@ public class SesIdentityService {
                 && isIdentityVerified(fromEmail.substring(at + 1), region);
     }
 
-    private boolean isIdentityVerified(String identity, String region) {
+    boolean isIdentityVerified(String identity, String region) {
         Identity id = getIdentityVerificationAttributes(identity, region);
         return id != null && "Success".equals(id.getVerificationStatus());
     }

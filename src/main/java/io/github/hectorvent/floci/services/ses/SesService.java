@@ -871,8 +871,7 @@ public class SesService {
      * {@code SourceArn} may be its sender.
      */
     public boolean isVerifiedIdentity(String identity, String region) {
-        Identity verified = identityService.getIdentityVerificationAttributes(identity, region);
-        return verified != null && "Success".equals(verified.getVerificationStatus());
+        return identityService.isIdentityVerified(identity, region);
     }
 
     private boolean isVerifiedDomainIdentity(String domain, String region) {
