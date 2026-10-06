@@ -250,6 +250,18 @@ class SesSimpleAttachmentsV2IntegrationTest {
 
     @Test
     @Order(11)
+    void simpleSend_attachmentHeaderMembersWithLineBreaks_areRejected() {
+        for (String member : List.of("ContentType", "ContentDescription", "ContentId")) {
+            sendWithAttachments("[{\"FileName\": \"a.png\", \"RawContent\": \"" + b64(PNG_BYTES)
+                    + "\", \"" + member + "\": \"x\\r\\nX-Injected: yes\"}]")
+                    .then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"))
+                    .body("message", equalTo(member + " must not contain line breaks."));
+        }
+    }
+
+    @Test
+    @Order(12)
     void cleanUp() {
         given().header("Authorization", AUTH)
         .when().delete("/v2/email/identities/" + SENDER).then().statusCode(200);

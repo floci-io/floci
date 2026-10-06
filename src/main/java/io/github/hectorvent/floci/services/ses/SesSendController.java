@@ -531,10 +531,10 @@ public class SesSendController {
                 throw new AwsException("BadRequestException",
                         "RawContent is not valid base64: " + e.getMessage(), 400);
             }
-            String contentType = attachmentString(node, "ContentType", memberPrefix + "contentType", 1, 78);
-            String description = attachmentString(node, "ContentDescription",
+            String contentType = attachmentHeaderValue(node, "ContentType", memberPrefix + "contentType", 1, 78);
+            String description = attachmentHeaderValue(node, "ContentDescription",
                     memberPrefix + "contentDescription", 0, 1000);
-            String contentId = attachmentString(node, "ContentId", memberPrefix + "contentId", 1, 78);
+            String contentId = attachmentHeaderValue(node, "ContentId", memberPrefix + "contentId", 1, 78);
             MessageAttachment.Disposition disposition = attachmentEnum(node, "ContentDisposition",
                     memberPrefix + "contentDisposition", MessageAttachment.Disposition.class);
             MessageAttachment.TransferEncoding transferEncoding = attachmentEnum(node,
@@ -565,6 +565,20 @@ public class SesSendController {
         return text;
     }
 
+    /**
+     * An attachment member written verbatim into the part's MIME headers. The mail encoder only
+     * encodes the file name, so a CR or LF here would add header lines to the part; it is refused
+     * by the same rule {@link MessageHeader#isSafe()} applies to custom headers.
+     */
+    private static String attachmentHeaderValue(JsonNode node, String member, String path, int min, int max) {
+        String text = attachmentString(node, member, path, min, max);
+        if (text != null && !MessageHeader.noCrlf(text)) {
+            throw new AwsException("BadRequestException",
+                    member + " must not contain line breaks.", 400);
+        }
+        return text;
+    }
+
     private static <E extends Enum<E>> E attachmentEnum(JsonNode node, String member, String path,
                                                         Class<E> type) {
         String text = attachmentString(node, member, path, 0, Integer.MAX_VALUE);
@@ -587,10 +601,8 @@ public class SesSendController {
                         + "' failed to satisfy constraint: " + constraint, 400);
     }
 
-    private AwsException missingHeaderMember(String location, int index, String member) {
-        return new AwsException("BadRequestException",
-                "1 validation error detected: Value at '" + location + "." + index + ".member." + member
-                        + "' failed to satisfy constraint: Member must not be null", 400);
+    private static AwsException missingHeaderMember(String location, int index, String member) {
+        return constraintViolation(null, location + "." + index + ".member." + member, "Member must not be null");
     }
 
     private static ListManagementOptions parseListManagementOptions(JsonNode node) {
