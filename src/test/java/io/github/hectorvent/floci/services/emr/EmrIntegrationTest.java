@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
@@ -67,7 +68,8 @@ class EmrIntegrationTest {
                 .body("Cluster.Status.State", equalTo("WAITING"))
                 .body("Cluster.ReleaseLabel", equalTo("emr-7.5.0"))
                 .body("Cluster.InstanceCollectionType", equalTo("INSTANCE_GROUP"))
-                .body("Cluster.AutoTerminate", equalTo(false));
+                .body("Cluster.AutoTerminate", equalTo(false))
+                .body("Cluster.MasterPublicDnsName", equalTo("ip-10-0-0-1.ec2.internal"));
     }
 
     @Test
@@ -93,7 +95,8 @@ class EmrIntegrationTest {
         call("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}")
                 .then().statusCode(200)
                 .body("Instances", hasSize(3))  // 1 master + 2 core
-                .body("Instances[0].Status.State", equalTo("RUNNING"));
+                .body("Instances[0].Status.State", equalTo("RUNNING"))
+                .body("Instances[0].PrivateDnsName", endsWith(".ec2.internal"));
     }
 
     @Test

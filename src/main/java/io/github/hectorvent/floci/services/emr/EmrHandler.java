@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.emr.model.EmrBlockPublicAccess;
 import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrInstanceFleet;
@@ -628,8 +629,9 @@ public class EmrHandler {
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", "i-" + String.format("%017d", index));
         node.put("PublicDnsName", AwsEndpoints.ec2PublicDns("203.0.113." + index, cluster.getRegion()));
-        node.put("PrivateDnsName", "ip-10-0-0-" + index + ".ec2.internal");
-        node.put("PrivateIpAddress", "10.0.0." + index);
+        String privateIp = "10.0.0." + index;
+        node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));
+        node.put("PrivateIpAddress", privateIp);
         node.put("InstanceGroupId", group.getId());
         if (group.getMarket() != null) {
             node.put("Market", group.getMarket());
