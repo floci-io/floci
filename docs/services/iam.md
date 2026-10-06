@@ -1004,9 +1004,12 @@ These identities always bypass enforcement (backward-compatible defaults):
 | Identity | Behaviour |
 |---|---|
 | Access key `test` (the default dev credential) | Always allowed — no policy lookup |
-| Access key that exists nowhere | **Rejected** with `403`: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services |
+| Access key that exists nowhere | **Rejected** with `403`, `sts:GetCallerIdentity` included: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. A presigned POST, whose credential is in the form body, is left to S3's own presigned-POST check |
+| Inactive access key | **Rejected** the same way, until the key is activated again |
+| Expired session credentials | **Rejected** with `403 ExpiredTokenException`, or `400 ExpiredToken` for S3, rather than as a key that exists nowhere, for as long as Floci still holds the session |
+| `Authorization` header with no readable credential: no access key (a Bearer token, SigV2, a credential without the SigV4 scheme or without its key), or a scope missing a part such as its `aws4_request` terminator, or an empty header. An empty header next to a presigned URL's `X-Amz-Credential` defers to that credential | **Rejected** with `400`: `AuthorizationHeaderMalformed` for S3 (`AuthorizationQueryParametersError` when the credential is a presigned URL's `X-Amz-Credential`), `IncompleteSignature` for Query services, `IncompleteSignatureException` for JSON services. A REST request is rejected only when the header claims SigV4; otherwise it is treated as unsigned (see [Unsigned requests](#unsigned-requests)) |
 | Credential the filter cannot map to policies, such as a session carrying no role ARN | Allowed: it is a real credential, so rejecting it would refuse an authenticated caller |
-| No `Authorization` header | Allowed — unauthenticated path (e.g. health checks) |
+| No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
 **IAM's own resources are mostly not named.** When enforcement evaluates a request, the target
@@ -1229,6 +1232,15 @@ function URLs, CloudFront serving, the Cognito OIDC endpoints and Floci's own he
 of which are unsigned by design, and a REST request does not say which service will serve it. An
 unsigned REST call therefore still reaches the service, including an unsigned S3 call.
 
+**A header with no readable credential does not get around this.** An `Authorization` header that
+names no access key (a Bearer token, SigV2, a credential without the SigV4 scheme or without its
+key), or whose SigV4 scope is missing a part, is refused on the same management calls with
+`400 IncompleteSignature`, the error AWS gives a header it cannot read. A REST request carrying one
+is refused only when the header claims SigV4 and the route maps to an IAM action. Otherwise it is
+treated as unsigned, because AppSync, CodeArtifact's package endpoints, Identity Store's SCIM
+endpoint and API Gateway's authorizers take Bearer and Basic tokens of their own. An empty header
+is refused the same way, unless a presigned URL's `X-Amz-Credential` is there to read instead.
+
 ## Bypass rules
 
 Enforcement is deliberately permissive in a few cases, so that enabling it does not break workloads
@@ -1236,11 +1248,14 @@ the emulator cannot reason about:
 
 | Case | Behaviour |
 | --- | --- |
-| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. |
+| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. The credential is still checked on an RPC call, as in the rows below. A REST request is left alone, as an unsigned one is: the filter cannot tell it from the API Gateway execute path, Lambda function URLs and the other paths it sees that are unsigned by design. |
 | No `Authorization` header, RPC protocol | **Rejected** with `403 MissingAuthenticationToken`, unless the operation is one AWS itself serves without credentials. |
 | No `Authorization` header, REST protocol | Allowed. This filter also sees the API Gateway execute path, Lambda function URLs, CloudFront serving and the Cognito OIDC endpoints, which are unsigned by design. |
-| `sts:GetCallerIdentity` | Always allowed — AWS returns caller identity even when a policy denies it. |
-| Access key that exists nowhere | **Rejected** with `403`, in each protocol's own vocabulary: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. Allowing it would let any string authorize the request. |
+| `sts:GetCallerIdentity` | No policy is evaluated: AWS returns caller identity even when a policy denies it. The credential is still checked: a key that exists nowhere or is inactive, an expired session, or a header with no readable credential is refused as below. |
+| Access key that exists nowhere | **Rejected** with `403`, in each protocol's own vocabulary: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. Allowing it would let any string authorize the request. A presigned POST is the exception: its credential is in the form body, so a key that exists nowhere, or a credential that cannot be read, is left to S3's own presigned-POST check, and uploads as an unsigned request would when that check is off. An inactive key or an expired session is refused there as everywhere else. |
+| Inactive access key | **Rejected** the same way: a deactivated key can no longer be used by API calls until it is activated again. |
+| Expired session credentials | **Rejected** with `403 ExpiredTokenException`, or `400 ExpiredToken` for S3. Once Floci has removed an expired session it no longer knows the key, and answers as for one that exists nowhere. |
+| `Authorization` header with no readable credential | **Rejected** with `400`, in each protocol's own vocabulary: `AuthorizationHeaderMalformed` for S3 (`AuthorizationQueryParametersError` when the credential is a presigned URL's `X-Amz-Credential`), `IncompleteSignature` for Query services, `IncompleteSignatureException` for JSON services. Without a key or a scope there is nothing to check, so allowing it would skip enforcement altogether. As with no header, an operation AWS serves without credentials is left alone, and a REST request is rejected only when the header claims SigV4. |
 | Known credential with no mappable caller context | Allowed. A stored session carrying no role ARN is a real credential, so it is not treated as unauthenticated. |
 | Bare account-id key with no SCP ceiling | Allowed. With no organization or SCP enforcement off, the account root keeps the historical bypass. |
 | Bare account-id key **with** an SCP ceiling | Enforced as the account root, bounded by the SCP chain. |

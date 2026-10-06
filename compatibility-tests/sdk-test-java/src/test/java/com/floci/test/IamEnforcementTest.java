@@ -563,6 +563,43 @@ class IamEnforcementTest {
         }
     }
 
+    @Test
+    @Order(14)
+    @DisplayName("a deactivated access key is refused until it is activated again")
+    void deactivatedAccessKeyIsRefusedUntilActivatedAgain() {
+        assumeEnforcementEnabled();
+        AccessKey key = iam.createAccessKey(CreateAccessKeyRequest.builder().userName(USER).build()).accessKey();
+        try (StsClient caller = StsClient.builder()
+                     .endpointOverride(TestFixtures.endpoint())
+                     .region(Region.US_EAST_1)
+                     .credentialsProvider(StaticCredentialsProvider.create(
+                             AwsBasicCredentials.create(key.accessKeyId(), key.secretAccessKey())))
+                     .build();
+             S3Client s3 = s3WithCredentials(key.accessKeyId(), key.secretAccessKey())) {
+            iam.updateAccessKey(UpdateAccessKeyRequest.builder()
+                    .userName(USER).accessKeyId(key.accessKeyId()).status(StatusType.INACTIVE).build());
+            // Not even a call that needs no permission.
+            assertThatThrownBy(caller::getCallerIdentity)
+                    .isInstanceOfSatisfying(StsException.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(403);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidClientTokenId");
+                    });
+            assertThatThrownBy(s3::listBuckets)
+                    .isInstanceOfSatisfying(S3Exception.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(403);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidAccessKeyId");
+                    });
+
+            iam.updateAccessKey(UpdateAccessKeyRequest.builder()
+                    .userName(USER).accessKeyId(key.accessKeyId()).status(StatusType.ACTIVE).build());
+            assertThatCode(caller::getCallerIdentity).doesNotThrowAnyException();
+        } finally {
+            cleanupResource("delete access key " + key.accessKeyId(),
+                    () -> iam.deleteAccessKey(DeleteAccessKeyRequest.builder()
+                            .userName(USER).accessKeyId(key.accessKeyId()).build()));
+        }
+    }
+
     private static StaticCredentialsProvider userCredentials() {
         return StaticCredentialsProvider.create(AwsBasicCredentials.create(userAccessKeyId, userSecretKey));
     }

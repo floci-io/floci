@@ -58,6 +58,39 @@ class UnknownAccessKeyEnforcementIntegrationTest {
     }
 
     @Test
+    void getCallerIdentityRefusesAnUnknownAccessKey() {
+        // It needs no permission, but it still needs a credential AWS recognises.
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", UNKNOWN_KEY_AUTH.formatted("sts"))
+                .formParam("Action", "GetCallerIdentity")
+                .formParam("Version", "2011-06-15")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>InvalidClientTokenId</Code>"));
+    }
+
+    @Test
+    void aCborServiceRejectsAnUnknownAccessKeyInCbor() {
+        byte[] body = given()
+                .contentType("application/x-amz-cbor-1.1")
+                .header("Authorization", UNKNOWN_KEY_AUTH.formatted("kinesis"))
+                .header("X-Amz-Target", "Kinesis_20131202.ListStreams")
+                .body(new byte[] {(byte) 0xa0})
+        .when()
+                .post("/")
+        .then()
+                .statusCode(403)
+                .contentType("application/x-amz-cbor-1.1")
+                .extract().asByteArray();
+
+        assertTrue(new String(body, StandardCharsets.ISO_8859_1).contains("UnrecognizedClientException"),
+                "the rejection must arrive CBOR-encoded, not as JSON");
+    }
+
+    @Test
     void anUnsignedJsonServiceCallIsRefused() {
         given()
                 .contentType("application/x-amz-json-1.0")

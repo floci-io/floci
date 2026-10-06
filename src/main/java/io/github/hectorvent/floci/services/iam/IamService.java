@@ -4416,6 +4416,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
      */
     public CallerContext resolveCallerContext(String accessKeyId) {
+        return resolveCallerContext(accessKeyId, Instant.now());
+    }
+
+    /**
+     * {@link #resolveCallerContext(String)} as of {@code now}. Enforcement passes the moment it
+     * asked {@link #isExpiredSession} about, so a session that expires between the two calls is
+     * neither deleted here nor then answered as a key that exists nowhere.
+     */
+    public CallerContext resolveCallerContext(String accessKeyId, Instant now) {
         // Check user access keys
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
@@ -4430,7 +4439,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
-            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+            if (session.getExpiration() != null && session.getExpiration().isBefore(now)) {
                 deleteSession(accessKeyId, session);
                 return null; // expired — unknown key → bypass
             }
@@ -4465,6 +4474,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * an unauthenticated caller, so enforcement needs to tell them apart. The lookup spans every
      * account deliberately: a key belonging to another account is a real credential, and denying
      * it here would be a false rejection rather than a closed hole.
+     *
+     * <p>An inactive key counts too. {@link #registerIssuedSession} relies on that, so a session
+     * minted with an inactive key has no issuer rather than acting as the account root, and
+     * enforcement refuses the key itself through {@link #isInactiveAccessKey}.
      */
     public boolean isKnownAccessKey(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
@@ -4478,6 +4491,43 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         return accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware
                 && !aware.scanAllAccountEntries(accessKeyId::equals).isEmpty();
+    }
+
+    /**
+     * True when this is an IAM user's long-term access key, in any account, that is not Active. An
+     * inactive key can't be used for API calls (IAM User Guide, "Manage access keys for IAM
+     * users"), so enforcement refuses it as it refuses a key that exists nowhere, rather than
+     * letting {@link #isKnownAccessKey}, which counts it as a credential, wave it through.
+     */
+    public boolean isInactiveAccessKey(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank() || isTemporaryAccessKey(accessKeyId)) {
+            return false;
+        }
+        // Routing sends an active key to its own account, so the usual case is answered here
+        // without scanning the others. An inactive key lands in the default account instead.
+        Optional<AccessKey> routed = accessKeys.get(accessKeyId);
+        if (routed.isPresent()) {
+            return !"Active".equals(routed.get().getStatus());
+        }
+        return accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware
+                && aware.scanAllAccountEntries(accessKeyId::equals).stream()
+                        .anyMatch(entry -> !"Active".equals(entry.value().getStatus()));
+    }
+
+    /**
+     * True when this temporary access key belongs to a session that had expired by {@code now} but
+     * is still stored. AWS answers its use with {@code ExpiredTokenException} rather than as a key
+     * it does not know, so enforcement asks before {@link #resolveCallerContext(String, Instant)},
+     * which deletes such a session and leaves nothing to tell the two apart.
+     */
+    public boolean isExpiredSession(String accessKeyId, Instant now) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return false;
+        }
+        return findSessionForCallerContext(accessKeyId)
+                .map(SessionCredential::getExpiration)
+                .filter(expiration -> expiration.isBefore(now))
+                .isPresent();
     }
 
     private Optional<SessionCredential> findSessionForCallerContext(String accessKeyId) {
