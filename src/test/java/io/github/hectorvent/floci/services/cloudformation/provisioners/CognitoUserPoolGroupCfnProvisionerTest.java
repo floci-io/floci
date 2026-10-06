@@ -168,6 +168,20 @@ class CognitoUserPoolGroupCfnProvisionerTest {
     }
 
     @Test
+    void thePoolRecordKeepsOnlyTheCurrentGroupOnceNoDeleteIsOwed() {
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", "admin"), ctx());
+        provisioner.provision(r, props("us-east-1_a", "ops"), ctx("admin"));
+        provisioner.completeUpdate(r);
+        provisioner.provision(r, props("us-east-1_a", "staff"), ctx("ops"));
+        provisioner.completeUpdate(r);
+
+        provisioner.provision(r, props("us-east-1_a", "staff"), ctx("staff"));
+
+        assertEquals("{\"staff\":\"us-east-1_a\"}", r.getAttributes().get("__FlociGroupPools"));
+    }
+
+    @Test
     void movingANamedGroupToAnotherPoolCreatesItThereAndOwesNoDelete() {
         // AWS replaces the group but deletes nothing: the physical id, the bare name, is unchanged.
         StackResource r = resource(null);

@@ -43,8 +43,9 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
     /**
-     * Every group name this resource provisioned, mapped to its pool, because the replacement
-     * cleanup addresses a displaced group by its name alone and a group is deleted by pool and name.
+     * The current group name and every one still owed a delete, mapped to its pool, because the
+     * replacement cleanup addresses a displaced group by its name alone and a group is deleted by
+     * pool and name.
      */
     // ponytail: keyed by name alone. Two groups of one name are owed deletes together only after a
     // group delete failed, and deleteGroup fails only with ResourceNotFoundException, which counts as deleted.
@@ -96,13 +97,20 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
         r.setPhysicalId(groupName);
         r.getAttributes().put(USER_POOL_ID_ATTR, userPoolId);
         r.getAttributes().put(NAME_MODE_ATTR, explicitName != null ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
-        ObjectNode pools = groupPools(r);
+        ReplacementCleanup.record(r, ctx, attributesBefore, replaced);
+        ObjectNode known = groupPools(r);
         if (ctx.isUpdate() && priorPoolId != null) {
-            pools.put(ctx.priorPhysicalId(), priorPoolId);
+            known.put(ctx.priorPhysicalId(), priorPoolId);
+        }
+        ObjectNode pools = MAPPER.createObjectNode();
+        for (String owed : ReplacementCleanup.owedPhysicalIds(r)) {
+            JsonNode pool = known.get(owed);
+            if (pool != null) {
+                pools.set(owed, pool);
+            }
         }
         pools.put(groupName, userPoolId);
         r.getAttributes().put(GROUP_POOLS_ATTR, pools.toString());
-        ReplacementCleanup.record(r, ctx, attributesBefore, replaced);
     }
 
     /**
