@@ -2326,11 +2326,9 @@ public class CloudFormationService implements ResourceProvider {
             }
             Map<String, Boolean> conditions = resolveConditions(
                     template, stack.parametersSnapshot(), stack, region, regionResolver.getAccountId());
-            // A stack saved before circular templates were rejected may still have one; order what
-            // can be ordered and put the circular resources after it, rather than giving up.
-            CreationOrder order = creationOrder(resources, conditions);
-            List<String> creationOrder = new ArrayList<>(order.sorted());
-            creationOrder.addAll(order.circular());
+            // A stack saved before circular templates were rejected may still have one; order it
+            // by its dependencies anyway rather than giving up.
+            List<String> creationOrder = creationOrder(resources, conditions).sorted();
             Map<String, Integer> rank = new HashMap<>();
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);
@@ -3070,8 +3068,9 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The template's resources that can be ordered, dependencies first, and those that cannot
-     * because they are in a dependency cycle or depend on one.
+     * The template's resources, dependencies first, and those that have no such order because they
+     * are in a dependency cycle or depend on one. Those are still placed in {@code sorted}, with a
+     * cycle broken where it starts, so everything outside the cycle keeps its dependency order.
      */
     private record CreationOrder(List<String> sorted, Set<String> circular) {
     }
@@ -3122,9 +3121,24 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         List<String> sorted = new ArrayList<>();
-        while (!queue.isEmpty()) {
+        Set<String> placed = new HashSet<>();
+        Set<String> circular = new LinkedHashSet<>();
+        while (sorted.size() < activeIds.size()) {
+            if (queue.isEmpty()) {
+                // Every resource left waits on another one left. Note them all as circular, then
+                // release one that is on a cycle itself, so whatever depends on the cycle is still
+                // ordered by its dependencies after it.
+                if (circular.isEmpty()) {
+                    circular.addAll(activeIds);
+                    circular.removeAll(placed);
+                }
+                String onCycle = resourceOnCycle(circular, placed, dependencies, inDegree);
+                inDegree.put(onCycle, 0);
+                queue.add(onCycle);
+            }
             String current = queue.poll();
             sorted.add(current);
+            placed.add(current);
             for (var entry : dependencies.entrySet()) {
                 if (entry.getValue().contains(current)) {
                     int newDegree = inDegree.get(entry.getKey()) - 1;
@@ -3136,9 +3150,24 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
 
-        Set<String> circular = new LinkedHashSet<>(activeIds);
-        circular.removeAll(sorted);
         return new CreationOrder(sorted, circular);
+    }
+
+    /**
+     * Follows unplaced dependencies from a resource left unsorted until one repeats; that resource
+     * is on a dependency cycle. Each resource left unsorted still waits on an unplaced dependency,
+     * so the walk always finds one.
+     */
+    private static String resourceOnCycle(Set<String> circular, Set<String> placed,
+                                          Map<String, Set<String>> dependencies, Map<String, Integer> inDegree) {
+        String current = circular.stream().filter(id -> !placed.contains(id)).findFirst().orElseThrow();
+        Set<String> seen = new HashSet<>();
+        while (seen.add(current)) {
+            current = dependencies.get(current).stream()
+                    .filter(dep -> inDegree.containsKey(dep) && !placed.contains(dep))
+                    .findFirst().orElseThrow();
+        }
+        return current;
     }
 
     private static final Pattern SUB_VAR_PATTERN = Pattern.compile("\\$\\{([^}]+)}");

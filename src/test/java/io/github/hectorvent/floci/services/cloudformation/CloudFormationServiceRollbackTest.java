@@ -233,6 +233,44 @@ class CloudFormationServiceRollbackTest {
         assertEquals("DELETE_COMPLETE", stack.getStatus());
     }
 
+    @Test
+    void deleteStack_savedWithCircularTemplate_deletesResourcesDependingOnTheCycleInDependencyOrder() {
+        // The target group depends on a queue in the cycle, so it cannot be ordered either; the
+        // listener using it comes first in the template, yet must still be deleted first.
+        Stack stack = new Stack();
+        stack.setStackName("delete-saved-circular-chain");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_COMPLETE");
+        stack.setTemplateBody("""
+                {"Resources": {
+                  "Listener": {"Type": "AWS::ElasticLoadBalancingV2::Listener",
+                               "Properties": {"DefaultActions": [{"Type": "forward",
+                                   "TargetGroupArn": {"Ref": "TargetGroup"}}]}},
+                  "FirstQueue": {"Type": "AWS::SQS::Queue", "DependsOn": "SecondQueue"},
+                  "SecondQueue": {"Type": "AWS::SQS::Queue", "DependsOn": "FirstQueue"},
+                  "TargetGroup": {"Type": "AWS::ElasticLoadBalancingV2::TargetGroup", "DependsOn": "FirstQueue"}
+                }}""");
+        StackResource listener = resource("Listener", "listener-arn", "AWS::ElasticLoadBalancingV2::Listener",
+                "CREATE_COMPLETE");
+        StackResource firstQueue = resource("FirstQueue", "first-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource secondQueue = resource("SecondQueue", "second-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource targetGroup = resource("TargetGroup", "target-group-arn",
+                "AWS::ElasticLoadBalancingV2::TargetGroup", "CREATE_COMPLETE");
+        for (StackResource resource : new StackResource[] {listener, firstQueue, secondQueue, targetGroup}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(listener, REGION);
+        deletes.verify(provisioner).delete(targetGroup, REGION);
+        deletes.verify(provisioner).delete(firstQueue, REGION);
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+    }
+
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
