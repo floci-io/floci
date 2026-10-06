@@ -31,9 +31,11 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -600,5 +602,82 @@ class ScheduleInvokerTest {
         assertThrows(UnsupportedOperationException.class, () -> invoke(target, "us-east-1"));
 
         verifyNoInteractions(sqsService, lambdaService, snsService, eventBridgeService, ecsService);
+    }
+
+    private static final String CONTEXT_INPUT = "{\"arn\":\"<aws.scheduler.schedule-arn>\","
+            + "\"time\":\"<aws.scheduler.scheduled-time>\",\"id\":\"<aws.scheduler.execution-id>\","
+            + "\"attempt\":<aws.scheduler.attempt-number>}";
+    private static final String SCHEDULE_ARN =
+            "arn:aws:scheduler:us-east-1:000000000000:schedule/default/test-schedule";
+
+    @Test
+    void templatedTargetInputHasContextAttributesReplaced() {
+        Target target = new Target();
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:test-queue");
+        target.setInput(CONTEXT_INPUT);
+
+        String request = invoker.invoke(scheduleIn("us-east-1", target),
+                Instant.parse("2026-04-21T09:17:54.678Z"), "d32c5kddcf5bb8c3", 3);
+
+        String expected = "{\"arn\":\"" + SCHEDULE_ARN + "\",\"time\":\"2026-04-21T09:17:54Z\","
+                + "\"id\":\"d32c5kddcf5bb8c3\",\"attempt\":3}";
+        verify(sqsService).sendMessage(anyString(), eq(expected), eq(0), isNull(), isNull(), eq("us-east-1"));
+        assertTrue(request.contains("2026-04-21T09:17:54Z"), request);
+    }
+
+    @Test
+    void materializedRequestUsesTheSameContextAttributes() {
+        Target target = new Target();
+        target.setArn("arn:aws:lambda:us-east-1:000000000000:function:fn");
+        target.setInput(CONTEXT_INPUT);
+
+        String request = invoker.materializeRequest(scheduleIn("us-east-1", target), SCHEDULED_AT,
+                "abcdef0123456789", 1);
+
+        assertTrue(request.contains("abcdef0123456789"), request);
+        assertTrue(request.contains("2026-04-21T09:17:54Z"), request);
+        assertTrue(request.contains("\\\"attempt\\\":1"), request);
+        assertFalse(request.contains("<aws.scheduler."), request);
+    }
+
+    @Test
+    void universalTargetInputHasContextAttributesReplacedBeforeTheCall() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"QueueUrl\":\"http://localhost:4566/000000000000/q\","
+                + "\"MessageBody\":\"<aws.scheduler.schedule-arn>|<aws.scheduler.scheduled-time>|"
+                + "<aws.scheduler.execution-id>|<aws.scheduler.attempt-number>\"}");
+
+        invoker.invoke(scheduleIn("us-east-1", target), SCHEDULED_AT, "0123456789abcdef", 2);
+
+        verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/q"),
+                eq(SCHEDULE_ARN + "|2026-04-21T09:17:54Z|0123456789abcdef|2"), eq(0), isNull(), isNull(),
+                argThat(attrs -> attrs == null || attrs.isEmpty()), eq("us-east-1"));
+    }
+
+    @Test
+    void inputWithoutContextAttributesIsDeliveredUnchanged() {
+        Target target = new Target();
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:test-queue");
+        target.setInput("{\"plain\":\"<b>not a keyword</b>\"}");
+
+        invoker.invoke(scheduleIn("us-east-1", target), SCHEDULED_AT, "0123456789abcdef", 4);
+
+        verify(sqsService).sendMessage(anyString(), eq("{\"plain\":\"<b>not a keyword</b>\"}"), eq(0),
+                isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
+    void twoArgumentInvokeIsTheFirstAttemptUnderAFreshExecutionId() {
+        Target target = new Target();
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:test-queue");
+        target.setInput("<aws.scheduler.execution-id>/<aws.scheduler.attempt-number>");
+
+        invoke(target, "us-east-1");
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqsService).sendMessage(anyString(), body.capture(), eq(0), isNull(), isNull(), eq("us-east-1"));
+        assertTrue(body.getValue().matches("[0-9a-f]{16}/1"), body.getValue());
     }
 }

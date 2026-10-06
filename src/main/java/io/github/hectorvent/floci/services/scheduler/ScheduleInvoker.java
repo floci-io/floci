@@ -48,6 +48,11 @@ public class ScheduleInvoker {
 
     private static final Logger LOG = Logger.getLogger(ScheduleInvoker.class);
 
+    static final String CONTEXT_SCHEDULE_ARN = "<aws.scheduler.schedule-arn>";
+    static final String CONTEXT_SCHEDULED_TIME = "<aws.scheduler.scheduled-time>";
+    static final String CONTEXT_EXECUTION_ID = "<aws.scheduler.execution-id>";
+    static final String CONTEXT_ATTEMPT_NUMBER = "<aws.scheduler.attempt-number>";
+
     private final SqsService sqsService;
     private final LambdaService lambdaService;
     private final SnsService snsService;
@@ -79,24 +84,35 @@ public class ScheduleInvoker {
     }
 
     /**
-     * Delivers one occurrence of {@code schedule}, scheduled at {@code scheduledAt}, to its target
-     * and returns the JSON request that was sent (see {@link #materializeRequest}).
+     * Delivers the first attempt of one occurrence of {@code schedule}, under a fresh execution id.
+     * See {@link #invoke(Schedule, Instant, String, int)}.
      */
     public String invoke(Schedule schedule, Instant scheduledAt) {
+        return invoke(schedule, scheduledAt, newExecutionId(), 1);
+    }
+
+    /**
+     * Delivers one attempt of the occurrence of {@code schedule} scheduled at {@code scheduledAt}
+     * to its target and returns the JSON request that was sent (see {@link #materializeRequest}).
+     * {@code executionId} and the 1-based {@code attemptNumber} fill the context attributes of
+     * the target's {@code Input}.
+     */
+    public String invoke(Schedule schedule, Instant scheduledAt, String executionId, int attemptNumber) {
         Target target = schedule.getTarget();
         if (target == null || target.getArn() == null) {
             return "{}";
         }
         String arn = target.getArn();
         String region = regionOf(schedule, defaultRegion);
+        String input = contextualInput(schedule, scheduledAt, executionId, attemptNumber);
         if (isUniversalTarget(arn)) {
             invokeUniversalTarget(arn.substring(arn.indexOf(":aws-sdk:") + ":aws-sdk:".length()),
-                    target.getInput(), region);
-            return universalTargetRequest(target);
+                    input, region);
+            return universalTargetRequest(input);
         }
 
         TargetKind kind = TargetKind.of(target);
-        String payload = templatedPayload(schedule, scheduledAt);
+        String payload = templatedPayload(schedule, input, scheduledAt);
         String targetRegion = extractRegion(arn, region);
         switch (kind) {
             case SQS -> {
@@ -141,14 +157,48 @@ public class ScheduleInvoker {
      * in the dead-letter queue example of the Scheduler user guide.
      */
     public String materializeRequest(Schedule schedule, Instant scheduledAt) {
+        return materializeRequest(schedule, scheduledAt, newExecutionId(), 1);
+    }
+
+    /** The request {@link #invoke(Schedule, Instant, String, int)} sends for the same attempt. */
+    public String materializeRequest(Schedule schedule, Instant scheduledAt, String executionId,
+                                     int attemptNumber) {
         Target target = schedule.getTarget();
         if (target == null || target.getArn() == null) {
             return "{}";
         }
+        String input = contextualInput(schedule, scheduledAt, executionId, attemptNumber);
         if (isUniversalTarget(target.getArn())) {
-            return universalTargetRequest(target);
+            return universalTargetRequest(input);
         }
-        return templatedTargetRequest(target, TargetKind.of(target), templatedPayload(schedule, scheduledAt));
+        return templatedTargetRequest(target, TargetKind.of(target),
+                templatedPayload(schedule, input, scheduledAt));
+    }
+
+    /** A Scheduler-style execution id: 16 lowercase hex characters. */
+    public static String newExecutionId() {
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+    }
+
+    /**
+     * The target's {@code Input} with the Scheduler context attributes replaced: the schedule ARN,
+     * the scheduled time as UTC seconds with a {@code Z} suffix, the execution id and the 1-based
+     * attempt number. Null when the target has no {@code Input}, so the default event is untouched.
+     */
+    static String contextualInput(Schedule schedule, Instant scheduledAt, String executionId,
+                                  int attemptNumber) {
+        String input = schedule.getTarget().getInput();
+        if (input == null || input.indexOf('<') < 0) {
+            return input;
+        }
+        String scheduledTime = scheduledAt == null
+                ? ""
+                : scheduledAt.truncatedTo(ChronoUnit.SECONDS).toString();
+        return input
+                .replace(CONTEXT_SCHEDULE_ARN, schedule.getArn() == null ? "" : schedule.getArn())
+                .replace(CONTEXT_SCHEDULED_TIME, scheduledTime)
+                .replace(CONTEXT_EXECUTION_ID, executionId == null ? "" : executionId)
+                .replace(CONTEXT_ATTEMPT_NUMBER, String.valueOf(attemptNumber));
     }
 
     /** The templated target types Floci delivers to, in the order their ARNs are recognised. */
@@ -189,8 +239,8 @@ public class ScheduleInvoker {
         return arn.contains(":aws-sdk:");
     }
 
-    private String universalTargetRequest(Target target) {
-        return validJsonOrString(target.getInput() != null ? target.getInput() : "{}");
+    private String universalTargetRequest(String input) {
+        return validJsonOrString(input != null ? input : "{}");
     }
 
     private String templatedTargetRequest(Target target, TargetKind kind, String payload) {
@@ -256,8 +306,7 @@ public class ScheduleInvoker {
      * The payload a templated target receives: the target's {@code Input}, or Scheduler's default
      * notification when no {@code Input} was configured (API reference, {@code Target.Input}).
      */
-    private String templatedPayload(Schedule schedule, Instant scheduledAt) {
-        String input = schedule.getTarget().getInput();
+    private String templatedPayload(Schedule schedule, String input, Instant scheduledAt) {
         return input != null ? input : defaultScheduledEvent(schedule, scheduledAt);
     }
 
