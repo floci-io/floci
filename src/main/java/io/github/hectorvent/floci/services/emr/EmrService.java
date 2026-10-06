@@ -87,7 +87,7 @@ public class EmrService {
         cluster.setInstanceCollectionType(cluster.getInstanceFleets().isEmpty()
                 ? "INSTANCE_GROUP" : "INSTANCE_FLEET");
         cluster.setAutoTerminate(!cluster.isKeepJobFlowAliveWhenNoSteps());
-        cluster.setMasterPublicDnsName(AwsRegions.ec2PrivateIpDnsName("10.0.0.1", region));
+        cluster.setMasterPublicDnsName(masterDnsName(region));
         cluster.setCreationDateTime(Instant.now());
         for (EmrInstanceGroup g : cluster.getInstanceGroups()) {
             g.setId("ig-" + randomId(13));
@@ -107,6 +107,11 @@ public class EmrService {
         advanceToWaiting(cluster);
         clusterStore.put(id, cluster);
         return cluster;
+    }
+
+    /** The master node's private DNS name, derived from the region so a stored name never goes stale. */
+    static String masterDnsName(String region) {
+        return AwsRegions.ec2PrivateIpDnsName("10.0.0.1", region);
     }
 
     public EmrCluster describeCluster(String id) {

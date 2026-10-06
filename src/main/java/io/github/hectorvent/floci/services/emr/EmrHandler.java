@@ -493,7 +493,7 @@ public class EmrHandler {
         }
         node.put("NormalizedInstanceHours", c.getNormalizedInstanceHours());
         if (c.getMasterPublicDnsName() != null) {
-            node.put("MasterPublicDnsName", c.getMasterPublicDnsName());
+            node.put("MasterPublicDnsName", EmrService.masterDnsName(c.getRegion()));
         }
         if (c.getAutoScalingRole() != null) {
             node.put("AutoScalingRole", c.getAutoScalingRole());

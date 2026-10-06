@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.emr;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.restassured.response.Response;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -30,6 +31,9 @@ class EmrIntegrationTest {
 
     private static String clusterId;
     private static String stepId;
+
+    @Inject
+    EmrService emrService;
 
     @BeforeAll
     static void configure() {
@@ -247,5 +251,25 @@ class EmrIntegrationTest {
         call("DescribeCluster", "{\"ClusterId\":\"" + protectedId + "\"}")
                 .then().statusCode(200)
                 .body("Cluster.Status.State", equalTo("WAITING"));
+    }
+
+    // Catches: a cluster stored before the DNS fix keeps reporting its old us-east-1 master name.
+    @Test
+    void storedClusterReportsTheRegionalMasterDnsName() {
+        String id = call("RunJobFlow",
+                "{\"Name\":\"stale-dns\",\"ReleaseLabel\":\"emr-7.5.0\","
+                        + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                        + "\"InstanceGroups\":[{\"Name\":\"master\",\"InstanceRole\":\"MASTER\","
+                        + "\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(200)
+                .extract().path("JobFlowId");
+        emrService.describeCluster(id).setMasterPublicDnsName("ip-10-0-0-1.us-east-1.compute.internal");
+
+        call("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}")
+                .then().statusCode(200)
+                .body("Cluster.MasterPublicDnsName", equalTo("ip-10-0-0-1.ec2.internal"));
+
+        call("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}")
+                .then().statusCode(200);
     }
 }
