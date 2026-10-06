@@ -119,6 +119,9 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
 
         verifyDomainIdentity(FALLBACK_DOMAIN);
         setIdentityNotificationTopic(FALLBACK_DOMAIN, "Bounce", topicArn);
+        // The domain stays Pending without its DKIM records, so the address under it is verified
+        // on its own to be allowed to send; it has no topic of its own.
+        verifyEmailIdentity("anyone@" + FALLBACK_DOMAIN);
     }
 
     @Test

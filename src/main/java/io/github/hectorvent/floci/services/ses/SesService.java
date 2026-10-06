@@ -223,9 +223,27 @@ public class SesService {
         LOG.infov("Deleted identity: {0}", identityValue);
     }
 
+    /**
+     * The SES send operations: v1 {@code SendEmail}, {@code SendRawEmail} and
+     * {@code SendTemplatedEmail}, and v2 {@code SendEmail}. The sender must be a verified identity,
+     * the address itself or its domain, as on AWS.
+     */
     public String sendEmail(SendEmailRequest request) {
+        return sendEmail(request, true);
+    }
+
+    /**
+     * A message another service sends to its users, such as a Cognito verification code. Its
+     * sender is not checked against the account's identities: Cognito's default sender,
+     * {@code no-reply@verificationemail.com}, belongs to an SES account Cognito owns.
+     */
+    public String sendServiceEmail(SendEmailRequest request) {
+        return sendEmail(request, false);
+    }
+
+    private String sendEmail(SendEmailRequest request, boolean requireVerifiedSender) {
         if (request.content() instanceof EmailContent.Raw raw) {
-            return sendRawEmail(request, raw);
+            return sendRawEmail(request, raw, requireVerifiedSender);
         }
         if (request.content() instanceof EmailContent.InlineTemplate inline) {
             requireInlineTemplateContent(inline.subject(), inline.textPart(), inline.htmlPart());
@@ -241,7 +259,22 @@ public class SesService {
             case EmailContent.InlineTemplate inline -> SesTemplateService.render(inline);
             case EmailContent.Raw raw -> throw new IllegalStateException("Raw content is sent above");
         };
+        if (requireVerifiedSender) {
+            requireVerifiedSender(request.source(), request.region());
+        }
         return sendSimpleEmail(request.toBuilder().content(content).build(), content, effectiveConfigSet);
+    }
+
+    // "The message must be sent from a verified email address or domain" (API_SendEmail). It runs
+    // after the request's own validation so that probe-confirmed order is unchanged; where AWS
+    // places this check among those errors has not been probed.
+    private void requireVerifiedSender(String source, String region) {
+        String address = extractEmailAddress(source);
+        if (!identityService.isVerifiedSender(address, region)) {
+            throw new AwsException("MessageRejected",
+                    "Email address is not verified. The following identities failed the check in region "
+                            + region.toUpperCase(Locale.ROOT) + ": " + address, 400);
+        }
     }
 
     private static EmailContent.Simple renderInlineTemplate(EmailContent.InlineTemplate template) {
@@ -353,7 +386,7 @@ public class SesService {
         return messageId;
     }
 
-    private String sendRawEmail(SendEmailRequest request, EmailContent.Raw raw) {
+    private String sendRawEmail(SendEmailRequest request, EmailContent.Raw raw, boolean requireVerifiedSender) {
         String source = request.source();
         String region = request.region();
         List<String> destinations = request.recipients();
@@ -403,6 +436,9 @@ public class SesService {
         if (effectiveDestinations.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination address is required.", 400);
+        }
+        if (requireVerifiedSender) {
+            requireVerifiedSender(effectiveSource, region);
         }
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
         // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.

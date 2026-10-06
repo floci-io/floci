@@ -45,6 +45,7 @@ class SesServiceSmtpTest {
         suppression = builder.suppressionService();
         cvetTemplates = builder.cvetService();
         identities = builder.identityService();
+        identities.verifyEmailIdentity("from@example.com", "us-east-1");
     }
 
     private void cvetTemplate(String name, String subject, String content) {

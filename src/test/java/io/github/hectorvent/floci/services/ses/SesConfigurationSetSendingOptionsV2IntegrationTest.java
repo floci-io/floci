@@ -29,6 +29,20 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     private static final String SENDER = "sender@example.com";
 
     @Test
+    @Order(0)
+    void verifySender() {
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", SES_AUTH)
+                .formParam("Action", "VerifyEmailIdentity")
+                .formParam("EmailAddress", SENDER)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
     @Order(1)
     void createConfigurationSet() {
         given()

@@ -31,7 +31,9 @@ class SesServiceAddressLengthTest {
 
     @BeforeEach
     void setUp() {
-        service = SesServiceTestBuilder.create().build();
+        SesServiceTestBuilder builder = SesServiceTestBuilder.create();
+        service = builder.build();
+        builder.identityService().verifyEmailIdentity(SENDER, REGION);
     }
 
     @Test

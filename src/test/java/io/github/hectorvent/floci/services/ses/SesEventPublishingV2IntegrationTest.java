@@ -1307,6 +1307,15 @@ class SesEventPublishingV2IntegrationTest {
         given()
                 .contentType("application/json")
                 .header("Authorization", sesAuth)
+                .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
+        .when()
+                .post("/v2/email/identities")
+        .then()
+                .statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", sesAuth)
                 .body("""
                     {
                       "EventDestinationName": "ed-eventbridge-eu-west-1",

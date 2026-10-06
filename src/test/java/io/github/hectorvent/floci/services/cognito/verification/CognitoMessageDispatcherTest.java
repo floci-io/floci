@@ -208,7 +208,7 @@ class CognitoMessageDispatcherTest {
 
     private SendEmailRequest sentEmail() {
         ArgumentCaptor<SendEmailRequest> captor = ArgumentCaptor.forClass(SendEmailRequest.class);
-        verify(ses).sendEmail(captor.capture());
+        verify(ses).sendServiceEmail(captor.capture());
         return captor.getValue();
     }
 
