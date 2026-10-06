@@ -20,7 +20,8 @@ import java.util.Set;
  * create-only: an update that keeps both changes the group in place, and one that changes either,
  * or drops an explicit name, creates the new group and leaves the displaced one to the
  * {@link ReplacementCleanup} record. A pool move that keeps an explicit name keeps the physical id,
- * so, as on AWS, nothing is deleted and the group in the old pool stays behind.
+ * so, as on AWS, nothing is deleted: a committed move leaves the group in the old pool behind, and
+ * a rolled-back one points the resource at the old pool's group again and leaves the new one.
  */
 @ApplicationScoped
 public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisioner {
@@ -33,7 +34,8 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
     /**
      * Records whether the name came from the template or was generated, so a later update can tell
      * an explicit name being dropped, which replaces the group, from an unnamed group keeping the
-     * name it was given. A resource without it predates the attribute and reads as generated.
+     * name it was given. A resource without it predates the attribute, and its name reads as
+     * generated when it has the generated shape.
      */
     private static final String NAME_MODE_ATTR = "FlociGroupNameMode";
     private static final String NAME_MODE_EXPLICIT = "explicit";
@@ -42,8 +44,8 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
      * Every group name this resource provisioned, mapped to its pool, because the replacement
      * cleanup addresses a displaced group by its name alone and a group is deleted by pool and name.
      */
-    // ponytail: keyed by name alone, so a name reused in another pool while a group of that name is
-    // still owed a delete (a failed rollback delete) loses that delete; the group stays in the old pool.
+    // ponytail: keyed by name alone. Two groups of one name are owed deletes together only after a
+    // group delete failed, and deleteGroup fails only with ResourceNotFoundException, which counts as deleted.
     private static final String GROUP_POOLS_ATTR = "__FlociGroupPools";
 
     private final CognitoService cognitoService;
@@ -76,13 +78,11 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
         Integer precedence = parsePrecedence(ctx.resolveOptional(props, "Precedence"));
         String roleArn = ctx.resolveOptional(props, "RoleArn");
 
-        // ponytail: a pool move keeping an explicit name keeps the physical id and records no
-        // replacement, so a failed stack update cannot roll it back and the new-pool group stays
-        // (unmeasured on AWS).
-        if (ctx.reusesPriorEntity(groupName) && !poolChanged) {
-            cognitoService.updateGroup(userPoolId, groupName, description, precedence, roleArn);
-        } else {
+        boolean replaced = poolChanged || !ctx.reusesPriorEntity(groupName);
+        if (replaced) {
             cognitoService.createGroup(userPoolId, groupName, description, precedence, roleArn);
+        } else {
+            cognitoService.updateGroup(userPoolId, groupName, description, precedence, roleArn);
         }
 
         r.setPhysicalId(groupName);
@@ -90,11 +90,11 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
         r.getAttributes().put(NAME_MODE_ATTR, explicitName != null ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
         ObjectNode pools = groupPools(r);
         if (ctx.isUpdate() && priorPoolId != null) {
-            pools.putIfAbsent(ctx.priorPhysicalId(), pools.textNode(priorPoolId));
+            pools.put(ctx.priorPhysicalId(), priorPoolId);
         }
         pools.put(groupName, userPoolId);
         r.getAttributes().put(GROUP_POOLS_ATTR, pools.toString());
-        ReplacementCleanup.record(r, ctx, attributesBefore);
+        ReplacementCleanup.record(r, ctx, attributesBefore, replaced);
     }
 
     /**
@@ -107,22 +107,32 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
         if (explicitName != null) {
             return explicitName;
         }
-        boolean priorGenerated = !NAME_MODE_EXPLICIT.equals(r.getAttributes().get(NAME_MODE_ATTR));
-        if (ctx.isUpdate() && priorGenerated && !poolChanged) {
+        if (ctx.isUpdate() && !poolChanged && priorNameGenerated(r, ctx)) {
             return ctx.priorPhysicalId();
         }
         return ctx.generatePhysicalName(r.getLogicalId(), 128, false);
     }
 
-    @Override
-    public void delete(StackResource resource, String region) {
-        deleteGroup(resource, resource.getPhysicalId());
+    /** Whether the prior name was generated, read from its shape when the mode was never recorded. */
+    private static boolean priorNameGenerated(StackResource r, ProvisionContext ctx) {
+        String mode = r.getAttributes().get(NAME_MODE_ATTR);
+        if (mode == null) {
+            return ctx.isGeneratedPhysicalName(ctx.priorPhysicalId(), r.getLogicalId(), 128, false);
+        }
+        return !NAME_MODE_EXPLICIT.equals(mode);
     }
 
-    /** Deletes a group this resource provisioned from the pool it was created in. */
-    private void deleteGroup(StackResource resource, String groupName) {
-        String userPoolId = groupPools(resource).path(groupName)
-                .asText(resource.getAttributes().get(USER_POOL_ID_ATTR));
+    /**
+     * Deletes the current group from its {@code UserPoolId}, not through the pool map: after a
+     * rolled-back pool move the map's entry for the name points at the new pool.
+     */
+    @Override
+    public void delete(StackResource resource, String region) {
+        deleteGroup(resource.getAttributes().get(USER_POOL_ID_ATTR), resource.getPhysicalId());
+    }
+
+    /** Deletes a group from the given pool, treating one that is already gone as deleted. */
+    private void deleteGroup(String userPoolId, String groupName) {
         if (userPoolId == null || userPoolId.isBlank()) {
             return;
         }
@@ -138,8 +148,11 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
         }
     }
 
+    /** Deletes a displaced group from the pool the map recorded for its name. */
     private ReplacementCleanup.Deleter displacedDeleter(StackResource resource) {
-        return (resourceType, groupName, region) -> deleteGroup(resource, groupName);
+        return (resourceType, groupName, region) -> deleteGroup(
+                groupPools(resource).path(groupName).asText(resource.getAttributes().get(USER_POOL_ID_ATTR)),
+                groupName);
     }
 
     private static ObjectNode groupPools(StackResource r) {
@@ -177,8 +190,10 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
     }
 
     /**
-     * A replacement is undone through the cleanup record. Without one the group was updated in
-     * place, and putting that back needs a snapshot this provisioner does not keep.
+     * A replacement is undone through the cleanup record. A named pool move kept the physical id,
+     * so its rollback points the resource at the old pool's group again and, as on AWS, leaves the
+     * new one. Without a record the group was updated in place, and putting that back needs a
+     * snapshot this provisioner does not keep.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {

@@ -198,4 +198,42 @@ class ReplacementCleanupTest {
 
         assertNull(previous.getAttributes().get(CfnRollback.REPLACEMENT_CLEANUP_ATTR));
     }
+
+    @Test
+    void aReplacementThatKeptItsPhysicalIdRollsBackWithoutADeleteAndDisplacesNothing() {
+        StackResource r = resource("subnet-1");
+        r.getAttributes().put("VpcId", "vpc-new");
+        List<String> deleted = new ArrayList<>();
+
+        ReplacementCleanup.record(r, update("subnet-1"), Map.of("VpcId", "vpc-old"), true);
+
+        assertFalse(ReplacementCleanup.hasReplacement(r));
+        assertNull(ReplacementCleanup.cleanupPhysicalId(r));
+        assertTrue(ReplacementCleanup.rollback(r, (type, id, region) -> deleted.add(id)));
+        assertEquals("subnet-1", r.getPhysicalId());
+        assertEquals("vpc-old", r.getAttributes().get("VpcId"));
+        assertEquals(List.of(), deleted);
+        assertNull(r.getAttributes().get(CfnRollback.REPLACEMENT_CLEANUP_ATTR));
+    }
+
+    @Test
+    void theThreeArgumentRecordStillKeysTheReplacementOnAChangedPhysicalId() {
+        StackResource inPlace = resource("subnet-1");
+        ReplacementCleanup.record(inPlace, update("subnet-1"), Map.of("VpcId", "vpc-old"));
+        assertNull(inPlace.getAttributes().get(CfnRollback.REPLACEMENT_CLEANUP_ATTR));
+        assertFalse(ReplacementCleanup.rollback(inPlace, (type, id, region) -> { }));
+
+        StackResource replaced = resource("subnet-2");
+        List<String> deleted = new ArrayList<>();
+        ReplacementCleanup.record(replaced, update("subnet-1"), Map.of("VpcId", "vpc-old"));
+        assertTrue(ReplacementCleanup.hasReplacement(replaced));
+        assertEquals("subnet-1", ReplacementCleanup.cleanupPhysicalId(replaced));
+        assertTrue(ReplacementCleanup.rollback(replaced, (type, id, region) -> deleted.add(id)));
+        assertEquals("subnet-1", replaced.getPhysicalId());
+        assertEquals(List.of("subnet-2"), deleted);
+    }
+
+    private static ProvisionContext update(String priorPhysicalId) {
+        return new ProvisionContext(null, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+    }
 }

@@ -191,6 +191,57 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
     }
 
     @Test
+    void aFailedUpdateAfterMovingANamedGroupKeepsTheOldPoolGroupAndLeavesTheNewOneBehind() {
+        // Measured on AWS: the group's physical id, the bare name, does not change, so the rollback
+        // points the resource at the old pool's group again and skips deleting the new pool's group.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cognito-group-move-rollback-" + suffix;
+        String name = "movers-" + suffix;
+        String firstPool = createPool(stackName + "-p1");
+        String secondPool = createPool(stackName + "-p2");
+
+        createStackAndWait(stackName, namedGroupTemplate(firstPool, name, false));
+
+        // Duplicate depends on Group and claims the new pool and the same name, so it fails after
+        // the group exists in the new pool and the update rolls back.
+        updateStack(stackName, namedGroupTemplate(secondPool, name, true));
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
+        assertEquals(name, output(describeStack(stackName), "GroupRef"));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackResource")
+            .formParam("StackName", stackName)
+            .formParam("LogicalResourceId", "Group")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<PhysicalResourceId>" + name + "</PhysicalResourceId>"));
+        cognito("GetGroup", "{\"UserPoolId\": \"" + firstPool + "\", \"GroupName\": \"" + name + "\"}")
+            .statusCode(200)
+            .body("Group.Description", equalTo("d1"))
+            .body("Group.Precedence", equalTo(1));
+        cognito("ListGroups", "{\"UserPoolId\": \"" + firstPool + "\"}")
+            .statusCode(200)
+            .body("Groups.GroupName", contains(name));
+        cognito("ListGroups", "{\"UserPoolId\": \"" + secondPool + "\"}")
+            .statusCode(200)
+            .body("Groups.GroupName", contains(name));
+
+        deleteStackAndWait(stackName);
+
+        cognito("ListGroups", "{\"UserPoolId\": \"" + firstPool + "\"}")
+            .statusCode(200)
+            .body("Groups", hasSize(0));
+        cognito("ListGroups", "{\"UserPoolId\": \"" + secondPool + "\"}")
+            .statusCode(200)
+            .body("Groups.GroupName", contains(name));
+    }
+
+    @Test
     void poolSchemaCustomAttributesAreNamespacedAndStandardOnesAreNot() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-cognito-schema-" + suffix;
@@ -249,6 +300,41 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    /** Creates the stack and waits for CREATE_COMPLETE, for templates without a PoolId output. */
+    private void createStackAndWait(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+        assertEquals("CREATE_COMPLETE", state.status(), state.reason());
+    }
+
+    private void deleteStackAndWait(String stackName) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        CfnStackWaits.awaitStackDeleted(stackName);
+    }
+
+    private String createPool(String poolName) {
+        return cognito("CreateUserPool", "{\"PoolName\": \"" + poolName + "\"}")
+            .statusCode(200)
+            .extract().path("UserPool.Id");
     }
 
     private String describeStack(String stackName) {
@@ -348,6 +434,39 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
                   }
                 }
                 """.formatted(poolLogicalId);
+    }
+
+    /**
+     * A named group in a pool created outside the stack. With {@code duplicate}, a second group of
+     * the same pool and name depends on it and fails with GroupExistsException once it exists.
+     */
+    private static String namedGroupTemplate(String poolId, String groupName, boolean duplicate) {
+        String duplicateResource = !duplicate ? "" : """
+                    ,
+                    "Duplicate": {
+                      "Type": "AWS::Cognito::UserPoolGroup",
+                      "DependsOn": "Group",
+                      "Properties": { "UserPoolId": "%s", "GroupName": "%s" }
+                    }
+                """.formatted(poolId, groupName);
+        return """
+                {
+                  "Resources": {
+                    "Group": {
+                      "Type": "AWS::Cognito::UserPoolGroup",
+                      "Properties": {
+                        "UserPoolId": "%s",
+                        "GroupName": "%s",
+                        "Description": "d1",
+                        "Precedence": 1
+                      }
+                    }%s
+                  },
+                  "Outputs": {
+                    "GroupRef": { "Value": { "Ref": "Group" } }
+                  }
+                }
+                """.formatted(poolId, groupName, duplicateResource);
     }
 
     private static String poolAndStudentGroupOnlyTemplate() {
