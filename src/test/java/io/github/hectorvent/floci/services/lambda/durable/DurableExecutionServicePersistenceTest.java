@@ -216,6 +216,90 @@ class DurableExecutionServicePersistenceTest {
         assertEquals(DurableExecutionStatus.SUCCEEDED, restarted.get(executionArn).getStatus());
     }
 
+    @Test
+    void aDurableChildTheStoreLostIsStartedAgainUnderItsArn() {
+        ScriptedInvoker before = new ScriptedInvoker();
+        PersistentStorageFactory firstStorage = new PersistentStorageFactory(directory);
+        DurableExecutionService first = newService(firstStorage, before, firstTaskOnly());
+        before.script((service, event) -> {
+            service.checkpoint(arn(event), token(event), null, List.of(chainedStart("i1", "child-fn:1", "{\"n\":1}")));
+            return "{\"Status\":\"PENDING\"}";
+        });
+        String parentArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
+                false)).getExecutionArn();
+        String childArn = first.get(parentArn).getOperations().get("i1").getChildExecutionArn();
+        executions(firstStorage).deleteForAccount(ACCOUNT,
+                "us-east-1/" + DurableExecutionService.parseArn(childArn).executionId());
+        firstStorage.flushAll();
+
+        ScriptedInvoker after = new ScriptedInvoker();
+        DurableExecutionService restarted = newService(new PersistentStorageFactory(directory), after);
+        Script dispatch = (service, event) -> {
+            if (arn(event).equals(childArn)) {
+                assertEquals("{\"n\":1}", event.at("/InitialExecutionState/Operations/0/ExecutionDetails/InputPayload")
+                        .asText());
+                return "{\"Status\":\"SUCCEEDED\",\"Result\":\"\\\"child\\\"\"}";
+            }
+            if ("SUCCEEDED".equals(operation(event, "i1").get("Status").asText())) {
+                return "{\"Status\":\"SUCCEEDED\",\"Result\":\"\\\"parent\\\"\"}";
+            }
+            return "{\"Status\":\"PENDING\"}";
+        };
+        after.script(dispatch);
+        after.script(dispatch);
+        restarted.recoverAfterRestart();
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, restarted.get(childArn).getStatus());
+        assertEquals(DurableExecutionStatus.SUCCEEDED, restarted.get(parentArn).getStatus());
+        assertEquals("\"child\"", restarted.get(parentArn).getOperations().get("i1").getResult());
+    }
+
+    @Test
+    void aTargetStartedByTheClosingCheckpointRunsOnceAfterARestart() {
+        ScriptedInvoker before = new ScriptedInvoker();
+        PersistentStorageFactory firstStorage = new PersistentStorageFactory(directory);
+        DurableExecutionService first = newService(firstStorage, before, firstTaskOnly());
+        before.script((service, event) -> {
+            service.checkpoint(arn(event), token(event), null, List.of(chainedStart("i1", "plain-fn", "{\"n\":1}"),
+                    new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
+                            DurableOperationAction.SUCCEED, "\"closed\"", null, null, null, null, null, null, null,
+                            null)));
+            return "{\"Status\":\"SUCCEEDED\",\"Result\":\"\"}";
+        });
+        first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}", false));
+        firstStorage.flushAll();
+
+        ScriptedInvoker second = new ScriptedInvoker();
+        PersistentStorageFactory secondStorage = new PersistentStorageFactory(directory);
+        newService(secondStorage, second).recoverAfterRestart();
+        secondStorage.flushAll();
+        ScriptedInvoker third = new ScriptedInvoker();
+        newService(new PersistentStorageFactory(directory), third).recoverAfterRestart();
+
+        assertEquals(List.of("{\"n\":1}"), second.plainPayloads);
+        assertEquals(List.of(), third.plainPayloads, "a completed target does not run again");
+    }
+
+    /** Runs the first launch, the parent's invocation, and drops what it starts, as a crash would. */
+    private static Executor firstTaskOnly() {
+        int[] launched = {0};
+        return task -> {
+            if (launched[0]++ == 0) {
+                task.run();
+            }
+        };
+    }
+
+    private static AccountAwareStorageBackend<DurableExecution> executions(StorageFactory storage) {
+        return storage.create("lambda", "lambda-durable-executions.json",
+                new TypeReference<Map<String, DurableExecution>>() {});
+    }
+
+    private static DurableOperationUpdate chainedStart(String id, String functionName, String payload) {
+        return new DurableOperationUpdate(id, null, null, DurableOperationType.CHAINED_INVOKE, "ChainedInvoke",
+                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null);
+    }
+
     private DurableExecutionService newService(StorageFactory storage, ScriptedInvoker invoker) {
         return newService(storage, invoker, Runnable::run);
     }
