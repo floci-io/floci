@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
+import io.github.hectorvent.floci.services.cognito.model.WebAuthnConfiguration;
 import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -143,6 +144,10 @@ public class CognitoJsonHandler {
             case "DeleteUserPoolClientSecret" -> handleDeleteUserPoolClientSecret(request);
             case "AdminSetUserMFAPreference" -> handleAdminSetUserMFAPreference(request);
             case "SetUserMFAPreference" -> handleSetUserMFAPreference(request);
+            case "StartWebAuthnRegistration" -> handleStartWebAuthnRegistration(request);
+            case "CompleteWebAuthnRegistration" -> handleCompleteWebAuthnRegistration(request);
+            case "ListWebAuthnCredentials" -> handleListWebAuthnCredentials(request);
+            case "DeleteWebAuthnCredential" -> handleDeleteWebAuthnCredential(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -230,14 +235,29 @@ public class CognitoJsonHandler {
                 request.path("UserPoolId").asText(),
                 request.hasNonNull("MfaConfiguration") ? request.path("MfaConfiguration").asText() : null,
                 softwareToken.hasNonNull("Enabled") ? softwareToken.path("Enabled").asBoolean() : null,
-                otherFactorConfigured);
+                otherFactorConfigured,
+                webAuthnConfiguration(request.path("WebAuthnConfiguration")));
         return Response.ok(buildMfaConfigResponse(pool)).build();
+    }
+
+    private static WebAuthnConfiguration webAuthnConfiguration(JsonNode node) {
+        if (!node.isObject()) {
+            return null;
+        }
+        WebAuthnConfiguration configuration = new WebAuthnConfiguration();
+        configuration.setRelyingPartyId(node.hasNonNull("RelyingPartyId") ? node.path("RelyingPartyId").asText() : null);
+        configuration.setUserVerification(
+                node.hasNonNull("UserVerification") ? node.path("UserVerification").asText() : null);
+        configuration.setFactorConfiguration(
+                node.hasNonNull("FactorConfiguration") ? node.path("FactorConfiguration").asText() : null);
+        return configuration;
     }
 
     /**
      * Shared by Get and Set, which answer with the same members. SoftwareTokenMfaConfiguration
-     * is omitted while unset, matching the live service, which returns only the factors that
-     * have been configured.
+     * and WebAuthnConfiguration are omitted while unset, matching the live service, which returns
+     * only the factors that have been configured. A stored WebAuthnConfiguration reports
+     * UserVerification as {@code preferred} when it was not given, the AWS default.
      */
     private ObjectNode buildMfaConfigResponse(UserPool pool) {
         ObjectNode response = objectMapper.createObjectNode();
@@ -246,6 +266,17 @@ public class CognitoJsonHandler {
                     .put("Enabled", pool.getSoftwareTokenMfaEnabled());
         }
         response.put("MfaConfiguration", pool.getMfaConfiguration());
+        WebAuthnConfiguration webAuthn = pool.getWebAuthnConfiguration();
+        if (webAuthn != null) {
+            ObjectNode node = response.putObject("WebAuthnConfiguration");
+            if (webAuthn.getFactorConfiguration() != null) {
+                node.put("FactorConfiguration", webAuthn.getFactorConfiguration());
+            }
+            if (webAuthn.getRelyingPartyId() != null) {
+                node.put("RelyingPartyId", webAuthn.getRelyingPartyId());
+            }
+            node.put("UserVerification", CognitoService.webAuthnUserVerification(pool));
+        }
         return response;
     }
 
@@ -1526,7 +1557,8 @@ public class CognitoJsonHandler {
                 userPoolId,
                 username,
                 enabled,
-                preferredMfa
+                preferredMfa,
+                webAuthnMfaEnabled(request)
         );
 
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -1546,9 +1578,50 @@ public class CognitoJsonHandler {
         service.setUserMFAPreference(
                 request.path("AccessToken").asText(),
                 enabled,
-                preferredMfa
+                preferredMfa,
+                webAuthnMfaEnabled(request)
         );
 
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** {@code WebAuthnMfaSettings.Enabled}, or null when the request leaves passkey MFA as it is. */
+    private static Boolean webAuthnMfaEnabled(JsonNode request) {
+        JsonNode settings = request.path("WebAuthnMfaSettings");
+        return settings.has("Enabled") ? settings.path("Enabled").asBoolean() : null;
+    }
+
+    private Response handleStartWebAuthnRegistration(JsonNode request) {
+        return Response.ok(objectMapper.valueToTree(
+                service.startWebAuthnRegistration(request.path("AccessToken").asText()))).build();
+    }
+
+    /**
+     * {@code Credential} is a document, so the SDKs send the {@code RegistrationResponseJSON} as a
+     * JSON object; a client that sends it as a JSON string is accepted too.
+     */
+    private Response handleCompleteWebAuthnRegistration(JsonNode request) {
+        JsonNode credential = request.path("Credential");
+        if (credential.isTextual()) {
+            try {
+                credential = objectMapper.readTree(credential.asText());
+            } catch (Exception e) {
+                throw new AwsException("InvalidParameterException", "Credential is not valid JSON", 400);
+            }
+        }
+        service.completeWebAuthnRegistration(request.path("AccessToken").asText(), credential);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListWebAuthnCredentials(JsonNode request) {
+        return Response.ok(objectMapper.valueToTree(service.listWebAuthnCredentials(
+                request.path("AccessToken").asText(),
+                request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null,
+                request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null))).build();
+    }
+
+    private Response handleDeleteWebAuthnCredential(JsonNode request) {
+        service.deleteWebAuthnCredential(request.path("AccessToken").asText(), request.path("CredentialId").asText());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

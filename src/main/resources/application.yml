@@ -3,6 +3,12 @@ quarkus:
     # Quarkus 3.37 stopped tolerating empty response beans; AWS StartApplication/
     # StopApplication legitimately return {}, so keep the pre-3.37 behaviour.
     fail-on-empty-beans: false
+  # Indexes webauthn4j (Cognito passkeys), so the native image can register the Jackson-bound
+  # hierarchies CognitoWebAuthn names, subtypes included.
+  index-dependency:
+    webauthn4j:
+      group-id: com.webauthn4j
+      artifact-id: webauthn4j-core
   log:
     console:
       format: "%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] %s%e%n"
@@ -103,6 +109,8 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.config.TlsConfigSource
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
+      # webauthn4j (Cognito passkeys) keeps a SecureRandom in a static field.
+      - --initialize-at-run-time=com.webauthn4j.util.ECUtil
       - --initialize-at-run-time=io.github.hectorvent.floci.core.common.Totp
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
