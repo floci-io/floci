@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.transport.DockerHttpClient;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.LinkedHashMap;
@@ -35,7 +38,7 @@ import java.util.Map;
  *       {@code DELETE}, whose replay after a lost response answers 404 and every caller tolerates
  *       that; {@code PUT} (archive upload, already limited to a byte-array body above); and
  *       {@code POST} only for a container start or stop (a replay gets 304), a wait, an image pull,
- *       a volume create (docker returns the existing volume) and a named container create (the
+ *       a named volume create (docker returns the existing volume) and a named container create (the
  *       caller adopts the container on a 409). Every other {@code POST} is never replayed: commit
  *       would make a second image, pause/unpause/kill a 409 for a state that already changed,
  *       rename a name conflict, restart a second restart, network create a swallowed 409, network
@@ -49,6 +52,9 @@ import java.util.Map;
  * re-checks existence so a replayed create finds the volume the lost response landed.
  */
 public final class RetryingDockerHttpClient implements DockerHttpClient {
+
+    private static final Logger LOG = Logger.getLogger(RetryingDockerHttpClient.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     static final String CONNECTION_HEADER = "Connection";
     static final String CONNECTION_CLOSE = "close";
@@ -137,13 +143,14 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         }
         return switch (request.method()) {
             case "GET", "HEAD", "DELETE", "PUT" -> true;
-            case "POST" -> isReplayablePost(request.path());
+            case "POST" -> isReplayablePost(request);
             default -> false;
         };
     }
 
     /** The {@code POST} routes whose replay after a lost response leaves the same outcome. */
-    private static boolean isReplayablePost(String path) {
+    private static boolean isReplayablePost(Request request) {
+        String path = request.path();
         int queryStart = path.indexOf('?');
         String route = queryStart < 0 ? path : path.substring(0, queryStart);
         if (route.endsWith("/containers/create")) {
@@ -155,8 +162,28 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
             }
             return false;
         }
+        if (route.endsWith("/volumes/create")) {
+            return hasVolumeName(request.bodyBytes());
+        }
         return route.endsWith("/start") || route.endsWith("/stop") || route.endsWith("/wait")
-                || route.endsWith("/images/create") || route.endsWith("/volumes/create");
+                || route.endsWith("/images/create");
+    }
+
+    /**
+     * Whether a volume create names its volume. A replayed named create returns the existing
+     * volume; a replayed unnamed one makes a second volume and orphans the first.
+     */
+    private static boolean hasVolumeName(byte[] body) {
+        if (body == null || body.length == 0) {
+            return false;
+        }
+        try {
+            JsonNode name = JSON.readTree(body).get("Name");
+            return name != null && name.isTextual() && !name.asText().isBlank();
+        } catch (IOException e) {
+            LOG.debugv(e, "Not replaying a volume create whose body is not JSON");
+            return false;
+        }
     }
 
     @Override

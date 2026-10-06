@@ -313,9 +313,9 @@ class RetryingDockerHttpClientTest {
     @Test
     void retriesTheAllowlistedPosts() {
         // Catches: an allowlist too narrow to keep the replays that are safe: a start or stop (304
-        // on replay), a wait, an image pull and a volume create (docker returns the existing one).
+        // on replay), a wait and an image pull.
         for (String path : List.of("/containers/abc/start", "/containers/abc/stop?t=10",
-                "/containers/abc/wait", "/images/create?fromImage=alpine&tag=3", "/volumes/create")) {
+                "/containers/abc/wait", "/images/create?fromImage=alpine&tag=3")) {
             Response ok = mock(Response.class);
             FakeTransport delegate = new FakeTransport(attempt -> {
                 if (attempt == 1) {
@@ -332,6 +332,37 @@ class RetryingDockerHttpClientTest {
             assertSame(ok, client.execute(request), path);
             assertEquals(2, delegate.calls.get(), path);
         }
+    }
+
+    @Test
+    void retriesOnlyANamedVolumeCreate() {
+        // Catches: replaying an unnamed volume create, which makes a second volume and orphans the
+        // first; a named one is safe because docker returns the existing volume.
+        assertEquals(2, volumeCreateAttempts("{\"Name\":\"floci-aws-data\",\"Labels\":{}}"));
+        assertEquals(1, volumeCreateAttempts("{\"Labels\":{}}"));
+        assertEquals(1, volumeCreateAttempts("{\"Name\":\"\"}"));
+        assertEquals(1, volumeCreateAttempts(null));
+    }
+
+    private static int volumeCreateAttempts(String json) {
+        Response ok = mock(Response.class);
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            if (attempt == 1) {
+                throw brokenPipe();
+            }
+            return ok;
+        });
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+        Request.Builder builder = Request.builder().method(Request.Method.POST).path("/volumes/create");
+        if (json != null) {
+            builder.bodyBytes(json.getBytes(StandardCharsets.UTF_8));
+        }
+        try {
+            client.execute(builder.build());
+        } catch (RuntimeException expected) {
+            // a refused replay surfaces the first attempt's failure; only the attempt count matters
+        }
+        return delegate.calls.get();
     }
 
     @Test
