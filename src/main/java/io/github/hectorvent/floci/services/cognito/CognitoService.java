@@ -79,6 +79,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
@@ -148,6 +149,10 @@ public class CognitoService implements ResourceProvider {
     private final CognitoMessageDispatcher messageDispatcher;
     private final TlsCertificateManager certificateManager;
     private final Object[] userLocks = newUserLockStripes();
+    // The userKey of each username an AdminCreateUser is creating, from before its existence check
+    // until it stores the user or fails, so an overlapping request for the same username is refused
+    // instead of invoking the PreSignUp trigger again. Only the request that adds a key removes it.
+    private final Set<String> adminCreatesInFlight = ConcurrentHashMap.newKeySet();
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
@@ -765,6 +770,27 @@ public class CognitoService implements ResourceProvider {
         });
     }
 
+    /** {@link #requireUserPoolInRegion} for an operation that names the pool by its ARN, as tagging does. */
+    public void requireUserPoolArnInRegion(String resourceArn, String region) {
+        requireUserPoolInRegion(extractUserPoolIdFromArn(resourceArn), region);
+    }
+
+    /**
+     * Refuses a domain whose user pool lives in another region, as the same not found an unknown
+     * domain gets: domains are stored by name alone, but a domain belongs to its pool's region.
+     */
+    public void requireUserPoolDomainInRegion(String domain, String region) {
+        if (domain == null || domain.isBlank()) {
+            return;
+        }
+        domainStore.get(domain).map(UserPoolDomain::getUserPoolId).flatMap(poolStore::get).ifPresent(pool -> {
+            String poolRegion = poolRegion(pool);
+            if (poolRegion != null && !poolRegion.equals(region)) {
+                throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
+            }
+        });
+    }
+
     /** Pools are stored by id for every region; the region comes from the pool ARN, else the id prefix. */
     private static String poolRegion(UserPool pool) {
         if (pool.getArn() != null && AwsArnUtils.isArn(pool.getArn())) {
@@ -798,9 +824,14 @@ public class CognitoService implements ResourceProvider {
         return Set.of(new SupportedResourceType("cognito-idp:userpool", "cognito-idp", true));
     }
 
+    /** The ARN must name the pool itself: the same id under another region or account is another pool. */
     private UserPool describeUserPoolByArn(String resourceArn) {
         String poolId = extractUserPoolIdFromArn(resourceArn);
-        return describeUserPool(poolId);
+        UserPool pool = describeUserPool(poolId);
+        if (pool.getArn() != null && !pool.getArn().equals(resourceArn)) {
+            throw userPoolNotFound(poolId);
+        }
+        return pool;
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
@@ -1658,7 +1689,7 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "Domain is required", 400);
         }
         return domainStore.get(domain)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 400));
     }
 
     /**
@@ -1713,7 +1744,7 @@ public class CognitoService implements ResourceProvider {
         describeUserPool(userPoolId);
         UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
         }
         String previousCertificateArn = userPoolDomain.getCertificateArn();
         String certificateArn = previousCertificateArn;
@@ -1758,7 +1789,7 @@ public class CognitoService implements ResourceProvider {
     public void deleteUserPoolDomain(String domain, String userPoolId) {
         UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
         }
         domainStore.delete(domain);
         if (userPoolDomain.isCustomDomain()) {
@@ -1996,78 +2027,124 @@ public class CognitoService implements ResourceProvider {
                                        String temporaryPassword,
                                        String messageAction,
                                        boolean forceAliasCreation) {
-        // Locked on the requested username/alias (not yet resolved to a canonical id, since
-        // an alias pool doesn't have one until creation), so two concurrent requests for the
-        // same identifier can't both pass the existence/alias check and create duplicates.
-        synchronized (userLock(userPoolId, username)) {
-            return adminCreateUserUnderUserLock(userPoolId, username, attributes,
-                    temporaryPassword, messageAction, forceAliasCreation);
-        }
+        return adminCreateUser(userPoolId, username, attributes, temporaryPassword, messageAction,
+                forceAliasCreation, Map.of(), Map.of());
     }
 
-    private CognitoUser adminCreateUserUnderUserLock(String userPoolId,
+    /**
+     * AdminCreateUser with the request's {@code ValidationData} and {@code ClientMetadata}, which
+     * reach only the PreSignUp trigger and are never stored.
+     */
+    public CognitoUser adminCreateUser(String userPoolId,
                                        String username,
                                        Map<String, String> attributes,
                                        String temporaryPassword,
                                        String messageAction,
-                                       boolean forceAliasCreation) {
-        UserPool pool = describeUserPool(userPoolId);
-        boolean resend = "RESEND".equalsIgnoreCase(messageAction);
-        boolean aliasPool = usesAliasUsernames(pool);
+                                       boolean forceAliasCreation,
+                                       Map<String, String> validationData,
+                                       Map<String, String> clientMetadata) {
+        // Locked on the requested username/alias (not yet resolved to a canonical id, since
+        // an alias pool doesn't have one until creation), so two concurrent requests for the
+        // same identifier can't both pass the existence/alias check and create duplicates.
+        Object lock = userLock(userPoolId, username);
+        if ("RESEND".equalsIgnoreCase(messageAction)) {
+            synchronized (lock) {
+                return resendInvitationUnderUserLock(userPoolId, username);
+            }
+        }
 
+        // The PreSignUp trigger runs with no lock held: its function can call back into the pool,
+        // and a call that needs the same lock stripe would wait until the invocation timed out.
+        // A taken username or alias is refused before the trigger sees the request, and checked
+        // again under the lock once the trigger accepts, since users can change while it runs.
+        UserPool pool = describeUserPool(userPoolId);
+        // Claimed before the username is checked, so an overlapping request for it is refused here
+        // rather than passing the check while this one is in its trigger and invoking the trigger
+        // again. That includes a function calling back for the username it was given.
+        String inFlightKey = userKey(userPoolId, username);
+        if (!adminCreatesInFlight.add(inFlightKey)) {
+            throw new AwsException("UsernameExistsException", "User already exists", 400);
+        }
+        try {
+            aliasHolderToMove(pool, username, forceAliasCreation);
+            CognitoUser user = newAdminCreatedUser(pool, username, attributes, temporaryPassword);
+
+            // Before anything is stored, so a trigger that refuses the user leaves the pool unchanged,
+            // including the alias a ForceAliasCreation request would move.
+            authFlowHandler.firePreSignUpForAdminCreateUser(pool, user, validationData, clientMetadata);
+
+            synchronized (lock) {
+                return storeAdminCreatedUserUnderUserLock(userPoolId, username, forceAliasCreation, user);
+            }
+        } finally {
+            adminCreatesInFlight.remove(inFlightKey);
+        }
+    }
+
+    private CognitoUser resendInvitationUnderUserLock(String userPoolId, String username) {
+        UserPool pool = describeUserPool(userPoolId);
+        CognitoUser existing = userStore.get(userKey(userPoolId, username)).orElse(null);
+        if (usesAliasUsernames(pool) && existing == null) {
+            existing = findUserByAlias(userPoolId, aliasAttributeForValue(pool, username), username);
+        }
+        if (existing == null) {
+            throw new AwsException("UserNotFoundException", "User not found", 400);
+        }
+        if (!"FORCE_CHANGE_PASSWORD".equals(existing.getUserStatus())) {
+            final String userStateExceptionMessage = """
+                    User is in %s state and cannot be resent an invitation.
+                    """.formatted(existing.getUserStatus());
+            throw new AwsException("UnsupportedUserStateException", userStateExceptionMessage, 400);
+        }
+        existing.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(userPoolId, existing.getUsername()), existing);
+        LOG.infov("Resent invitation for user {0} in pool {1}", existing.getUsername(), userPoolId);
+        return existing;
+    }
+
+    /**
+     * The user whose verified alias an AdminCreateUser for {@code username} moves to the new user,
+     * or null when no user has that username or alias. Throws when one does and the request
+     * cannot take it: {@code UsernameExistsException} for a username or an unverified alias, and
+     * {@code AliasExistsException} for a verified alias without ForceAliasCreation.
+     */
+    private CognitoUser aliasHolderToMove(UserPool pool, String username, boolean forceAliasCreation) {
+        CognitoUser existing = userStore.get(userKey(pool.getId(), username)).orElse(null);
+        String aliasAttribute = null;
+        if (usesAliasUsernames(pool) && existing == null) {
+            aliasAttribute = aliasAttributeForValue(pool, username);
+            existing = findUserByAlias(pool.getId(), aliasAttribute, username);
+        }
+        if (existing == null) {
+            return null;
+        }
+        boolean existingAliasVerified = aliasAttribute != null
+                && "true".equalsIgnoreCase(existing.getAttributes().get(aliasAttribute + "_verified"));
+        if (!existingAliasVerified) {
+            throw new AwsException("UsernameExistsException", "User already exists", 400);
+        }
+        if (!forceAliasCreation) {
+            throw new AwsException("AliasExistsException",
+                    "An account with the given " + aliasAttribute + " already exists.", 400);
+        }
+        return existing;
+    }
+
+    private CognitoUser newAdminCreatedUser(UserPool pool, String username, Map<String, String> attributes,
+                                            String temporaryPassword) {
         Map<String, String> resolvedAttributes = attributes == null
                 ? new HashMap<>() : new HashMap<>(attributes);
 
-        CognitoUser existing = userStore.get(userKey(userPoolId, username)).orElse(null);
-        String aliasAttribute = null;
-        if (aliasPool && existing == null) {
-            aliasAttribute = aliasAttributeForValue(pool, username);
-            existing = findUserByAlias(userPoolId, aliasAttribute, username);
-        }
-
-        if (resend) {
-            if (existing == null) {
-                throw new AwsException("UserNotFoundException", "User not found", 400);
-            }
-            if (!"FORCE_CHANGE_PASSWORD".equals(existing.getUserStatus())) {
-                final String userStateExceptionMessage = """
-                        User is in %s state and cannot be resent an invitation.
-                        """.formatted(existing.getUserStatus());
-                throw new AwsException("UnsupportedUserStateException", userStateExceptionMessage, 400);
-            }
-            existing.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-            userStore.put(userKey(userPoolId, existing.getUsername()), existing);
-            LOG.infov("Resent invitation for user {0} in pool {1}", existing.getUsername(), userPoolId);
-            return existing;
-        }
-
-        if (existing != null) {
-            boolean existingAliasVerified = aliasAttribute != null
-                    && "true".equalsIgnoreCase(existing.getAttributes().get(aliasAttribute + "_verified"));
-            if (existingAliasVerified) {
-                if (!forceAliasCreation) {
-                    throw new AwsException("AliasExistsException",
-                            "An account with the given " + aliasAttribute + " already exists.", 400);
-                }
-                existing.getAttributes().remove(aliasAttribute);
-                existing.getAttributes().put(aliasAttribute + "_verified", "false");
-                existing.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-                userStore.put(userKey(userPoolId, existing.getUsername()), existing);
-            } else {
-                throw new AwsException("UsernameExistsException", "User already exists", 400);
-            }
-        }
-
         String canonicalUsername = username;
-        if (aliasPool) {
-            resolvedAttributes.put(aliasAttribute, username);
+        if (usesAliasUsernames(pool)) {
+            resolvedAttributes.put(aliasAttributeForValue(pool, username), username);
             canonicalUsername = UUID.randomUUID().toString();
             resolvedAttributes.put("sub", canonicalUsername);
         }
 
         CognitoUser user = new CognitoUser();
         user.setUsername(canonicalUsername);
-        user.setUserPoolId(userPoolId);
+        user.setUserPoolId(pool.getId());
         user.getAttributes().putAll(resolvedAttributes);
 
         // Ensure sub attribute is present
@@ -2080,9 +2157,27 @@ public class CognitoService implements ResourceProvider {
             user.setTemporaryPassword(true);
             user.setUserStatus("FORCE_CHANGE_PASSWORD");
         }
+        return user;
+    }
 
-        userStore.put(userKey(userPoolId, canonicalUsername), user);
-        LOG.infov("Created user {0} in pool {1}", canonicalUsername, userPoolId);
+    private CognitoUser storeAdminCreatedUserUnderUserLock(String userPoolId, String username,
+                                                           boolean forceAliasCreation, CognitoUser user) {
+        // Read again under the lock rather than reused from before the trigger: while it ran, the
+        // pool may have been deleted, another request may have taken the username or alias, and
+        // the alias holder may have been updated or deleted, which writing back an earlier read
+        // would undo.
+        UserPool pool = describeUserPool(userPoolId);
+        CognitoUser aliasHolder = aliasHolderToMove(pool, username, forceAliasCreation);
+        if (aliasHolder != null) {
+            String aliasAttribute = aliasAttributeForValue(pool, username);
+            aliasHolder.getAttributes().remove(aliasAttribute);
+            aliasHolder.getAttributes().put(aliasAttribute + "_verified", "false");
+            aliasHolder.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(userPoolId, aliasHolder.getUsername()), aliasHolder);
+        }
+
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        LOG.infov("Created user {0} in pool {1}", user.getUsername(), userPoolId);
         return user;
     }
 

@@ -46,6 +46,16 @@ public class CognitoJsonHandler {
         if (region != null && request.hasNonNull("UserPoolId") && !"UpdateAuthEventFeedback".equals(action)) {
             service.requireUserPoolInRegion(request.path("UserPoolId").asText(), region);
         }
+        // The tag operations name the pool by ARN, and a domain is looked up by its name.
+        if (region != null) {
+            switch (action) {
+                case "TagResource", "UntagResource", "ListTagsForResource" ->
+                        service.requireUserPoolArnInRegion(request.path("ResourceArn").asText(), region);
+                case "DescribeUserPoolDomain" ->
+                        service.requireUserPoolDomainInRegion(request.path("Domain").asText(), region);
+                default -> { }
+            }
+        }
         return switch (action) {
             case "CreateUserPool" -> handleCreateUserPool(request, region);
             case "DescribeUserPool" -> handleDescribeUserPool(request);
@@ -601,6 +611,10 @@ public class CognitoJsonHandler {
                 : request.path("TemporaryPassword").asText(null);
         String messageAction = request.path("MessageAction").isMissingNode() ? null
                 : request.path("MessageAction").asText(null);
+        Map<String, String> validationData = new HashMap<>();
+        request.path("ValidationData").forEach(a -> validationData.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
 
         CognitoUser user = service.adminCreateUser(
                 request.path("UserPoolId").asText(),
@@ -608,7 +622,9 @@ public class CognitoJsonHandler {
                 attrs,
                 tempPassword,
                 messageAction,
-                request.path("ForceAliasCreation").asBoolean(false)
+                request.path("ForceAliasCreation").asBoolean(false),
+                validationData,
+                clientMetadata
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("User", userToNode(user));

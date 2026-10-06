@@ -17,6 +17,9 @@ import java.util.function.Function;
  */
 record UploadChecksums(String contentMd5, Map<ChecksumAlgorithm, String> claimed) {
 
+    /** No integrity headers, as for the part an UploadPartCopy reads from another object. */
+    static final UploadChecksums NONE = new UploadChecksums(null, Map.of());
+
     // The order the checksums have always been checked in, so a body failing several reports the same one.
     private static final List<ChecksumAlgorithm> CHECK_ORDER = List.of(ChecksumAlgorithm.SHA1,
             ChecksumAlgorithm.SHA256, ChecksumAlgorithm.CRC32, ChecksumAlgorithm.CRC32C, ChecksumAlgorithm.CRC64NVME);

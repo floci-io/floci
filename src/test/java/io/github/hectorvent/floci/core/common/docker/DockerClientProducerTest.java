@@ -4,7 +4,6 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -753,7 +752,7 @@ class DockerClientProducerTest {
                         .withDockerTlsVerify(false)
                         .build();
 
-        try (ApacheDockerHttpClient client = DockerClientProducer.newHttpClient(plainConfig, 10)) {
+        try (FlociDockerHttpClient client = DockerClientProducer.newHttpClient(plainConfig, 10)) {
             assertNull(plainConfig.getSSLConfig(), "a config without TLS verify carries no SSL config");
             assertEquals("tcp://127.0.0.1:2375", plainConfig.getDockerHost().toString());
         }

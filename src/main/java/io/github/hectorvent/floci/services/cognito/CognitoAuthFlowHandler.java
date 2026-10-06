@@ -52,6 +52,8 @@ final class CognitoAuthFlowHandler {
     private static final Logger LOG = Logger.getLogger(CognitoAuthFlowHandler.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String CUSTOM_MESSAGE_CODE_PARAMETER = "{####}";
+    /** The {@code callerContext.clientId} AWS sends for an admin action, which names no app client. */
+    private static final String CLIENT_ID_NOT_APPLICABLE = "CLIENT_ID_NOT_APPLICABLE";
     /** The message of a wrong password, which managed login also shows for an unknown user. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     static final int MAX_USER_AUTH_SESSIONS_PER_PARTITION = 4_096;
@@ -1538,7 +1540,7 @@ final class CognitoAuthFlowHandler {
         event.put("userName", user == null ? null : user.getUsername());
         event.put("callerContext", Map.of(
                 "awsSdkVersion", "floci",
-                "clientId", client.getClientId()));
+                "clientId", client == null ? CLIENT_ID_NOT_APPLICABLE : client.getClientId()));
         event.put("triggerSource", triggerSource);
         Map<String, Object> req = new HashMap<>(request);
         if (user != null) {
@@ -1701,6 +1703,28 @@ final class CognitoAuthFlowHandler {
                 Boolean.TRUE.equals(resp.get("autoConfirmUser")),
                 Boolean.TRUE.equals(resp.get("autoVerifyEmail")),
                 Boolean.TRUE.equals(resp.get("autoVerifyPhone")));
+    }
+
+    /**
+     * Fires PreSignUp with triggerSource {@code PreSignUp_AdminCreateUser}. AWS ignores
+     * {@code autoConfirmUser}, {@code autoVerifyEmail} and {@code autoVerifyPhone} for this
+     * source, so the response is discarded and only a failure changes the outcome.
+     */
+    void firePreSignUpForAdminCreateUser(UserPool pool, CognitoUser user,
+                                         Map<String, String> validationData,
+                                         Map<String, String> clientMetadata) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("validationData", validationData == null ? Map.of() : validationData);
+        req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
+        TriggerResult result = invokeTrigger(pool, null, user, "PreSignUp", "PreSignUp_AdminCreateUser", req);
+        if (!result.errored()) {
+            return;
+        }
+        if (result.errorKind() == TriggerErrorKind.USER_VALIDATION) {
+            throw new AwsException("UserLambdaValidationException",
+                    "PreSignUp failed with error " + result.errorMessage() + ".", 400);
+        }
+        throw triggerFailure(result, "PreSignUp");
     }
 
     /**

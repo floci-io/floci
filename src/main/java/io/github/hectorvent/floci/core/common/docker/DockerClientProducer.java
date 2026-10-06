@@ -9,7 +9,6 @@ import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.core.SSLConfig;
 import com.github.dockerjava.core.util.CertificateUtils;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import com.github.dockerjava.transport.DockerHttpClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
@@ -493,8 +492,8 @@ public class DockerClientProducer {
                 wrapForRole(newHttpClient(clientConfig, maxConnections), role));
     }
 
-    static ApacheDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections) {
-        return new ApacheDockerHttpClient.Builder()
+    static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections) {
+        return new FlociDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())
                 .sslConfig(clientConfig.getSSLConfig())
                 .maxConnections(maxConnections)

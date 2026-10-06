@@ -70,4 +70,27 @@ class EmrClusterRegionIntegrationTest {
         call(HOME, "TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
             .then().statusCode(200);
     }
+
+    // Catches: an instance's or the master's private DNS name in the wrong region's domain.
+    @Test
+    void listedInstancesUseTheClustersRegionalPrivateDnsDomain() {
+        String clusterId = call(HOME, "RunJobFlow",
+                "{\"Name\":\"region-dns\",\"ReleaseLabel\":\"emr-7.5.0\","
+                        + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                        + "\"InstanceGroups\":[{\"Name\":\"master\",\"InstanceRole\":\"MASTER\","
+                        + "\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+            .then().statusCode(200)
+            .extract().path("JobFlowId");
+
+        call(HOME, "ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}")
+            .then().statusCode(200)
+            .body("Instances[0].PrivateDnsName", equalTo("ip-10-0-0-1.eu-west-1.compute.internal"))
+            .body("Instances[0].PrivateIpAddress", equalTo("10.0.0.1"));
+        call(HOME, "DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
+            .then().statusCode(200)
+            .body("Cluster.MasterPublicDnsName", equalTo("ip-10-0-0-1.eu-west-1.compute.internal"));
+
+        call(HOME, "TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
+            .then().statusCode(200);
+    }
 }

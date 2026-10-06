@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -86,7 +87,7 @@ public class EmrService {
         cluster.setInstanceCollectionType(cluster.getInstanceFleets().isEmpty()
                 ? "INSTANCE_GROUP" : "INSTANCE_FLEET");
         cluster.setAutoTerminate(!cluster.isKeepJobFlowAliveWhenNoSteps());
-        cluster.setMasterPublicDnsName("ip-10-0-0-1." + region + ".compute.internal");
+        cluster.setMasterPublicDnsName(masterDnsName(region));
         cluster.setCreationDateTime(Instant.now());
         for (EmrInstanceGroup g : cluster.getInstanceGroups()) {
             g.setId("ig-" + randomId(13));
@@ -106,6 +107,11 @@ public class EmrService {
         advanceToWaiting(cluster);
         clusterStore.put(id, cluster);
         return cluster;
+    }
+
+    /** The master node's private DNS name, derived from the region so a stored name never goes stale. */
+    static String masterDnsName(String region) {
+        return AwsRegions.ec2PrivateIpDnsName("10.0.0.1", region);
     }
 
     public EmrCluster describeCluster(String id) {

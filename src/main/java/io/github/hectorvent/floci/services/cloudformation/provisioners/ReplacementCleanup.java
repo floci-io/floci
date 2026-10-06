@@ -57,13 +57,24 @@ public final class ReplacementCleanup {
      * because the entity under that id is the one this update created.
      */
     static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision) {
+        record(r, ctx, attributesBeforeProvision,
+                ctx.isUpdate() && !ctx.priorPhysicalId().equals(r.getPhysicalId()));
+    }
+
+    /**
+     * Records a replacement the provisioner decided on, for a type whose replacement can keep its
+     * physical id. One that kept it is rolled back by restoring the prior attributes and displaces
+     * nothing: as on AWS, the old entity is not deleted when the physical id did not change.
+     */
+    static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision,
+                       boolean replaced) {
         ObjectNode cleanup = readOrEmpty(r);
         cleanup.remove("priorPhysicalId");
         cleanup.remove("priorAttributes");
         cleanup.put("region", ctx.region());
         String prior = ctx.priorPhysicalId();
         boolean priorIsStub = CfnResourceDispatcher.isStub(prior, attributesBeforeProvision);
-        if (ctx.isUpdate() && (!prior.equals(r.getPhysicalId()) || priorIsStub)) {
+        if (ctx.isUpdate() && (replaced || priorIsStub)) {
             cleanup.put("priorPhysicalId", prior);
             ObjectNode priorAttributes = cleanup.putObject("priorAttributes");
             attributesBeforeProvision.forEach((key, value) -> {
@@ -71,7 +82,7 @@ public final class ReplacementCleanup {
                     priorAttributes.put(key, value);
                 }
             });
-            if (!priorIsStub) {
+            if (!priorIsStub && !prior.equals(r.getPhysicalId())) {
                 addDisplaced(cleanup, prior, r.getResourceType(), ctx.region(), true);
             }
         }

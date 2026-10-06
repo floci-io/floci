@@ -441,6 +441,53 @@ class LambdaDurableProtocolIntegrationTest {
             .body("Events[3].CallbackSucceededDetails.Result.Payload", equalTo("{\"approved\":true}"));
     }
 
+    @Test
+    void aChainedInvokeOfAnUnqualifiedDurableFunctionFailsInTheCheckpointResponse() throws Exception {
+        Response accepted = given()
+                .header("X-Amz-Invocation-Type", "Event")
+                .header("X-Amz-Durable-Execution-Name", "chained-1")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations");
+        String arn = accepted.getHeader("X-Amz-Durable-Execution-Arn");
+
+        Invocation first = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode event = MAPPER.readTree(first.payload());
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body("""
+                {
+                    "CheckpointToken": "%s",
+                    "Updates": [{"Id": "i1", "Name": "greet", "Type": "CHAINED_INVOKE", "SubType": "ChainedInvoke",
+                                 "Action": "START", "ChainedInvokeOptions": {"FunctionName": "%s"}}]
+                }
+                """.formatted(event.get("CheckpointToken").asText(), FUNCTION))
+        .when()
+            .post(DURABLE + "/durable-executions/" + arn + "/checkpoint")
+        .then()
+            .statusCode(200)
+            .body("NewExecutionState.Operations[0].Type", equalTo("CHAINED_INVOKE"))
+            .body("NewExecutionState.Operations[0].Status", equalTo("FAILED"))
+            .body("NewExecutionState.Operations[0].ChainedInvokeDetails.Error.ErrorType",
+                    equalTo("InvalidParameterValueException"))
+            .body("NewExecutionState.Operations[0].ChainedInvokeDetails.Error.ErrorMessage",
+                    equalTo("You cannot invoke a durable function using an unqualified ARN."));
+        first.response().complete(handlerResponse("{\"Status\": \"PENDING\"}"));
+
+        Invocation second = invoker.awaitInvocation(Duration.ofSeconds(30));
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn + "/history")
+        .then()
+            .statusCode(200)
+            .body("Events.EventType", equalTo(List.of("ExecutionStarted", "ChainedInvokeStarted",
+                    "ChainedInvokeFailed", "InvocationCompleted")))
+            .body("Events[1].ChainedInvokeStartedDetails.FunctionName", equalTo(FUNCTION))
+            .body("Events[2].ChainedInvokeFailedDetails.Error.Truncated", equalTo(true));
+        second.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"\\\"ok\\\"\"}"));
+    }
+
     private static DurableInvocationResult handlerResponse(String json) {
         return new DurableInvocationResult("req-" + System.nanoTime(), json.getBytes(StandardCharsets.UTF_8), null);
     }

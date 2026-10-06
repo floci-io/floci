@@ -2286,4 +2286,41 @@ class LambdaServiceTest {
         assertEquals("ResourceNotFoundException",
                 assertThrows(AwsException.class, () -> service.getFunction(REGION, "package-type-fn")).getErrorCode());
     }
+
+    @Test
+    void updateFunctionConfigurationWithStaleRevisionIdRollsBack() {
+        // Catches: stale RevisionId rejection leaves rejected changes (Timeout) visible afterwards
+        Map<String, Object> request = baseRequest("rollback-test-function");
+        LambdaFunction fn = service.createFunction(REGION, request);
+        String originalRevisionId = fn.getRevisionId();
+
+        Map<String, Object> updateRequest = Map.of(
+                "RevisionId", "stale-id",
+                "Timeout", 99);
+
+        AwsException thrown = assertThrows(AwsException.class, () -> {
+            service.updateFunctionConfiguration(REGION, "rollback-test-function", updateRequest);
+        });
+        assertEquals("PreconditionFailedException", thrown.getErrorCode());
+        assertEquals(412, thrown.getHttpStatus());
+
+        LambdaFunction updatedFn = service.getFunction(REGION, "rollback-test-function");
+        assertEquals(originalRevisionId, updatedFn.getRevisionId());
+        assertEquals(10, updatedFn.getTimeout());
+    }
+
+    @Test
+    void updateFunctionConfigurationValidatesFieldsBeforeCheckingRevisionId() {
+        // Catches: a stale RevisionId answers 412 ahead of the ValidationException an over-long Description earns
+        service.createFunction(REGION, baseRequest("validation-order-function"));
+
+        Map<String, Object> updateRequest = Map.of(
+                "RevisionId", "stale-id",
+                "Description", "d".repeat(300));
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "validation-order-function", updateRequest));
+        assertEquals("ValidationException", thrown.getErrorCode());
+        assertEquals(400, thrown.getHttpStatus());
+    }
 }

@@ -119,6 +119,7 @@ public final class DurableWire {
                     putTimestamp(details, "ScheduledEndTimestamp", operation.getScheduledEndTimestamp(), millis);
                 }
             }
+            case CHAINED_INVOKE -> putResultAndError(node.putObject("ChainedInvokeDetails"), operation);
             case CALLBACK -> {
                 ObjectNode details = node.putObject("CallbackDetails");
                 putIfPresent(details, "CallbackId", operation.getCallbackId());
@@ -264,6 +265,7 @@ public final class DurableWire {
         Map<?, ?> waitOptions = structure(map, "WaitOptions");
         Map<?, ?> contextOptions = structure(map, "ContextOptions");
         Map<?, ?> callbackOptions = structure(map, "CallbackOptions");
+        Map<?, ?> chainedInvokeOptions = structure(map, "ChainedInvokeOptions");
         return new DurableOperationUpdate(
                 string(map, "Id"),
                 string(map, "ParentId"),
@@ -278,7 +280,9 @@ public final class DurableWire {
                 contextOptions == null ? null : bool(contextOptions, "ReplayChildren"),
                 integer(callbackOptions, "TimeoutSeconds", path + "callbackOptions", 0, MAX_CALLBACK_TIMEOUT_SECONDS),
                 integer(callbackOptions, "HeartbeatTimeoutSeconds", path + "callbackOptions", 0,
-                        MAX_CALLBACK_TIMEOUT_SECONDS));
+                        MAX_CALLBACK_TIMEOUT_SECONDS),
+                chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "FunctionName"),
+                chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "TenantId"));
     }
 
     private static <E extends Enum<E>> E enumMember(Map<?, ?> map, String member, Class<E> type) {

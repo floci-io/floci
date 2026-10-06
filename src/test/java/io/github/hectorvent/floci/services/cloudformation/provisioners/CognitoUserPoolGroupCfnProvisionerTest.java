@@ -14,6 +14,9 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -142,6 +145,220 @@ class CognitoUserPoolGroupCfnProvisionerTest {
 
         verify(cognito).createGroup("us-east-1_pool", "operators", null, null, null);
         assertEquals("operators", r.getPhysicalId());
+    }
+
+    @Test
+    void renamingReplacesTheGroupAndTheCleanupDeletesTheOldNameInItsPool() {
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", "admin"), ctx());
+
+        provisioner.provision(r, props("us-east-1_a", "operators"), ctx("admin"));
+
+        verify(cognito).createGroup("us-east-1_a", "operators", null, null, null);
+        assertEquals("operators", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("admin", provisioner.updateCleanupPhysicalId(r));
+        verify(cognito, never()).deleteGroup(any(), any());
+
+        UpdateCleanupResult result = provisioner.completeUpdate(r);
+
+        assertTrue(result.complete());
+        verify(cognito).deleteGroup("us-east-1_a", "admin");
+        verify(cognito, never()).deleteGroup("us-east-1_a", "operators");
+    }
+
+    @Test
+    void thePoolRecordKeepsOnlyTheCurrentGroupOnceNoDeleteIsOwed() {
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", "admin"), ctx());
+        provisioner.provision(r, props("us-east-1_a", "ops"), ctx("admin"));
+        provisioner.completeUpdate(r);
+        provisioner.provision(r, props("us-east-1_a", "staff"), ctx("ops"));
+        provisioner.completeUpdate(r);
+
+        provisioner.provision(r, props("us-east-1_a", "staff"), ctx("staff"));
+
+        assertEquals("{\"staff\":\"us-east-1_a\"}", r.getAttributes().get("__FlociGroupPools"));
+    }
+
+    @Test
+    void movingANamedGroupToAnotherPoolCreatesItThereAndOwesNoDelete() {
+        // AWS replaces the group but deletes nothing: the physical id, the bare name, is unchanged.
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", "admin"), ctx());
+
+        provisioner.provision(r, props("us-east-1_b", "admin"), ctx("admin"));
+
+        verify(cognito).createGroup("us-east-1_b", "admin", null, null, null);
+        verify(cognito, never()).updateGroup(any(), any(), any(), any(), any());
+        assertEquals("admin", r.getPhysicalId());
+        assertEquals("us-east-1_b", r.getAttributes().get("UserPoolId"));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        assertNull(provisioner.updateCleanupPhysicalId(r));
+        UpdateCleanupResult result = provisioner.completeUpdate(r);
+        assertTrue(result.complete());
+        assertNull(result.previousPhysicalId());
+        verify(cognito, never()).deleteGroup(any(), any());
+    }
+
+    @Test
+    void rollingBackANamedPoolMovePointsAtTheOldPoolGroupAndLeavesTheNewOne() {
+        // Measured on AWS: the physical id did not change, so the rollback deletes nothing.
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", "admin"), ctx());
+        provisioner.provision(r, props("us-east-1_b", "admin"), ctx("admin"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(cognito, never()).deleteGroup(any(), any());
+        assertEquals("admin", r.getPhysicalId());
+        assertEquals("us-east-1_a", r.getAttributes().get("UserPoolId"));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+
+        provisioner.delete(r, "us-east-1");
+
+        verify(cognito).deleteGroup("us-east-1_a", "admin");
+        verify(cognito, never()).deleteGroup(eq("us-east-1_b"), any());
+    }
+
+    @Test
+    void aLegacyResourceWithAnExplicitLookingNameIsReplacedWhenTheNameIsDropped() {
+        // Persisted before the name mode was recorded: a name without the generated shape was explicit.
+        StackResource r = resource("admin");
+        r.setAttributes(new HashMap<>(Map.of("UserPoolId", "us-east-1_a")));
+
+        provisioner.provision(r, props("us-east-1_a", null), ctx("admin"));
+
+        String generated = r.getPhysicalId();
+        assertTrue(generated.startsWith("my-stack-AdminGroup-"), generated);
+        verify(cognito).createGroup("us-east-1_a", generated, null, null, null);
+        verify(cognito, never()).updateGroup(any(), any(), any(), any(), any());
+        assertEquals("admin", provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void aLegacyResourceWithAGeneratedNameKeepsItAndUpdatesInPlace() {
+        String legacy = ctx().generatePhysicalName("AdminGroup", 128, false);
+        StackResource r = resource(legacy);
+        r.setAttributes(new HashMap<>(Map.of("UserPoolId", "us-east-1_a")));
+
+        provisioner.provision(r, props("us-east-1_a", null), ctx(legacy));
+
+        assertEquals(legacy, r.getPhysicalId());
+        verify(cognito).updateGroup("us-east-1_a", legacy, null, null, null);
+        verify(cognito, never()).createGroup(any(), any(), any(), any(), any());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void aLegacyResourceWithAGeneratedLookingExplicitNameUpdatesInPlace() {
+        // Persisted before the name mode was recorded: the shape cannot tell an explicit name from
+        // a generated one, so declaring the same name keeps the pre-mode in-place update.
+        StackResource r = resource("my-stack-AdminGroup-0123456789ab");
+        r.setAttributes(new HashMap<>(Map.of("UserPoolId", "us-east-1_a")));
+
+        provisioner.provision(r, props("us-east-1_a", "my-stack-AdminGroup-0123456789ab"),
+                ctx("my-stack-AdminGroup-0123456789ab"));
+
+        verify(cognito).updateGroup("us-east-1_a", "my-stack-AdminGroup-0123456789ab", null, null, null);
+        verify(cognito, never()).createGroup(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void droppingTheExplicitNameReplacesTheGroupUnderAGeneratedNameAndDeletesTheNamedOne() {
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", "admin"), ctx());
+
+        provisioner.provision(r, props("us-east-1_a", null), ctx("admin"));
+
+        String generated = r.getPhysicalId();
+        assertTrue(generated.startsWith("my-stack-AdminGroup-"), generated);
+        verify(cognito).createGroup("us-east-1_a", generated, null, null, null);
+        assertEquals("admin", provisioner.updateCleanupPhysicalId(r));
+
+        provisioner.completeUpdate(r);
+
+        verify(cognito).deleteGroup("us-east-1_a", "admin");
+    }
+
+    @Test
+    void declaringTheGeneratedNameExplicitlyIsRefusedAsACustomNamedReplacement() {
+        // Measured on AWS: GroupName is create-only, so declaring it replaces the group, and a
+        // replacement keeping the same pool and name is refused before anything is created.
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", null), ctx());
+        String generated = r.getPhysicalId();
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props("us-east-1_a", generated), ctx(generated)));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename " + generated + " and update the stack again.", thrown.getMessage());
+        verify(cognito, times(1)).createGroup(any(), any(), any(), any(), any());
+        verify(cognito, never()).updateGroup(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void movingAGeneratedGroupToAnotherPoolGeneratesANewNameAndDeletesTheOldOneFromTheOldPool() {
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", null), ctx());
+        String original = r.getPhysicalId();
+
+        provisioner.provision(r, props("us-east-1_b", null), ctx(original));
+
+        String replacement = r.getPhysicalId();
+        assertNotEquals(original, replacement);
+        assertTrue(replacement.startsWith("my-stack-AdminGroup-"), replacement);
+        verify(cognito).createGroup("us-east-1_b", replacement, null, null, null);
+        assertEquals(original, provisioner.updateCleanupPhysicalId(r));
+
+        provisioner.completeUpdate(r);
+
+        verify(cognito).deleteGroup("us-east-1_a", original);
+        verify(cognito, never()).deleteGroup(eq("us-east-1_b"), any());
+    }
+
+    @Test
+    void anInPlaceUpdateChangesTheGroupAndOwesNoCleanup() {
+        StackResource named = resource(null);
+        provisioner.provision(named, props("us-east-1_a", "admin"), ctx());
+        StackResource unnamed = resource(null);
+        provisioner.provision(unnamed, props("us-east-1_a", null), ctx());
+        String generated = unnamed.getPhysicalId();
+
+        ObjectNode namedUpdate = props("us-east-1_a", "admin");
+        namedUpdate.put("Description", "d2");
+        namedUpdate.put("Precedence", 2);
+        provisioner.provision(named, namedUpdate, ctx("admin"));
+        provisioner.provision(unnamed, props("us-east-1_a", null), ctx(generated));
+
+        verify(cognito).updateGroup("us-east-1_a", "admin", "d2", 2, null);
+        verify(cognito).updateGroup("us-east-1_a", generated, null, null, null);
+        verify(cognito, times(2)).createGroup(any(), any(), any(), any(), any());
+        assertEquals("admin", named.getPhysicalId());
+        assertEquals(generated, unnamed.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(named));
+        assertFalse(provisioner.hasReplacementUpdate(unnamed));
+    }
+
+    @Test
+    void rollingBackARenameDeletesTheReplacementAndRestoresThePriorNameAndPool() {
+        StackResource r = resource(null);
+        provisioner.provision(r, props("us-east-1_a", "admin"), ctx());
+        provisioner.provision(r, props("us-east-1_b", "operators"), ctx("admin"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(cognito).deleteGroup("us-east-1_b", "operators");
+        verify(cognito, never()).deleteGroup(any(), eq("admin"));
+        assertEquals("admin", r.getPhysicalId());
+        assertEquals("us-east-1_a", r.getAttributes().get("UserPoolId"));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+
+        provisioner.delete(r, "us-east-1");
+
+        verify(cognito).deleteGroup("us-east-1_a", "admin");
     }
 
     @Test

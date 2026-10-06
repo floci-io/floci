@@ -666,6 +666,20 @@
             <version>1.84</version>
             <scope>test</scope>
         </dependency>
+        <!-- MQTT 3.1.1 and MQTT 5 clients for the IoT custom-authorizer WebSocket tests,
+             the versions the emulator module itself tests with -->
+        <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.client.mqttv3</artifactId>
+            <version>1.2.5</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.mqttv5.client</artifactId>
+            <version>1.2.5</version>
+            <scope>test</scope>
+        </dependency>
         <!-- Decodes the Snappy variants Firehose delivers to S3 (issue #2328).
              Pinned because this module imports no BOM; keep it in step with the
              version the Quarkus BOM manages for the emulator itself. -->

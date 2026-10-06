@@ -76,6 +76,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
@@ -869,6 +870,8 @@ public class S3Controller {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization);
             }
+
+            rejectUnimplementedPutConditions(ifMatch, ifNoneMatch);
 
             Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
 
@@ -3405,6 +3408,26 @@ public class S3Controller {
             return preconditionFailedResponse("If-None-Match");
         }
         return null;
+    }
+
+    // Members are judged one by one, so a "*" inside an If-Match list cannot stand in for the ETag
+    // it is listed beside.
+    private static void rejectUnimplementedPutConditions(String ifMatch, String ifNoneMatch) {
+        if ((ifMatch != null && anyEntityTag(ifMatch, "*"::equals))
+                || (ifNoneMatch != null && anyEntityTag(ifNoneMatch, tag -> !"*".equals(tag)))) {
+            throw new AwsException("NotImplemented",
+                    "A header you provided implies functionality that is not implemented.", 501);
+        }
+    }
+
+    private static boolean anyEntityTag(String headerValue, Predicate<String> test) {
+        // A limit of -1 keeps empty members, so a header of only commas is still judged.
+        for (String candidate : headerValue.split(",", -1)) {
+            if (test.test(S3Service.normalizeEntityTag(candidate))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasPreconditions(String ifMatch, String ifNoneMatch,

@@ -863,6 +863,17 @@ public class LambdaService implements ResourceProvider {
             validateFileSystemVpcConfig(requestedFileSystemConfigs, requestedVpcConfig);
         }
 
+        // RevisionId optimistic locking runs after request validation, like AWS, and before any field mutation
+        if (request.containsKey("RevisionId")) {
+            String incomingRevision = (String) request.get("RevisionId");
+            if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
+                throw new AwsException("PreconditionFailedException",
+                        "The Revision Id provided does not match the latest Revision Id. "
+                        + "Call the GetFunction or the GetFunctionConfiguration API to retrieve "
+                        + "the latest Revision Id for your resource.", 412);
+            }
+        }
+
         if (request.containsKey("Description")) {
             fn.setDescription((String) request.get("Description"));
         }
@@ -884,17 +895,6 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("Environment")) {
             if (environment != null && environment.containsKey("Variables")) {
                 fn.setEnvironment(environmentVariables != null ? environmentVariables : new java.util.HashMap<>());
-            }
-        }
-
-        // RevisionId optimistic locking
-        if (request.containsKey("RevisionId")) {
-            String incomingRevision = (String) request.get("RevisionId");
-            if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
-                throw new AwsException("PreconditionFailedException",
-                        "The Revision Id provided does not match the latest Revision Id. "
-                        + "Call the GetFunction or the GetFunctionConfiguration API to retrieve "
-                        + "the latest Revision Id for your resource.", 412);
             }
         }
 

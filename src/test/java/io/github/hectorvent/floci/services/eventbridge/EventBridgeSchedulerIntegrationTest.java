@@ -148,7 +148,7 @@ class EventBridgeSchedulerIntegrationTest {
             assertTrue(scheduler.isRunning(arn));
 
             eventBridgeService.putRule(
-                    "test-rule", "default", null, null,
+                    "test-rule", "default", "{\"source\":[\"my.app\"]}", null,
                     RuleState.ENABLED, null, null, null, REGION);
 
             assertFalse(scheduler.isRunning(arn));
@@ -276,7 +276,7 @@ class EventBridgeSchedulerIntegrationTest {
             assertTrue(scheduler.isRunning(arn));
 
             eventBridgeService.putRule(
-                    "test-cron-rule", "default", null, null,
+                    "test-cron-rule", "default", "{\"source\":[\"my.app\"]}", null,
                     RuleState.ENABLED, null, null, null, REGION);
 
             assertFalse(scheduler.isRunning(arn));

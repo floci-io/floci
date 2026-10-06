@@ -205,6 +205,27 @@ class ProvisionContextTest {
                 "a replacing update derives a different name and must still create");
     }
 
+    @Test
+    void isGeneratedPhysicalNameRecognisesOnlyWhatGeneratePhysicalNameProducesForTheLogicalId() {
+        ProvisionContext ctx = context(null);
+        String generated = ctx.generatePhysicalName("AdminGroup", 128, false);
+        assertTrue(ctx.isGeneratedPhysicalName(generated, "AdminGroup", 128, false), generated);
+
+        ProvisionContext longStack = new ProvisionContext(engine, "us-east-1", "000000000000",
+                "a-stack-name-long-enough-to-force-truncation", null);
+        String longLogicalId = "AVeryLongLogicalIdThatPushesTheGeneratedNamePastItsLimit";
+        String truncated = longStack.generatePhysicalName(longLogicalId, 64, false);
+        assertEquals(64, truncated.length(), truncated);
+        assertTrue(longStack.isGeneratedPhysicalName(truncated, longLogicalId, 64, false), truncated);
+
+        assertFalse(ctx.isGeneratedPhysicalName("admin", "AdminGroup", 128, false), "an explicit name");
+        assertFalse(ctx.isGeneratedPhysicalName(ctx.generatePhysicalName("OtherGroup", 128, false),
+                "AdminGroup", 128, false), "another logical id's name");
+        assertFalse(ctx.isGeneratedPhysicalName("my-stack-AdminGroup-0123456789zz", "AdminGroup", 128, false),
+                "a suffix that is not hex");
+        assertFalse(ctx.isGeneratedPhysicalName(null, "AdminGroup", 128, false));
+    }
+
 
     /**
      * The whole property node is handed to {@code engine.resolveStringList}, so a list-valued

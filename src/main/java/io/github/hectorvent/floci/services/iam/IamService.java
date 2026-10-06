@@ -39,6 +39,7 @@ import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
@@ -58,6 +59,7 @@ import java.security.cert.X509Certificate;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -69,6 +71,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -76,6 +79,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -168,6 +172,53 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int MAX_SERVER_CERTIFICATES = 20;
     /** IAM User Guide quota table, and GetAccountSummary's SigningCertificatesPerUserQuota. */
     private static final int MAX_SIGNING_CERTIFICATES_PER_USER = 2;
+    /**
+     * IAM User Guide: "a maximum of two sets of service-specific credentials for each supported
+     * service per IAM user". Per service, so a user may hold two for each of them.
+     */
+    private static final int MAX_SERVICE_CREDENTIALS_PER_SERVICE = 2;
+    /** The unique-ID prefix table gives ACCA for a context-specific credential. */
+    private static final int SERVICE_CREDENTIAL_ID_SUFFIX_LENGTH = 16;
+    /**
+     * The services whose credential is a long-term API key, an alias and a secret rather than a
+     * user name and a password. CredentialAgeDays, and so an expiry, is only valid for these.
+     *
+     * <p>Sourced from the User Guide's worked {@code create-service-specific-credential} block,
+     * which creates exactly these four with {@code --credential-age-days}; the API Reference
+     * corroborates two of them by naming "Bedrock API keys and CloudWatch Logs API keys" on
+     * ServiceCredentialAlias, ServiceCredentialSecret and ExpirationDate.
+     */
+    private static final Set<String> LONG_TERM_API_KEY_SERVICES = Set.of(
+            ServicePrincipals.of("bedrock"),
+            ServicePrincipals.of("aws-external-anthropic"),
+            ServicePrincipals.of("cloudwatch"),
+            ServicePrincipals.of("logs"));
+    /**
+     * The services that support service-specific credentials. Anything else is {@code NoSuchEntity}
+     * with status 404, which is not what the model would suggest: it declares
+     * {@code ServiceNotSupportedException} (wire code {@code NotSupportedService}) on both Create
+     * and List, and AWS does not raise it. LocalStack's AWS-validated IAM snapshots record
+     * {@code NoSuchEntity} for a nonexistent service, a malformed name and an existing but
+     * unsupported service alike, all with the message this throws.
+     *
+     * <p>This is the sourced subset, not a claim of completeness. The User Guide's own
+     * enumeration ("AWS currently supports service-specific credentials for the following
+     * services:") falls on a page boundary and renders as nothing in the published PDF, so these
+     * come from two other passages: CodeCommit and Keyspaces from the
+     * {@code iam:ServiceSpecificCredentialServiceName}
+     * condition-key list, which gives them "with their exact value formatting", and the four
+     * long-term API key services from the CLI block above.
+     */
+    private static final Set<String> SERVICE_CREDENTIAL_SERVICES = Stream.concat(
+                    LONG_TERM_API_KEY_SERVICES.stream(),
+                    Stream.of(ServicePrincipals.of("codecommit"), ServicePrincipals.of("cassandra")))
+            .collect(Collectors.toUnmodifiableSet());
+    /** credentialAgeDays is 1 to 36600, in the model and in the User Guide's own prose. */
+    private static final int MIN_CREDENTIAL_AGE_DAYS = 1;
+    private static final int MAX_CREDENTIAL_AGE_DAYS = 36600;
+    /** The creation half of a long-term API key's alias. */
+    private static final DateTimeFormatter CREDENTIAL_ALIAS_DATE =
+            DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
     /** AWS General Reference, IAM service quotas: "SSH Public keys per user", not adjustable. */
     private static final int MAX_SSH_PUBLIC_KEYS_PER_USER = 5;
     /** publicKeyIdType is 20 to 128 of [\w]+, and AWS's own examples use the APKA prefix. */
@@ -179,13 +230,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** certificateIdType is 24 to 128 of [\w]+, so a 32-character id sits inside that. */
     private static final int SIGNING_CERTIFICATE_ID_LENGTH = 32;
     private static final String CREDENTIAL_STATUS_ACTIVE = "Active";
+    private static final String CREDENTIAL_STATUS_EXPIRED = "Expired";
     /**
      * statusType's values, shared by signing certificates and SSH public keys: Active, Inactive
      * and Expired. Each operation's prose explains only the first two, so the third is easy to
      * reject by mistake, while the API Reference lists all three as valid.
      */
     private static final Set<String> CREDENTIAL_STATUSES =
-            Set.of(CREDENTIAL_STATUS_ACTIVE, "Inactive", "Expired");
+            Set.of(CREDENTIAL_STATUS_ACTIVE, "Inactive", CREDENTIAL_STATUS_EXPIRED);
     /** {@code certificateBodyType} and {@code privateKeyType} are both 1 to 16384 characters. */
     private static final int MAX_CERTIFICATE_BODY_LENGTH = 16384;
     /** {@code certificateChainType} is far larger, at 1 to 2097152. */
@@ -262,6 +314,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, ServerCertificate> serverCertificates;
     private final StorageBackend<String, SigningCertificate> signingCertificates;
     private final StorageBackend<String, SshPublicKey> sshPublicKeys;
+    private final StorageBackend<String, ServiceSpecificCredential> serviceCredentials;
     /**
      * Guards the check-then-write on a server certificate. Upload checks the name is free before
      * storing, and UpdateServerCertificate checks a new name is free before moving to it, so two
@@ -270,6 +323,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final Object serverCertificateLock = new Object();
     private final Object signingCertificateLock = new Object();
     private final Object sshPublicKeyLock = new Object();
+    private final Object serviceCredentialLock = new Object();
     /**
      * Guards every check-then-write on an MFA device. Assignment is the reason it has to exist:
      * EnableMFADevice reads the device to confirm it is unassigned and reads the user's device
@@ -313,6 +367,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-server-certificates.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-signing-certificates.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-ssh-public-keys.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-service-specific-credentials.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -345,6 +400,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
     }
 
@@ -369,6 +425,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 serviceLinkedRoleDeletions, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, seededAccountAlias);
     }
 
@@ -389,6 +446,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(), passwordPolicies, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
@@ -412,6 +470,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, ServerCertificate> serverCertificates,
                StorageBackend<String, SigningCertificate> signingCertificates,
                StorageBackend<String, SshPublicKey> sshPublicKeys,
+               StorageBackend<String, ServiceSpecificCredential> serviceCredentials,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -433,6 +492,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.serverCertificates = serverCertificates;
         this.signingCertificates = signingCertificates;
         this.sshPublicKeys = sshPublicKeys;
+        this.serviceCredentials = serviceCredentials;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -611,22 +671,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         // UploadSigningCertificate and EnableMFADevice confirm the user under their own lock, so
         // none of them can interleave into a credential owned by a deleted user. Taken in this
         // order here and in UpdateUser, and nowhere else in more than one, so it cannot deadlock.
-        synchronized (sshPublicKeyLock) {
-            if (!userSshPublicKeys(userName).isEmpty()) {
+        synchronized (serviceCredentialLock) {
+            // AWS lists these among the items to remove first, under their CodeCommit
+            // name: "Git credentials (DeleteServiceSpecificCredential)".
+            if (!userServiceCredentials(userName).isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must delete SSH public keys first.", 409);
+                        "Cannot delete entity, must delete service-specific credentials "
+                                + "first.", 409);
             }
-            synchronized (signingCertificateLock) {
-                if (!userSigningCertificates(userName).isEmpty()) {
+            synchronized (sshPublicKeyLock) {
+                if (!userSshPublicKeys(userName).isEmpty()) {
                     throw new AwsException("DeleteConflict",
-                            "Cannot delete entity, must delete signing certificates first.", 409);
+                            "Cannot delete entity, must delete SSH public keys first.", 409);
                 }
-                synchronized (mfaDeviceLock) {
-                    if (!mfaDevicesForUser(userName).isEmpty()) {
+                synchronized (signingCertificateLock) {
+                    if (!userSigningCertificates(userName).isEmpty()) {
                         throw new AwsException("DeleteConflict",
-                                "Cannot delete entity, must deactivate MFA device first.", 409);
+                                "Cannot delete entity, must delete signing certificates first.", 409);
                     }
-                    users.delete(userName);
+                    synchronized (mfaDeviceLock) {
+                        if (!mfaDevicesForUser(userName).isEmpty()) {
+                            throw new AwsException("DeleteConflict",
+                                    "Cannot delete entity, must deactivate MFA device first.", 409);
+                        }
+                        users.delete(userName);
+                    }
                 }
             }
         }
@@ -673,31 +742,40 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 // published but before the credential follows, see none, and delete a user whose
                 // credential is about to be reassigned to it. The two locks are taken in the same
                 // order DeleteUser takes them, so the nesting cannot deadlock.
-                synchronized (sshPublicKeyLock) {
-                    List<SshPublicKey> sshKeysToMove = userSshPublicKeys(userName);
-                    synchronized (signingCertificateLock) {
-                        List<SigningCertificate> certificatesToMove = userSigningCertificates(userName);
-                        synchronized (mfaDeviceLock) {
-                            users.delete(userName);
-                            user.setUserName(newUserName);
-                            if (newPath != null) {
-                                user.setPath(normalizePath(newPath));
+                synchronized (serviceCredentialLock) {
+                    List<ServiceSpecificCredential> credentialsToMove =
+                            userServiceCredentials(userName);
+                    synchronized (sshPublicKeyLock) {
+                        List<SshPublicKey> sshKeysToMove = userSshPublicKeys(userName);
+                        synchronized (signingCertificateLock) {
+                            List<SigningCertificate> certificatesToMove = userSigningCertificates(userName);
+                            synchronized (mfaDeviceLock) {
+                                users.delete(userName);
+                                user.setUserName(newUserName);
+                                if (newPath != null) {
+                                    user.setPath(normalizePath(newPath));
+                                }
+                                user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
+                                users.put(newUserName, user);
+                                for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
+                                    device.setUserName(newUserName);
+                                    virtualMfaDevices.put(device.getSerialNumber(), device);
+                                }
                             }
-                            user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
-                            users.put(newUserName, user);
-                            for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
-                                device.setUserName(newUserName);
-                                virtualMfaDevices.put(device.getSerialNumber(), device);
+                            for (SigningCertificate certificate : certificatesToMove) {
+                                certificate.setUserName(newUserName);
+                                signingCertificates.put(certificate.getCertificateId(), certificate);
                             }
                         }
-                        for (SigningCertificate certificate : certificatesToMove) {
-                            certificate.setUserName(newUserName);
-                            signingCertificates.put(certificate.getCertificateId(), certificate);
+                        for (SshPublicKey key : sshKeysToMove) {
+                            key.setUserName(newUserName);
+                            sshPublicKeys.put(key.getSshPublicKeyId(), key);
                         }
                     }
-                    for (SshPublicKey key : sshKeysToMove) {
-                        key.setUserName(newUserName);
-                        sshPublicKeys.put(key.getSshPublicKeyId(), key);
+                    for (ServiceSpecificCredential credential : credentialsToMove) {
+                        credential.setUserName(newUserName);
+                        serviceCredentials.put(
+                                credential.getServiceSpecificCredentialId(), credential);
                     }
                 }
                 loginProfiles.get(userName).ifPresent(profile -> {
@@ -2726,6 +2804,261 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return sshPublicKeys.scan(key -> true).stream()
                 .filter(k -> userName.equals(k.getUserName()))
                 .sorted(Comparator.comparing(SshPublicKey::getSshPublicKeyId))
+                .toList();
+    }
+
+    // Service-specific credentials
+    // =========================================================================
+
+    /**
+     * Creates a credential scoped to one service. The shape depends on the service: a long-term
+     * API key service gets an alias and a secret, everything else a user name and a password.
+     *
+     * <p>The secret half is returned here and by the reset, and nowhere else: there is no get
+     * operation, and the list is defined without it.
+     */
+    public ServiceSpecificCredential createServiceSpecificCredential(
+            String userName, String requestedServiceName, Integer credentialAgeDays) {
+        String serviceName = supportedServiceName(requestedServiceName);
+        boolean longTermKey = LONG_TERM_API_KEY_SERVICES.contains(serviceName);
+        if (credentialAgeDays != null) {
+            if (!longTermKey) {
+                throw new AwsException("ValidationError",
+                        "CredentialAgeDays is only valid for services that support long-term API "
+                                + "keys.", 400);
+            }
+            if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
+                    || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
+                throw new AwsException("ValidationError",
+                        "Value '" + credentialAgeDays + "' at 'credentialAgeDays' failed to "
+                                + "satisfy constraint: Member must be between "
+                                + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS,
+                        400);
+            }
+        }
+        synchronized (serviceCredentialLock) {
+            // Confirmed under the lock, as the other per-user credentials are: DeleteUser checks
+            // for these holding the same lock.
+            getUser(userName);
+            // One scan serves both checks: the quota counts this user's credentials for this
+            // service, the name search needs every name in the account, and no write can land
+            // between them while this holds the lock.
+            List<ServiceSpecificCredential> all = serviceCredentials.scan(key -> true);
+            List<ServiceSpecificCredential> existing = all.stream()
+                    .filter(c -> userName.equals(c.getUserName()))
+                    .filter(c -> serviceName.equals(c.getServiceName()))
+                    .toList();
+            if (existing.size() >= MAX_SERVICE_CREDENTIALS_PER_SERVICE) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for ServiceSpecificCredentialsPerUser: "
+                                + MAX_SERVICE_CREDENTIALS_PER_SERVICE, 409);
+            }
+            ServiceSpecificCredential credential = new ServiceSpecificCredential();
+            credential.setUserName(userName);
+            credential.setServiceName(serviceName);
+            credential.setServiceSpecificCredentialId(
+                    "ACCA" + randomId(SERVICE_CREDENTIAL_ID_SUFFIX_LENGTH));
+            credential.setStatus(CREDENTIAL_STATUS_ACTIVE);
+            credential.setCreateDate(Instant.now());
+            int version = freeCredentialVersion(
+                    all, userName, longTermKey, credential.getCreateDate());
+            if (longTermKey) {
+                credential.setServiceCredentialAlias(
+                        credentialAliasFor(userName, version, credential.getCreateDate()));
+                credential.setServiceCredentialSecret(randomSecret(40));
+                if (credentialAgeDays != null) {
+                    credential.setExpirationDate(
+                            credential.getCreateDate().plus(Duration.ofDays(credentialAgeDays)));
+                }
+            } else {
+                credential.setServiceUserName(serviceUserNameFor(userName, version));
+                credential.setServicePassword(randomSecret(40));
+            }
+            serviceCredentials.put(credential.getServiceSpecificCredentialId(), credential);
+            LOG.infov("Created a {0} service-specific credential for user {1}",
+                    serviceName, userName);
+            return credential;
+        }
+    }
+
+    /**
+     * The service as the allowlist holds it, or {@code NoSuchEntity}. A legacy per-partition form
+     * folds to the universal one first, so a China-partition caller naming
+     * {@code bedrock.amazonaws.com.cn} is not refused for a service that is supported; a bare
+     * {@code codecommit} still is, because AWS documents these values with their exact formatting.
+     */
+    private String supportedServiceName(String requestedServiceName) {
+        String canonical = ServicePrincipals.canonical(requestedServiceName);
+        if (canonical == null || !SERVICE_CREDENTIAL_SERVICES.contains(canonical)) {
+            // The name as asked for, not the canonical form: AWS echoes what the caller sent.
+            throw new AwsException("NoSuchEntity",
+                    "No such service " + requestedServiceName
+                            + " is supported for Service Specific Credentials", 404);
+        }
+        return canonical;
+    }
+
+    /**
+     * The lowest version whose name is not already in use anywhere in the account, which is what
+     * keeps two live credentials from sharing the name or alias the caller authenticates with.
+     *
+     * <p>The comparison has to span the whole store rather than the user's credentials for this
+     * service, because three different routes reach the same name otherwise. Taking a count
+     * collides as soon as one is deleted out of order: holding only {@code anika+1}, a count of one
+     * mints {@code anika+1} again. Scoping to one service lets two services collide, since an alias
+     * carries no service and two created on the same day would both be {@code anika+v1-<date>}.
+     * Scoping to one user lets a rename collide, because a credential keeps the name it was minted
+     * with, so a new user taking the freed IAM name would mint it a second time.
+     *
+     * <p>Bounded by the names in use, so one of the first {@code taken + 1} candidates is always
+     * free. The caller passes the account's credentials rather than this reading them itself,
+     * because the quota check needs the same snapshot and one scan under the lock serves both.
+     */
+    private int freeCredentialVersion(List<ServiceSpecificCredential> accountCredentials,
+                                      String userName,
+                                      boolean longTermKey,
+                                      Instant createDate) {
+        Set<String> taken = accountCredentials.stream()
+                .map(longTermKey
+                        ? ServiceSpecificCredential::getServiceCredentialAlias
+                        : ServiceSpecificCredential::getServiceUserName)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        for (int version = 0; version <= taken.size(); version++) {
+            String candidate = longTermKey
+                    ? credentialAliasFor(userName, version, createDate)
+                    : serviceUserNameFor(userName, version);
+            if (!taken.contains(candidate)) {
+                return version;
+            }
+        }
+        throw new IllegalStateException("no free service-credential version for " + userName);
+    }
+
+    /**
+     * The service user name AWS derives for a credential: the IAM user name, the account, and a
+     * {@code +n} before the account for the second one, which is how two credentials for the same
+     * service tell themselves apart. The API Reference's examples show {@code anika-at-<account>}
+     * and {@code anika+1-at-<account>}.
+     */
+    private String serviceUserNameFor(String userName, int version) {
+        String suffix = version == 0 ? "" : "+" + version;
+        return userName + suffix + "-at-" + regionResolver.getAccountId();
+    }
+
+    /**
+     * The public half of a long-term API key, which the API Reference describes as including "the
+     * IAM user name and a suffix containing version and creation information". The exact format
+     * AWS produces is not published, so this is ours: the user name, the version that tells two
+     * credentials for one service apart, and the creation date.
+     */
+    private String credentialAliasFor(String userName, int version, Instant createDate) {
+        return userName + "+v" + (version + 1) + "-"
+                + CREDENTIAL_ALIAS_DATE.format(createDate);
+    }
+
+    /**
+     * The status to report for a credential: {@code Expired} once its {@code ExpirationDate} has
+     * passed, and the stored status otherwise.
+     *
+     * <p>Derived on read rather than written back, so the status a caller set is never overwritten
+     * and an {@code UpdateServiceSpecificCredential} to {@code Active} cannot make an expired key
+     * look usable. Expiry wins over {@code Inactive} too: a key past its expiry is finished either
+     * way, and {@code Expired} is the more specific answer.
+     *
+     * <p>AWS does not document this transition. {@code Expired} is in {@code statusType}, but that
+     * enum is shared with access keys, SSH public keys and signing certificates, most of which
+     * have no expiry, and the API Reference's prose describes only the other two values. Reporting
+     * an expired key as {@code Active} is the worse of the two guesses: it tells a caller a key
+     * works when the same response carries the date saying it does not.
+     */
+    public String reportedStatus(ServiceSpecificCredential credential) {
+        Instant expiry = credential.getExpirationDate();
+        if (expiry != null && !expiry.isAfter(Instant.now())) {
+            return CREDENTIAL_STATUS_EXPIRED;
+        }
+        return credential.getStatus();
+    }
+
+    /** Every credential of a user, or of every user when the caller asked for all of them. */
+    public List<ServiceSpecificCredential> listServiceSpecificCredentials(
+            String userName, String requestedServiceName, boolean allUsers) {
+        String serviceName = requestedServiceName == null
+                ? null : supportedServiceName(requestedServiceName);
+        List<ServiceSpecificCredential> found;
+        if (allUsers) {
+            found = serviceCredentials.scan(key -> true);
+        } else {
+            getUser(userName); // validates existence
+            found = userServiceCredentials(userName);
+        }
+        return found.stream()
+                .filter(c -> serviceName == null || serviceName.equals(c.getServiceName()))
+                .sorted(Comparator.comparing(
+                        ServiceSpecificCredential::getServiceSpecificCredentialId))
+                .toList();
+    }
+
+    public void updateServiceSpecificCredential(String userName, String credentialId,
+                                                String status) {
+        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
+            throw new AwsException("ValidationError",
+                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
+                            + "satisfy enum value set: [" + String.join(", ",
+                            CREDENTIAL_STATUSES) + "]", 400);
+        }
+        synchronized (serviceCredentialLock) {
+            ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
+            credential.setStatus(status);
+            serviceCredentials.put(credential.getServiceSpecificCredentialId(), credential);
+        }
+    }
+
+    /**
+     * Replaces the secret half and returns the new one. The credential keeps its id, its service
+     * and its service user name or alias: only what authenticates with it changes.
+     */
+    public ServiceSpecificCredential resetServiceSpecificCredential(String userName,
+                                                                    String credentialId) {
+        synchronized (serviceCredentialLock) {
+            ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
+            if (LONG_TERM_API_KEY_SERVICES.contains(credential.getServiceName())) {
+                credential.setServiceCredentialSecret(randomSecret(40));
+            } else {
+                credential.setServicePassword(randomSecret(40));
+            }
+            serviceCredentials.put(credential.getServiceSpecificCredentialId(), credential);
+            return credential;
+        }
+    }
+
+    public void deleteServiceSpecificCredential(String userName, String credentialId) {
+        synchronized (serviceCredentialLock) {
+            ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
+            serviceCredentials.delete(credential.getServiceSpecificCredentialId());
+        }
+    }
+
+    /** A credential of that id belonging to that user, reported missing when it belongs elsewhere. */
+    private ServiceSpecificCredential userServiceCredential(String userName, String credentialId) {
+        getUser(userName); // validates existence
+        ServiceSpecificCredential credential = serviceCredentials.get(credentialId)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The Service Specific Credential with id " + credentialId
+                                + " cannot be found.", 404));
+        if (!userName.equals(credential.getUserName())) {
+            throw new AwsException("NoSuchEntity",
+                    "The Service Specific Credential with id " + credentialId
+                            + " cannot be found.", 404);
+        }
+        return credential;
+    }
+
+    private List<ServiceSpecificCredential> userServiceCredentials(String userName) {
+        return serviceCredentials.scan(key -> true).stream()
+                .filter(c -> userName.equals(c.getUserName()))
+                .sorted(Comparator.comparing(
+                        ServiceSpecificCredential::getServiceSpecificCredentialId))
                 .toList();
     }
 

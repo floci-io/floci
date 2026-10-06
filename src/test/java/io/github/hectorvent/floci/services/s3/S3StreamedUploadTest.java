@@ -17,14 +17,19 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -42,12 +47,14 @@ class S3StreamedUploadTest {
     Path tempDir;
 
     private S3Service s3Service;
+    private InMemoryStorage<String, S3Object> objectStore;
     private Path dataRoot;
 
     @BeforeEach
     void setUp() {
         dataRoot = tempDir.resolve("s3");
-        s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
+        objectStore = new InMemoryStorage<>();
+        s3Service = new S3Service(new InMemoryStorage<>(), objectStore, dataRoot, false);
         s3Service.createBucket("bucket", "us-east-1");
     }
 
@@ -219,6 +226,82 @@ class S3StreamedUploadTest {
 
         assertTrue(List.of("NoSuchUpload", "NoSuchBucket").contains(error.getErrorCode()), error.getErrorCode());
         assertNothingStaged();
+    }
+
+    @Test
+    void anUploadPartCopyStreamsItsRangeIntoThePart() {
+        byte[] source = new byte[300_000];
+        new Random(5034).nextBytes(source);
+        s3Service.putObject("bucket", "source.bin", source, "application/octet-stream", Map.of());
+        MultipartUpload upload = s3Service.initiateMultipartUpload("bucket", "copy.bin", null);
+
+        String rangeETag = s3Service.uploadPartCopy("bucket", "copy.bin", upload.getUploadId(), 1,
+                "bucket", "source.bin", null, "bytes=1000-200999");
+        String wholeETag = s3Service.uploadPartCopy("bucket", "copy.bin", upload.getUploadId(), 2,
+                "bucket", "source.bin", null, null);
+
+        byte[] range = Arrays.copyOfRange(source, 1000, 201_000);
+        assertEquals(S3Object.computeETag(range), rangeETag);
+        assertEquals(S3Object.computeETag(source), wholeETag);
+        s3Service.completeMultipartUpload("bucket", "copy.bin", upload.getUploadId(), List.of(1, 2), null, null);
+        byte[] whole = new byte[range.length + source.length];
+        System.arraycopy(range, 0, whole, 0, range.length);
+        System.arraycopy(source, 0, whole, range.length, source.length);
+        assertArrayEquals(whole, s3Service.getObject("bucket", "copy.bin").getData());
+        assertNothingStaged();
+    }
+
+    @Test
+    void anUploadPartCopyIntoAMissingUploadFails() {
+        s3Service.putObject("bucket", "source.bin", BODY, "text/plain", Map.of());
+
+        assertEquals("NoSuchUpload", assertThrows(AwsException.class, () -> s3Service.uploadPartCopy("bucket",
+                "copy.bin", "no-such-upload", 1, "bucket", "source.bin", null, "bytes=0-9")).getErrorCode());
+        assertNothingStaged();
+    }
+
+    @Test
+    void anUploadPartCopyOverFiveGibibytesIsEntityTooLarge() throws IOException {
+        assertEquals(5_368_709_120L, S3Service.MAX_PART_SIZE);
+        long overLimit = S3Service.MAX_PART_SIZE + 1;
+        sparseSource("source.bin", overLimit);
+        MultipartUpload upload = s3Service.initiateMultipartUpload("bucket", "copy.bin", null);
+
+        for (String range : Arrays.asList(null, "bytes=0-" + S3Service.MAX_PART_SIZE)) {
+            AwsException error = assertThrows(AwsException.class, () -> s3Service.uploadPartCopy("bucket",
+                    "copy.bin", upload.getUploadId(), 1, "bucket", "source.bin", null, range), "range " + range);
+
+            assertEquals("EntityTooLarge", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+            assertEquals("Your proposed upload exceeds the maximum allowed object size.", error.getMessage());
+        }
+        assertTrue(s3Service.getMultipartUpload("bucket", "copy.bin", upload.getUploadId()).getParts().isEmpty());
+        assertNothingStaged();
+    }
+
+    @Test
+    void anUploadPartCopyOfExactlyFiveGibibytesIsWithinTheLimit() throws IOException {
+        sparseSource("source.bin", S3Service.MAX_PART_SIZE + 1);
+
+        // A missing upload is only found once the size passed, and before any of the source is read.
+        assertEquals("NoSuchUpload", assertThrows(AwsException.class, () -> s3Service.uploadPartCopy("bucket",
+                "copy.bin", "no-such-upload", 1, "bucket", "source.bin", null,
+                "bytes=1-" + S3Service.MAX_PART_SIZE)).getErrorCode());
+    }
+
+    /** A stored object of {@code size} bytes whose file is sparse, so it takes almost no disk. */
+    private void sparseSource(String key, long size) throws IOException {
+        s3Service.putObject("bucket", key, new byte[] {1}, "application/octet-stream", Map.of());
+        objectStore.scan(storeKey -> true).stream()
+                .filter(object -> "bucket".equals(object.getBucketName()) && key.equals(object.getKey()))
+                .forEach(object -> object.setSize(size));
+        try (Stream<Path> files = Files.walk(dataRoot)) {
+            for (Path file : files.filter(path -> path.getFileName().toString().equals(key + ".s3data")).toList()) {
+                try (FileChannel channel = FileChannel.open(file, StandardOpenOption.WRITE)) {
+                    channel.write(ByteBuffer.wrap(new byte[] {0}), size - 1);
+                }
+            }
+        }
     }
 
     @Test

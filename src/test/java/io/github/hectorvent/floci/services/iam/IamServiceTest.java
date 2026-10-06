@@ -2640,6 +2640,7 @@ class IamServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
@@ -2657,6 +2658,7 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),

@@ -222,6 +222,8 @@ jobs:
             floci/floci:nightly-${{ needs.prepare.outputs.version }}
             public.ecr.aws/floci/floci:nightly
             public.ecr.aws/floci/floci:nightly-${{ needs.prepare.outputs.version }}
+          build-args: |
+            VERSION=nightly-${{ needs.prepare.outputs.version }}
           labels: |
             org.opencontainers.image.version=nightly-${{ needs.prepare.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}

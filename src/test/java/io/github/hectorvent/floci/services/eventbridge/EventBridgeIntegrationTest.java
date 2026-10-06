@@ -208,7 +208,8 @@ class EventBridgeIntegrationTest {
         given()
                 .contentType(EVENT_BRIDGE_CONTENT_TYPE)
                 .header("X-Amz-Target", "AWSEvents.PutRule")
-                .body("{\"Name\":\"" + ruleName + "\",\"EventBusName\":\"" + busName + "\"}")
+                .body("{\"Name\":\"" + ruleName + "\",\"EventBusName\":\"" + busName
+                        + "\",\"EventPattern\":\"{\\\"source\\\":[\\\"my.app\\\"]}\"}")
                 .when().post("/")
                 .then().statusCode(200);
 
@@ -250,6 +251,27 @@ class EventBridgeIntegrationTest {
                 .contentType(EVENT_BRIDGE_CONTENT_TYPE)
                 .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
                 .body("{\"Rule\":\"missing-target-rule\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(8)
+    void putRuleWithoutPatternOrScheduleIsRejected() {
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.PutRule")
+                .body("{\"Name\":\"eb-no-pattern-or-schedule\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Parameter(s) EventPattern or ScheduleExpression must be specified."));
+
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.DescribeRule")
+                .body("{\"Name\":\"eb-no-pattern-or-schedule\"}")
                 .when().post("/")
                 .then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));

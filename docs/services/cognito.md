@@ -181,7 +181,7 @@ further divergences, both deliberate:
 
 | Action | Description |
 |--------|-------------|
-| AdminCreateUser | Creates or resends setup for a user in a user pool. |
+| AdminCreateUser | Creates or resends setup for a user in a user pool. Creating a user invokes the pre sign-up trigger with triggerSource `PreSignUp_AdminCreateUser`, the request's `ValidationData` and `ClientMetadata`, and `callerContext.clientId` `CLIENT_ID_NOT_APPLICABLE`. A trigger error refuses the user with `UserLambdaValidationException`, and its `autoConfirmUser`, `autoVerifyEmail` and `autoVerifyPhone` are ignored, as on AWS. |
 | AdminGetUser | Returns a user's stored attributes and status. |
 | AdminDeleteUser | Deletes a user from a user pool. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | AdminSetUserPassword | Sets a user's password and permanent-password status. |

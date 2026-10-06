@@ -3,9 +3,17 @@ package io.github.hectorvent.floci.services.iot;
 import io.vertx.core.Handler;
 import io.vertx.core.http.ServerWebSocket;
 import io.vertx.core.net.NetSocket;
+import io.vertx.core.net.SocketAddress;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyShort;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -22,7 +30,7 @@ class IotMqttWebSocketBridgeTest {
         when(webSocket.isClosed()).thenReturn(false);
 
         IotMqttWebSocketBridge.BridgeSession session =
-                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket);
+                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket, () -> { });
         session.start();
 
         ArgumentCaptor<Handler<Void>> closeCaptor = ArgumentCaptor.forClass(Handler.class);
@@ -44,7 +52,7 @@ class IotMqttWebSocketBridgeTest {
         when(webSocket.isClosed()).thenReturn(false);
 
         IotMqttWebSocketBridge.BridgeSession session =
-                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket);
+                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket, () -> { });
         session.start();
 
         ArgumentCaptor<Handler<Void>> closeCaptor = ArgumentCaptor.forClass(Handler.class);
@@ -66,7 +74,7 @@ class IotMqttWebSocketBridgeTest {
         when(webSocket.isClosed()).thenReturn(false);
 
         IotMqttWebSocketBridge.BridgeSession session =
-                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket);
+                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket, () -> { });
         session.start();
 
         ArgumentCaptor<Handler<Throwable>> exceptionCaptor = ArgumentCaptor.forClass(Handler.class);
@@ -89,7 +97,7 @@ class IotMqttWebSocketBridgeTest {
         when(webSocket.isClosed()).thenReturn(false);
 
         IotMqttWebSocketBridge.BridgeSession session =
-                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket);
+                new IotMqttWebSocketBridge.BridgeSession(webSocket, socket, () -> { });
         session.start();
 
         ArgumentCaptor<Handler<Void>> closeCaptor = ArgumentCaptor.forClass(Handler.class);
@@ -103,5 +111,45 @@ class IotMqttWebSocketBridgeTest {
         verify(socket).close();
         verify(webSocket, never()).close();
         verify(webSocket, never()).close(anyShort(), anyString());
+    }
+
+    @Test
+    void everyWayTheSessionEndsRunsTheCloseHookOnce() {
+        for (int path = 0; path < 3; path++) {
+            ServerWebSocket webSocket = mock(ServerWebSocket.class);
+            NetSocket socket = mock(NetSocket.class);
+            AtomicInteger hooks = new AtomicInteger();
+            new IotMqttWebSocketBridge.BridgeSession(webSocket, socket, hooks::incrementAndGet).start();
+            ArgumentCaptor<Handler<Void>> socketClose = ArgumentCaptor.forClass(Handler.class);
+            verify(socket).closeHandler(socketClose.capture());
+            ArgumentCaptor<Handler<Void>> webSocketClose = ArgumentCaptor.forClass(Handler.class);
+            verify(webSocket).closeHandler(webSocketClose.capture());
+            ArgumentCaptor<Handler<Throwable>> failure = ArgumentCaptor.forClass(Handler.class);
+            verify(socket).exceptionHandler(failure.capture());
+
+            switch (path) {
+                case 0 -> socketClose.getValue().handle(null);
+                case 1 -> webSocketClose.getValue().handle(null);
+                default -> failure.getValue().handle(new IllegalStateException("broker failed"));
+            }
+            socketClose.getValue().handle(null);
+            webSocketClose.getValue().handle(null);
+
+            assertEquals(1, hooks.get(), "path " + path);
+        }
+    }
+
+    @Test
+    void closingAnOlderSessionKeepsANewerSessionsEqualUpgradeOnTheSameAddress() {
+        SocketAddress address = SocketAddress.inetSocketAddress(50000, "127.0.0.1");
+        IotCustomAuthorizer.WebSocketUpgrade older = new IotCustomAuthorizer.WebSocketUpgrade(Map.of("host", "h"), "", null, null);
+        IotCustomAuthorizer.WebSocketUpgrade newer = new IotCustomAuthorizer.WebSocketUpgrade(Map.of("host", "h"), "", null, null);
+        Map<SocketAddress, IotCustomAuthorizer.WebSocketUpgrade> upgrades = new ConcurrentHashMap<>(Map.of(address, newer));
+
+        IotMqttWebSocketBridge.forgetting(upgrades, address, older).run();
+        assertSame(newer, upgrades.get(address));
+
+        IotMqttWebSocketBridge.forgetting(upgrades, address, newer).run();
+        assertTrue(upgrades.isEmpty());
     }
 }

@@ -23,6 +23,8 @@ class LambdaDurableFunctionsTest {
     private static final String ROLE = "arn:aws:iam::000000000000:role/lambda-role";
     private static final String FN = TestFixtures.uniqueName("fn-durable-exec");
     private static final String CALLBACK_FN = TestFixtures.uniqueName("fn-durable-callback");
+    private static final String CHAIN_FN = TestFixtures.uniqueName("fn-durable-chain");
+    private static final String CHAIN_TARGET_FN = TestFixtures.uniqueName("fn-durable-chain-target");
 
     private static LambdaClient lambda;
 
@@ -34,7 +36,7 @@ class LambdaDurableFunctionsTest {
     @AfterAll
     static void cleanup() {
         if (lambda != null) {
-            for (String name : new String[] {FN, CALLBACK_FN}) {
+            for (String name : new String[] {FN, CALLBACK_FN, CHAIN_FN, CHAIN_TARGET_FN}) {
                 try {
                     lambda.deleteFunction(DeleteFunctionRequest.builder().functionName(name).build());
                 } catch (Exception ignored) {
@@ -178,5 +180,46 @@ class LambdaDurableFunctionsTest {
         assertThatThrownBy(() -> lambda.sendDurableExecutionCallbackSuccess(
                 SendDurableExecutionCallbackSuccessRequest.builder().callbackId(id).build()))
                 .isInstanceOf(CallbackTimeoutException.class);
+    }
+
+    @Test
+    @DisplayName("a durable function invokes another function and receives its result")
+    void durableChainedInvokeReturnsTheTargetResult() {
+        Assumptions.assumeTrue(TestFixtures.isLambdaDispatchAvailable(),
+                "skipping: Lambda dispatch (Docker) not available in this environment");
+
+        lambda.createFunction(CreateFunctionRequest.builder()
+                .functionName(CHAIN_TARGET_FN)
+                .runtime(Runtime.NODEJS20_X)
+                .role(ROLE)
+                .handler("index.handler")
+                .code(FunctionCode.builder().zipFile(SdkBytes.fromByteArray(LambdaUtils.handlerZip())).build())
+                .build());
+        lambda.createFunction(CreateFunctionRequest.builder()
+                .functionName(CHAIN_FN)
+                .runtime(Runtime.PYTHON3_14)
+                .role(ROLE)
+                .handler("lambda_function.handler")
+                .timeout(30)
+                .durableConfig(DurableConfig.builder().executionTimeout(120).retentionPeriodInDays(1).build())
+                .code(FunctionCode.builder().zipFile(SdkBytes.fromByteArray(LambdaUtils.durablePythonZip())).build())
+                .build());
+
+        InvokeResponse invoked = lambda.invoke(InvokeRequest.builder()
+                .functionName(CHAIN_FN + ":$LATEST")
+                .payload(SdkBytes.fromUtf8String("{\"chain\": \"" + CHAIN_TARGET_FN + "\"}"))
+                .build());
+
+        assertThat(invoked.functionError()).isNull();
+        assertThat(invoked.payload().asUtf8String()).contains("Hello, Durable!");
+        GetDurableExecutionHistoryResponse history = lambda.getDurableExecutionHistory(
+                GetDurableExecutionHistoryRequest.builder().durableExecutionArn(invoked.durableExecutionArn()).build());
+        assertThat(history.events()).extracting(Event::eventType)
+                .contains(EventType.CHAINED_INVOKE_STARTED, EventType.CHAINED_INVOKE_SUCCEEDED);
+        Event started = history.events().stream()
+                .filter(event -> event.eventType() == EventType.CHAINED_INVOKE_STARTED)
+                .findFirst().orElseThrow();
+        assertThat(started.chainedInvokeStartedDetails().functionName()).isEqualTo(CHAIN_TARGET_FN);
+        assertThat(started.chainedInvokeStartedDetails().executedVersion()).isEqualTo("$LATEST");
     }
 }

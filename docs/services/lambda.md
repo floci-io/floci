@@ -168,7 +168,7 @@ background. Invocations through an ARN (EventBridge, Scheduler, function URLs, d
 durable executions the same way.
 
 The checkpoint protocol under `/2025-12-01` is the real one, so the Durable Execution SDK works
-unchanged for steps, waits, step retries, callbacks and replay. Timers are persisted and fired by a
+unchanged for steps, waits, step retries, callbacks, chained invokes and replay. Timers are persisted and fired by a
 background sweep, so an execution survives a restart of Floci. A function that returns something
 other than the `{Status, Result, Error}` envelope fails its execution with
 `Invalid Status in invocation output.` A function that throws is re-invoked four more times, after
@@ -182,6 +182,13 @@ timeout. A failure sent with an empty request body fails the callback but does n
 function again, as on AWS, so the execution keeps waiting. The SDKs send `{}` when `Error` is
 omitted, which does invoke it.
 
+A chained invoke (`context.invoke`) runs another function with an input of up to 1 MB. A durable
+target needs a version or alias and runs as its own durable execution, and its close completes the
+operation as `SUCCEEDED`, `FAILED`, `TIMED_OUT` or `STOPPED`. Any other function is invoked once,
+and an output over 1 MB fails the operation. A missing function or an unqualified durable one
+fails the operation at once, and a target in another account or Region is rejected at checkpoint.
+Stopping the parent leaves the child running, as on AWS.
+
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.
 
@@ -194,7 +201,8 @@ package.
 
 Not emulated yet:
 
-- Chained invokes (`context.invoke`). They are rejected at checkpoint time.
+- The execution role's `lambda:InvokeFunction` permission before a chained invoke. `TenantId` is
+  recorded in the history only.
 - Durable executions started by Step Functions or by an event source mapping. These invoke the
   function as a plain one.
 - Payload encryption. `KMSKeyArn` is stored and returned only.
@@ -399,7 +407,6 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - `InvokeWithResponseStream`
-- Durable function chained invokes. See Durable Functions
 - Code signing enforcement. A configuration is created, read, updated, deleted and listed, and
   nothing verifies a signature against it, so it never gates a deployment. Attaching one to a
   function is not wired either: there is no `PutFunctionCodeSigningConfig`, so
