@@ -147,8 +147,8 @@ public final class CognitoMessageDispatcher {
             return DEFAULT_SENDER;
         }
         if (!isVerifiedForPool(AwsArnUtils.parse(sourceArn), identity, pool, sendRegion)) {
-            LOG.warnv("User pool {0} SourceArn {1} is not an SES identity verified for the pool''s account"
-                + " in that Region; sending from {2}", pool.getId(), sourceArn, DEFAULT_FROM);
+            LOG.warnv("User pool {0} SourceArn {1} is not an SES identity verified for the pool''s account in that Region; sending from {2}",
+                pool.getId(), sourceArn, DEFAULT_FROM);
             return DEFAULT_SENDER;
         }
         boolean identityIsAddress = identity.contains("@");
