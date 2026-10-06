@@ -369,23 +369,26 @@ public class CloudFormationService implements ResourceProvider {
                             "AWS::CloudFormation::Stack", "REVIEW_IN_PROGRESS", "User Initiated");
                 }
             } else {
+                String status = existing.getStatus();
                 boolean reusableReviewPlaceholder =
-                        attachToReviewInProgressStack && "REVIEW_IN_PROGRESS".equals(existing.getStatus());
+                        attachToReviewInProgressStack && "REVIEW_IN_PROGRESS".equals(status);
                 if (isCreateType && !reusableReviewPlaceholder) {
                     throw new AwsException("AlreadyExistsException",
                             "Stack [" + stackName + "] already exists", 400);
                 }
-                // A stack ID whose stack was deleted and its name reused names no live stack.
-                if (!isCreateType && AwsArnUtils.isArn(stackName) && !stackName.equals(existing.getStackId())) {
+                // A deleted stack names no live stack, even before it leaves the map, and neither
+                // does a stack ID whose name has since been reused.
+                if (!isCreateType && ("DELETE_COMPLETE".equals(status)
+                        || (AwsArnUtils.isArn(stackName) && !stackName.equals(existing.getStackId())))) {
                     throw new AwsException("ValidationError",
                             "Stack with id " + stackName + " does not exist", 400);
                 }
                 // The message is the one real CloudFormation emits, down to its own "can not"
                 // spelling and the stack id carried as "Stack:<arn>" with no space: clients match
                 // on this string.
-                if (!isCreateType && refusesUpdate(existing.getStatus())) {
+                if (!isCreateType && refusesUpdate(status)) {
                     throw new AwsException("ValidationError",
-                            "Stack:" + existing.getStackId() + " is in " + existing.getStatus()
+                            "Stack:" + existing.getStackId() + " is in " + status
                                     + " state and can not be updated.", 400);
                 }
                 target = existing;
