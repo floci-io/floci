@@ -413,6 +413,79 @@ class CodePipelineRetryRollbackTest {
         assertEquals("ConflictException", error.getErrorCode());
     }
 
+    // Catches: RollbackStage accepting a source stage, which cannot be rolled back (the Fetch stage
+    // would run and end Succeeded).
+    @Test
+    void rollbackStageRejectsSourceStage() {
+        createPipeline("sourced", sourceStage(), lambdaStage("Deploy"));
+        String firstId = startExecution("sourced");
+        awaitStatus("sourced", firstId, "Succeeded");
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "sourced")
+                                .put("stageName", "Fetch")
+                                .put("targetPipelineExecutionId", firstId),
+                        REGION, ACCOUNT));
+        assertEquals("UnableToRollbackStageException", error.getErrorCode());
+        assertEquals("A source stage cannot be rolled back.", error.getMessage());
+    }
+
+    // Catches: RollbackStage accepting a ROLLBACK execution as the target, starting a rollback of a
+    // rollback.
+    @Test
+    void rollbackStageRejectsRollbackExecutionAsTarget() {
+        createPipeline("chained", sourceStage(), lambdaStage("Deploy"));
+        String firstId = startExecution("chained");
+        awaitStatus("chained", firstId, "Succeeded");
+        String rollbackId = service.handle("RollbackStage", mapper.createObjectNode()
+                        .put("pipelineName", "chained")
+                        .put("stageName", "Deploy")
+                        .put("targetPipelineExecutionId", firstId),
+                REGION, ACCOUNT).path("pipelineExecutionId").asText();
+        awaitStatus("chained", rollbackId, "Succeeded");
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "chained")
+                                .put("stageName", "Deploy")
+                                .put("targetPipelineExecutionId", rollbackId),
+                        REGION, ACCOUNT));
+        assertEquals("UnableToRollbackStageException", error.getErrorCode());
+        assertEquals("The target execution is a rollback execution.", error.getMessage());
+    }
+
+    // Catches: RollbackStage starting while another execution is still running the stage.
+    @Test
+    void rollbackStageRejectsStageThatIsCurrentlyRunning() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        service.shutdown();
+        service = newService(storage, lambdaService);
+        ObjectNode parallel = declaration("running", sourceStage(), lambdaStage("Deploy"));
+        parallel.put("pipelineType", "V2").put("executionMode", "PARALLEL");
+        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", parallel), REGION, ACCOUNT);
+        String firstId = startExecution("running");
+        awaitStatus("running", firstId, "Succeeded");
+
+        CodePipelineExecution active = new CodePipelineExecution();
+        active.setAccountId(ACCOUNT);
+        active.setRegion(REGION);
+        active.setPipelineName("running");
+        active.setPipelineExecutionId("active-deploy");
+        active.setStatus("InProgress");
+        active.getStageExecutionStatuses().put("Deploy", "InProgress");
+        storage.executions().putForAccount(ACCOUNT, REGION + ":running:active-deploy", active);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "running")
+                                .put("stageName", "Deploy")
+                                .put("targetPipelineExecutionId", firstId),
+                        REGION, ACCOUNT));
+        assertEquals("UnableToRollbackStageException", error.getErrorCode());
+        assertEquals("The stage is currently running.", error.getMessage());
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private void lambdaReturns(String functionError) {

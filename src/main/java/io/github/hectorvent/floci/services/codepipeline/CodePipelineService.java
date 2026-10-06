@@ -955,9 +955,27 @@ public class CodePipelineService {
         String pipelineName = text(request, "pipelineName");
         String stageName = text(request, "stageName");
         CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
-        requireStage(pipeline, stageName);
+        JsonNode stage = stageByName(pipeline, stageName);
+        // CodePipeline User Guide, "Considerations for rollbacks": a source stage cannot be rolled back.
+        for (JsonNode action : stage.path("actions")) {
+            if ("Source".equals(action.path("actionTypeId").path("category").asText())) {
+                throw new AwsException("UnableToRollbackStageException",
+                        "A source stage cannot be rolled back.", 400);
+            }
+        }
         CodePipelineExecution target = requireExecution(
                 account, region, pipelineName, text(request, "targetPipelineExecutionId"));
+        if ("ROLLBACK".equals(target.getExecutionType())) {
+            throw new AwsException("UnableToRollbackStageException",
+                    "The target execution is a rollback execution.", 400);
+        }
+        boolean stageRunning = executions(account, region, pipelineName).stream()
+                .anyMatch(candidate -> "InProgress".equals(candidate.getStatus())
+                        && "InProgress".equals(candidate.getStageExecutionStatuses().get(stageName)));
+        if (stageRunning) {
+            throw new AwsException("UnableToRollbackStageException",
+                    "The stage is currently running.", 400);
+        }
         if (!Objects.equals(target.getPipelineVersion(), pipeline.getVersion())) {
             throw new AwsException("UnableToRollbackStageException",
                     "The pipeline structure changed after the target execution ran.", 400);
