@@ -83,18 +83,13 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         }
         HttpClientConnectionOperator connectionOperator = createConnectionOperator(dockerHost, sslContext);
 
-        switch (dockerHost.getScheme()) {
-            case "unix", "npipe" -> {
-                pathPrefix = "";
-                host = new HttpHost(dockerHost.getScheme(), "localhost", 2375);
-            }
-            case "tcp" -> {
-                String rawPath = dockerHost.getRawPath();
-                pathPrefix = rawPath.endsWith("/") ? rawPath.substring(0, rawPath.length() - 1) : rawPath;
-                host = new HttpHost(sslContext != null ? "https" : "http", dockerHost.getHost(), dockerHost.getPort());
-            }
+        host = switch (dockerHost.getScheme()) {
+            case "unix", "npipe" -> new HttpHost(dockerHost.getScheme(), "localhost", 2375);
+            case "tcp" -> new HttpHost(sslContext != null ? "https" : "http", dockerHost.getHost(), dockerHost.getPort());
             default -> throw new IllegalArgumentException("Unsupported protocol scheme: " + dockerHost);
-        }
+        };
+        String rawPath = "tcp".equals(dockerHost.getScheme()) ? dockerHost.getRawPath() : "";
+        pathPrefix = rawPath.endsWith("/") ? rawPath.substring(0, rawPath.length() - 1) : rawPath;
 
         PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(
                 connectionOperator, null, null, null,
