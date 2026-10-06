@@ -856,6 +856,18 @@ launches. An instance's reported private IP is then an address its container act
 from the subnet CIDR the caller declared, not a plausible-looking number. Instances in the same
 VPC reach each other at those addresses; instances in different VPCs sit on different bridges.
 
+`CreateVpc` and `CreateSubnet` record declarations without contacting Docker. CIDR collision
+checks and fallback address planning run when a consumer first needs an effective address or
+network attachment. This keeps management calls responsive even when the Docker daemon is slow.
+For overlapping VPC CIDRs, the first VPC whose addresses are needed keeps the declared range;
+later VPCs use the fallback pool. Within one emulator run, allocated addresses remain on the
+same effective range.
+
+When EC2 is enabled, Floci initializes its service, restores persisted state, and seeds the
+configured region's default resources during startup. Other account and region scopes seed on
+first access. Docker reconciliation can lengthen startup, and Docker-backed instance launches
+still depend on daemon responsiveness.
+
 One network per **VPC**, not per subnet: subnets inside a VPC route to each other in AWS, so a
 network per subnet would manufacture a partition AWS does not have. Per-subnet addressing is kept
 anyway: the network's IPAM pool is the whole VPC CIDR and each subnet allocates static addresses

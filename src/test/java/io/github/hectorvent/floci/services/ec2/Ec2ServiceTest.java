@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -93,6 +94,29 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2ServiceTest {
+
+    @Test
+    void createAndDescribeVpcsDoNotContactDockerEvenOnFirstUse() {
+        EmulatorConfig config = mockConfig(false);
+        EmulatorConfig.VpcNetworksConfig networks = mock(EmulatorConfig.VpcNetworksConfig.class);
+        when(config.services().ec2().vpcNetworks()).thenReturn(networks);
+        when(networks.enabled()).thenReturn(true);
+        when(config.docker()).thenReturn(mock(EmulatorConfig.DockerConfig.class));
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        DockerClient docker = mock(DockerClient.class);
+        VpcNetworkManager manager = new VpcNetworkManager(config, docker, null);
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), manager);
+
+        Vpc created = service.createVpc("eu-central-1", "42.0.0.0/16", false);
+        service.createTags("eu-central-1", List.of(created.getVpcId()), List.of(new Tag("Name", "probe")));
+        List<Vpc> found = service.describeVpcs("eu-central-1", List.of(), Map.of("tag:Name", List.of("probe")));
+
+        assertEquals(List.of(created.getVpcId()), found.stream().map(Vpc::getVpcId).toList());
+        assertTrue(service.describeVpcs("eu-central-1", List.of(), Map.of()).stream().anyMatch(Vpc::isDefault));
+        verifyNoInteractions(docker);
+    }
 
     @Test
     void sharedDescribeVpcsOmitsUnknownIdsButExplicitLookupStillRejectsThem() {
