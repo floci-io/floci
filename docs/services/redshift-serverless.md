@@ -22,6 +22,11 @@ For the upstream API shape, see the [Amazon Redshift Serverless API Reference](h
 | `ListWorkgroups` | Page through the workgroups in the account and Region |
 | `UpdateWorkgroup` | Apply the supplied fields to an existing workgroup and return it |
 | `DeleteWorkgroup` | Stop a workgroup's container and proxy, release its endpoint, and return it with `status` `DELETING` |
+| `CreateSnapshot` | Create an `AVAILABLE` snapshot of a namespace; a snapshot created in a standby Region stands in for a cross-Region copy |
+| `GetSnapshot` | Return a snapshot by `snapshotName` or `snapshotArn` |
+| `ListSnapshots` | Page through the snapshots in the Region, optionally filtered by `namespaceName` |
+| `DeleteSnapshot` | Remove a snapshot and return it |
+| `RestoreFromSnapshot` | Restore into an existing namespace and workgroup; neither is created |
 | `GetCredentials` | Mint a temporary database user and password for a workgroup, valid on its endpoint until `expiration` |
 | `ListTagsForResource` | Return the tags on the namespace or workgroup named by `resourceArn` |
 | `TagResource` | Merge tags into the namespace or workgroup named by `resourceArn` |
