@@ -81,6 +81,11 @@ class IotServiceTest {
     private static final String BUILDING_RULE_SQL = "SELECT *, topic() AS topic, clientid() AS cid "
             + "FROM '$aws/things/+/shadow/name/building/update/accepted' WHERE endswith(clientToken, 'inbound')";
     private static final String BUILDING_UPDATE = "$aws/things/sensor-1/shadow/name/building/update";
+    private static final String NESTED_SHADOW_UPDATE = """
+        {"state": {"desired": {"lights": {"color": {"r": 255, "g": 255, "b": 255}, "on": true}, "arr": [1, 2], "same": {"x": 1}},
+                   "reported": {"lights": {"color": {"r": 255, "g": 0, "b": 255}, "on": true}, "arr": [1, 3], "same": {"x": 1}}}}
+        """;
+    private static final String NESTED_DELTA = "{\"lights\":{\"color\":{\"g\":255}},\"arr\":[1,2]}";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final SqsService sqs = mock(SqsService.class);
@@ -1008,6 +1013,28 @@ class IotServiceTest {
                 json("{\"state\":{\"desired\":{\"color\":\"blue\"},\"reported\":{\"color\":\"blue\"}}}"), REGION);
 
         assertFalse(service.getThingShadow("sensor-5", null, REGION).get("state").has("delta"));
+    }
+
+    @Test
+    void getComputesTheDeltaThroughNestedObjectsAndComparesArraysWhole() throws Exception {
+        service.updateThingShadow("sensor-7", null, json(NESTED_SHADOW_UPDATE), REGION);
+
+        JsonNode shadow = service.getThingShadow("sensor-7", null, REGION);
+
+        assertEquals(json(NESTED_DELTA), reparse(shadow.get("state").get("delta")));
+    }
+
+    @Test
+    void deltaEventCarriesOnlyTheNestedDifferencesAndTheirStoredMetadata() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-7", null, json(NESTED_SHADOW_UPDATE), REGION);
+        long timestamp = accepted.get("timestamp").asLong();
+
+        JsonNode delta = recordedPayload("$aws/things/sensor-7/shadow/update/delta");
+
+        assertEquals(json(NESTED_DELTA), delta.get("state"));
+        assertEquals(json("""
+            {"lights": {"color": {"g": %1$s}}, "arr": [%1$s, %1$s]}
+            """.formatted(leaf(timestamp))), delta.get("metadata"));
     }
 
     @Test

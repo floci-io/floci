@@ -866,7 +866,7 @@ public class IotService {
                 .orElseThrow(() -> shadowNotFound(thingName));
         ObjectNode document = storedShadowDocument(shadow);
         ObjectNode state = (ObjectNode) document.get("state");
-        ObjectNode delta = shadowDelta(state);
+        ObjectNode delta = shadowDelta(state.path("desired"), state.path("reported"));
         if (!delta.isEmpty()) {
             state.set("delta", delta);
         }
@@ -970,7 +970,7 @@ public class IotService {
         documents.put("timestamp", timestamp);
         withClientToken(documents, clientToken);
 
-        ObjectNode deltaState = shadowDelta(state);
+        ObjectNode deltaState = shadowDelta(state.path("desired"), state.path("reported"));
         if (deltaState.isEmpty()) {
             return new ShadowUpdate(accepted, documents, null);
         }
@@ -978,14 +978,7 @@ public class IotService {
         delta.put("version", version);
         delta.put("timestamp", timestamp);
         delta.set("state", deltaState);
-        ObjectNode deltaMetadata = delta.putObject("metadata");
-        JsonNode desiredMetadata = metadata.path("desired");
-        deltaState.fieldNames().forEachRemaining(name -> {
-            JsonNode keyMetadata = desiredMetadata.get(name);
-            if (keyMetadata != null) {
-                deltaMetadata.set(name, keyMetadata.deepCopy());
-            }
-        });
+        delta.set("metadata", deltaMetadata(deltaState, metadata.path("desired")));
         withClientToken(delta, clientToken);
         return new ShadowUpdate(accepted, documents, delta);
     }
@@ -1022,20 +1015,42 @@ public class IotService {
         return snapshot;
     }
 
-    /** The desired keys whose reported value is missing or different, compared shallowly. */
-    private ObjectNode shadowDelta(JsonNode state) {
+    /** The desired values whose reported value is missing or different: nested objects compared key by key, arrays and scalars whole. */
+    private ObjectNode shadowDelta(JsonNode desired, JsonNode reported) {
         ObjectNode delta = objectMapper.createObjectNode();
-        JsonNode desired = state.path("desired");
-        JsonNode reported = state.path("reported");
-        if (desired.isObject()) {
-            desired.fields().forEachRemaining(entry -> {
-                JsonNode reportedValue = reported.path(entry.getKey());
-                if (reportedValue.isMissingNode() || !reportedValue.equals(entry.getValue())) {
-                    delta.set(entry.getKey(), entry.getValue());
-                }
-            });
+        if (!desired.isObject()) {
+            return delta;
         }
+        desired.fields().forEachRemaining(entry -> {
+            JsonNode desiredValue = entry.getValue();
+            JsonNode reportedValue = reported.path(entry.getKey());
+            if (desiredValue.isObject() && reportedValue.isObject()) {
+                ObjectNode nested = shadowDelta(desiredValue, reportedValue);
+                if (!nested.isEmpty()) {
+                    delta.set(entry.getKey(), nested);
+                }
+            } else if (reportedValue.isMissingNode() || !reportedValue.equals(desiredValue)) {
+                delta.set(entry.getKey(), desiredValue);
+            }
+        });
         return delta;
+    }
+
+    /** The stored desired metadata of exactly the values in {@code delta}, following nested objects. */
+    private ObjectNode deltaMetadata(JsonNode delta, JsonNode desiredMetadata) {
+        ObjectNode metadata = objectMapper.createObjectNode();
+        delta.fields().forEachRemaining(entry -> {
+            JsonNode valueMetadata = desiredMetadata.get(entry.getKey());
+            if (valueMetadata == null) {
+                return;
+            }
+            if (entry.getValue().isObject() && valueMetadata.isObject()) {
+                metadata.set(entry.getKey(), deltaMetadata(entry.getValue(), valueMetadata));
+            } else {
+                metadata.set(entry.getKey(), valueMetadata.deepCopy());
+            }
+        });
+        return metadata;
     }
 
     /** AWS's metadata mirror of a state value: every leaf, a null included, becomes the update timestamp. */
