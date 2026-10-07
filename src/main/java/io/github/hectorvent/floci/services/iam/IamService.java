@@ -1419,8 +1419,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 && !"AWS".equalsIgnoreCase(scope)
                 && !"Local".equalsIgnoreCase(scope)) {
             throw new AwsException("ValidationError",
-                    "Value '" + scope + "' at 'scope' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [All, AWS, Local]", 400);
+                    "1 validation error detected: Value '" + scope + "' at 'scope' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: "
+                            + "[All, AWS, Local]", 400);
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
         boolean blankScope = scope == null || scope.isBlank();
@@ -2327,8 +2328,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
             throw new AwsException("ValidationError",
-                    "Value null at 'properties' failed to satisfy constraint: Member must not be "
-                            + "null", 400);
+                    "1 validation error detected: Value null at 'properties' failed to "
+                            + "satisfy constraint: Member must not be null", 400);
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -2365,7 +2366,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
                 || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
             throw new AwsException("ValidationError",
-                    "Value '" + key + "' at 'properties' failed to satisfy constraint: Map keys "
+                    "1 validation error detected: Value '" + key + "' at 'properties' failed "
+                            + "to satisfy constraint: Map keys "
                             + "must satisfy constraint: [Member must have length less than or "
                             + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
                             + "satisfy regular expression pattern: "
@@ -2385,9 +2387,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (value == null || value.isEmpty()
                 || value.length() > MAX_ACCOUNT_PROPERTY_VALUE_LENGTH) {
             throw new AwsException("ValidationError",
-                    "Value at 'properties." + key + "' failed to satisfy constraint: Member must "
-                            + "have length between 1 and " + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH,
-                    400);
+                    "1 validation error detected: Value at 'properties." + key + "' failed to "
+                            + "satisfy constraint: Member must have length between 1 and "
+                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH, 400);
         }
     }
 
@@ -2396,8 +2398,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (globalEndpointTokenVersion == null
                 || !GLOBAL_ENDPOINT_TOKEN_VERSIONS.contains(globalEndpointTokenVersion)) {
             throw new AwsException("ValidationError",
-                    "Value '" + globalEndpointTokenVersion + "' at 'globalEndpointTokenVersion' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: ["
+                    "1 validation error detected: Value '" + globalEndpointTokenVersion
+                            + "' at 'globalEndpointTokenVersion' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: ["
                             + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]", 400);
         }
         stsPreferences.put(STS_PREFERENCES_KEY, globalEndpointTokenVersion);
@@ -3095,10 +3098,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
                     || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
                 throw new AwsException("ValidationError",
-                        "Value '" + credentialAgeDays + "' at 'credentialAgeDays' failed to "
-                                + "satisfy constraint: Member must be between "
-                                + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS,
-                        400);
+                        "1 validation error detected: Value '" + credentialAgeDays
+                                + "' at 'credentialAgeDays' failed to satisfy constraint: "
+                                + "Member must be between " + MIN_CREDENTIAL_AGE_DAYS + " and "
+                                + MAX_CREDENTIAL_AGE_DAYS, 400);
             }
         }
         synchronized (serviceCredentialLock) {

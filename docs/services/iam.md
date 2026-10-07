@@ -558,6 +558,13 @@ published pattern, which admits a key with no slash, with several, and with a tr
 a rule applied once the format is already satisfied: that, and a request mixing namespaces, are
 `InvalidInput` with status 400, the "invalid or out-of-range value" the operation declares.
 
+Each `ValidationError` here opens with "1 validation error detected: ", which is the envelope the
+IAM front end puts on a constraint report rather than anything specific to this operation. Every
+such message recorded against AWS carries it, including on map members: SNS's recordings show
+`Value null at 'attributes'` and `Value null at 'messageAttributes.attr1.member.dataType'` both
+prefixed. What is not recorded anywhere is how AWS spells a map *key* constraint, so the
+"Map keys must satisfy constraint" tail is a reasonable shape rather than an attested one.
+
 **Enabling federation twice is an error, and so is disabling it twice**, which is the asymmetry
 worth noticing: `EnableOutboundWebIdentityFederation` answers `FeatureEnabled` with status 409,
 while `DisableOutboundWebIdentityFederation` answers `FeatureDisabled` with status **404**. AWS

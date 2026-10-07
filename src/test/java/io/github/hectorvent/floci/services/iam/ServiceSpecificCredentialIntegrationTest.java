@@ -202,6 +202,10 @@ class ServiceSpecificCredentialIntegrationTest {
             .when().post("/").then().statusCode(400)
                 .body(containsString("ValidationError"))
                 .body(containsString("credentialAgeDays"))
+                // optionalInt's report is the last IAM constraint message that was opening
+                // without the count, and this is the only path that reaches it.
+                .body(containsString("1 validation error detected"))
+                .body(containsString("Member must be an integer"))
                 .body(not(containsString("ExpirationDate")));
         }
     }
@@ -216,7 +220,11 @@ class ServiceSpecificCredentialIntegrationTest {
                 .formParam("CredentialAgeDays", days)
             .when().post("/").then().statusCode(400)
                 .body(containsString("ValidationError"))
-                .body(containsString("credentialAgeDays"));
+                .body(containsString("credentialAgeDays"))
+                // The range report builds its message across two string literals, so a sweep
+                // for the phrase missed it while every other one was prefixed.
+                .body(containsString("1 validation error detected"))
+                .body(containsString("Member must be between"));
         }
 
         // And both ends of the range are accepted, so the bounds are not off by one.
@@ -600,7 +608,11 @@ class ServiceSpecificCredentialIntegrationTest {
         iam("DeleteServiceSpecificCredential").formParam("UserName", userName)
         .when().post("/").then().statusCode(400)
             .body(containsString("ValidationError"))
-            .body(containsString("serviceSpecificCredentialId"));
+            .body(containsString("serviceSpecificCredentialId"))
+            // requireParam serves every required IAM member, so this is the one place the
+            // counted prefix on an absent-member message is worth pinning.
+            .body(containsString("1 validation error detected"))
+            .body(containsString("Member must not be null"));
     }
 
     /**

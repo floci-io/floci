@@ -94,7 +94,8 @@ class AccountPropertiesIntegrationTest {
             .when().post("/").then().statusCode(400)
                 .body(containsString("ValidationError"))
                 .body(not(containsString("InvalidInput")))
-                .body(containsString("failed to satisfy constraint"));
+                .body(containsString("failed to satisfy constraint"))
+                .body(containsString("1 validation error detected"));
         }
     }
 
@@ -126,13 +127,17 @@ class AccountPropertiesIntegrationTest {
         iam("PutAccountProperties")
             .formParam("Properties.entry.1.key", ns + "/" + "P".repeat(60))
             .formParam("Properties.entry.1.value", "x")
-        .when().post("/").then().statusCode(400).body(containsString("ValidationError"));
+        .when().post("/").then().statusCode(400)
+            .body(containsString("ValidationError"))
+            .body(containsString("1 validation error detected"));
 
         // valueLength is 1 to 1024.
         iam("PutAccountProperties")
             .formParam("Properties.entry.1.key", ns + "/TooLongValue")
             .formParam("Properties.entry.1.value", "v".repeat(1025))
-        .when().post("/").then().statusCode(400).body(containsString("ValidationError"));
+        .when().post("/").then().statusCode(400)
+            .body(containsString("ValidationError"))
+            .body(containsString("1 validation error detected"));
 
         // And the top of the range is accepted, so the bound is not off by one.
         iam("PutAccountProperties")
@@ -144,7 +149,16 @@ class AccountPropertiesIntegrationTest {
     @Test
     void anAbsentPropertiesMapIsRejected() {
         iam("PutAccountProperties").when().post("/").then().statusCode(400)
-            .body(containsString("ValidationError"));
+            .body(containsString("ValidationError"))
+            // Recorded against AWS on SNS's own map member, down to the phrasing:
+            // "1 validation error detected: Value null at 'attributes' failed to satisfy
+            // constraint: Member must not be null".
+            .body(containsString("1 validation error detected"))
+            // The apostrophes around the member name come back XML-escaped, so the assertion
+            // stops at the parts that survive escaping.
+            .body(containsString("Value null at "))
+            .body(containsString("properties"))
+            .body(containsString("Member must not be null"));
     }
 
     @Test
@@ -159,7 +173,8 @@ class AccountPropertiesIntegrationTest {
             iam("SetSecurityTokenServicePreferences")
                 .formParam("GlobalEndpointTokenVersion", version)
             .when().post("/").then().statusCode(400)
-                .body(containsString("ValidationError"));
+                .body(containsString("ValidationError"))
+                .body(containsString("1 validation error detected"));
         }
 
         iam("SetSecurityTokenServicePreferences").when().post("/").then().statusCode(400)
