@@ -181,6 +181,22 @@ public class RedshiftContainerManager {
         return ContainerStorageHelper.dockerName(config, "redshift-" + accountId + "-" + clusterIdentifier);
     }
 
+    private RedshiftContainerHandle requireHandle(String accountId, String clusterIdentifier) {
+        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
+        if (handle == null) {
+            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
+        }
+        return handle;
+    }
+
+    private static String userOrDefault(String username) {
+        return (username != null && !username.isBlank()) ? username : "postgres";
+    }
+
+    private static String databaseOrDefault(String dbname) {
+        return (dbname != null && !dbname.isBlank()) ? dbname : DEFAULT_DATABASE;
+    }
+
     /** Schema {@code bootstrap-catalog.sql} owns; the catalog views read it, so snapshots leave it alone. */
     public static final String BOOTSTRAP_SCHEMA = "floci_internal";
 
@@ -194,13 +210,10 @@ public class RedshiftContainerManager {
      */
     public void takeSnapshot(String accountId, String clusterIdentifier, String username, String dbname,
                              Path outputFile, boolean skipBootstrapSchema) {
-        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
-        if (handle == null) {
-            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
-        }
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
 
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
-        String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
+        String effectiveUser = userOrDefault(username);
+        String effectiveDb = databaseOrDefault(dbname);
 
         String[] cmd = skipBootstrapSchema
                 ? new String[]{"pg_dump", "-U", effectiveUser, "--exclude-schema=" + BOOTSTRAP_SCHEMA, effectiveDb,
@@ -237,11 +250,8 @@ public class RedshiftContainerManager {
     /** As the four-argument form, connecting to {@code databaseName} instead of {@code dev}. */
     public void alterUserPassword(String accountId, String clusterIdentifier, String username, String newPassword,
                                   String databaseName) {
-        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
-        if (handle == null) {
-            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
-        }
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
+        String effectiveUser = userOrDefault(username);
         // Validate effectiveUser against safe SQL identifier pattern to prevent SQL injection.
         // psql -c sends the query string to Postgres, which allows multiple ;-separated statements,
         // so even argv-escaping doesn't protect against a username like "postgres; DROP TABLE ..."
@@ -305,18 +315,15 @@ public class RedshiftContainerManager {
      */
     public void restoreSnapshot(String accountId, String clusterIdentifier, String username, String dbname,
                                 Path sqlDumpFile, boolean stopOnError) {
-        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
-        if (handle == null) {
-            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
-        }
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
 
         if (sqlDumpFile == null || !Files.exists(sqlDumpFile)) {
             LOG.infov("Empty snapshot dump for cluster {0}, skipping restore", clusterIdentifier);
             return;
         }
 
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
-        String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
+        String effectiveUser = userOrDefault(username);
+        String effectiveDb = databaseOrDefault(dbname);
         String fileName = sqlDumpFile.getFileName().toString();
 
         try {
@@ -349,17 +356,14 @@ public class RedshiftContainerManager {
             + "CREATE SCHEMA public; END $$;";
 
     /**
-     * Drops every large object and every user schema except the bootstrap one, and recreates an empty {@code public} one, so a following
-     * {@link #restoreSnapshot} replays into a clean database rather than appending to what is
-     * already there.
+     * Drops every large object and every user schema except the bootstrap one, and recreates an
+     * empty {@code public} one, so a following {@link #restoreSnapshot} replays into a clean
+     * database rather than appending to what is already there.
      */
     public void resetUserSchemas(String accountId, String clusterIdentifier, String username, String dbname) {
-        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
-        if (handle == null) {
-            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
-        }
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
-        String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
+        String effectiveUser = userOrDefault(username);
+        String effectiveDb = databaseOrDefault(dbname);
         String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-c",
                 DROP_USER_SCHEMAS_SQL};
         try {
@@ -408,7 +412,7 @@ public class RedshiftContainerManager {
         return bos.toByteArray();
     }
     private void waitForReady(String containerName, String containerId, String username, String dbName) {
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        String effectiveUser = userOrDefault(username);
         String[] cmd = {
                 "psql",
                 "-h", "127.0.0.1",
@@ -448,7 +452,7 @@ public class RedshiftContainerManager {
      * and migration tooling can inspect metadata without relation-does-not-exist errors.
      */
     void bootstrapCatalog(String containerId, String username, String dbName) {
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        String effectiveUser = userOrDefault(username);
         String effectiveDb = (dbName != null && !dbName.isBlank()) ? dbName : "dev";
         try (InputStream in = getClass().getResourceAsStream("/redshift/bootstrap-catalog.sql")) {
             if (in == null) {

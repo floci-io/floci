@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
