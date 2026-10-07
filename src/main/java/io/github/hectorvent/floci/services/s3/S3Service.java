@@ -2665,6 +2665,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = requireBucket(bucketName);
         S3Object[] notificationTarget = {null};
         ObjectAnnotation annotation;
+        String sequencer;
         synchronized (bucket) {
             versionId = normalizeNullVersionId(versionId);
             S3Object parent = resolveParentObject(bucketName, key, versionId);
@@ -2708,10 +2709,11 @@ public class S3Service implements Resettable, ResourceProvider {
             annotationStore.put(storeKey, annotation);
             LOG.debugv("Put annotation {0} on object: {1}/{2}", annotationName, bucketName, key);
             notificationTarget[0] = parent;
+            sequencer = nextEventSequencer();
         }
         // Fired outside the bucket monitor (the storeObject callers' pattern): a slow SQS/SNS/
         // Lambda delivery must not block every other write and annotation op on the bucket.
-        fireNotifications(bucketName, key, "ObjectAnnotation:Put", notificationTarget[0]);
+        fireNotifications(bucketName, key, "ObjectAnnotation:Put", notificationTarget[0], sequencer);
         return annotation;
     }
 
@@ -2778,6 +2780,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = requireBucket(bucketName);
         S3Object[] notificationTarget = {null};
         String parentVersionId;
+        String sequencer;
         synchronized (bucket) {
             versionId = normalizeNullVersionId(versionId);
             S3Object parent = resolveParentObject(bucketName, key, versionId);
@@ -2803,9 +2806,10 @@ public class S3Service implements Resettable, ResourceProvider {
             LOG.debugv("Deleted annotation {0} from object: {1}/{2}", annotationName, bucketName, key);
             parentVersionId = parent.getVersionId();
             notificationTarget[0] = parent;
+            sequencer = nextEventSequencer();
         }
         // Fired outside the bucket monitor, as in putObjectAnnotation.
-        fireNotifications(bucketName, key, "ObjectAnnotation:Delete", notificationTarget[0]);
+        fireNotifications(bucketName, key, "ObjectAnnotation:Delete", notificationTarget[0], sequencer);
         return parentVersionId;
     }
 
@@ -5370,6 +5374,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void fireNotifications(String bucketName, String key, String eventName, S3Object obj) {
+        fireNotifications(bucketName, key, eventName, obj, eventSequencer(eventName, obj));
+    }
+
+    /**
+     * Fires the event with a {@code sequencer} the caller took under the bucket lock, so it orders
+     * against other writes to the key the way they were applied, however late the event is built.
+     */
+    private void fireNotifications(String bucketName, String key, String eventName, S3Object obj,
+                                   String sequencer) {
         if (s3UpdatedEvent != null && eventName.startsWith("ObjectCreated")) {
             s3UpdatedEvent.fire(new S3ObjectUpdatedEvent(bucketName, key));
         }
@@ -5387,7 +5400,8 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         String region = bucket.getRegion();
-        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled());
+        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled(),
+                sequencer);
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
@@ -5540,7 +5554,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private String buildS3EventJson(String bucketName, String key, String eventName,
-                                    S3Object obj, String region, boolean isVersionEnabled) {
+                                    S3Object obj, String region, boolean isVersionEnabled, String sequencer) {
         try {
             String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
             long size = obj != null ? obj.getSize() : 0;
@@ -5559,7 +5573,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 String versionId = obj !=null && obj.getVersionId()!=null ? obj.getVersionId() : "";
                 objectNode.put("versionId", versionId);
             }
-            objectNode.put("sequencer", eventSequencer(eventName, obj));
+            objectNode.put("sequencer", sequencer);
             ObjectNode s3Node = objectMapper.createObjectNode();
             s3Node.put("s3SchemaVersion", "1.0");
             s3Node.put("configurationId", "emulator");
@@ -5599,7 +5613,8 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * The sequencer a created object was given when it was stored. Any other event names an object
-     * that already existed, whose stored sequencer belongs to its own creation, so it gets a new one.
+     * that already existed, whose stored sequencer belongs to its own creation, so it gets a new one:
+     * the delete paths fire inside the bucket lock, so that value is still taken under it.
      */
     private String eventSequencer(String eventName, S3Object obj) {
         if (eventName.startsWith("ObjectCreated") && obj != null && obj.getEventSequencer() != null) {
