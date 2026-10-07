@@ -257,18 +257,18 @@ update path.
 3. CI runs tests automatically. All checks must pass before merge.
 4. Keep PRs focused: one feature or fix per PR.
 5. Reference any related issues in the PR description.
-6. Keep at most **2 open, non-draft PRs** at a time: see [Pull Request Limits and Review Bandwidth](#pull-request-limits-and-review-bandwidth).
+6. Keep at most **4 open PRs**, drafts included, and at most **2 of them ready for review**: see [Pull Request Limits and Review Bandwidth](#pull-request-limits-and-review-bandwidth).
 
 Docker images are built on contributor PRs only for the compatibility suite (`.github/workflows/compatibility.yml`, on changes under `src/**` and the compat test trees) and are never published, so merging to `main` is always cheap.
 
 ### Pull Request Limits and Review Bandwidth
 
-To make sure every contribution gets a thorough, high-quality review in a reasonable time, we ask contributors to keep **no more than 2 open, non-draft pull requests** at any time in this repository.
+To make sure every contribution gets a thorough, high-quality review in a reasonable time, we ask contributors to keep **no more than 4 open pull requests**, drafts included, at any time in this repository, and **no more than 2 of them ready for review**.
 
 - **Why this policy exists:** maintainer review time is limited. Capping concurrent open PRs prevents review backlogs, reduces context switching, and keeps PR cycle times short for everyone.
 - **Dependent work:** if your work depends on a PR that has not been merged yet, build on that branch or note the dependency in the discussion instead of opening separate, uncoordinated PRs.
-- **Draft PRs:** drafts do not count against the limit. Mark a draft as ready for review only when you have review capacity available.
-- **How it is applied:** a bot labels your 3rd and later open pull requests `over-pr-limit` with a reminder. Starting **2026-10-08**, from your 5th open pull request onward, new ones are closed automatically. Your branch and commits are kept, and you can reopen the PR once one of your other PRs is merged or closed. Maintainers and dependency bots are not counted.
+- **Draft PRs:** drafts do not count against the limit of 2 ready pull requests, but they do count toward the total of 4. You can have, for example, 2 ready and 2 drafts, or 1 ready and 3 drafts. Use drafts for work in progress, not as a queue of finished changes waiting for a review slot, and mark a draft as ready for review only when you have review capacity available.
+- **How it is applied:** a bot turns a pull request back into a draft if it would be your 3rd ready for review, and closes a pull request opened while you already have 4 open, drafts included. Your branch and commits are always kept: mark the draft ready again once one of your ready pull requests is merged, closed or turned into a draft, and reopen a closed pull request once you have fewer than 4 open. Maintainers and dependency bots are not counted.
 
 Once your current pull requests are reviewed, merged, or closed, you are welcome to open new ones!
 
