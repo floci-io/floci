@@ -1233,6 +1233,64 @@ class SsmServiceTest {
     }
 
     @Test
+    void putParameter_topLevelNameArnHasParameterSlash() {
+        ssmService.putParameter("arn-plain", "v", "String", null, false, "us-east-1");
+        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/arn-plain",
+                ssmService.getParameter("arn-plain", "us-east-1").getArn());
+    }
+
+    @Test
+    void putParameter_hierarchicalNameArnHasNoDoubleSlash() {
+        ssmService.putParameter("/arn/nested", "v", "String", null, false, "us-east-1");
+        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/arn/nested",
+                ssmService.getParameter("/arn/nested", "us-east-1").getArn());
+    }
+
+    @Test
+    void getParameter_forAnotherService_acceptsTheArnOfATopLevelOrPathParameter() {
+        ssmService.putParameter("arn-read", "top", "String", null, false, "us-east-1");
+        ssmService.putParameter("/arn/read", "path", "String", null, false, "us-gov-west-1");
+
+        assertEquals("top", ssmService.getParameter(
+                ssmService.getParameter("arn-read", "us-east-1").getArn(), "us-east-1").getValue());
+        assertEquals("path", ssmService.getParameter(
+                "arn:aws-us-gov:ssm:us-gov-west-1:000000000000:parameter/arn/read", "us-gov-west-1").getValue());
+        assertEquals("path", ssmService.getParameter(
+                "arn:aws-us-gov:ssm:us-gov-west-1:000000000000:parameter/arn/read:1", "us-gov-west-1").getValue());
+    }
+
+    @Test
+    void tagOperations_byArn_findATopLevelParameter() {
+        ssmService.putParameter("arn-tagged", "v", "String", null, false, "us-east-1");
+        String arn = ssmService.getParameter("arn-tagged", "us-east-1").getArn();
+
+        ssmService.addTagsToResource(arn, Map.of("env", "dev"), "us-east-1");
+        assertEquals(Map.of("env", "dev"), ssmService.listTagsForResource(arn, "us-east-1"));
+        assertEquals(Map.of("env", "dev"),
+                ssmService.listTagsForResource(arn.replace(":parameter/", ":parameter"), "us-east-1"));
+        ssmService.removeTagsFromResource(arn, List.of("env"), "us-east-1");
+        assertEquals(Map.of(), ssmService.listTagsForResource("arn-tagged", "us-east-1"));
+    }
+
+    @Test
+    void tagOperations_byArn_findAPathStoredWithoutLeadingSlash() {
+        ssmService.putParameter("arn/relative", "v", "String", null, false, "us-east-1");
+        String arn = ssmService.getParameter("arn/relative", "us-east-1").getArn();
+
+        ssmService.addTagsToResource(arn, Map.of("env", "dev"), "us-east-1");
+        assertEquals(Map.of("env", "dev"), ssmService.listTagsForResource(arn, "us-east-1"));
+    }
+
+    @Test
+    void tagOperations_byArn_findAHierarchicalParameter() {
+        ssmService.putParameter("/arn/tagged", "v", "String", null, false, "us-east-1");
+        String arn = ssmService.getParameter("/arn/tagged", "us-east-1").getArn();
+
+        ssmService.addTagsToResource(arn, Map.of("env", "dev"), "us-east-1");
+        assertEquals(Map.of("env", "dev"), ssmService.listTagsForResource("/arn/tagged", "us-east-1"));
+    }
+
+    @Test
     void putParameterOverwriteClearsDescriptionWhenOmitted() {
         String region = "eu-west-1";
         ssmService.putParameter("/app/desc-test", "val1", "String", "Initial description", false, null, region);

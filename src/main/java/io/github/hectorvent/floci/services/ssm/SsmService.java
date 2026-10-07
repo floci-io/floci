@@ -207,7 +207,7 @@ public class SsmService implements ResourceProvider {
         Parameter parameter = new Parameter(name, value, type != null ? type : "String");
         parameter.setVersion(version);
         parameter.setDescription(description);
-        parameter.setArn(regionResolver.buildArn("ssm", region, "parameter" + name));
+        parameter.setArn(regionResolver.buildArn("ssm", region, parameterResource(name)));
         parameter.setLastModifiedDate(Instant.now());
 
         if (existing != null && existing.getTags() != null) {
@@ -223,9 +223,14 @@ public class SsmService implements ResourceProvider {
         return version;
     }
 
-    /** Reads on behalf of ECS task secrets, CodeBuild and CloudFormation ssm-secure, which decrypt. */
-    public Parameter getParameter(String name, String region) {
-        return getParameter(name, true, region);
+    /** AWS's form is {@code parameter/<name>} whether or not the name starts with a slash. */
+    public static String parameterResource(String name) {
+        return "parameter" + (name.startsWith("/") ? name : "/" + name);
+    }
+
+    /** Reads on behalf of ECS task secrets, CodeBuild and CloudFormation ssm-secure, which decrypt and may pass an ARN. */
+    public Parameter getParameter(String nameOrArn, String region) {
+        return getParameter(parameterName(nameOrArn, region), true, region);
     }
 
     public Parameter getParameter(String name, boolean withDecryption, String region) {
@@ -719,8 +724,7 @@ public class SsmService implements ResourceProvider {
 
     public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
         validateTagKeys(tags);
-        String normalizedId = normalizeResourceId(resourceId);
-        String storageKey = regionKey(region, normalizedId);
+        String storageKey = regionKey(region, parameterName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -760,8 +764,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public Map<String, String> listTagsForResource(String resourceId, String region) {
-        String normalizedId = normalizeResourceId(resourceId);
-        String storageKey = regionKey(region, normalizedId);
+        String storageKey = regionKey(region, parameterName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -769,8 +772,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
-        String normalizedId = normalizeResourceId(resourceId);
-        String storageKey = regionKey(region, normalizedId);
+        String storageKey = regionKey(region, parameterName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -784,26 +786,28 @@ public class SsmService implements ResourceProvider {
         LOG.debugv("Removed tags from parameter: {0}", resourceId);
     }
 
-    private static String normalizeResourceId(String resourceId) {
-        if (resourceId != null && resourceId.startsWith("arn:")) {
+    /**
+     * The stored name a parameter name or ARN addresses. The ARN carries a leading slash the stored name may
+     * lack, so {@code parameter/foo} falls back to {@code foo} when only {@code foo} is stored.
+     */
+    private String parameterName(String nameOrArn, String region) {
+        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
             try {
-                AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceId);
-                if ("ssm".equals(arn.service())) {
-                    String resource = arn.resource();
-                    if (resource.startsWith("parameter/")) {
-                        return resource.substring("parameter".length());
+                AwsArnUtils.Arn arn = AwsArnUtils.parse(nameOrArn);
+                if ("ssm".equals(arn.service()) && arn.resource().startsWith("parameter")) {
+                    String name = arn.resource().substring("parameter".length());
+                    if (name.startsWith("/") && parameterStore.get(regionKey(region, name)).isEmpty()
+                            && parameterStore.get(regionKey(region, name.substring(1))).isPresent()) {
+                        return name.substring(1);
                     }
-                    if (resource.startsWith("parameter")) {
-                        return resource.substring("parameter".length());
-                    }
+                    return name;
                 }
             } catch (IllegalArgumentException e) {
-                // Not a valid ARN; fall through and use resourceId directly so callers
-                // querying parameterStore produce the standard InvalidResourceId error.
-                LOG.debugv("Failed to parse resourceId as ARN: {0}", resourceId);
+                // Not a valid ARN; use it as a name so the caller reports its usual not-found error.
+                LOG.debugv("Failed to parse resourceId as ARN: {0}", nameOrArn);
             }
         }
-        return resourceId;
+        return nameOrArn;
     }
 
     // ──────────────────────── Documents and Share Permissions ────────────────
