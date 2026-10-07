@@ -33,6 +33,7 @@ import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.james.mime4j.dom.Message;
 import org.jboss.logging.Logger;
 
 import java.net.URLEncoder;
@@ -315,7 +316,9 @@ public class SesService {
         if (content.hasAttachments()) {
             mime = SmtpRelay.encodeMime(simpleRelayMessage(request, content, effectiveReturnPath, messageId,
                     request.toAddresses(), request.ccAddresses(), null));
-            SesContentScan.Result scan = SesContentScan.scan(mime);
+            Message parsedMime = SmtpRelay.parseMime(mime);
+            rejectBlockedAttachments(parsedMime);
+            SesContentScan.Result scan = SesContentScan.scan(mime, parsedMime);
             if (scan == SesContentScan.Result.UNREADABLE) {
                 LOG.warnv("SES content scan could not parse the assembled message, only its bytes were checked: "
                         + "messageId={0}", messageId);
@@ -464,6 +467,7 @@ public class SesService {
         if (scan == SesContentScan.Result.UNREADABLE) {
             throw new AwsException("InvalidParameterValue", "Raw message could not be parsed.", 400);
         }
+        rejectBlockedAttachments(parsed.message());
         boolean rejected = scan == SesContentScan.Result.REJECTED;
         // AWS routes bounces to the Return-Path carried by the message, falling back to the
         // request's return path and then the sender. A rejected message keeps nothing read off its
@@ -1493,6 +1497,14 @@ public class SesService {
         if (!hasSubject && !hasText && !hasHtml) {
             throw new AwsException("InvalidTemplate",
                     "Template must have at least a subject, text, or html part.", 400);
+        }
+    }
+
+    // SES refuses the send outright for an attachment type it does not accept, unlike the content
+    // scan, which accepts the message and rejects it afterwards.
+    private static void rejectBlockedAttachments(Message parsed) {
+        if (SesContentScan.hasBlockedAttachment(parsed)) {
+            throw new AwsException("MessageRejected", "Message contains invalid content.", 400);
         }
     }
 

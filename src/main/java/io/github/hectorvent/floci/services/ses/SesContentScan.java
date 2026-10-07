@@ -8,6 +8,7 @@ import org.apache.james.mime4j.dom.Header;
 import org.apache.james.mime4j.dom.Message;
 import org.apache.james.mime4j.dom.Multipart;
 import org.apache.james.mime4j.dom.SingleBody;
+import org.apache.james.mime4j.dom.field.ContentTypeField;
 import org.apache.james.mime4j.stream.Field;
 import org.jboss.logging.Logger;
 
@@ -17,6 +18,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * The content scan SES runs on every accepted message. Real SES scans for viruses and rejects the
@@ -45,6 +48,16 @@ final class SesContentScan {
     // Decoded parts are read as a stream in chunks of this size with a rolling overlap, so the
     // scan itself never needs a whole part in one array, whatever the parser buffers.
     static final int CHUNK_SIZE = 64 * 1024;
+    // The developer guide's "SES unsupported attachment types", matched case-insensitively.
+    private static final Set<String> BLOCKED_EXTENSIONS = Set.of(
+            "ade", "adp", "app", "asp", "bas", "bat", "cer", "chm", "cmd", "com", "cpl", "crt", "csh",
+            "der", "exe", "fxp", "gadget", "hlp", "hta", "inf", "ins", "isp", "its", "js", "jse", "ksh",
+            "lib", "lnk", "mad", "maf", "mag", "mam", "maq", "mar", "mas", "mat", "mau", "mav", "maw",
+            "mda", "mdb", "mde", "mdt", "mdw", "mdz", "msc", "msh", "msh1", "msh2", "mshxml", "msh1xml",
+            "msh2xml", "msi", "msp", "mst", "ops", "pcd", "pif", "plg", "prf", "prg", "reg", "scf", "scr",
+            "sct", "shb", "shs", "sys", "ps1", "ps1xml", "ps2", "ps2xml", "psc1", "psc2", "tmp", "url",
+            "vb", "vbe", "vbs", "vps", "vsmacros", "vss", "vst", "vsw", "vxd", "ws", "wsc", "wsf", "wsh",
+            "xnk");
 
     private SesContentScan() {}
 
@@ -105,6 +118,51 @@ final class SesContentScan {
             return Result.CLEAN;
         }
         return scan(mime, SmtpRelay.parseMime(mime));
+    }
+
+    /**
+     * True when any part of the parsed message, forwarded messages included, carries a file name
+     * whose extension SES refuses. The name is read from {@code Content-Disposition} and, failing
+     * that, from the {@code name} parameter of {@code Content-Type}.
+     */
+    static boolean hasBlockedAttachment(Message parsed) {
+        if (parsed == null) {
+            return false;
+        }
+        Deque<Entity> pending = new ArrayDeque<>();
+        pending.push(parsed);
+        while (!pending.isEmpty()) {
+            Entity entity = pending.pop();
+            if (isBlockedFileName(fileName(entity))) {
+                return true;
+            }
+            Body body = entity.getBody();
+            if (body instanceof Message embedded) {
+                pending.push(embedded);
+            } else if (body instanceof Multipart multipart) {
+                for (Entity part : multipart.getBodyParts()) {
+                    pending.push(part);
+                }
+            }
+        }
+        return false;
+    }
+
+    static boolean isBlockedFileName(String fileName) {
+        if (fileName == null) {
+            return false;
+        }
+        int dot = fileName.lastIndexOf('.');
+        return dot >= 0 && BLOCKED_EXTENSIONS.contains(fileName.substring(dot + 1).trim().toLowerCase(Locale.ROOT));
+    }
+
+    private static String fileName(Entity entity) {
+        String name = entity.getFilename();
+        if (name == null && entity.getHeader() != null
+                && entity.getHeader().getField("Content-Type") instanceof ContentTypeField contentType) {
+            name = contentType.getParameter("name");
+        }
+        return name == null ? null : DecoderUtil.decodeEncodedWords(name, DecodeMonitor.SILENT);
     }
 
     // An explicit worklist rather than recursion: a message can nest forwarded messages and

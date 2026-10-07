@@ -243,6 +243,15 @@ to `application/octet-stream`.
 `ContentTransferEncoding` is validated but not applied: every attachment part
 is base64-encoded, whatever the request asks for.
 
+A message carrying an attachment whose file name ends in one of the
+[unsupported attachment types](https://docs.aws.amazon.com/ses/latest/dg/attachments.html#mime-types)
+(`.exe`, `.bat`, `.js`, `.vbs` and the rest of that list, in any case) is
+refused with `MessageRejected` and nothing is recorded, for a Simple send with
+attachments and a raw send alike. The name is read from `Content-Disposition`,
+or from the `name` parameter of `Content-Type`, in every MIME part, including
+a forwarded message. AWS does not document the error, so the message text is
+Floci's own.
+
 ## Examples
 
 ```bash

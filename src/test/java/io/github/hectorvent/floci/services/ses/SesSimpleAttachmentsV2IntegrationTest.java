@@ -262,6 +262,35 @@ class SesSimpleAttachmentsV2IntegrationTest {
 
     @Test
     @Order(12)
+    void simpleSend_attachmentWithUnsupportedExtension_isRefused() {
+        sendWithAttachments("[{\"FileName\": \"report.pdf\", \"RawContent\": \"" + b64(PDF_BYTES) + "\"},"
+                + "{\"FileName\": \"Setup.EXE\", \"RawContent\": \"" + b64(PDF_BYTES) + "\"}]")
+                .then().statusCode(400)
+                .body("__type", equalTo("MessageRejected"))
+                .body("message", equalTo("Message contains invalid content."));
+    }
+
+    @Test
+    @Order(13)
+    void rawSend_attachmentWithUnsupportedExtension_isRefused() {
+        String mime = "From: " + SENDER + "\r\nTo: to@example.com\r\nSubject: raw\r\n"
+                + "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n"
+                + "--b\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+                + "--b\r\nContent-Type: application/octet-stream\r\n"
+                + "Content-Disposition: attachment; filename=\"macro.vbs\"\r\n"
+                + "Content-Transfer-Encoding: base64\r\n\r\nAAAA\r\n--b--\r\n";
+        send("""
+                {"FromEmailAddress": "%s",
+                 "Destination": {"ToAddresses": ["to@example.com"]},
+                 "Content": {"Raw": {"Data": "%s"}}}
+                """.formatted(SENDER, b64(mime.getBytes(StandardCharsets.US_ASCII))))
+                .then().statusCode(400)
+                .body("__type", equalTo("MessageRejected"))
+                .body("message", equalTo("Message contains invalid content."));
+    }
+
+    @Test
+    @Order(14)
     void cleanUp() {
         given().header("Authorization", AUTH)
         .when().delete("/v2/email/identities/" + SENDER).then().statusCode(200);
