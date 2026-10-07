@@ -53,6 +53,44 @@ class RdsDataServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    @Test
+    void executeStatementRejectsAResponseOverOneMebibyte() throws Exception {
+        TestHarness harness = new TestHarness();
+        ObjectNode request = harness.request(
+                "select repeat('x', 20000) as c from system_range(1, 100)");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(request, REGION));
+        assertEquals("UnsupportedResultException", error.getErrorCode());
+        assertEquals("Database response exceeded size limit", error.getMessage());
+    }
+
+    @Test
+    void executeStatementAllowsAResponseUnderOneMebibyte() throws Exception {
+        TestHarness harness = new TestHarness();
+        ObjectNode response = harness.service.executeStatement(harness.request(
+                "select repeat('x', 20000) as c from system_range(1, 10)"), REGION);
+
+        assertEquals(10, response.get("records").size());
+    }
+
+    /** Records serialize as [[{"stringValue":"..."}]]: 22 bytes around a single string. */
+    @Test
+    void executeStatementCountsTheWholeRecordsArrayAtTheBoundary() throws Exception {
+        int overhead = 22;
+        int limit = 1024 * 1024;
+        TestHarness harness = new TestHarness();
+        ObjectNode exact = harness.service.executeStatement(harness.request(
+                "select repeat('x', " + (limit - overhead) + ") as c"), REGION);
+        assertEquals(1, exact.get("records").size());
+
+        ObjectNode over = harness.request("select repeat('x', " + (limit - overhead + 1) + ") as c");
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(over, REGION));
+        assertEquals("UnsupportedResultException", error.getErrorCode());
+        assertEquals("Database response exceeded size limit", error.getMessage());
+    }
+
     /**
      * Message and error code checked against Aurora PostgreSQL 17.7 through the real
      * Data API on 2026-09-13.

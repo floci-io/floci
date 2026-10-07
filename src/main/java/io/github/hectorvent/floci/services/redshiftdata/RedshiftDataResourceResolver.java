@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessRuntime;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -65,17 +67,21 @@ class RedshiftDataResourceResolver {
         }
         RedshiftServerlessService.WorkgroupTarget workgroup =
                 serverlessService.getWorkgroupTarget(request.get("WorkgroupName").asText(), region);
+        String accountId = AwsArnUtils.parse(workgroup.arn()).accountId();
+        SpectrumSession spectrum = new SpectrumSession(accountId,
+                accountId + ":" + RedshiftServerlessRuntime.backendId(region, workgroup.workgroupName()), database,
+                workgroup.iamRoleArns(), false);
         if (!database.equals(workgroup.database())) {
             throw validation("Database " + database + " does not exist in workgroup " + workgroup.workgroupName()
                     + "; the only database is " + workgroup.database() + ".");
         }
         if (!hasText(request, "SecretArn")) {
             return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
-                    workgroup.masterUsername(), workgroup.masterPassword());
+                    workgroup.masterUsername(), workgroup.masterPassword(), spectrum);
         }
         Credentials creds = secretCredentials(request.get("SecretArn").asText(), region);
         return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
-                creds.username(), creds.password());
+                creds.username(), creds.password(), spectrum);
     }
 
     private Credentials secretCredentials(String secretArn, String region) {
@@ -146,7 +152,10 @@ class RedshiftDataResourceResolver {
         if (host == null || host.isBlank() || port <= 0) {
             throw validation("Cluster runtime is not available for Data API execution.");
         }
-        return new DatabaseTarget(arn, host, port, database, user, password);
+        String accountId = AwsArnUtils.parse(arn).accountId();
+        SpectrumSession spectrum = new SpectrumSession(accountId, accountId + ":" + cluster.getClusterIdentifier(),
+                database, cluster.getIamRoleArns(), false);
+        return new DatabaseTarget(arn, host, port, database, user, password, spectrum);
     }
 
     private Credentials parseCredentials(String secretString) {
@@ -196,7 +205,11 @@ class RedshiftDataResourceResolver {
         return value == null || value.isNull() ? null : value.asText();
     }
 
-    record DatabaseTarget(String arn, String host, int port, String database, String user, String password) {
+    record DatabaseTarget(String arn, String host, int port, String database, String user, String password,
+                          SpectrumSession spectrum) {
+        DatabaseTarget(String arn, String host, int port, String database, String user, String password) {
+            this(arn, host, port, database, user, password, null);
+        }
     }
 
     private record Credentials(String username, String password) {

@@ -5,8 +5,8 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.runtime.ShutdownEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -76,6 +76,7 @@ public class RedshiftProxyManager {
         // Make sure the self-signed proxy certificate covers the host clients will connect to,
         // so sslmode=prefer/require handshakes succeed.
         tlsCertificates.ensureHost(advertisedHost);
+        invalidateSpectrumRuntime(relayKey);
         EmulatorConfig.RedshiftServiceConfig redshiftConfig = config.services().redshift();
         String clusterAccountId = relayKey.substring(0, relayKey.indexOf(':'));
         RedshiftAuthProxy proxy = new RedshiftAuthProxy(
@@ -137,6 +138,20 @@ public class RedshiftProxyManager {
             proxy.stop();
             proxies.remove(relayKey);
             LOG.infov("Stopped Redshift proxy for cluster {0}", relayKey);
+        }
+        invalidateSpectrumRuntime(relayKey);
+    }
+
+    public void forgetSpectrumRuntime(String relayKey) {
+        if (spectrumInterceptor != null && spectrumInterceptor.preparation() != null) {
+            String accountId = relayKey.substring(0, relayKey.indexOf(':'));
+            spectrumInterceptor.preparation().forgetRuntime(accountId, relayKey);
+        }
+    }
+
+    private void invalidateSpectrumRuntime(String relayKey) {
+        if (spectrumInterceptor != null && spectrumInterceptor.preparation() != null) {
+            spectrumInterceptor.preparation().invalidateRuntime(relayKey);
         }
     }
 

@@ -7,6 +7,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
+import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -33,16 +38,25 @@ public class RedshiftDataService implements Resettable {
     private final RedshiftDataConnectionFactory connectionFactory;
     private final RedshiftDataStatementStore store;
     private final ObjectMapper objectMapper;
+    private final SpectrumQueryPreparation preparation;
 
-    @Inject
     public RedshiftDataService(RedshiftDataResourceResolver resolver,
                                RedshiftDataConnectionFactory connectionFactory,
                                RedshiftDataStatementStore store,
                                ObjectMapper objectMapper) {
+        this(resolver, connectionFactory, store, objectMapper, null);
+    }
+
+    @Inject
+    public RedshiftDataService(RedshiftDataResourceResolver resolver,
+                               RedshiftDataConnectionFactory connectionFactory,
+                               RedshiftDataStatementStore store, ObjectMapper objectMapper,
+                               SpectrumQueryPreparation preparation) {
         this.resolver = resolver;
         this.connectionFactory = connectionFactory;
         this.store = store;
         this.objectMapper = objectMapper;
+        this.preparation = preparation;
     }
 
     @Override
@@ -77,7 +91,7 @@ public class RedshiftDataService implements Resettable {
                               RedshiftDataResourceResolver.DatabaseTarget target,
                               String sql, Map<String, String> parameters) {
         try (Connection connection = connectionFactory.open(target)) {
-            runOnConnection(stored, connection, sql, parameters);
+            runOnConnection(stored, connection, sql, parameters, target.spectrum());
         } catch (SQLException e) {
             stored.status = RedshiftDataStatementStore.Status.FAILED;
             stored.error = e.getMessage();
@@ -104,8 +118,25 @@ public class RedshiftDataService implements Resettable {
     }
 
     private void runOnConnection(RedshiftDataStatementStore.StoredStatement stored,
-                                 Connection connection, String sql, Map<String, String> parameters)
+                                 Connection connection, String sql, Map<String, String> parameters, SpectrumSession context)
             throws SQLException {
+        if (preparation != null && context != null) {
+            SpectrumSession session = new SpectrumSession(context.accountId(), context.clusterKey(), context.databaseName(),
+                    context.iamRoleArns(), !connection.getAutoCommit());
+            try {
+                if (preparation.prepare(sql, session, new RedshiftDataBackendSql(connection))) {
+                    stored.status = RedshiftDataStatementStore.Status.FINISHED;
+                    return;
+                }
+            } catch (SpectrumSqlException exception) {
+                throw new SQLException(exception.getMessage(), exception.sqlState(), exception);
+            } catch (SpectrumReadException exception) {
+                throw new SQLException(exception.getMessage(), exception.sqlState(), exception);
+            } catch (RuntimeException exception) {
+                // Anything else from Glue or the read path must fail the statement, not leave it running.
+                throw new SQLException("External query preparation failed: " + exception.getMessage(), "58030", exception);
+            }
+        }
         ParsedSql parsed = RedshiftDataSqlParameters.parse(sql);
         long t0 = System.nanoTime();
         try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
@@ -309,44 +340,57 @@ public class RedshiftDataService implements Resettable {
 
         long totalDuration = 0;
         try (Connection connection = connectionFactory.open(target)) {
-            connection.setAutoCommit(false);
-            boolean failed = false;
-            for (int n = 0; n < sqls.size(); n++) {
-                RedshiftDataStatementStore.StoredStatement sub = new RedshiftDataStatementStore.StoredStatement();
-                sub.id = parent.id + ":" + (n + 1);
-                sub.sql = sqls.get(n);
-                sub.sqls = List.of(sqls.get(n));
-                sub.clusterIdentifier = parent.clusterIdentifier;
-                sub.workgroupName = parent.workgroupName;
-                sub.database = parent.database;
-                sub.dbUser = parent.dbUser;
-                sub.resultFormat = parent.resultFormat;
-                Instant now = Instant.now();
-                sub.createdAt = now;
-                sub.updatedAt = now;
-                try {
-                    runOnConnection(sub, connection, sqls.get(n), Map.of());
-                } catch (SQLException e) {
-                    sub.status = RedshiftDataStatementStore.Status.FAILED;
-                    sub.error = e.getMessage();
+            BackendSql batchBackend = new RedshiftDataBackendSql(connection);
+            boolean committed = false;
+            try {
+                connection.setAutoCommit(false);
+                boolean failed = false;
+                for (int n = 0; n < sqls.size(); n++) {
+                    RedshiftDataStatementStore.StoredStatement sub = new RedshiftDataStatementStore.StoredStatement();
+                    sub.id = parent.id + ":" + (n + 1);
+                    sub.sql = sqls.get(n);
+                    sub.sqls = List.of(sqls.get(n));
+                    sub.clusterIdentifier = parent.clusterIdentifier;
+                    sub.workgroupName = parent.workgroupName;
+                    sub.database = parent.database;
+                    sub.dbUser = parent.dbUser;
+                    sub.resultFormat = parent.resultFormat;
+                    Instant now = Instant.now();
+                    sub.createdAt = now;
+                    sub.updatedAt = now;
+                    try {
+                        runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum());
+                    } catch (SQLException e) {
+                        sub.status = RedshiftDataStatementStore.Status.FAILED;
+                        sub.error = e.getMessage();
+                        sub.updatedAt = Instant.now();
+                        parent.subStatements.add(sub);
+                        store.put(sub);
+                        totalDuration += sub.durationNanos;
+                        parent.status = RedshiftDataStatementStore.Status.FAILED;
+                        parent.error = e.getMessage();
+                        connection.rollback();
+                        failed = true;
+                        break;
+                    }
                     sub.updatedAt = Instant.now();
                     parent.subStatements.add(sub);
                     store.put(sub);
                     totalDuration += sub.durationNanos;
-                    parent.status = RedshiftDataStatementStore.Status.FAILED;
-                    parent.error = e.getMessage();
-                    connection.rollback();
-                    failed = true;
-                    break;
                 }
-                sub.updatedAt = Instant.now();
-                parent.subStatements.add(sub);
-                store.put(sub);
-                totalDuration += sub.durationNanos;
-            }
-            if (!failed) {
-                connection.commit();
-                parent.status = RedshiftDataStatementStore.Status.FINISHED;
+                if (!failed) {
+                    connection.commit();
+                    committed = true;
+                    parent.status = RedshiftDataStatementStore.Status.FINISHED;
+                }
+            } finally {
+                if (preparation != null) {
+                    if (committed) {
+                        preparation.finishCycle(batchBackend, true);
+                    } else {
+                        preparation.finishCycle(batchBackend);
+                    }
+                }
             }
         } catch (SQLException e) {
             parent.status = RedshiftDataStatementStore.Status.FAILED;

@@ -648,6 +648,9 @@ public class CognitoJsonHandler {
             attr.put("Name", k);
             attr.put("Value", v);
         });
+        Map<String, Object> mfaSettings = new LinkedHashMap<>();
+        CognitoService.putMfaSettings(mfaSettings, service.describeUserPool(request.path("UserPoolId").asText()), user);
+        response.setAll(objectMapper.<ObjectNode>valueToTree(mfaSettings));
         return Response.ok(response).build();
     }
 
@@ -1509,47 +1512,26 @@ public class CognitoJsonHandler {
         return node;
     }
     private Response handleAdminSetUserMFAPreference(JsonNode request) {
-        String userPoolId = request.path("UserPoolId").asText();
-        String username = request.path("Username").asText();
-
-        JsonNode emailSettings = request.path("EmailMfaSettings");
-
-        Boolean enabled = emailSettings.has("Enabled")
-                ? emailSettings.path("Enabled").asBoolean()
-                : null;
-
-        Boolean preferredMfa = emailSettings.has("PreferredMfa")
-                ? emailSettings.path("PreferredMfa").asBoolean()
-                : null;
-
         service.adminSetUserMFAPreference(
-                userPoolId,
-                username,
-                enabled,
-                preferredMfa
-        );
-
+                request.path("UserPoolId").asText(),
+                request.path("Username").asText(),
+                mfaSettingsUpdate(request.path("EmailMfaSettings")),
+                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleSetUserMFAPreference(JsonNode request) {
-        JsonNode emailSettings = request.path("EmailMfaSettings");
-
-        Boolean enabled = emailSettings.has("Enabled")
-                ? emailSettings.path("Enabled").asBoolean()
-                : null;
-
-        Boolean preferredMfa = emailSettings.has("PreferredMfa")
-                ? emailSettings.path("PreferredMfa").asBoolean()
-                : null;
-
         service.setUserMFAPreference(
                 request.path("AccessToken").asText(),
-                enabled,
-                preferredMfa
-        );
-
+                mfaSettingsUpdate(request.path("EmailMfaSettings")),
+                mfaSettingsUpdate(request.path("SoftwareTokenMfaSettings")));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static CognitoService.MfaSettingsUpdate mfaSettingsUpdate(JsonNode settings) {
+        return new CognitoService.MfaSettingsUpdate(
+                settings.has("Enabled") ? settings.path("Enabled").asBoolean() : null,
+                settings.has("PreferredMfa") ? settings.path("PreferredMfa").asBoolean() : null);
     }
 
 }
