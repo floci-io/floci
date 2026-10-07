@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * A Redshift Serverless snapshot. Floci stores snapshot metadata only and does not model async
@@ -24,6 +26,31 @@ public class RedshiftServerlessSnapshot {
     private String ownerAccount;
     private String status = "AVAILABLE";
     private Instant snapshotCreateTime;
+    private String adminUsername;
+    private String kmsKeyId;
+    private Integer retentionPeriod;
+    private String sqlDump;
+    private Map<String, String> tags = new LinkedHashMap<>();
+
+    public RedshiftServerlessSnapshot() {
+    }
+
+    public RedshiftServerlessSnapshot(RedshiftServerlessSnapshot other) {
+        this.snapshotName = other.snapshotName;
+        this.snapshotArn = other.snapshotArn;
+        this.namespaceName = other.namespaceName;
+        this.namespaceArn = other.namespaceArn;
+        this.region = other.region;
+        this.accountId = other.accountId;
+        this.ownerAccount = other.ownerAccount;
+        this.status = other.status;
+        this.snapshotCreateTime = other.snapshotCreateTime;
+        this.adminUsername = other.adminUsername;
+        this.kmsKeyId = other.kmsKeyId;
+        this.retentionPeriod = other.retentionPeriod;
+        this.sqlDump = other.sqlDump;
+        this.tags = new LinkedHashMap<>(other.tags);
+    }
 
     public String getSnapshotName() {
         return snapshotName;
@@ -95,5 +122,47 @@ public class RedshiftServerlessSnapshot {
 
     public void setSnapshotCreateTime(Instant snapshotCreateTime) {
         this.snapshotCreateTime = snapshotCreateTime;
+    }
+
+    public String getAdminUsername() {
+        return adminUsername;
+    }
+
+    public void setAdminUsername(String adminUsername) {
+        this.adminUsername = adminUsername;
+    }
+
+    public String getKmsKeyId() {
+        return kmsKeyId;
+    }
+
+    public void setKmsKeyId(String kmsKeyId) {
+        this.kmsKeyId = kmsKeyId;
+    }
+
+    /** Days the snapshot is kept, or {@code null} for indefinitely. */
+    public Integer getRetentionPeriod() {
+        return retentionPeriod;
+    }
+
+    public void setRetentionPeriod(Integer retentionPeriod) {
+        this.retentionPeriod = retentionPeriod;
+    }
+
+    /** Path of the pg_dump file, or {@code null} for a metadata-only snapshot. */
+    public String getSqlDump() {
+        return sqlDump;
+    }
+
+    public void setSqlDump(String sqlDump) {
+        this.sqlDump = sqlDump;
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
     }
 }

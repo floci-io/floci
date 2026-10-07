@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 
@@ -68,6 +69,26 @@ class RedshiftServerlessRuntimeTest {
         order.verify(proxies).startProxy(eq(RELAY_KEY), eq(7100), eq("172.17.0.5"), eq(5432), eq("localhost"),
                 eq("root"), eq("Secret123"), eq("analytics"), any(PasswordValidator.class), eq(List.of()));
         verify(containers, never()).adoptOrStart(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void takeSnapshotDumpsTheWorkgroupBackend() {
+        Path dump = Path.of("/tmp/dump.sql");
+
+        runtime.takeSnapshot(ACCOUNT, REGION, "my-wg", "root", "analytics", dump);
+
+        verify(containers).takeSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump);
+    }
+
+    @Test
+    void restoreSnapshotEmptiesTheSchemaBeforeReplayingTheDump() {
+        Path dump = Path.of("/tmp/dump.sql");
+
+        runtime.restoreSnapshot(ACCOUNT, REGION, "my-wg", "root", "analytics", dump);
+
+        InOrder order = inOrder(containers);
+        order.verify(containers).resetPublicSchema(ACCOUNT, BACKEND_ID, "root", "analytics");
+        order.verify(containers).restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump);
     }
 
     @Test

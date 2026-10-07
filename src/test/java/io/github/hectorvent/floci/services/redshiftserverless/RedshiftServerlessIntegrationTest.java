@@ -195,9 +195,14 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(200);
 
         String snapshotArn = call("CreateSnapshot",
-                "{\"snapshotName\":\"snap-life\",\"namespaceName\":\"snap-life-ns\"}")
+                "{\"snapshotName\":\"snap-life\",\"namespaceName\":\"snap-life-ns\",\"retentionPeriod\":7,"
+                        + "\"tags\":[{\"key\":\"env\",\"value\":\"dev\"}]}")
                 .statusCode(200)
                 .body("snapshot.snapshotName", equalTo("snap-life"))
+                .body("snapshot.snapshotRetentionPeriod", equalTo(7))
+                .body("snapshot.snapshotRemainingDays", equalTo(7))
+                .body("snapshot.adminUsername", equalTo("admin"))
+                .body("snapshot.kmsKeyId", equalTo("AWS_OWNED_KMS_KEY"))
                 .body("snapshot.namespaceName", equalTo("snap-life-ns"))
                 .body("snapshot.status", equalTo("AVAILABLE"))
                 .body("snapshot.snapshotCreateTime", matchesPattern("\\d{4}-\\d{2}-\\d{2}T.*Z"))
@@ -220,6 +225,19 @@ class RedshiftServerlessIntegrationTest {
         call("ListSnapshots", "{\"namespaceName\":\"snap-life-ns\",\"maxResults\":1}")
                 .statusCode(200)
                 .body("snapshots.snapshotName", hasItem("snap-life"));
+        call("ListTagsForResource", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(200)
+                .body("tags.key", hasItem("env"));
+        call("ListSnapshots", "{\"ownerAccount\":\"999999999999\"}")
+                .statusCode(200)
+                .body("snapshots", hasSize(0));
+        call("ListSnapshots", "{\"startTime\":4102444800}")
+                .statusCode(200)
+                .body("snapshots", hasSize(0));
+        call("RestoreFromSnapshot", "{\"namespaceName\":\"snap-life-ns\",\"workgroupName\":\"snap-life-wg\","
+                + "\"snapshotName\":\"snap-life\",\"snapshotArn\":\"" + snapshotArn + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
         call("ListSnapshots", "{\"namespaceName\":\"no-such-ns\"}")
                 .statusCode(200)
                 .body("snapshots", hasSize(0));

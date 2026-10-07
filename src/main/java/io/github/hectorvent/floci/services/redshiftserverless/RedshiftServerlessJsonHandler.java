@@ -20,6 +20,8 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -207,7 +209,8 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleCreateSnapshot(JsonNode request, String region) {
         return snapshotResponse(service.createSnapshot(
-                text(request, "snapshotName"), text(request, "namespaceName"), region));
+                text(request, "snapshotName"), text(request, "namespaceName"),
+                parseInteger(request, "retentionPeriod"), parseTagList(request.path("tags"), "tags"), region));
     }
 
     /**
@@ -220,7 +223,9 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleListSnapshots(JsonNode request, String region) {
         PaginatedResult<RedshiftServerlessSnapshot> page = service.listSnapshots(
-                text(request, "namespaceName"), region, parseMaxResults(request), text(request, "nextToken"));
+                text(request, "namespaceName"), text(request, "namespaceArn"), text(request, "ownerAccount"),
+                parseEpochSeconds(request, "startTime"), parseEpochSeconds(request, "endTime"), region,
+                parseMaxResults(request), text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("snapshots");
         page.items().forEach(snapshot -> items.add(snapshotNode(snapshot)));
@@ -237,7 +242,7 @@ public class RedshiftServerlessJsonHandler {
     private Response handleRestoreFromSnapshot(JsonNode request, String region) {
         RedshiftServerlessService.RestoreResult result = service.restoreFromSnapshot(
                 text(request, "namespaceName"), text(request, "workgroupName"),
-                snapshotNameOf(request, region), region);
+                snapshotNameOf(request, region), text(request, "ownerAccount"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("namespace", namespaceNode(result.namespace()));
         response.put("ownerAccount", result.snapshot().getOwnerAccount());
@@ -248,11 +253,11 @@ public class RedshiftServerlessJsonHandler {
     /** The snapshot name from {@code snapshotName}, or recovered from {@code snapshotArn} when absent. */
     private String snapshotNameOf(JsonNode request, String region) {
         String snapshotName = text(request, "snapshotName");
-        if (snapshotName != null) {
-            return snapshotName;
-        }
         String snapshotArn = text(request, "snapshotArn");
-        return snapshotArn == null ? null : service.snapshotNameFromArn(snapshotArn, region);
+        if (snapshotName != null && snapshotArn != null) {
+            throw validation("snapshotName and snapshotArn cannot both be specified.");
+        }
+        return snapshotArn == null ? snapshotName : service.snapshotNameFromArn(snapshotArn, region);
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
@@ -330,6 +335,15 @@ public class RedshiftServerlessJsonHandler {
         node.put("namespaceArn", snapshot.getNamespaceArn());
         node.put("ownerAccount", snapshot.getOwnerAccount());
         node.put("status", snapshot.getStatus());
+        node.put("adminUsername", snapshot.getAdminUsername());
+        if (snapshot.getKmsKeyId() != null) {
+            node.put("kmsKeyId", snapshot.getKmsKeyId());
+        }
+        if (snapshot.getRetentionPeriod() != null) {
+            node.put("snapshotRetentionPeriod", snapshot.getRetentionPeriod());
+            long elapsedDays = Duration.between(snapshot.getSnapshotCreateTime(), Instant.now()).toDays();
+            node.put("snapshotRemainingDays", Math.max(0, snapshot.getRetentionPeriod() - elapsedDays));
+        }
         if (snapshot.getSnapshotCreateTime() != null) {
             node.put("snapshotCreateTime", CREATION_DATE_FORMAT.format(snapshot.getSnapshotCreateTime()));
         }
@@ -461,6 +475,18 @@ public class RedshiftServerlessJsonHandler {
             throw validation("pricePerformanceTarget must be an object.");
         }
         return new PricePerformanceTarget(text(node, "status"), parseInteger(node, "level"));
+    }
+
+    /** A timestamp request member, which awsJson1.1 sends as epoch seconds unless the model says otherwise. */
+    private Instant parseEpochSeconds(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isNumber()) {
+            throw validation(field + " must be a timestamp.");
+        }
+        return Instant.ofEpochMilli(Math.round(node.asDouble() * 1000));
     }
 
     private Integer parseMaxResults(JsonNode request) {

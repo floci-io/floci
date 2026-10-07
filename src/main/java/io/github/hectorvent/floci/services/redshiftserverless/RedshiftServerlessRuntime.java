@@ -11,6 +11,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.List;
 import java.util.Optional;
@@ -79,6 +80,20 @@ public class RedshiftServerlessRuntime {
             rollback(accountId, backendId);
             throw e;
         }
+    }
+
+    /** Dumps the workgroup's database to {@code outputFile} with pg_dump. */
+    public void takeSnapshot(String accountId, String region, String workgroupName, String masterUsername,
+                             String dbName, Path outputFile) {
+        containerManager.takeSnapshot(accountId, backendId(region, workgroupName), masterUsername, dbName, outputFile);
+    }
+
+    /** Replaces the workgroup's database contents with the dump in {@code dumpFile}. */
+    public void restoreSnapshot(String accountId, String region, String workgroupName, String masterUsername,
+                                String dbName, Path dumpFile) {
+        String backendId = backendId(region, workgroupName);
+        containerManager.resetPublicSchema(accountId, backendId, masterUsername, dbName);
+        containerManager.restoreSnapshot(accountId, backendId, masterUsername, dbName, dumpFile);
     }
 
     /**

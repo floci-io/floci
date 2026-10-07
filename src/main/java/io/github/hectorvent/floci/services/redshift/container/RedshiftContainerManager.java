@@ -315,6 +315,36 @@ public class RedshiftContainerManager {
         }
     }
 
+    /**
+     * Empties the {@code public} schema so a following {@link #restoreSnapshot} replays into a clean
+     * database rather than appending to what is already there.
+     */
+    public void resetPublicSchema(String accountId, String clusterIdentifier, String username, String dbname) {
+        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
+        if (handle == null) {
+            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
+        }
+        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
+        String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-c",
+                "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"};
+        try {
+            ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 30);
+            if (result.exitCode() != 0) {
+                LOG.warnv("Schema reset failed for cluster {0} (exit {1}): {2}", clusterIdentifier,
+                        result.exitCode(), result.stderr());
+                throw new AwsException("InternalFailure", "Failed to reset the database of " + clusterIdentifier
+                        + ": " + result.stderr(), 500);
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.errorv(e, "Error resetting the database of cluster {0}", clusterIdentifier);
+            throw new AwsException("InternalFailure", "Failed to reset the database of " + clusterIdentifier
+                    + ": " + e.getMessage(), 500);
+        }
+    }
+
     public void restoreSnapshot(String accountId, String clusterIdentifier, String username, Path sqlDumpFile) {
         restoreSnapshot(accountId, clusterIdentifier, username, "dev", sqlDumpFile);
     }

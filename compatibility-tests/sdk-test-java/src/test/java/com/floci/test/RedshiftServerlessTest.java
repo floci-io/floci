@@ -195,9 +195,18 @@ class RedshiftServerlessTest {
                 assertThatThrownBy(() -> client.getSnapshot(request -> request.snapshotName(snapshotName)))
                         .isInstanceOf(ResourceNotFoundException.class);
             } finally {
+                deleteSnapshotBestEffort(client, snapshotName);
                 deleteWorkgroupBestEffort(client, workgroupName);
                 deleteBestEffort(client, namespaceName);
             }
+        }
+    }
+
+    private static void deleteSnapshotBestEffort(RedshiftServerlessClient client, String snapshotName) {
+        try {
+            client.deleteSnapshot(request -> request.snapshotName(snapshotName));
+        } catch (Exception cleanupError) {
+            LOG.warnf(cleanupError, "Best-effort cleanup failed for snapshotName=%s", snapshotName);
         }
     }
 
