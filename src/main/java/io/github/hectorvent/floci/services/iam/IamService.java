@@ -173,6 +173,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int ROLE_NAME_MAX_LENGTH = 64;
     /** groupNameType / instanceProfileNameType: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern IAM_RESOURCE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
+    /**
+     * serviceSpecificCredentialId, kept as the model spells it because the pattern is quoted
+     * back in the error message. AWS checks the format before it looks for the credential.
+     */
+    private static final Pattern SERVICE_CREDENTIAL_ID_PATTERN = Pattern.compile("[\\w]+");
+    private static final int SERVICE_CREDENTIAL_ID_MIN_LENGTH = 20;
+    private static final int SERVICE_CREDENTIAL_ID_MAX_LENGTH = 128;
     /** pathType: a bare slash, or a slash-delimited run of {@code !}-{@code ~}. */
     private static final Pattern IAM_PATH_PATTERN = Pattern.compile("(/)|(/[\\x21-\\x7E]+/)");
     private static final int IAM_PATH_MAX_LENGTH = 512;
@@ -727,11 +734,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         // order here and in UpdateUser, and nowhere else in more than one, so it cannot deadlock.
         synchronized (serviceCredentialLock) {
             // AWS lists these among the items to remove first, under their CodeCommit
-            // name: "Git credentials (DeleteServiceSpecificCredential)".
+            // name: "Git credentials (DeleteServiceSpecificCredential)". Unlike the
+            // cases above it has no message of its own: AWS falls back to the generic
+            // referenced-objects wording here.
             if (!userServiceCredentials(userName).isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must delete service-specific credentials "
-                                + "first.", 409);
+                        "Cannot delete entity, must remove referenced objects first.", 409);
             }
             synchronized (sshPublicKeyLock) {
                 if (!userSshPublicKeys(userName).isEmpty()) {
@@ -2727,6 +2735,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return getServerCertificate(name).getTags();
     }
 
+    // Credential status, shared by the three operations that take statusType
+    // =========================================================================
+
+    /**
+     * {@code statusType}, shared by UpdateSigningCertificate, UpdateSSHPublicKey and
+     * UpdateServiceSpecificCredential. One rendering serves all three because one front end
+     * validates one shape: the recording is of UpdateServiceSpecificCredential, and AWS names
+     * neither the offending value nor the permitted set, unlike this message elsewhere in the
+     * tree. Matched rather than made uniform.
+     */
+    private void requireStatusFromEnum(String status) {
+        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'status' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set", 400);
+        }
+    }
+
     // Signing certificates
     // =========================================================================
 
@@ -2782,12 +2808,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateSigningCertificate(String userName, String certificateId, String status) {
-        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
-                            + "satisfy enum value set: [" + String.join(", ",
-                            CREDENTIAL_STATUSES) + "]", 400);
-        }
+        requireStatusFromEnum(status);
         synchronized (signingCertificateLock) {
             SigningCertificate certificate = userSigningCertificate(userName, certificateId);
             certificate.setStatus(status);
@@ -2951,12 +2972,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateSshPublicKey(String userName, String keyId, String status) {
-        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
-                            + "satisfy enum value set: [" + String.join(", ",
-                            CREDENTIAL_STATUSES) + "]", 400);
-        }
+        requireStatusFromEnum(status);
         synchronized (sshPublicKeyLock) {
             SshPublicKey stored = userSshPublicKey(userName, keyId);
             stored.setStatus(status);
@@ -3231,12 +3247,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void updateServiceSpecificCredential(String userName, String credentialId,
                                                 String status) {
-        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
-                            + "satisfy enum value set: [" + String.join(", ",
-                            CREDENTIAL_STATUSES) + "]", 400);
-        }
+        requireCredentialIdFormat(credentialId);
+        requireStatusFromEnum(status);
         synchronized (serviceCredentialLock) {
             ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
             credential.setStatus(status);
@@ -3250,6 +3262,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public ServiceSpecificCredential resetServiceSpecificCredential(String userName,
                                                                     String credentialId) {
+        requireCredentialIdFormat(credentialId);
         synchronized (serviceCredentialLock) {
             ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
             if (LONG_TERM_API_KEY_SERVICES.contains(credential.getServiceName())) {
@@ -3263,23 +3276,66 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteServiceSpecificCredential(String userName, String credentialId) {
+        requireCredentialIdFormat(credentialId);
         synchronized (serviceCredentialLock) {
             ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
             serviceCredentials.delete(credential.getServiceSpecificCredentialId());
         }
     }
 
+    /**
+     * The id has to satisfy the model before anything looks for it: AWS answers a malformed one
+     * with a {@code ValidationError} naming the constraint it broke, and only a well-formed id
+     * that matches nothing gets {@code NoSuchEntity}. Different mistakes, different answers.
+     *
+     * <p>The API Reference publishes a length of 20 to 128 as well as the pattern, so both are
+     * checked, and both are reported when both are broken, in the order it prints them. The
+     * pattern message is the one recorded against AWS; the length wording is the form AWS uses for
+     * a member carrying both bounds, which {@link #validateLoginProfilePassword} spells the same
+     * way.
+     */
+    private void requireCredentialIdFormat(String credentialId) {
+        String id = credentialId == null ? "" : credentialId;
+        List<String> violations = new ArrayList<>();
+        if (id.length() < SERVICE_CREDENTIAL_ID_MIN_LENGTH
+                || id.length() > SERVICE_CREDENTIAL_ID_MAX_LENGTH) {
+            violations.add("Member must have length less than or equal to "
+                    + SERVICE_CREDENTIAL_ID_MAX_LENGTH + " and greater than or equal to "
+                    + SERVICE_CREDENTIAL_ID_MIN_LENGTH);
+        }
+        if (!SERVICE_CREDENTIAL_ID_PATTERN.matcher(id).matches()) {
+            violations.add("Member must satisfy regular expression pattern: [\\w]+");
+        }
+        if (violations.isEmpty()) {
+            return;
+        }
+        StringBuilder message = new StringBuilder()
+                .append(violations.size())
+                .append(violations.size() == 1 ? " validation error detected: "
+                                               : " validation errors detected: ");
+        for (int i = 0; i < violations.size(); i++) {
+            if (i > 0) {
+                message.append("; ");
+            }
+            message.append("Value at 'serviceSpecificCredentialId' failed to satisfy constraint: ")
+                    .append(violations.get(i));
+        }
+        throw new AwsException("ValidationError", message.toString(), 400);
+    }
+
+    /** AWS's wording for an id that matches the pattern and no credential. */
+    private AwsException noSuchCredential(String credentialId) {
+        return new AwsException("NoSuchEntity",
+                "No such credential " + credentialId + " exists", 404);
+    }
+
     /** A credential of that id belonging to that user, reported missing when it belongs elsewhere. */
     private ServiceSpecificCredential userServiceCredential(String userName, String credentialId) {
         getUser(userName); // validates existence
         ServiceSpecificCredential credential = serviceCredentials.get(credentialId)
-                .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "The Service Specific Credential with id " + credentialId
-                                + " cannot be found.", 404));
+                .orElseThrow(() -> noSuchCredential(credentialId));
         if (!userName.equals(credential.getUserName())) {
-            throw new AwsException("NoSuchEntity",
-                    "The Service Specific Credential with id " + credentialId
-                            + " cannot be found.", 404);
+            throw noSuchCredential(credentialId);
         }
         return credential;
     }

@@ -744,6 +744,19 @@ code `NotSupportedService`, on both `CreateServiceSpecificCredential` and
 a real service that simply does not support these credentials. A client written against the model,
 catching the modelled exception, would catch nothing.
 
+A bad `ServiceSpecificCredentialId` splits two ways on `UpdateServiceSpecificCredential`,
+`ResetServiceSpecificCredential` and `DeleteServiceSpecificCredential`. The id is matched against
+the model's `[\w]+` before anything goes looking for it, so one carrying characters outside that
+class is a `ValidationError` with status 400 quoting the pattern, while an id that satisfies the
+pattern and names no credential of that user is `NoSuchEntity` with status 404 and the message
+"No such credential `<id>` exists". The published length of 20 to 128 is enforced the same way, and
+an id breaking both constraints is reported as two validation errors rather than one.
+
+A user that still owns a credential cannot be deleted: `DeleteUser` is `DeleteConflict` with status
+409. Where access keys, policies and group memberships each get a message naming what is in the
+way, this case does not, and AWS answers the generic "Cannot delete entity, must remove referenced
+objects first." Deleting the credential first lets the user go.
+
 **A credential has one of two shapes, decided by the service:**
 
 | Service | Shape |
