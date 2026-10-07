@@ -2344,7 +2344,7 @@ class LambdaServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION, "revision-lock-func", updateReq));
         assertEquals("PreconditionFailedException", ex.getErrorCode());
         assertEquals(412, ex.getHttpStatus());
-        assertEquals("The Revision Id provided does not match the latest Revision Id. Call the GetFunction or the GetFunctionConfiguration API to retrieve the latest Revision Id for your resource.", ex.getMessage());
+        assertEquals("The Revision Id provided does not match the latest Revision Id. Call the GetFunction/GetAlias API to retrieve the latest Revision Id", ex.getMessage());
 
         LambdaFunction unchangedFn = service.getFunction(REGION, "revision-lock-func");
         assertEquals(initialRevisionId, unchangedFn.getRevisionId());

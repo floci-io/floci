@@ -787,8 +787,7 @@ public class LambdaService implements ResourceProvider {
             if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
                 throw new AwsException("PreconditionFailedException",
                         "The Revision Id provided does not match the latest Revision Id. "
-                        + "Call the GetFunction or the GetFunctionConfiguration API to retrieve "
-                        + "the latest Revision Id for your resource.", 412);
+                        + "Call the GetFunction/GetAlias API to retrieve the latest Revision Id", 412);
             }
         }
     }
