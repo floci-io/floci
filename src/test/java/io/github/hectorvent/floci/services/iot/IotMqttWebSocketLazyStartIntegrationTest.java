@@ -8,6 +8,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
 import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.junit.jupiter.api.BeforeEach;
@@ -79,7 +80,7 @@ class IotMqttWebSocketLazyStartIntegrationTest {
             Thread thread = new Thread(() -> {
                 try {
                     MqttClient client = new MqttClient(ws(), clientId, new MemoryPersistence());
-                    client.connect();
+                    PahoWebSocketConnect.connect(client, new MqttConnectOptions());
                     connected.add(client);
                 } catch (Exception e) {
                     failures.add(e);
