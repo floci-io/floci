@@ -557,6 +557,28 @@ class ApiGatewayExecuteControllerTest {
     }
 
     @Test
+    void httpApiPayloadV1ResponseWithoutStatusCodeIsNotInferred() {
+        // An HTTP API integration configured with payloadFormatVersion 1.0 keeps the 1.0 response rules.
+        String payload = "{\"headers\":{\"X-Trace\":\"value\"},\"body\":\"inner\"}";
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(proxyPayload(payload), true, false)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("inner", bodyOf(response));
+            assertEquals("value", response.getHeaderString("X-Trace"));
+        }
+    }
+
+    @Test
+    void httpApiPayloadV1FunctionErrorAnswersInternalServerErrorMessage() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(functionError(
+                "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), true, false)) {
+            assertEquals(502, response.getStatus());
+            assertEquals("{\"message\":\"Internal Server Error\"}", bodyOf(response));
+        }
+    }
+
+    @Test
     void restApiV1ResponseWithoutStatusCodeIsNotInferred() {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         try (Response response = controller.buildProxyResponse(proxyPayload("{\"body\":\"inner\"}"), false)) {

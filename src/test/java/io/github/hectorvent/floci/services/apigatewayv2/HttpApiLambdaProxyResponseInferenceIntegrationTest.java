@@ -16,7 +16,7 @@ import static org.hamcrest.Matchers.startsWith;
  * End to end check of how an HTTP API answers a payload format 2.0 Lambda proxy integration whose
  * function returns no {@code statusCode} or throws. AWS infers a 200 JSON response whose body is
  * the function's result, and answers a function error with {@code {"message":"Internal Server
- * Error"}}.
+ * Error"}}. An integration configured with format 1.0 keeps the 1.0 response rules.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -25,6 +25,7 @@ class HttpApiLambdaProxyResponseInferenceIntegrationTest {
     private static final String BARE_FUNCTION = "httpv2-inference-bare-fn";
     private static final String STRING_FUNCTION = "httpv2-inference-string-fn";
     private static final String THROW_FUNCTION = "httpv2-inference-throw-fn";
+    private static final String V1_FUNCTION = "httpv2-inference-v1-fn";
 
     private static String apiId;
 
@@ -56,9 +57,16 @@ class HttpApiLambdaProxyResponseInferenceIntegrationTest {
                 "exports.handler = async () => 'Hello from Lambda!';");
         createProxyRoute(THROW_FUNCTION, "/throw",
                 "exports.handler = async () => { throw new Error('boom'); };");
+        createProxyRoute(V1_FUNCTION, "/v1", "1.0",
+                "exports.handler = async () => ({ headers: { 'X-Trace': 'value' }, body: 'inner' });");
     }
 
     private static void createProxyRoute(String functionName, String path, String handlerCode) throws Exception {
+        createProxyRoute(functionName, path, "2.0", handlerCode);
+    }
+
+    private static void createProxyRoute(String functionName, String path, String payloadFormatVersion,
+                                         String handlerCode) throws Exception {
         String zip = WebSocketTestSupport.createLambdaZip(handlerCode);
 
         given()
@@ -72,8 +80,8 @@ class HttpApiLambdaProxyResponseInferenceIntegrationTest {
         String integrationId = given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"integrationType":"AWS_PROXY","integrationUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations","integrationMethod":"POST","payloadFormatVersion":"2.0"}
-                        """.formatted(functionName))
+                        {"integrationType":"AWS_PROXY","integrationUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations","integrationMethod":"POST","payloadFormatVersion":"%s"}
+                        """.formatted(functionName, payloadFormatVersion))
                 .when().post("/v2/apis/" + apiId + "/integrations")
                 .then()
                 .statusCode(201)
@@ -122,11 +130,22 @@ class HttpApiLambdaProxyResponseInferenceIntegrationTest {
     }
 
     @Test
+    @Order(13)
+    void payloadV1ResponseFieldsAreNotInferred() {
+        given()
+                .when().get("/execute-api/" + apiId + "/test/v1")
+                .then()
+                .statusCode(200)
+                .header("X-Trace", "value")
+                .body(equalTo("inner"));
+    }
+
+    @Test
     @Order(999)
     void cleanup() throws Exception {
         if (apiId != null) {
             given().when().delete("/v2/apis/" + apiId);
         }
-        WebSocketTestSupport.deleteFunctions(BARE_FUNCTION, STRING_FUNCTION, THROW_FUNCTION);
+        WebSocketTestSupport.deleteFunctions(BARE_FUNCTION, STRING_FUNCTION, THROW_FUNCTION, V1_FUNCTION);
     }
 }
