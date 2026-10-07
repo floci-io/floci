@@ -343,12 +343,13 @@ public class RedshiftContainerManager {
     }
 
     private static final String DROP_USER_SCHEMAS_SQL = "DO $$ DECLARE s text; BEGIN "
+            + "PERFORM lo_unlink(oid) FROM pg_largeobject_metadata; "
             + "FOR s IN SELECT nspname FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema') "
             + "AND nspname <> '" + BOOTSTRAP_SCHEMA + "' AND nspname NOT LIKE 'pg\\_%' LOOP EXECUTE format('DROP SCHEMA %I CASCADE', s); END LOOP; "
             + "CREATE SCHEMA public; END $$;";
 
     /**
-     * Drops every user schema except the bootstrap one and recreates an empty {@code public} one, so a following
+     * Drops every large object and every user schema except the bootstrap one, and recreates an empty {@code public} one, so a following
      * {@link #restoreSnapshot} replays into a clean database rather than appending to what is
      * already there.
      */
