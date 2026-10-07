@@ -279,7 +279,8 @@ class CodePipelineRetryRollbackTest {
     }
 
     // Catches: a manual rollback reporting triggerType RollbackStage, which is not a value of the
-    // AWS TriggerType enum (ManualRollback is).
+    // AWS TriggerType enum (ManualRollback is), or putting the target execution id in triggerDetail
+    // instead of what a manual start records ("manual"); rollbackMetadata carries the target id.
     @Test
     void rollbackStageExecutionTriggerTypeIsManualRollback() {
         createPipeline("trigger-type", sourceStage(), lambdaStage("Deploy"));
@@ -294,7 +295,7 @@ class CodePipelineRetryRollbackTest {
 
         JsonNode rollback = awaitStatus("trigger-type", rollbackId, "Succeeded");
         assertEquals("ManualRollback", rollback.path("trigger").path("triggerType").asText());
-        assertEquals(firstId, rollback.path("trigger").path("triggerDetail").asText());
+        assertEquals("manual", rollback.path("trigger").path("triggerDetail").asText());
     }
 
     // Catches: a rollback execution that never publishes the pipeline STARTED state-change event.
@@ -389,7 +390,7 @@ class CodePipelineRetryRollbackTest {
         service.shutdown();
         service = newService(storage, lambdaService);
         ObjectNode parallel = declaration("full", sourceStage(), lambdaStage("Deploy"));
-        parallel.put("pipelineType", "V2").put("executionMode", "PARALLEL");
+        parallel.put("pipelineType", "V2").put("executionMode", "QUEUED");
         service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", parallel), REGION, ACCOUNT);
         String firstId = startExecution("full");
         awaitStatus("full", firstId, "Succeeded");
@@ -462,7 +463,7 @@ class CodePipelineRetryRollbackTest {
         service.shutdown();
         service = newService(storage, lambdaService);
         ObjectNode parallel = declaration("running", sourceStage(), lambdaStage("Deploy"));
-        parallel.put("pipelineType", "V2").put("executionMode", "PARALLEL");
+        parallel.put("pipelineType", "V2").put("executionMode", "QUEUED");
         service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", parallel), REGION, ACCOUNT);
         String firstId = startExecution("running");
         awaitStatus("running", firstId, "Succeeded");
@@ -479,6 +480,59 @@ class CodePipelineRetryRollbackTest {
         AwsException error = assertThrows(AwsException.class, () ->
                 service.handle("RollbackStage", mapper.createObjectNode()
                                 .put("pipelineName", "running")
+                                .put("stageName", "Deploy")
+                                .put("targetPipelineExecutionId", firstId),
+                        REGION, ACCOUNT));
+        assertEquals("UnableToRollbackStageException", error.getErrorCode());
+        assertEquals("The stage is currently running.", error.getMessage());
+    }
+
+    // Catches: RollbackStage accepting a PARALLEL pipeline, which AWS does not support for stage
+    // rollback (CodePipeline User Guide, execution modes).
+    @Test
+    void rollbackStageRejectsParallelPipeline() {
+        ObjectNode parallel = declaration("par", sourceStage(), lambdaStage("Deploy"));
+        parallel.put("pipelineType", "V2").put("executionMode", "PARALLEL");
+        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", parallel), REGION, ACCOUNT);
+        String firstId = startExecution("par");
+        awaitStatus("par", firstId, "Succeeded");
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "par")
+                                .put("stageName", "Deploy")
+                                .put("targetPipelineExecutionId", firstId),
+                        REGION, ACCOUNT));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Stage rollback is not supported on PARALLEL pipelines.", error.getMessage());
+    }
+
+    // Catches: the running check only looking at stage statuses, so a second rollback is admitted
+    // while the first is still fetching its sources and has not reached the stage yet.
+    @Test
+    void rollbackStageRejectsSecondRollbackOfSameStageStillFetchingSources() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        service.shutdown();
+        service = newService(storage, lambdaService);
+        ObjectNode queued = declaration("inflight", sourceStage(), lambdaStage("Deploy"));
+        queued.put("pipelineType", "V2").put("executionMode", "QUEUED");
+        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", queued), REGION, ACCOUNT);
+        String firstId = startExecution("inflight");
+        awaitStatus("inflight", firstId, "Succeeded");
+
+        CodePipelineExecution fetching = new CodePipelineExecution();
+        fetching.setAccountId(ACCOUNT);
+        fetching.setRegion(REGION);
+        fetching.setPipelineName("inflight");
+        fetching.setPipelineExecutionId("rollback-fetching");
+        fetching.setStatus("InProgress");
+        fetching.setExecutionType("ROLLBACK");
+        fetching.setRollbackStageName("Deploy");
+        storage.executions().putForAccount(ACCOUNT, REGION + ":inflight:rollback-fetching", fetching);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.handle("RollbackStage", mapper.createObjectNode()
+                                .put("pipelineName", "inflight")
                                 .put("stageName", "Deploy")
                                 .put("targetPipelineExecutionId", firstId),
                         REGION, ACCOUNT));

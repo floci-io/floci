@@ -116,6 +116,7 @@ public class CodePipelineService {
     private final ScheduledExecutorService sourcePoller = Executors.newSingleThreadScheduledExecutor();
     private final KeyedLockPool pipelineLocks = new KeyedLockPool();
     private final KeyedLockPool sourcePollLocks = new KeyedLockPool();
+    private static final String MANUAL_TRIGGER_DETAIL = "manual";
     // Admission is serialized per pipeline on its own lock. A QUEUED worker holds the pipelineLocks
     // monitor for its whole run, so counting under that monitor would block StartPipelineExecution
     // until the running execution finished.
@@ -554,7 +555,7 @@ public class CodePipelineService {
     }
 
     private ObjectNode startPipelineExecution(JsonNode request, String region, String account) {
-        return startPipelineExecution(request, region, account, "StartPipelineExecution", "manual");
+        return startPipelineExecution(request, region, account, "StartPipelineExecution", MANUAL_TRIGGER_DETAIL);
     }
 
     private ObjectNode startPipelineExecution(JsonNode request, String region, String account,
@@ -955,10 +956,15 @@ public class CodePipelineService {
         String pipelineName = text(request, "pipelineName");
         String stageName = text(request, "stageName");
         CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
+        // CodePipeline User Guide, execution modes: stage rollback is not available on PARALLEL pipelines.
+        if ("PARALLEL".equals(pipeline.getDeclaration().path("executionMode").asText(DEFAULT_EXECUTION_MODE))) {
+            throw new AwsException("ValidationException",
+                    "Stage rollback is not supported on PARALLEL pipelines.", 400);
+        }
         JsonNode stage = stageByName(pipeline, stageName);
         // CodePipeline User Guide, "Considerations for rollbacks": a source stage cannot be rolled back.
         for (JsonNode action : stage.path("actions")) {
-            if ("Source".equals(action.path("actionTypeId").path("category").asText())) {
+            if (isSourceAction(action)) {
                 throw new AwsException("UnableToRollbackStageException",
                         "A source stage cannot be rolled back.", 400);
             }
@@ -968,13 +974,6 @@ public class CodePipelineService {
         if ("ROLLBACK".equals(target.getExecutionType())) {
             throw new AwsException("UnableToRollbackStageException",
                     "The target execution is a rollback execution.", 400);
-        }
-        boolean stageRunning = executions(account, region, pipelineName).stream()
-                .anyMatch(candidate -> "InProgress".equals(candidate.getStatus())
-                        && "InProgress".equals(candidate.getStageExecutionStatuses().get(stageName)));
-        if (stageRunning) {
-            throw new AwsException("UnableToRollbackStageException",
-                    "The stage is currently running.", 400);
         }
         if (!Objects.equals(target.getPipelineVersion(), pipeline.getVersion())) {
             throw new AwsException("UnableToRollbackStageException",
@@ -988,8 +987,28 @@ public class CodePipelineService {
             throw new AwsException("UnableToRollbackStageException",
                     "The stage did not complete successfully in the target execution.", 400);
         }
-        CodePipelineExecution rollback = startRollback(pipeline, account, region, stageName, target);
+        // Checked and registered under the start lock so two concurrent rollbacks of one stage cannot both pass.
+        CodePipelineExecution rollback = startLocks.withLock(pipelineLockKey(account, region, pipelineName), () -> {
+            if (stageRunning(account, region, pipelineName, stageName)) {
+                throw new AwsException("UnableToRollbackStageException",
+                        "The stage is currently running.", 400);
+            }
+            return startRollback(pipeline, account, region, stageName, target);
+        });
         return mapper.createObjectNode().put("pipelineExecutionId", rollback.getPipelineExecutionId());
+    }
+
+    // A rollback still fetching its sources has no stage status yet, so it is matched by its target stage.
+    private boolean stageRunning(String account, String region, String pipelineName, String stageName) {
+        return executions(account, region, pipelineName).stream()
+                .anyMatch(candidate -> "InProgress".equals(candidate.getStatus())
+                        && ("InProgress".equals(candidate.getStageExecutionStatuses().get(stageName))
+                        || ("ROLLBACK".equals(candidate.getExecutionType())
+                        && stageName.equals(candidate.getRollbackStageName()))));
+    }
+
+    private static boolean isSourceAction(JsonNode action) {
+        return "Source".equals(action.path("actionTypeId").path("category").asText());
     }
 
     /**
@@ -1025,7 +1044,7 @@ public class CodePipelineService {
         rollback.setVariables(new ArrayList<>(target.getVariables()));
         Map<String, String> trigger = new LinkedHashMap<>();
         trigger.put("triggerType", "ManualRollback");
-        trigger.put("triggerDetail", target.getPipelineExecutionId());
+        trigger.put("triggerDetail", MANUAL_TRIGGER_DETAIL);
         rollback.setTrigger(trigger);
         if (!persistExecutionIfSlotAvailable(rollback)) {
             throw pipelineBusy();
@@ -1484,7 +1503,7 @@ public class CodePipelineService {
             }
             boolean sourceOnly = stage.path("actions").size() > 0;
             for (JsonNode action : stage.path("actions")) {
-                if (!"Source".equals(action.path("actionTypeId").path("category").asText())) {
+                if (!isSourceAction(action)) {
                     sourceOnly = false;
                     break;
                 }
