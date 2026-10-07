@@ -62,6 +62,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
     private static final int LAMBDA_DEFAULT_DURABLE_RETENTION_DAYS = 14;
+    private static final Set<String> DURABLE_CONFIG_MEMBERS = Set.of("ExecutionTimeout", "RetentionPeriodInDays", "KMSKeyArn");
     private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
     private static final String LAMBDA_DEFAULT_TRACING_MODE = "PassThrough";
@@ -728,10 +729,18 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
             throw new AwsException("ValidationError", "AWS::Lambda::Function DurableConfig must be an object", 400);
         }
-        Map<String, Object> config = new LinkedHashMap<>();
-        if (node.hasNonNull("ExecutionTimeout")) {
-            config.put("ExecutionTimeout", integerOrRaw(node.get("ExecutionTimeout")));
+        // The schema requires ExecutionTimeout and allows no other members, and checks both on update too.
+        node.fieldNames().forEachRemaining(member -> {
+            if (!DURABLE_CONFIG_MEMBERS.contains(member)) {
+                throw new AwsException("ValidationError",
+                        "AWS::Lambda::Function DurableConfig does not allow the member " + member, 400);
+            }
+        });
+        if (!node.hasNonNull("ExecutionTimeout")) {
+            throw new AwsException("ValidationError", "AWS::Lambda::Function DurableConfig requires ExecutionTimeout", 400);
         }
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("ExecutionTimeout", integerOrRaw(node.get("ExecutionTimeout")));
         config.put("RetentionPeriodInDays", node.hasNonNull("RetentionPeriodInDays")
                 ? integerOrRaw(node.get("RetentionPeriodInDays")) : LAMBDA_DEFAULT_DURABLE_RETENTION_DAYS);
         // Lambda keeps a stored key when the update leaves the member out, and clears it on "".

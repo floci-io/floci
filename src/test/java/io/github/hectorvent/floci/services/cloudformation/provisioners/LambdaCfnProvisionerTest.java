@@ -223,6 +223,27 @@ class LambdaCfnProvisionerTest {
     }
 
     @Test
+    void aDurableConfigWithoutExecutionTimeoutOrWithAnUnknownMemberIsRejectedOnUpdate() {
+        LambdaFunction existing = lambdaFunction("my-fn");
+        existing.setDurableExecutionTimeout(60);
+        when(lambda.getFunction(REGION, "my-fn")).thenReturn(existing);
+        ObjectNode withoutTimeout = props("my-fn");
+        withoutTimeout.putObject("DurableConfig").put("RetentionPeriodInDays", 5);
+        ObjectNode unknownMember = props("my-fn");
+        unknownMember.putObject("DurableConfig").put("ExecutionTimeout", 90).put("executionTimeout", 1);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> provisioner.provision(function("my-fn"), withoutTimeout, updateCtx("my-fn")));
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> provisioner.provision(function("my-fn"), unknownMember, updateCtx("my-fn")));
+
+        assertEquals("AWS::Lambda::Function DurableConfig requires ExecutionTimeout", missing.getMessage());
+        assertEquals("AWS::Lambda::Function DurableConfig does not allow the member executionTimeout",
+                unknown.getMessage());
+        verify(lambda, never()).updateFunctionConfiguration(anyString(), anyString(), anyMap());
+    }
+
+    @Test
     void anExecutionTimeoutBeyondAnIntegerReachesLambdaUnchanged() {
         when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("my-fn"));
         ObjectNode props = props("my-fn");
