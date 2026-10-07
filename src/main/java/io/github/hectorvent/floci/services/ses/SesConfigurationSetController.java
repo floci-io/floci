@@ -87,8 +87,8 @@ public class SesConfigurationSetController {
         try {
             JsonNode request = objectMapper.readTree(body);
             String name = request.path("ConfigurationSetName").asText(null);
-            if (name == null || name.isBlank()) {
-                throw new AwsException("BadRequestException", "ConfigurationSetName is required.", 400);
+            if (name == null || name.isEmpty()) {
+                throw new AwsException("BadRequestException", "The configuration set name must be specified.", 400);
             }
             ConfigurationSet cs = new ConfigurationSet(name);
             List<Tag> parsedTags = parseTagsArray(request.path("Tags"));

@@ -53,6 +53,7 @@ public class SesConfigurationSetService {
     private static final Logger LOG = Logger.getLogger(SesConfigurationSetService.class);
 
     private static final Pattern CONFIG_SET_NAME = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
+    private static final int MAX_CONFIG_SET_NAME_LENGTH = 64;
     private static final Set<String> VDM_FEATURE_STATES = Set.of("ENABLED", "DISABLED");
 
     private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
@@ -724,14 +725,18 @@ public class SesConfigurationSetService {
     }
 
     private static void validateConfigurationSetName(String name) {
-        if (name == null || name.isBlank()) {
+        if (name == null || name.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
-                    "ConfigurationSetName is required.", 400);
+                    "The configuration set name must be specified.", 400);
+        }
+        if (name.length() > MAX_CONFIG_SET_NAME_LENGTH) {
+            throw new AwsException("InvalidParameterValue",
+                    "Configuration set name cannot exceed " + MAX_CONFIG_SET_NAME_LENGTH + " characters.", 400);
         }
         if (!CONFIG_SET_NAME.matcher(name).matches()) {
             throw new AwsException("InvalidParameterValue",
-                    "ConfigurationSetName must be 1-64 characters and may only contain "
-                            + "alphanumeric characters, underscores, and hyphens.", 400);
+                    "Invalid configuration set name <" + name + ">: only alphanumeric ASCII characters, "
+                            + "'_', and '-' are allowed.", 400);
         }
     }
 

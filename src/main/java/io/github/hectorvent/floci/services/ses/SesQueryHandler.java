@@ -822,10 +822,7 @@ public class SesQueryHandler {
     }
 
     private Response handleCreateConfigurationSet(MultivaluedMap<String, String> params, String region) {
-        String name = getParam(params, "ConfigurationSet.Name");
-        if (name == null || name.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "ConfigurationSet.Name is required.", 400);
-        }
+        String name = requireConfigurationSetName(params, "ConfigurationSet.Name");
         ConfigurationSet configSet = new ConfigurationSet(name);
         configSet.setReputationMetricsEnabled(false);
         sesService.createConfigurationSet(configSet, region);
@@ -833,10 +830,7 @@ public class SesQueryHandler {
     }
 
     private Response handleDescribeConfigurationSet(MultivaluedMap<String, String> params, String region) {
-        String name = getParam(params, "ConfigurationSetName");
-        if (name == null || name.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "ConfigurationSetName is required.", 400);
-        }
+        String name = requireConfigurationSetName(params, "ConfigurationSetName");
         ConfigurationSet cs = configSetService.get(name, region);
         List<String> attrs = extractMembers(params, "ConfigurationSetAttributeNames");
         XmlBuilder xml = new XmlBuilder()
@@ -951,17 +945,14 @@ public class SesQueryHandler {
     }
 
     private Response handleDeleteConfigurationSet(MultivaluedMap<String, String> params, String region) {
-        String name = getParam(params, "ConfigurationSetName");
-        if (name == null || name.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "ConfigurationSetName is required.", 400);
-        }
+        String name = requireConfigurationSetName(params, "ConfigurationSetName");
         sesService.deleteConfigurationSet(name, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteConfigurationSet", AwsNamespaces.SES)).build();
     }
 
     private Response handleCreateConfigurationSetEventDestination(MultivaluedMap<String, String> params,
                                                                   String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
         configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
@@ -971,7 +962,7 @@ public class SesQueryHandler {
 
     private Response handleUpdateConfigurationSetEventDestination(MultivaluedMap<String, String> params,
                                                                   String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
         configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
@@ -981,7 +972,7 @@ public class SesQueryHandler {
 
     private Response handleDeleteConfigurationSetEventDestination(MultivaluedMap<String, String> params,
                                                                   String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestinationName");
         configSetService.deleteEventDestination(configSet, edName, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
@@ -990,7 +981,7 @@ public class SesQueryHandler {
 
     private Response handleUpdateConfigurationSetSendingEnabled(MultivaluedMap<String, String> params,
                                                                 String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         boolean enabled = parseXsdBoolean(params, "Enabled");
         configSetService.setSendingEnabled(configSet, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
@@ -999,7 +990,7 @@ public class SesQueryHandler {
 
     private Response handleCreateConfigurationSetTrackingOptions(MultivaluedMap<String, String> params,
                                                                  String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String domain = getParam(params, "TrackingOptions.CustomRedirectDomain");
         sesService.createConfigurationSetTrackingOptions(configSet, domain, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
@@ -1008,7 +999,7 @@ public class SesQueryHandler {
 
     private Response handleUpdateConfigurationSetTrackingOptions(MultivaluedMap<String, String> params,
                                                                  String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String domain = getParam(params, "TrackingOptions.CustomRedirectDomain");
         sesService.updateConfigurationSetTrackingOptions(configSet, domain, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
@@ -1017,7 +1008,7 @@ public class SesQueryHandler {
 
     private Response handleDeleteConfigurationSetTrackingOptions(MultivaluedMap<String, String> params,
                                                                  String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         configSetService.deleteTrackingOptions(configSet, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "DeleteConfigurationSetTrackingOptions", AwsNamespaces.SES)).build();
@@ -1025,7 +1016,7 @@ public class SesQueryHandler {
 
     private Response handleUpdateConfigurationSetReputationMetricsEnabled(MultivaluedMap<String, String> params,
                                                                           String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         boolean enabled = parseXsdBoolean(params, "Enabled");
         configSetService.setReputationMetricsEnabled(configSet, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
@@ -1034,7 +1025,7 @@ public class SesQueryHandler {
 
     private Response handlePutConfigurationSetDeliveryOptions(MultivaluedMap<String, String> params,
                                                               String region) {
-        String configSet = requireParam(params, "ConfigurationSetName");
+        String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String tlsPolicy = getParam(params, "DeliveryOptions.TlsPolicy");
         // The V1 API accepts TlsPolicy Require/Optional (PascalCase, case-sensitive). Validate
         // here so an invalid enum value yields the v1 ValidationError AWS returns rather than the
@@ -1511,6 +1502,15 @@ public class SesQueryHandler {
         }
 
         return dest;
+    }
+
+    // Only an empty name is "not specified"; a blank one reaches the shared name validation.
+    private static String requireConfigurationSetName(MultivaluedMap<String, String> params, String name) {
+        String v = params.getFirst(name);
+        if (v == null || v.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "The configuration set name must be specified.", 400);
+        }
+        return v;
     }
 
     private static String requireParam(MultivaluedMap<String, String> params, String name) {
