@@ -10,7 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
-import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -2082,11 +2082,9 @@ public class ApiGatewayService implements ResourceProvider {
             domain.setDistributionDomainName(null);
             domain.setDistributionHostedZoneId(null);
         } else if (domain.getDistributionDomainName() == null) {
-            domain.setDistributionDomainName(
-                    "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + "."
-                            + config.services().cloudfront().domainSuffix());
-            domain.setDistributionHostedZoneId(AwsRegionFacts.cloudFrontHostedZoneId(
-                    AwsPartitions.forRegionOrCommercial(region).id()).orElse(null));
+            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, config.services().cloudfront().domainSuffix());
+            domain.setDistributionDomainName(edge.domainName());
+            domain.setDistributionHostedZoneId(edge.hostedZoneId());
         }
     }
 

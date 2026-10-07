@@ -5,8 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsPartitions;
-import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -757,14 +756,13 @@ public class AppSyncService {
      * AppSync fronts a custom domain with a CloudFront distribution: the CDK aliases
      * {@code appsyncDomainName} into the CloudFront hosted zone of the partition
      * ({@code aws-route53-targets/lib/appsync-target.ts}), so the name is a distribution name and
-     * the zone is CloudFront's, never a zone of its own. Built like an edge-optimized API
-     * Gateway domain.
+     * the zone is CloudFront's, never a zone of its own, the same front an edge-optimized API
+     * Gateway domain gets.
      */
     private void applyCloudFrontFront(DomainName dn, String region) {
-        dn.setAppsyncDomainName("d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + "."
-                + cloudFrontDomainSuffix);
-        dn.setHostedZoneId(AwsRegionFacts.cloudFrontHostedZoneId(
-                AwsPartitions.forRegionOrCommercial(region).id()).orElse(null));
+        CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, cloudFrontDomainSuffix);
+        dn.setAppsyncDomainName(edge.domainName());
+        dn.setHostedZoneId(edge.hostedZoneId());
     }
 
     public DomainName getDomainName(String domainName) {
