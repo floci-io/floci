@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -129,23 +130,12 @@ final class SesContentScan {
         if (parsed == null) {
             return false;
         }
-        Deque<Entity> pending = new ArrayDeque<>();
-        pending.push(parsed);
-        while (!pending.isEmpty()) {
-            Entity entity = pending.pop();
-            if (isBlockedFileName(fileName(entity))) {
-                return true;
-            }
-            Body body = entity.getBody();
-            if (body instanceof Message embedded) {
-                pending.push(embedded);
-            } else if (body instanceof Multipart multipart) {
-                for (Entity part : multipart.getBodyParts()) {
-                    pending.push(part);
-                }
-            }
+        try {
+            return anyPart(parsed, entity -> isBlockedFileName(fileName(entity)));
+        } catch (IOException e) {
+            // The check reads only headers, so the walk has no stream to fail on.
+            throw new UncheckedIOException(e);
         }
-        return false;
     }
 
     static boolean isBlockedFileName(String fileName) {
@@ -165,14 +155,34 @@ final class SesContentScan {
         return name == null ? null : DecoderUtil.decodeEncodedWords(name, DecodeMonitor.SILENT);
     }
 
+    private static boolean entityContains(Entity root) throws IOException {
+        return anyPart(root, entity -> {
+            if (headerContains(entity.getHeader())) {
+                return true;
+            }
+            if (entity.getBody() instanceof SingleBody single) {
+                try (InputStream in = single.getInputStream()) {
+                    return streamContains(in, SIGNATURE);
+                }
+            }
+            return false;
+        });
+    }
+
+    /** A check run on one part of a message by {@link #anyPart}. */
+    @FunctionalInterface
+    private interface PartCheck {
+        boolean test(Entity entity) throws IOException;
+    }
+
     // An explicit worklist rather than recursion: a message can nest forwarded messages and
     // multiparts as deep as its size allows, and the stack must not be the limit.
-    private static boolean entityContains(Entity root) throws IOException {
+    private static boolean anyPart(Entity root, PartCheck check) throws IOException {
         Deque<Entity> pending = new ArrayDeque<>();
         pending.push(root);
         while (!pending.isEmpty()) {
             Entity entity = pending.pop();
-            if (headerContains(entity.getHeader())) {
+            if (check.test(entity)) {
                 return true;
             }
             Body body = entity.getBody();
@@ -182,12 +192,6 @@ final class SesContentScan {
             } else if (body instanceof Multipart multipart) {
                 for (Entity part : multipart.getBodyParts()) {
                     pending.push(part);
-                }
-            } else if (body instanceof SingleBody single) {
-                try (InputStream in = single.getInputStream()) {
-                    if (streamContains(in, SIGNATURE)) {
-                        return true;
-                    }
                 }
             }
         }
