@@ -627,7 +627,7 @@ public class IotMqttBrokerService implements Resettable {
 
         String topic = message.topicName();
         if (topic.startsWith("$aws/")) {
-            iotService.get().handleReservedMqttPublish(topic, payload, this::publish);
+            iotService.get().handleReservedMqttPublish(topic, payload, rules -> evaluateRulesOnWorker(topic, rules));
             return;
         }
 

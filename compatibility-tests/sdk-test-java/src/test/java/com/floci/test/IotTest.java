@@ -837,6 +837,85 @@ class IotTest {
     }
 
     @Test
+    void namedShadowUpdateReachesATopicRuleOnItsAcceptedTopic() throws Exception {
+        String ruleName = "java_iot_shadow_rule";
+        String thingName = "java-iot-shadow-rule-thing";
+        String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("java-iot-shadow-rule-queue")
+                .build()).queueUrl();
+
+        try {
+            iot.createTopicRule(CreateTopicRuleRequest.builder()
+                    .ruleName(ruleName)
+                    .topicRulePayload(TopicRulePayload.builder()
+                            .sql("SELECT *, topic() AS topic, clientid() AS cid "
+                                    + "FROM '$aws/things/+/shadow/name/building/update/accepted' "
+                                    + "WHERE endswith(clientToken, 'inbound')")
+                            .ruleDisabled(false)
+                            .actions(Action.builder()
+                                    .sqs(SqsAction.builder()
+                                            .roleArn(TestFixtures.globalArn(
+                                                    "iam", "000000000000", "role/iot-rule-role"))
+                                            .queueUrl(queueUrl)
+                                            .useBase64(false)
+                                            .build())
+                                    .build())
+                            .build())
+                    .build());
+
+            iotData.updateThingShadow(UpdateThingShadowRequest.builder()
+                    .thingName(thingName)
+                    .shadowName("building")
+                    .payload(SdkBytes.fromUtf8String(
+                            "{\"state\":{\"desired\":{\"temp\":20}},\"clientToken\":\"x:outbound\"}"))
+                    .build());
+            UpdateThingShadowResponse updated = iotData.updateThingShadow(UpdateThingShadowRequest.builder()
+                    .thingName(thingName)
+                    .shadowName("building")
+                    .payload(SdkBytes.fromUtf8String(
+                            "{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"x:inbound\"}"))
+                    .build());
+            JsonNode accepted = OBJECT_MAPPER.readTree(updated.payload().asByteArray());
+
+            ReceiveMessageResponse received = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .maxNumberOfMessages(10)
+                    .waitTimeSeconds(5)
+                    .build());
+            assertThat(received.messages()).hasSize(1);
+            JsonNode message = OBJECT_MAPPER.readTree(received.messages().get(0).body());
+            assertThat(message.path("topic").asText())
+                    .isEqualTo("$aws/things/" + thingName + "/shadow/name/building/update/accepted");
+            assertThat(message.path("cid").asText()).isEqualTo("N/A");
+            assertThat(message.path("clientToken").asText()).isEqualTo("x:inbound");
+            assertThat(message.at("/state/desired/temp").asInt()).isEqualTo(21);
+            assertThat(message.path("version").asLong()).isEqualTo(accepted.path("version").asLong());
+
+            ReceiveMessageResponse outbound = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .maxNumberOfMessages(10)
+                    .waitTimeSeconds(1)
+                    .build());
+            assertThat(outbound.messages()).isEmpty();
+        } finally {
+            try {
+                iot.deleteTopicRule(DeleteTopicRuleRequest.builder().ruleName(ruleName).build());
+            } catch (ResourceNotFoundException ignored) {
+                // The rule was never created; there is nothing to clean up.
+            }
+            try {
+                iotData.deleteThingShadow(DeleteThingShadowRequest.builder()
+                        .thingName(thingName)
+                        .shadowName("building")
+                        .build());
+            } catch (software.amazon.awssdk.services.iotdataplane.model.ResourceNotFoundException ignored) {
+                // Name clash with the IoT control-plane ResourceNotFoundException; the shadow was never created.
+            }
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+        }
+    }
+
+    @Test
     void thingTypesGroupsAndJobs() {
         String thingType = "java-iot-type";
         String thingName = "java-iot-typed-thing";

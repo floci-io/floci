@@ -265,6 +265,21 @@ Required phase 7 reserved-topic behavior:
 
 Reserved request topics are handled by Floci before normal MQTT fan-out. The original `$aws/...` request publish is not routed as an application message; generated accepted, rejected, documents, and delta responses are published back through `IotMqttBrokerService.publish(...)` so matching MQTT subscribers receive broker-native messages.
 
+### Shadow Events
+
+A successful classic or named shadow change reaches MQTT subscribers and the topic rules on the AWS response topics, whether it came from an MQTT request or from the REST `UpdateThingShadow` and `DeleteThingShadow` APIs. A rule such as `SELECT * FROM '$aws/things/+/shadow/name/building/update/accepted'` therefore fires for both. The events are published in the order accepted, documents, delta, and carry one timestamp (epoch seconds) per operation:
+
+- `update/accepted`, which is also the `UpdateThingShadow` response: `state` exactly as sent, null leaves kept, `metadata` mirroring it with `{"timestamp": ...}` per leaf (an array gets one entry per element), the new `version`, `timestamp`, and `clientToken` when the request had one.
+- `update/documents`: `previous` (JSON `null` on the first update) and `current`, each `{state, metadata, version}` as stored, plus `timestamp` and `clientToken`.
+- `update/delta`, only when a desired key's reported value is missing or different: `version`, `timestamp`, `state` with those keys, their stored desired `metadata`, and `clientToken`.
+- `get/accepted`, for an MQTT get only (`GetThingShadow` publishes nothing): `state` with `desired`, `reported` and, when non-empty, `delta`, the stored `metadata`, `version`, the current `timestamp`, and `clientToken`.
+- `delete/accepted`: the deleted `version`, `timestamp`, and `clientToken`. `DeleteThingShadow` returns `version` and `timestamp`.
+- `rejected`, for an MQTT request only: `code` (the HTTP status as a number), `message`, and `clientToken` once the request parsed. A version conflict is `409` with `Version conflict`, a payload that is not JSON is `400` with `Invalid JSON`.
+
+Shadow events are evaluated only against the rules of the shadow's region. A REST change belongs to the region of its SigV4 credential, and MQTT shadows live in the default region (`FLOCI_DEFAULT_REGION`). `clientid()` is `N/A` for every shadow event, as on AWS.
+
+Shadow responses are produced only by the shadow service in reaction to a request, and each one is fanned out once, recorded once and rule-evaluated once. Response topics are never parsed as requests. A `republish` action stays record plus fan-out, with no rule re-evaluation and no shadow processing, even when it targets a shadow request topic. Broker publish and fan-out are not recursive.
+
 Implementation notes:
 
 - Vert.x MQTT handles the wire protocol and connection lifecycle.
@@ -280,6 +295,10 @@ Current accepted limitation:
 - Persistent offline sessions are not modeled yet.
 - QoS 2 and advanced MQTT 5 property semantics remain follow-up scope.
 - At most 1,000 MQTT publishes are pending rule evaluation, running or waiting. While that many are pending, further publishes are still delivered to subscribers but their topic rules are skipped, with one warning logged until the backlog drains.
+- Shadow state is merged shallowly: a nested object in `desired` or `reported` replaces the stored value of its top-level key instead of being merged into it.
+- REST shadow errors are not published to `rejected`.
+- MQTT shadow request topics are not themselves delivered to rules or subscribers.
+- An IoT Data `Publish` to a shadow request topic does not update the shadow, and a `republish` that targets a shadow request topic is not processed as a shadow request.
 
 ## Implementation Shape
 
@@ -289,6 +308,7 @@ The MQTT integration should keep service behavior separated from broker mechanic
 - The broker publish handler detects AWS IoT reserved topics.
 - IoT reserved-topic handling lives in IoT service code or a focused reserved-topic handler, not in packet parsing code.
 - AWS-generated shadow responses are published back through `IotMqttBrokerService.publish(...)` so regular MQTT subscribers receive broker-native messages.
+- MQTT and REST shadow changes share one `IotService` path that fans each response out once, records it once and hands its rule evaluation to the caller's rule runner: the JAX-RS request thread for REST, so the rules run before the response returns, and the broker's rule worker for MQTT.
 
 ## Phase 7 Completion Criteria
 
@@ -317,6 +337,7 @@ Supported rule behavior:
 - IoT Data `Publish` and MQTT publishes use the same rule dispatch path. An IoT Data `Publish` evaluates its rules before it returns. An MQTT publish evaluates them on the broker's rule worker, so neither its PUBACK nor its fan-out waits for rule actions, and a republished message can reach subscribers before or after the source message's other deliveries; AWS gives no ordering guarantee there either.
 - Rule matching is region-scoped: an IoT Data `Publish` evaluates the rules of the region named by its SigV4 credential, and a rule's actions target the rule's own region.
 - Publishes that carry no region (MQTT, or an IoT Data `Publish` whose `Authorization` header is absent or not SigV4) are evaluated against every region's rules.
+- Device shadow events on the `$aws/things/...` response topics reach rules as well, evaluated only against the rules of the shadow's region; see [Shadow Events](#shadow-events).
 - Actions receive the projected document, which is the payload itself for a statement that selects only `*`.
 - `republish` action republishes to another MQTT topic through `IotMqttBrokerService`.
 - `sqs` action sends to an SQS queue through Floci's SQS service boundary.
@@ -354,8 +375,8 @@ Semantics:
 
 - Keywords and function names are case insensitive, field names are case sensitive.
 - `topic()` is the full MQTT topic, `topic(n)` is its nth segment counting from 1.
-- `clientid()` is the MQTT client that published the message, or `n/a` for an IoT Data `Publish`
-  over HTTP, as on AWS. `accountid()` is the account that owns the rule. `timestamp()` is the
+- `clientid()` is the MQTT client that published the message, or `N/A` for an IoT Data `Publish`
+  over HTTP and for a device shadow event, as on AWS. `accountid()` is the account that owns the rule. `timestamp()` is the
   current time in milliseconds since the epoch. `newuuid()` is a fresh random UUID.
 - `isNull(x)` is true only for a JSON `null`, `isUndefined(x)` only for a missing field or an
   undefined expression. Neither is ever undefined itself.
