@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
+import io.github.hectorvent.floci.services.s3.ByteRange;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -473,8 +474,9 @@ public class CloudFrontServingController {
             }
             String key = CloudFrontRequestRouter.resolveOriginKey(
                     origin.getOriginPath(), decodedViewerPath, config.getDefaultRootObject());
-            return fetchFromS3(
-                    distribution, origin, key, viewerAuthorization, !"HEAD".equals(method));
+            HttpServerRequest request = currentVertxRequest.getCurrent().request();
+            return fetchFromS3(distribution, origin, key, viewerAuthorization, !"HEAD".equals(method),
+                    new ViewerRange(request.getHeader("Range"), request.getHeader("If-Range")));
         }
         String forwardUri = CloudFrontRequestRouter.resolveForwardUri(
                 origin.getOriginPath(), rawViewerPath, config.getDefaultRootObject());
@@ -565,7 +567,8 @@ public class CloudFrontServingController {
             Origin origin,
             String key,
             String viewerAuthorization,
-            boolean includeBody) {
+            boolean includeBody,
+            ViewerRange viewerRange) {
         String bucket = CloudFrontRequestRouter.bucketFromS3Domain(origin.getDomainName());
         if (bucket == null) {
             return OriginResponse.error(502, "Could not determine S3 bucket for origin.");
@@ -577,14 +580,9 @@ public class CloudFrontServingController {
             if (includeBody) {
                 // The body is streamed to the viewer, so an object of any size is served without
                 // being read into the heap; the metadata and the stream come from one snapshot.
-                S3Service.ObjectRead read = s3Service.openObject(bucket, key, null);
-                S3Object obj = read.object();
-                response = new OriginResponse(
-                        200, contentType(obj), null, read.body(), obj.getSize(), s3ObjectHeaders(obj));
+                response = s3ObjectResponse(s3Service.openObject(bucket, key, null), viewerRange);
             } else {
-                S3Object meta = s3Service.headObject(bucket, key);
-                response = new OriginResponse(
-                        200, contentType(meta), null, meta.getSize(), s3ObjectHeaders(meta));
+                response = s3HeadResponse(s3Service.headObject(bucket, key), viewerRange);
             }
         } catch (AwsException e) {
             response = OriginResponse.error(e.getHttpStatus(), e.getMessage());
@@ -595,6 +593,69 @@ public class CloudFrontServingController {
         } catch (RuntimeException e) {
             response.closeStream();
             throw e;
+        }
+    }
+
+    /**
+     * The GET of an S3 object, answered as S3 answers the viewer's {@code Range}: the one range it
+     * asks for, or 416 when that range starts past the end of the object. CloudFront serves the
+     * whole object, as for no {@code Range} at all, when the header is not one valid range, which
+     * covers several ranges, since S3 serves one range per request, and when an {@code If-Range}
+     * no longer describes the object.
+     */
+    private static OriginResponse s3ObjectResponse(S3Service.ObjectRead read, ViewerRange viewerRange) {
+        S3Object obj = read.object();
+        ByteRange.Resolution resolution = resolveRange(viewerRange, obj);
+        return switch (resolution.outcome()) {
+            case PART -> {
+                ByteRange range = resolution.range();
+                Map<String, List<String>> headers = s3ObjectHeaders(obj);
+                putHeader(headers, "Content-Range", range.contentRange(obj.getSize()));
+                yield new OriginResponse(206, contentType(obj), null, range.slice(read.body()),
+                        range.length(), headers);
+            }
+            case NOT_SATISFIABLE -> {
+                closeUnsent(read);
+                yield rangeNotSatisfiable(obj.getSize());
+            }
+            case WHOLE, INVALID -> new OriginResponse(
+                    200, contentType(obj), null, read.body(), obj.getSize(), s3ObjectHeaders(obj));
+        };
+    }
+
+    /**
+     * The HEAD of an S3 object, answered as HeadObject answers a {@code Range}: "If the Range is
+     * satisfiable, only the ContentLength is affected in the response. If the Range is not
+     * satisfiable, S3 returns a 416". A header that is not one valid range is ignored, as for a GET.
+     */
+    private static OriginResponse s3HeadResponse(S3Object meta, ViewerRange viewerRange) {
+        ByteRange.Resolution resolution = resolveRange(viewerRange, meta);
+        return switch (resolution.outcome()) {
+            case PART -> new OriginResponse(
+                    200, contentType(meta), null, resolution.range().length(), s3ObjectHeaders(meta));
+            case NOT_SATISFIABLE -> rangeNotSatisfiable(meta.getSize());
+            case WHOLE, INVALID -> new OriginResponse(
+                    200, contentType(meta), null, meta.getSize(), s3ObjectHeaders(meta));
+        };
+    }
+
+    /** The viewer's {@code Range} resolved against an object, unless its {@code If-Range} no longer matches it. */
+    private static ByteRange.Resolution resolveRange(ViewerRange viewerRange, S3Object obj) {
+        String rangeHeader = ByteRange.rangeApplies(viewerRange.ifRange(), obj.getETag(), obj.getLastModified())
+                ? viewerRange.range() : null;
+        return ByteRange.resolve(rangeHeader, obj.getSize());
+    }
+
+    private static OriginResponse rangeNotSatisfiable(long size) {
+        return OriginResponse.error(416, ByteRange.NOT_SATISFIABLE_MESSAGE)
+                .withHeaders(Map.of("Content-Range", List.of(ByteRange.unsatisfiedContentRange(size))));
+    }
+
+    private static void closeUnsent(S3Service.ObjectRead read) {
+        try {
+            read.close();
+        } catch (IOException e) {
+            LOG.debugv("Could not close an unsent S3 object: {0}", e.getMessage());
         }
     }
 
@@ -759,6 +820,11 @@ public class CloudFrontServingController {
     record ViewerBody(InputStream stream, long length) {
     }
 
+    /** The viewer's {@code Range} and the {@code If-Range} that qualifies it, either one possibly absent. */
+    private record ViewerRange(String range, String ifRange) {
+        static final ViewerRange NONE = new ViewerRange(null, null);
+    }
+
     private static String originAccessIdentityId(Origin origin) {
         Map<String, String> config = origin.getS3OriginConfig();
         String value = config != null ? config.get("OriginAccessIdentity") : null;
@@ -911,8 +977,9 @@ public class CloudFrontServingController {
         OriginResponse page;
         if (CloudFrontRequestRouter.isS3Origin(errOrigin)) {
             String key = CloudFrontRequestRouter.resolveOriginKey(errOrigin.getOriginPath(), errNormalized, null);
+            // The viewer's Range is for the object it asked for, not for the page served instead.
             page = fetchFromS3(
-                    distribution, errOrigin, key, viewerAuthorization, includeBody);
+                    distribution, errOrigin, key, viewerAuthorization, includeBody, ViewerRange.NONE);
         } else {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
             page = fetchFromCustomOrigin(

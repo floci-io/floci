@@ -28,6 +28,10 @@ import java.util.concurrent.ThreadLocalRandom;
  *       {@code User-Agent} is forwarded, an {@code X-Forwarded-For} ending in the viewer address,
  *       CloudFront's {@code Via} hop and an {@code X-Amz-Cf-Id}. {@code Host} is the origin's own
  *       name unless the viewer's {@code Host} is forwarded.</li>
+ *   <li>Whatever the policies, {@code Authorization} goes with the methods CloudFront does not cache,
+ *       {@code Content-Type} with a request body, and the viewer's {@code Range} and
+ *       {@code If-Range} with a GET or HEAD that has a {@code Range}, since CloudFront forwards a
+ *       range GET to the origin.</li>
  * </ul>
  *
  * <p>This class holds no state and does no I/O. Origin custom headers are applied afterwards by the
@@ -113,6 +117,8 @@ final class CloudFrontOriginRequestBuilder {
         Set<String> connectionTokens = connectionTokens(viewer.headers());
         boolean forwardsAuthorization = BODY_METHODS.contains(viewer.method())
                 || ("OPTIONS".equals(viewer.method()) && !forwarding.optionsCached());
+        boolean rangeRead = ("GET".equals(viewer.method()) || "HEAD".equals(viewer.method()))
+                && viewer.headers().stream().anyMatch(header -> "range".equals(normalize(header.name())));
 
         List<Header> headers = new ArrayList<>();
         List<String> cookieHeaders = new ArrayList<>();
@@ -148,6 +154,14 @@ final class CloudFrontOriginRequestBuilder {
                 }
                 case "content-type" -> {
                     if (BODY_METHODS.contains(viewer.method()) || selections.forwardsHeader(name)) {
+                        headers.add(header);
+                    }
+                }
+                case "range", "if-range" -> {
+                    // CloudFront forwards a range GET to the origin whatever the cache settings, so the
+                    // origin can answer with the range alone. A HEAD gets them too, so it can report the
+                    // range's length as S3's HeadObject does. If-Range only qualifies a Range.
+                    if (rangeRead || selections.forwardsHeader(name)) {
                         headers.add(header);
                     }
                 }

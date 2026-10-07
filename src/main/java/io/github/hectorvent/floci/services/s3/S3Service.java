@@ -4060,7 +4060,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         "Your proposed upload exceeds the maximum allowed object size.", 400);
             }
             return storePart(destBucket, destKey, uploadId, partNumber,
-                    new CopyRangeInputStream(read.body(), range), UploadChecksums.NONE,
+                    new ByteRangeInputStream(read.body(), range.first(), range.length()), UploadChecksums.NONE,
                     sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5())
                     .getETag();
         } catch (IOException e) {

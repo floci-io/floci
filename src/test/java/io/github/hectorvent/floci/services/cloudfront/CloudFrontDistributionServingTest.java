@@ -52,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CloudFrontDistributionServingTest {
 
     private static final String REGION = "us-east-1";
+    private static final String ALPHABET = "abcdefghijklmnopqrstuvwxyz";
 
     @Inject
     S3Service s3Service;
@@ -281,6 +282,86 @@ class CloudFrontDistributionServingTest {
                 .then().statusCode(200)
                 .header("ETag", equalTo(object.getETag()))
                 .header("Content-Length", equalTo(Integer.toString(body.getBytes(StandardCharsets.UTF_8).length)));
+    }
+
+    @Test
+    void servesTheByteRangeAViewerAsksForFromAnS3Object() {
+        Distribution dist = alphabetDistribution();
+
+        assertRange(dist, "bytes=2-5", "bytes 2-5/26", "cdef");
+        assertRange(dist, "bytes=20-", "bytes 20-25/26", "uvwxyz");
+        assertRange(dist, "bytes=-3", "bytes 23-25/26", "xyz");
+        assertRange(dist, "bytes=-100", "bytes 0-25/26", ALPHABET);
+        assertRange(dist, "bytes=24-100", "bytes 24-25/26", "yz");
+        assertRange(dist, "Bytes=2-5", "bytes 2-5/26", "cdef");
+        // HeadObject: "If the Range is satisfiable, only the ContentLength is affected in the response."
+        given().header("Host", dist.getDomainName()).header("Range", "bytes=2-5").when().head("/alphabet.txt")
+                .then().statusCode(200)
+                .header("Content-Length", equalTo("4"))
+                .header("Content-Range", nullValue());
+    }
+
+    @Test
+    void servesTheWholeS3ObjectWhenItsIfRangeNoLongerMatches() {
+        Distribution dist = alphabetDistribution();
+        String etag = given().header("Host", dist.getDomainName()).when().head("/alphabet.txt")
+                .then().extract().header("ETag");
+
+        given().header("Host", dist.getDomainName()).header("Range", "bytes=2-5").header("If-Range", etag)
+                .when().get("/alphabet.txt")
+                .then().statusCode(206)
+                .body(equalTo("cdef"));
+        given().header("Host", dist.getDomainName()).header("Range", "bytes=2-5").header("If-Range", "\"stale\"")
+                .when().get("/alphabet.txt")
+                .then().statusCode(200)
+                .header("Content-Range", nullValue())
+                .body(equalTo(ALPHABET));
+    }
+
+    @Test
+    void answersARangePastTheEndOfAnS3ObjectWith416() {
+        Distribution dist = alphabetDistribution();
+
+        for (String range : List.of("bytes=26-", "bytes=100-200", "bytes=-0")) {
+            given().header("Host", dist.getDomainName()).header("Range", range).when().get("/alphabet.txt")
+                    .then().statusCode(416)
+                    .header("Content-Range", equalTo("bytes */26"))
+                    .body(equalTo("The requested range is not satisfiable"));
+            given().header("Host", dist.getDomainName()).header("Range", range).when().head("/alphabet.txt")
+                    .then().statusCode(416);
+        }
+    }
+
+    @Test
+    void servesTheWholeS3ObjectForARangeHeaderCloudFrontDoesNotAccept() {
+        Distribution dist = alphabetDistribution();
+
+        for (String range : List.of("bytes=5-2", "bytes=0-1,4-5", "bytes=abc", "bytes=-", "items=0-1")) {
+            given().header("Host", dist.getDomainName()).header("Range", range).when().get("/alphabet.txt")
+                    .then().statusCode(200)
+                    .header("Content-Length", equalTo("26"))
+                    .header("Content-Range", nullValue())
+                    .body(equalTo(ALPHABET));
+        }
+    }
+
+    @Test
+    void aViewerRangeIsNotAppliedToTheErrorPageServedInstead() {
+        String suffix = suffix();
+        String bucket = "cf-range-error-page-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "index.html", "INDEX-" + suffix, "text/html");
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        cfg.setDefaultCacheBehavior(defaultBehavior("only-origin"));
+        cfg.setCustomErrorResponses(List.of(customError(404, 200, "/index.html")));
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        given().header("Host", dist.getDomainName()).header("Range", "bytes=0-1").when().get("/missing/route")
+                .then().statusCode(200)
+                .header("Content-Range", nullValue())
+                .body(equalTo("INDEX-" + suffix));
     }
 
     @Test
@@ -1603,6 +1684,27 @@ class CloudFrontDistributionServingTest {
         keyGroup.setItems(List.of(publicKey.getId()));
         keyGroup = cloudFrontService.createKeyGroup(keyGroup);
         return new SignerResources(publicKey.getId(), keyGroup.getId());
+    }
+
+    /** A distribution in front of a bucket holding {@code alphabet.txt}, the 26 letters. */
+    private Distribution alphabetDistribution() {
+        String bucket = "cf-range-" + suffix();
+        createBucket(bucket);
+        putObject(bucket, "alphabet.txt", ALPHABET, "text/plain");
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(s3Origin("only-origin", bucket)));
+        cfg.setDefaultCacheBehavior(defaultBehavior("only-origin"));
+        return cloudFrontService.createDistribution(distribution(cfg), Map.of());
+    }
+
+    private static void assertRange(Distribution dist, String range, String contentRange, String body) {
+        given().header("Host", dist.getDomainName()).header("Range", range).when().get("/alphabet.txt")
+                .then().statusCode(206)
+                .header("Content-Range", equalTo(contentRange))
+                .header("Content-Length", equalTo(Integer.toString(body.length())))
+                .header("Accept-Ranges", equalTo("bytes"))
+                .body(equalTo(body));
     }
 
     private void createBucket(String bucket) {

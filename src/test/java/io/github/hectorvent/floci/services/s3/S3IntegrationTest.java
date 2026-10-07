@@ -1032,6 +1032,108 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(123)
+    void getObjectWithARangeUnitInAnyCase() {
+        putGreeting("range-unit-bucket");
+        try {
+            // Range unit names are case-insensitive (RFC 9110, section 14.1).
+            given()
+                .header("Range", "Bytes=0-4")
+            .when()
+                .get("/range-unit-bucket/greeting.txt")
+            .then()
+                .statusCode(206)
+                .header("Content-Range", equalTo("bytes 0-4/20"))
+                .body(equalTo("Hello"));
+        } finally {
+            deleteGreeting("range-unit-bucket");
+        }
+    }
+
+    @Test
+    @Order(124)
+    void getObjectWithIfRangeServesTheRangeOnlyWhileItsValidatorMatches() {
+        putGreeting("if-range-bucket");
+        try {
+            String etag = given().when().head("/if-range-bucket/greeting.txt").then().extract().header("ETag");
+            String lastModified = given().when().head("/if-range-bucket/greeting.txt").then().extract()
+                    .header("Last-Modified");
+
+            for (String current : List.of(etag, lastModified)) {
+                given()
+                    .header("Range", "bytes=0-4")
+                    .header("If-Range", current)
+                .when()
+                    .get("/if-range-bucket/greeting.txt")
+                .then()
+                    .statusCode(206)
+                    .header("Content-Range", equalTo("bytes 0-4/20"))
+                    .body(equalTo("Hello"));
+            }
+            given()
+                .header("Range", "bytes=0-4")
+                .header("If-Range", "\"stale\"")
+            .when()
+                .get("/if-range-bucket/greeting.txt")
+            .then()
+                .statusCode(200)
+                .header("Content-Range", nullValue())
+                .header("Content-Length", equalTo("20"));
+        } finally {
+            deleteGreeting("if-range-bucket");
+        }
+    }
+
+    @Test
+    @Order(125)
+    void headObjectWithRangeReportsTheRangeLengthOr416() {
+        putGreeting("head-range-bucket");
+        try {
+            // "If the Range is satisfiable, only the ContentLength is affected in the response. If the
+            // Range is not satisfiable, S3 returns a 416".
+            given()
+                .header("Range", "bytes=0-4")
+                .header("x-amz-checksum-mode", "ENABLED")
+            .when()
+                .head("/head-range-bucket/greeting.txt")
+            .then()
+                .statusCode(200)
+                .header("Content-Length", equalTo("5"))
+                .header("Content-Range", nullValue())
+                .header("x-amz-checksum-crc64nvme", nullValue())
+                .header("x-amz-checksum-type", nullValue());
+            given()
+                .header("Range", "bytes=0-4")
+                .header("If-Range", "\"stale\"")
+                .header("x-amz-checksum-mode", "ENABLED")
+            .when()
+                .head("/head-range-bucket/greeting.txt")
+            .then()
+                .statusCode(200)
+                .header("Content-Length", equalTo("20"))
+                .header("x-amz-checksum-crc64nvme", notNullValue());
+            given()
+                .header("Range", "bytes=50-")
+            .when()
+                .head("/head-range-bucket/greeting.txt")
+            .then()
+                .statusCode(416);
+            // A Range that is not one valid range is not one that cannot be satisfied, so it is ignored.
+            for (String invalid : List.of("bytes=0-1,4-5", "bytes=5-2", "bytes=abc")) {
+                given()
+                    .header("Range", invalid)
+                .when()
+                    .head("/head-range-bucket/greeting.txt")
+                .then()
+                    .statusCode(200)
+                    .header("Content-Length", equalTo("20"));
+            }
+        } finally {
+            deleteGreeting("head-range-bucket");
+        }
+    }
+
+    @Test
     @Order(27)
     void getObjectWithFullRange() {
         given()
@@ -1082,7 +1184,10 @@ class S3IntegrationTest {
         .then()
             .statusCode(416)
             .header("Content-Range", equalTo("bytes */20"))
-            .body(containsString("InvalidRange"));
+            .body(hasXPath("/Error/Code", equalTo("InvalidRange")))
+            .body(hasXPath("/Error/Message", equalTo("The requested range is not satisfiable")))
+            .body(hasXPath("/Error/RangeRequested", equalTo("bytes=50-100")))
+            .body(hasXPath("/Error/ActualObjectSize", equalTo("20")));
     }
 
     @Test
@@ -3197,6 +3302,17 @@ class S3IntegrationTest {
         catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("MD5 is not available", e);
         }
+    }
+
+    /** Creates {@code bucket} holding {@code greeting.txt}, the 20 bytes "Hello World from S3!". */
+    private static void putGreeting(String bucket) {
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("Hello World from S3!").when().put("/" + bucket + "/greeting.txt").then().statusCode(200);
+    }
+
+    private static void deleteGreeting(String bucket) {
+        given().delete("/" + bucket + "/greeting.txt");
+        given().delete("/" + bucket);
     }
 
     private static byte[] alphabetBytes(int size) {

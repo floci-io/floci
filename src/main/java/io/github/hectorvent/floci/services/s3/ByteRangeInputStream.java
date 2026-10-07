@@ -1,28 +1,26 @@
 package io.github.hectorvent.floci.services.s3;
 
-import io.github.hectorvent.floci.services.s3.S3Service.CopySourceRange;
-
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * The bytes of one copy-source range, read from a stream over the whole source as they are needed.
- * The first read skips to the range's first byte, so nothing of the source is touched until the
- * part is about to be written, and the stream ends after the range's last byte. A source that ends
+ * The bytes of one range of an object, read from a stream over the whole object as they are needed.
+ * The first read skips to the range's first byte, so nothing of the object is touched until the
+ * range is about to be written, and the stream ends after the range's last byte. An object that ends
  * before the range does fails the read.
  */
-final class CopyRangeInputStream extends InputStream {
+final class ByteRangeInputStream extends InputStream {
 
     private final InputStream source;
     private final long first;
     private long remaining;
     private boolean positioned;
 
-    CopyRangeInputStream(InputStream source, CopySourceRange range) {
+    ByteRangeInputStream(InputStream source, long first, long length) {
         this.source = source;
-        this.first = range.first();
-        this.remaining = range.length();
+        this.first = first;
+        this.remaining = length;
     }
 
     @Override
@@ -46,7 +44,7 @@ final class CopyRangeInputStream extends InputStream {
         }
         int read = source.read(buffer, offset, (int) Math.min(length, remaining));
         if (read < 0) {
-            throw new EOFException("Copy source ended " + remaining + " bytes before the end of the requested range");
+            throw new EOFException("Object ended " + remaining + " bytes before the end of the requested range");
         }
         remaining -= read;
         return read;
