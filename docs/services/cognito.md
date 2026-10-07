@@ -5,9 +5,14 @@
 
 Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth token endpoint, so local clients can mint and validate Cognito-like access tokens against RS256 signing keys.
 
-When configured, `PostAuthentication` and `PreTokenGeneration` Lambda triggers must succeed
-before authentication or token issuance completes. Function errors and malformed responses
-return Cognito Lambda errors instead of issuing tokens without the trigger's claims.
+When configured, `PreAuthentication`, `PostAuthentication` and `PreTokenGeneration` Lambda triggers
+must succeed before authentication or token issuance completes. Function errors and malformed
+responses return Cognito Lambda errors instead of issuing tokens without the trigger's claims. A
+`PreSignUp` or `PreAuthentication` function that raises refuses the request with
+`UserLambdaValidationException` and the message `<Trigger> failed with error <errorMessage>.`,
+where `errorMessage` is taken verbatim from the function's error payload, as on AWS.
+
+Sign-in by a disabled user fails with `NotAuthorizedException` (`User is disabled.`), as on AWS.
 
 `CreateUserPool` supports overriding several values using user-pool tags **only** at creation time:
 * `floci:override-id`, to pin the resulting `UserPool.Id`. Because a pinned id is caller-chosen it can be reused, which AWS never does. `DeleteUserPool` therefore deletes everything the pool owns (users, groups, app clients, resource servers, revoked token records and outstanding verification codes) so a pool recreated on the same id starts empty rather than inheriting the deleted pool's password hashes and client secrets.
@@ -214,7 +219,7 @@ further divergences, both deliberate:
 | AdminUpdateUserAttributes | Updates attributes for a user in a user pool. |
 | AdminDeleteUserAttributes | Deletes the named attributes from a user, along with any pending verification of them. |
 | AdminConfirmSignUp | Confirms a user's sign-up without a confirmation code. |
-| AdminDisableUser | Disables a user, who can no longer sign in. Tokens already issued keep working, where AWS revokes the user's access tokens. |
+| AdminDisableUser | Disables a user, whose sign-in then fails with `NotAuthorizedException` (`User is disabled.`). Tokens already issued keep working, where AWS revokes the user's access tokens. |
 | AdminEnableUser | Re-enables a disabled user. |
 | AdminResetUserPassword | Clears a user's password and sets the status to `RESET_REQUIRED`, so sign-in fails with `PasswordResetRequiredException`. Floci sends no reset code: finish with `ForgotPassword` and `ConfirmForgotPassword`, or `AdminSetUserPassword`. Refused when the pool's account recovery is `admin_only`. |
 | AdminSetUserMFAPreference | Sets a user's email and software-token MFA preferences from `EmailMfaSettings` and `SoftwareTokenMfaSettings`. SMS settings are accepted but not stored. See [MFA preferences](#mfa-preferences). |

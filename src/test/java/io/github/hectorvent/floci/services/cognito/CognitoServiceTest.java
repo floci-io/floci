@@ -4664,7 +4664,8 @@ class CognitoServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
-        assertEquals("UserNotConfirmedException", ex.getErrorCode());
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("User is disabled.", ex.getMessage());
     }
 
     @Test

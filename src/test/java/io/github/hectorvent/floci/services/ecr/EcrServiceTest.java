@@ -227,6 +227,29 @@ class EcrServiceTest {
                         "missing/cache", null, null, null, REGION)).getErrorCode());
     }
 
+    /**
+     * An ECR upstream is recognised in every partition, as Floci's own registry recognises an ECR
+     * image URI: the host pattern once accepted only the commercial and China suffixes.
+     */
+    @Test
+    void pullThroughCacheRule_acceptsAnEcrUpstreamInEveryPartition() {
+        String[] hosts = {
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+            "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn",
+            "123456789012.dkr.ecr.us-gov-west-1.amazonaws.com",
+            "123456789012.dkr.ecr.us-iso-east-1.c2s.ic.gov",
+            "123456789012.dkr.ecr.eusc-de-east-1.amazonaws.eu",
+        };
+        for (int i = 0; i < hosts.length; i++) {
+            PullThroughCacheRule rule = service.createPullThroughCacheRule("ecr-up-" + i, hosts[i], null,
+                    null, null, null, null, REGION);
+            assertEquals("ecr", rule.getUpstreamRegistry(), hosts[i]);
+        }
+        assertEquals("UnsupportedUpstreamRegistryException", assertThrows(AwsException.class,
+                () -> service.createPullThroughCacheRule("ecr-up-bad", "123456789012.dkr.ecr.us-east-1.example.com",
+                        null, null, null, null, null, REGION)).getErrorCode());
+    }
+
     @Test
     void pullThroughCacheRule_rejectsInvalidInputs() {
         assertEquals("InvalidParameterException", assertThrows(AwsException.class,

@@ -956,7 +956,7 @@ class CognitoManagedLoginIntegrationTest {
         Response refused = post(null, wrong, Map.of("code", code));
 
         String html = refused.then().statusCode(400).extract().asString();
-        assertTrue(html.contains("<p role=\"alert\">User is disabled</p>"), html);
+        assertTrue(html.contains("<p role=\"alert\">User is disabled.</p>"), html);
         assertNull(input(html, "code"), "the code is used up, so the page does not ask for it again");
         assertTrue(input(html, "username").contains("value=\"" + pool.email() + "\""), html);
         assertNull(refused.getHeader("Location"));

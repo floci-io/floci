@@ -1530,9 +1530,12 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "select")) {
                 s3Service.authorizeGetObject(bucket, key, versionId, authorization);
-                S3Object obj = s3Service.getObject(bucket, key, versionId);
-                byte[] result = s3SelectService.select(obj, new String(body, StandardCharsets.UTF_8));
-                return Response.ok(result)
+                // The object and its metadata are opened as one snapshot, as for GetObject, and the
+                // query reads it as the response is written, so the object is never held in memory.
+                S3SelectService.EventStream events = s3SelectService.select(
+                        s3Service.openObject(bucket, key, versionId), new String(body, StandardCharsets.UTF_8));
+                StreamingOutput entity = events::writeTo;
+                return Response.ok(entity)
                         .type("application/octet-stream")
                         .build();
             }

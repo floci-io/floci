@@ -115,7 +115,7 @@ class AccountContextFilterTest {
         filter.filter(mockContext(
             "AWS4-HMAC-SHA256 Credential=000000000001/20260617/aws-cn-global/iam/aws4_request, SignedHeaders=host, Signature=abc",
             null));
-        assertEquals("aws-cn-global", requestContext.getRegion());
+        assertEquals("cn-northwest-1", requestContext.getRegion(), "a pseudo-region is never a request region");
         assertEquals("aws-cn", requestContext.getPartition());
     }
 
@@ -249,7 +249,7 @@ class AccountContextFilterTest {
     @Test
     void strictModeAlsoCoversPresignedCredentials() {
         strictPartitions = true;
-        ContainerRequestContext ctx = mockContext(null, "AKID/20260617/eusc-de-east-1/iam/aws4_request");
+        ContainerRequestContext ctx = mockContext(null, "AKID/20260617/cn-north-1/lightsail/aws4_request");
         filter.filter(ctx);
         ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
         verify(ctx).abortWith(aborted.capture());

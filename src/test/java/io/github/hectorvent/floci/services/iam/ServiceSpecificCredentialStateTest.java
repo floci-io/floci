@@ -70,6 +70,7 @@ class ServiceSpecificCredentialStateTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 credentials,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", defaultAccount), false, null);
     }
 
@@ -291,7 +292,11 @@ class ServiceSpecificCredentialStateTest {
         }
     }
 
-    /** AWS lists the service-specific credential among the items to remove before a user. */
+    /**
+     * AWS lists the service-specific credential among the items to remove before a user. Unlike the
+     * access-key and policy cases it gets no message of its own: the recorded answer is the generic
+     * referenced-objects wording, so the message deliberately does not name the credential.
+     */
     @Test
     void aUserWithACredentialCannotBeDeleted() {
         IamService service = newService(new InMemoryStorage<>(), ACCOUNT_A);
@@ -302,8 +307,8 @@ class ServiceSpecificCredentialStateTest {
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.deleteUser("blocked-user"));
         assertEquals("DeleteConflict", refused.getErrorCode());
-        assertTrue(refused.getMessage().contains("service-specific credential"),
-                "the message should name what is in the way: " + refused.getMessage());
+        assertEquals("Cannot delete entity, must remove referenced objects first.",
+                refused.getMessage());
 
         service.deleteServiceSpecificCredential("blocked-user", id);
         service.deleteUser("blocked-user");

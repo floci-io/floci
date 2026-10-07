@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecr;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -39,6 +40,13 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class EcrService implements ResourceProvider {
+
+    /**
+     * A private ECR registry host in any partition, {@code <account>.dkr.ecr.<region>.<dnsSuffix>},
+     * matched the same way {@code EcrRegistryManager} recognises an ECR image URI.
+     */
+    private static final Pattern ECR_UPSTREAM_HOST = Pattern.compile(
+            "[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\." + AwsPartitions.dnsSuffixRegex());
 
     private static final Logger LOG = Logger.getLogger(EcrService.class);
     private static final Pattern REPO_NAME = Pattern.compile(
@@ -1023,7 +1031,7 @@ public class EcrService implements ResourceProvider {
         if (host.equals("cgr.dev")) {
             return "chainguard";
         }
-        if (host.matches("[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com(?:\\.cn)?")) {
+        if (ECR_UPSTREAM_HOST.matcher(host).matches()) {
             return "ecr";
         }
         throw unsupportedUpstreamRegistry(upstreamRegistryUrl);

@@ -2443,8 +2443,8 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .body("domainNameConfig.domainName", equalTo("api.example.com"))
             .body("domainNameConfig.description", equalTo("Test domain"))
-            .body("domainNameConfig.appsyncDomainName", containsString(".appsync-api."))
-            .body("domainNameConfig.hostedZoneId", notNullValue())
+            .body("domainNameConfig.appsyncDomainName", endsWith(".cloudfront.net"))
+            .body("domainNameConfig.hostedZoneId", equalTo("Z2FDTNDATAQYW2"))
             .extract().path("domainNameConfig.domainName");
     }
 

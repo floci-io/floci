@@ -251,7 +251,7 @@ class CognitoLambdaTriggersTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
-        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("UserLambdaValidationException", ex.getErrorCode());
         assertEquals("PreAuthentication failed with error Unhandled.", ex.getMessage());
     }
 
@@ -275,7 +275,7 @@ class CognitoLambdaTriggersTest {
             }
         });
 
-        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("UserLambdaValidationException", ex.getErrorCode());
         assertEquals("PreAuthentication failed with error Email not verified.", ex.getMessage());
     }
 
@@ -298,8 +298,82 @@ class CognitoLambdaTriggersTest {
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
 
-        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("UserLambdaValidationException", ex.getErrorCode());
         assertEquals("PreAuthentication failed with error Unhandled.", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preAuthenticationUninvokableFunctionIsAnUnexpectedLambdaException(boolean adminAuth) {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenThrow(new AwsException("ResourceNotFoundException",
+                        "Function not found: arn:aws:lambda:::pre", 404));
+
+        AwsException ex = assertThrows(AwsException.class, () -> {
+            if (adminAuth) {
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+            } else {
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+            }
+        });
+
+        assertEquals("UnexpectedLambdaException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("PreAuthentication trigger failed: Function not found: arn:aws:lambda:::pre", ex.getMessage());
+    }
+
+    @Test
+    void preAuthenticationRuntimeFailureIsAnUnexpectedLambdaException() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenThrow(new IllegalStateException("runtime container crashed"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        assertEquals("UnexpectedLambdaException", ex.getErrorCode());
+        assertEquals("PreAuthentication trigger failed: runtime container crashed", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"not-json", "null", "{\"response\":\"not-an-object\"}", ""})
+    void preAuthenticationMalformedResponseIsAnInvalidLambdaResponseException(String payload) {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenReturn(rawPayload(payload));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        assertEquals("InvalidLambdaResponseException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("PreAuthentication trigger failed: " + malformedResponseReason("PreAuthentication", payload),
+                ex.getMessage());
+    }
+
+    /** The reason {@code invokeTrigger} attaches to each shape of malformed function output. */
+    private static String malformedResponseReason(String trigger, String payload) {
+        if (payload.isEmpty()) {
+            return trigger + " trigger returned an empty response";
+        }
+        if ("not-json".equals(payload)) {
+            return trigger + " trigger returned malformed JSON";
+        }
+        return trigger + " trigger returned a non-object response";
     }
 
     // =========================================================================
@@ -421,12 +495,57 @@ class CognitoLambdaTriggersTest {
 
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
                 any(byte[].class), any()))
-                .thenReturn(lambdaError("Unhandled"));
+                .thenReturn(lambdaError("Unhandled", "Invitations are closed"));
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.signUp(client.getClientId(), "alice", "Perm1234!",
                         Map.of("email", "alice@example.com")));
-        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("UserLambdaValidationException", ex.getErrorCode());
+        assertEquals("PreSignUp failed with error Invitations are closed.", ex.getMessage());
+    }
+
+    @Test
+    void preSignUpUninvokableFunctionIsAnUnexpectedLambdaException() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), any()))
+                .thenThrow(new AwsException("ResourceNotFoundException",
+                        "Function not found: arn:aws:lambda:::pre-signup", 404));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.signUp(client.getClientId(), "alice", "Perm1234!",
+                        Map.of("email", "alice@example.com")));
+
+        assertEquals("UnexpectedLambdaException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("PreSignUp trigger failed: Function not found: arn:aws:lambda:::pre-signup", ex.getMessage());
+        AwsException lookup = assertThrows(AwsException.class, () ->
+                service.adminGetUser(pool.getId(), "alice"));
+        assertEquals("UserNotFoundException", lookup.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"not-json", "null", "{\"response\":\"not-an-object\"}", ""})
+    void preSignUpMalformedResponseIsAnInvalidLambdaResponseException(String payload) {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), any()))
+                .thenReturn(rawPayload(payload));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.signUp(client.getClientId(), "alice", "Perm1234!",
+                        Map.of("email", "alice@example.com")));
+
+        assertEquals("InvalidLambdaResponseException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("PreSignUp trigger failed: " + malformedResponseReason("PreSignUp", payload), ex.getMessage());
+        AwsException lookup = assertThrows(AwsException.class, () ->
+                service.adminGetUser(pool.getId(), "alice"));
+        assertEquals("UserNotFoundException", lookup.getErrorCode());
     }
 
     @Test

@@ -119,7 +119,8 @@ class CognitoTotpMfaTest {
         AwsException disabled = assertThrows(AwsException.class,
                 () -> service.respondToAuthChallenge(client.getClientId(), "MFA_SETUP", verifiedSession,
                         Map.of("USERNAME", USERNAME)));
-        assertEquals("UserNotConfirmedException", disabled.getErrorCode());
+        assertEquals("NotAuthorizedException", disabled.getErrorCode());
+        assertEquals("User is disabled.", disabled.getMessage());
     }
 
     @Test
@@ -138,7 +139,8 @@ class CognitoTotpMfaTest {
         AwsException disabled = assertThrows(AwsException.class,
                 () -> service.respondToAuthChallenge(client.getClientId(), "SOFTWARE_TOKEN_MFA", challengeSession,
                         Map.of("USERNAME", USERNAME, "SOFTWARE_TOKEN_MFA_CODE", code)));
-        assertEquals("UserNotConfirmedException", disabled.getErrorCode());
+        assertEquals("NotAuthorizedException", disabled.getErrorCode());
+        assertEquals("User is disabled.", disabled.getMessage());
     }
 
     @Test

@@ -392,13 +392,16 @@ public class CloudFormationService implements ResourceProvider {
         // persistStack() stays outside: it is storage I/O, and compute()'s contract is that the
         // remapping function does short, non-blocking work.
         boolean isCreateType = changeSetType == null || "CREATE".equalsIgnoreCase(changeSetType);
+        // An update names its stack by name or stack ID; the map is keyed by name. One that names no
+        // live stack is keyed as given, so it lands in the missing-stack branch below.
+        Stack live = isCreateType ? null : resolveStack(stackName, region, accountId);
+        String canonicalStackName = live == null ? stackName : live.getStackName();
         ChangeSet[] created = new ChangeSet[1];
-        Stack stack = stacks.compute(stackKey(accountId, stackName, region), (k, existing) -> {
+        Stack stack = stacks.compute(stackKey(accountId, canonicalStackName, region), (k, existing) -> {
             Stack target;
             if (existing == null) {
                 if (!isCreateType) {
-                    throw new AwsException("ValidationError",
-                            "Stack with id " + stackName + " does not exist", 400);
+                    throw noStackToUpdate(stackName, region, accountId);
                 }
                 target = newStack(stackName, region, accountId);
                 if (tags != null) target.getTags().putAll(tags);
@@ -412,19 +415,24 @@ public class CloudFormationService implements ResourceProvider {
                             "AWS::CloudFormation::Stack", "REVIEW_IN_PROGRESS", "User Initiated");
                 }
             } else {
+                String status = existing.getStatus();
                 boolean reusableReviewPlaceholder =
-                        attachToReviewInProgressStack && "REVIEW_IN_PROGRESS".equals(existing.getStatus());
+                        attachToReviewInProgressStack && "REVIEW_IN_PROGRESS".equals(status);
                 if (isCreateType && !reusableReviewPlaceholder) {
                     throw new AwsException("AlreadyExistsException",
                             "Stack [" + stackName + "] already exists", 400);
                 }
+                // A name whose stack has finished deleting names no live stack, even before it leaves the
+                // map, and neither does a stack ID that is not the live stack's.
+                if (!isCreateType && !stackName.equals(existing.getStackId())
+                        && ("DELETE_COMPLETE".equals(status) || AwsArnUtils.isArn(stackName))) {
+                    throw noStackToUpdate(stackName, region, accountId);
+                }
                 // The message is the one real CloudFormation emits, down to its own "can not"
                 // spelling and the stack id carried as "Stack:<arn>" with no space: clients match
                 // on this string.
-                if (!isCreateType && refusesUpdate(existing.getStatus())) {
-                    throw new AwsException("ValidationError",
-                            "Stack:" + existing.getStackId() + " is in " + existing.getStatus()
-                                    + " state and can not be updated.", 400);
+                if (!isCreateType && (refusesUpdate(status) || "DELETE_COMPLETE".equals(status))) {
+                    throw cannotBeUpdated(existing.getStackId(), status);
                 }
                 if (fromPreviousTemplate && !Objects.equals(templateBody, previousTemplateOf(existing))) {
                     return existing;
@@ -435,7 +443,7 @@ public class CloudFormationService implements ResourceProvider {
             ChangeSet cs = new ChangeSet();
             cs.setChangeSetId(AwsArnUtils.Arn.of("cloudformation", region, accountId, "changeSet/" + changeSetName + "/" + UUID.randomUUID()).toString());
             cs.setChangeSetName(changeSetName);
-            cs.setStackName(stackName);
+            cs.setStackName(canonicalStackName);
             cs.setStackId(target.getStackId());
             cs.setChangeSetType(changeSetType != null ? changeSetType : "CREATE");
             cs.setTemplateBody(resolvedTemplate);
@@ -459,6 +467,21 @@ public class CloudFormationService implements ResourceProvider {
             persistStack(stack);
         }
         return created[0];
+    }
+
+    private static AwsException cannotBeUpdated(String stackId, String status) {
+        return new AwsException("ValidationError",
+                "Stack:" + stackId + " is in " + status + " state and can not be updated.", 400);
+    }
+
+    // AWS refuses a deleted stack's ID by its state, while a name, or an ID it never issued,
+    // does not exist.
+    private AwsException noStackToUpdate(String stackName, String region, String accountId) {
+        Stack deleted = resolveDeletedStack(stackName, region, accountId);
+        if (deleted != null) {
+            return cannotBeUpdated(deleted.getStackId(), deleted.getStatus());
+        }
+        return new AwsException("ValidationError", "Stack with id " + stackName + " does not exist", 400);
     }
 
     /**
@@ -2883,6 +2906,10 @@ public class CloudFormationService implements ResourceProvider {
         if (stack != null) {
             return stack;
         }
+        return resolveDeletedStack(stackNameOrArn, region, accountId);
+    }
+
+    private Stack resolveDeletedStack(String stackNameOrArn, String region, String accountId) {
         if (stackNameOrArn != null && stackNameOrArn.startsWith("arn:")) {
             DeletedStackEntry deleted = deletedStacks.get(stackNameOrArn);
             if (deleted != null) {

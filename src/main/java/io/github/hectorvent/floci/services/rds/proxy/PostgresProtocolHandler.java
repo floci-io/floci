@@ -21,6 +21,7 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -85,6 +86,10 @@ public class PostgresProtocolHandler {
         return new BackendLogin(clientUsername, clientPassword);
     }
 
+    /**
+     * Authenticates the client, opening the backend session with only {@code user} and
+     * {@code database}: the client's other StartupMessage parameters are not forwarded.
+     */
     public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
                                       String masterUsername, String masterPassword, String dbName,
                                       boolean iamEnabled, RdsSigV4Validator sigV4,
@@ -92,6 +97,24 @@ public class PostgresProtocolHandler {
                                       RdsProxyTlsCertificates tlsCertificates,
                                       PasswordValidator passwordValidator,
                                       int handshakeTimeoutMillis) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator,
+                handshakeTimeoutMillis, false);
+    }
+
+    /**
+     * Authenticates the client. With {@code forwardStartupParameters}, the client's other
+     * StartupMessage parameters ({@code options}, {@code application_name} and any run-time
+     * parameter) open the backend session too, so they apply as they would on the server itself.
+     */
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding,
+                                      RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator,
+                                      int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
 
@@ -176,12 +199,31 @@ public class PostgresProtocolHandler {
                     masterUsername, masterPassword, clientUsername, clientPassword);
             String backendUser = backendLogin.user();
             String backendPass = backendLogin.password();
-            sendStartupToBackend(backendOut, backendUser, effectiveDbName);
+            // An IAM login for any role but the master runs on a session opened as the master and
+            // handed over below, so PostgreSQL would apply the client's parameters with the
+            // master's privileges: a "-c role=<master>" would outlive the handover and RESET ROLE
+            // would regain the master. Those logins send only user and database.
+            Map<String, String> clientParameters = forwardStartupParameters && !(isIam && !isMaster)
+                    ? startup.parameters() : Map.of();
+            sendStartupToBackend(backendOut, backendUser, effectiveDbName, clientParameters);
             backendOut.flush();
 
-            if (!authenticateWithBackend(backendIn, backendOut, backendUser, backendPass)) {
-                sendErrorResponse(clientOut, "FATAL", "08006",
-                        "Backend database authentication failed");
+            boolean backendAuthenticated = false;
+            byte[] backendRejection = null;
+            try {
+                backendAuthenticated = authenticateWithBackend(backendIn, backendOut, backendUser, backendPass);
+            } catch (BackendRejectedException e) {
+                backendRejection = e.errorResponse();
+            }
+            if (!backendAuthenticated) {
+                // PostgreSQL's own refusal, such as a missing pg_hba.conf entry for a forwarded
+                // replication=true, says far more than the proxy's generic error.
+                if (backendRejection != null) {
+                    clientOut.write(backendRejection);
+                } else {
+                    sendErrorResponse(clientOut, "FATAL", "08006",
+                            "Backend database authentication failed");
+                }
                 clientOut.flush();
                 closeQuietly(client);
                 closeQuietly(backend);
@@ -270,7 +312,8 @@ public class PostgresProtocolHandler {
             Map<String, String> params = parseStartupParams(payload);
             return new StartupMessage(currentSocket,
                     params.getOrDefault("user", "postgres"),
-                    params.get("database"));
+                    params.get("database"),
+                    params);
         }
     }
 
@@ -286,7 +329,8 @@ public class PostgresProtocolHandler {
         }
     }
 
-    private record StartupMessage(Socket socket, String username, String database) {}
+    private record StartupMessage(Socket socket, String username, String database,
+                                  Map<String, String> parameters) {}
 
     static String resolveEffectiveDbName(String clientDatabase, String instanceDbName) {
         if (clientDatabase != null && !clientDatabase.isBlank()) {
@@ -302,8 +346,8 @@ public class PostgresProtocolHandler {
         return !messages.isEmpty() && messages.get(messages.size() - 1)[0] == 'E';
     }
 
-    private static Map<String, String> parseStartupParams(byte[] data) {
-        Map<String, String> params = new HashMap<>();
+    static Map<String, String> parseStartupParams(byte[] data) {
+        Map<String, String> params = new LinkedHashMap<>();
         int i = 0;
         while (i < data.length) {
             int keyStart = i;
@@ -329,25 +373,35 @@ public class PostgresProtocolHandler {
         return params;
     }
 
-    private static void sendStartupToBackend(OutputStream out, String username, String dbName)
-            throws IOException {
-        byte[] userKey = "user".getBytes(StandardCharsets.UTF_8);
-        byte[] userVal = username.getBytes(StandardCharsets.UTF_8);
-        byte[] dbKey = "database".getBytes(StandardCharsets.UTF_8);
-        byte[] dbVal = dbName.getBytes(StandardCharsets.UTF_8);
+    /**
+     * Writes the backend StartupMessage: the proxy's own {@code user} and {@code database}, then
+     * the client's other parameters in the order the client sent them. {@code _pq_.} names request
+     * protocol extensions, which the proxy does not negotiate with the backend.
+     */
+    private static void sendStartupToBackend(OutputStream out, String username, String dbName,
+                                             Map<String, String> clientParameters) throws IOException {
+        ByteArrayOutputStream parameters = new ByteArrayOutputStream();
+        writeStartupParameter(parameters, "user", username);
+        writeStartupParameter(parameters, "database", dbName);
+        for (Map.Entry<String, String> parameter : clientParameters.entrySet()) {
+            String name = parameter.getKey();
+            if (!"user".equals(name) && !"database".equals(name) && !name.startsWith("_pq_.")) {
+                writeStartupParameter(parameters, name, parameter.getValue());
+            }
+        }
+        parameters.write(0); // final null
 
-        int length = 4 + 4
-                + userKey.length + 1 + userVal.length + 1
-                + dbKey.length + 1 + dbVal.length + 1
-                + 1; // final null
-
-        writeInt32(out, length);
+        writeInt32(out, 4 + 4 + parameters.size());
         writeInt32(out, STARTUP_PROTOCOL_VERSION);
-        out.write(userKey); out.write(0);
-        out.write(userVal); out.write(0);
-        out.write(dbKey); out.write(0);
-        out.write(dbVal); out.write(0);
-        out.write(0); // final null
+        parameters.writeTo(out);
+    }
+
+    private static void writeStartupParameter(ByteArrayOutputStream out, String name, String value)
+            throws IOException {
+        out.write(name.getBytes(StandardCharsets.UTF_8));
+        out.write(0);
+        out.write(value.getBytes(StandardCharsets.UTF_8));
+        out.write(0);
     }
 
     // ── Client auth phase ─────────────────────────────────────────────────────
@@ -376,7 +430,7 @@ public class PostgresProtocolHandler {
 
     private static boolean authenticateWithBackend(InputStream in, OutputStream out,
                                                    String username, String password) throws IOException {
-        int type = in.read();
+        int type = readAuthenticationType(in);
         if (type != 'R') {
             LOG.warnv("Expected Authentication ('R') from backend, got type={0}", type);
             return false;
@@ -422,6 +476,33 @@ public class PostgresProtocolHandler {
         return false;
     }
 
+    /**
+     * Reads the type byte of a message the handshake expects to be an Authentication one. When
+     * PostgreSQL refuses the login instead, the whole ErrorResponse is read and thrown so the
+     * client sees PostgreSQL's reason.
+     */
+    private static int readAuthenticationType(InputStream in) throws IOException {
+        int type = in.read();
+        if (type == 'E') {
+            throw new BackendRejectedException(readMessage(in, type));
+        }
+        return type;
+    }
+
+    /** PostgreSQL refused the backend login with {@code errorResponse}, a complete message. */
+    private static final class BackendRejectedException extends IOException {
+        private final byte[] errorResponse;
+
+        BackendRejectedException(byte[] errorResponse) {
+            super("Backend rejected the login: " + errorMessage(errorResponse, "no message"));
+            this.errorResponse = errorResponse;
+        }
+
+        byte[] errorResponse() {
+            return errorResponse;
+        }
+    }
+
     // ── SCRAM-SHA-256 ─────────────────────────────────────────────────────────
 
     private static boolean performScramSha256(InputStream in, OutputStream out,
@@ -445,7 +526,7 @@ public class PostgresProtocolHandler {
         out.flush();
 
         // Step 2: Read AuthenticationSASLContinue (authType=11)
-        if (in.read() != 'R') {
+        if (readAuthenticationType(in) != 'R') {
             return false;
         }
         int len2 = checkedPacketLength(readInt32(in), 8, "SASL continue message");
@@ -486,7 +567,7 @@ public class PostgresProtocolHandler {
         out.flush();
 
         // Step 4: Read AuthenticationSASLFinal (authType=12) — server signature (ignored)
-        if (in.read() != 'R') {
+        if (readAuthenticationType(in) != 'R') {
             return false;
         }
         int len3 = checkedPacketLength(readInt32(in), 8, "SASL final message");
@@ -560,7 +641,7 @@ public class PostgresProtocolHandler {
     // ── MD5 password ──────────────────────────────────────────────────────────
 
     private static boolean readAuthOk(InputStream in) throws IOException {
-        int type = in.read();
+        int type = readAuthenticationType(in);
         if (type != 'R') {
             LOG.warnv("Expected AuthenticationOK from backend, got type={0}", type);
             return false;
@@ -605,19 +686,7 @@ public class PostgresProtocolHandler {
             if (type < 0) {
                 throw new EOFException("Connection closed before ReadyForQuery");
             }
-            int length = checkedPacketLength(readInt32(in), 4, "backend message");
-            byte[] payload = new byte[length - 4];
-            readFully(in, payload);
-
-            // Reconstruct full message: type + length(4) + payload
-            byte[] full = new byte[1 + 4 + payload.length];
-            full[0] = (byte) type;
-            full[1] = (byte) ((length >> 24) & 0xFF);
-            full[2] = (byte) ((length >> 16) & 0xFF);
-            full[3] = (byte) ((length >> 8) & 0xFF);
-            full[4] = (byte) (length & 0xFF);
-            System.arraycopy(payload, 0, full, 5, payload.length);
-            messages.add(full);
+            messages.add(readMessage(in, type));
 
             if (type == 'Z') { // ReadyForQuery
                 break;
@@ -628,6 +697,23 @@ public class PostgresProtocolHandler {
             }
         }
         return messages;
+    }
+
+    /** Reads the rest of a backend message whose type byte was {@code type}, returning it whole. */
+    private static byte[] readMessage(InputStream in, int type) throws IOException {
+        int length = checkedPacketLength(readInt32(in), 4, "backend message");
+        byte[] payload = new byte[length - 4];
+        readFully(in, payload);
+
+        // Reconstruct full message: type + length(4) + payload
+        byte[] full = new byte[1 + 4 + payload.length];
+        full[0] = (byte) type;
+        full[1] = (byte) ((length >> 24) & 0xFF);
+        full[2] = (byte) ((length >> 16) & 0xFF);
+        full[3] = (byte) ((length >> 8) & 0xFF);
+        full[4] = (byte) (length & 0xFF);
+        System.arraycopy(payload, 0, full, 5, payload.length);
+        return full;
     }
 
     // ── IAM session role ──────────────────────────────────────────────────────

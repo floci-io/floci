@@ -77,7 +77,7 @@ public interface EmulatorConfig {
 
         /**
          * Refuse requests signed for a service AWS does not publish in the request's partition
-         * (CloudFront in GovCloud, IAM in {@code aws-eusc}). On AWS such a request never reaches
+         * (CloudFront in GovCloud, Lightsail in China). On AWS such a request never reaches
          * an API because its endpoint does not resolve; Floci serves every enabled service in
          * every partition unless this is set.
          */

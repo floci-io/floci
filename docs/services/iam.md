@@ -531,6 +531,61 @@ ready. `GenerateCredentialReport`'s `State`/`Description` for the no-report-exis
 own documented example response (`STARTED` / "No report exists. Starting a new report generation
 task"); the wording for the report-expired case is Floci's own, since AWS does not document it.
 
+### Account Properties and Outbound Federation
+
+| Action | Description |
+|--------|-------------|
+| GetAccountProperties | Returns the account's properties as a `Namespace/PropertyName` to value map. |
+| PutAccountProperties | Sets account properties, all of which must share one namespace. |
+| SetSecurityTokenServicePreferences | Sets the account's global endpoint token version, `v1Token` or `v2Token`. |
+| EnableOutboundWebIdentityFederation | Turns on outbound web identity federation and returns the account's issuer URL. |
+| DisableOutboundWebIdentityFederation | Turns it off. |
+| GetOutboundWebIdentityFederationInfo | Returns the issuer URL and whether JWT vending is on. |
+
+A property key is `Namespace/PropertyName` with exactly one forward slash and neither a leading nor
+a trailing one, 1 to 50 characters matching `^[A-Za-z][A-Za-z0-9/_-]*$`, and a value of 1 to 1024.
+**Every key in one `PutAccountProperties` request must belong to the same namespace**, which AWS
+states directly, so a request mixing namespaces is rejected whole rather than partly applied. Role
+Manager is the only namespace AWS names, and any well-formed key is accepted rather than only that
+one, since an allowlist of one would refuse keys AWS takes.
+
+Those two rules are not the same kind of failure, and they answer differently. The length and the
+pattern are constraints the API Reference publishes on the parameter, and it defines
+`ValidationError` as the common error for input that "doesn't meet the required format or
+constraints", so a key that is too long or outside the pattern, and a value outside 1 to 1024, are
+`ValidationError` with status 400. The `Namespace/PropertyName` rule cannot be expressed in the
+published pattern, which admits a key with no slash, with several, and with a trailing one, so it is
+a rule applied once the format is already satisfied: that, and a request mixing namespaces, are
+`InvalidInput` with status 400, the "invalid or out-of-range value" the operation declares.
+
+**Enabling federation twice is an error, and so is disabling it twice**, which is the asymmetry
+worth noticing: `EnableOutboundWebIdentityFederation` answers `FeatureEnabled` with status 409,
+while `DisableOutboundWebIdentityFederation` answers `FeatureDisabled` with status **404**. AWS
+documents both, including the message wording. `GetOutboundWebIdentityFederationInfo` answers
+`FeatureDisabled` too when the feature is off, reusing the disable operation's own text, so a getter
+reports that the feature cannot be disabled twice. That reads oddly and is matched rather than
+improved.
+
+The issuer URL is `https://<uuid>.tokens.sts.global.<dual-stack suffix>`, which the API Reference
+shows as `https://a1d2b0fd-1177-4468-9351-2fEXAMPLE723.tokens.sts.global.api.aws`. The suffix comes
+from the request's partition rather than the literal, since `api.aws` is only the commercial
+partition's. It is minted once per account and kept across a disable, so re-enabling returns the
+same URL. AWS does not document which way that goes; the reasoning is that a relying party
+verifying tokens will have pinned the URL, so regenerating it would break verification silently.
+
+Two things the feature references are not modeled. The issuer URL is documented as hosting OIDC
+discovery endpoints at `/.well-known/openid-configuration` and `/.well-known/jwks.json`, and the
+operation's description points at a `GetWebIdentityToken` API for obtaining JWTs. Neither is served
+here: these six are the management operations only. `JwtVendingEnabled` is therefore reported as
+true whenever the feature is enabled, which is the only reading available, since nothing in the API
+toggles it separately.
+
+`SetSecurityTokenServicePreferences` stores the version, and `GetAccountSummary` reports it as
+`GlobalEndpointTokenVersion`, which the operation's own description requires. What does not follow
+it is STS itself: Floci does not vary its token format by account preference, so the setting is
+observable in the summary rather than in a token. `v1Token` is reported as the default for an account
+that has never set one.
+
 ### Organizations Root Access
 
 | Action | Description |
@@ -697,6 +752,19 @@ code `NotSupportedService`, on both `CreateServiceSpecificCredential` and
 `NoSuchEntity` for a nonexistent service, for a name that is not a service principal at all, and for
 a real service that simply does not support these credentials. A client written against the model,
 catching the modelled exception, would catch nothing.
+
+A bad `ServiceSpecificCredentialId` splits two ways on `UpdateServiceSpecificCredential`,
+`ResetServiceSpecificCredential` and `DeleteServiceSpecificCredential`. The id is matched against
+the model's `[\w]+` before anything goes looking for it, so one carrying characters outside that
+class is a `ValidationError` with status 400 quoting the pattern, while an id that satisfies the
+pattern and names no credential of that user is `NoSuchEntity` with status 404 and the message
+"No such credential `<id>` exists". The published length of 20 to 128 is enforced the same way, and
+an id breaking both constraints is reported as two validation errors rather than one.
+
+A user that still owns a credential cannot be deleted: `DeleteUser` is `DeleteConflict` with status
+409. Where access keys, policies and group memberships each get a message naming what is in the
+way, this case does not, and AWS answers the generic "Cannot delete entity, must remove referenced
+objects first." Deleting the credential first lets the user go.
 
 **A credential has one of two shapes, decided by the service:**
 

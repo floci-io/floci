@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
@@ -24,18 +25,34 @@ import java.util.List;
  * <p>GET  /_aws/sns?phone=X   — filter by phone number (URL-encoded)
  * <p>GET  /_aws/sns?id=X      — filter by message ID
  * <p>DELETE /_aws/sns         — clear all stored SMS
+ * <p>GET  /_aws/sns/SimpleNotificationService-&lt;fingerprint&gt;.pem: the certificate deliveries
+ *     are signed with, the {@code SigningCertURL} of every signed message
  */
 @Path("/_aws/sns")
 @Produces(MediaType.APPLICATION_JSON)
 public class SnsInspectionController {
 
+    private static final String PEM_MEDIA_TYPE = "application/x-pem-file";
+
     private final SnsService snsService;
     private final ObjectMapper objectMapper;
+    private final SnsMessageSigner messageSigner;
 
     @Inject
-    public SnsInspectionController(SnsService snsService, ObjectMapper objectMapper) {
+    public SnsInspectionController(SnsService snsService, ObjectMapper objectMapper,
+                                   SnsMessageSigner messageSigner) {
         this.snsService = snsService;
         this.objectMapper = objectMapper;
+        this.messageSigner = messageSigner;
+    }
+
+    @GET
+    @Path("{certificate: SimpleNotificationService-[0-9a-f]+\\.pem}")
+    @Produces(PEM_MEDIA_TYPE)
+    public Response getSigningCertificate(@PathParam("certificate") String certificate) {
+        return messageSigner.certificatePem(certificate)
+                .map(pem -> Response.ok(pem, PEM_MEDIA_TYPE).build())
+                .orElseGet(() -> Response.status(Response.Status.NOT_FOUND).build());
     }
 
     @GET

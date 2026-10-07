@@ -577,7 +577,13 @@ class ServiceSpecificCredentialIntegrationTest {
                 .formParam("ServiceSpecificCredentialId", id)
                 .formParam("Status", status)
             .when().post("/").then().statusCode(400)
-                .body(containsString("ValidationError"));
+                .body(containsString("ValidationError"))
+                .body(containsString("1 validation error detected"))
+                .body(containsString("Member must satisfy enum value set"))
+                // AWS names neither the offending value nor the permitted set. The trailing colon
+                // is the tell for the set, and "Deleted" for the value.
+                .body(not(containsString("enum value set:")))
+                .body(not(containsString("Deleted")));
         }
 
         iam("UpdateServiceSpecificCredential")
@@ -595,6 +601,116 @@ class ServiceSpecificCredentialIntegrationTest {
         .when().post("/").then().statusCode(400)
             .body(containsString("ValidationError"))
             .body(containsString("serviceSpecificCredentialId"));
+    }
+
+    /**
+     * A malformed id and an unknown one are different mistakes, and AWS answers them differently.
+     * The id is checked against the model's {@code [\w]+} before anything looks for it, so one
+     * carrying hyphens is a {@code ValidationError} quoting the pattern, while an id that
+     * satisfies the pattern and names no credential is {@code NoSuchEntity}. Both are recorded
+     * against real AWS in LocalStack's validated IAM snapshots, for all three operations.
+     */
+    @Test
+    void aMalformedCredentialIdIsAValidationErrorRatherThanNotFound() {
+        String userName = user();
+        create(userName, CODECOMMIT);
+
+        for (String action : List.of("UpdateServiceSpecificCredential",
+                "ResetServiceSpecificCredential", "DeleteServiceSpecificCredential")) {
+            iam(action)
+                .formParam("UserName", userName)
+                .formParam("ServiceSpecificCredentialId",
+                        "totally-wrong-credential-id-with-hyphens")
+                .formParam("Status", "Inactive")
+            .when().post("/").then().statusCode(400)
+                .body(containsString("ValidationError"))
+                .body(containsString("serviceSpecificCredentialId"))
+                .body(containsString("Member must satisfy regular expression pattern"))
+                .body(not(containsString("NoSuchEntity")));
+        }
+    }
+
+    /**
+     * The id's other published constraint is a length of 20 to 128. A short id satisfies
+     * {@code [\w]+} and still fails, and one that breaks both constraints is reported as two
+     * validation errors rather than one, which is what the counted prefix is for.
+     */
+    @Test
+    void anIdOutsideItsPublishedLengthIsAValidationError() {
+        String userName = user();
+        create(userName, CODECOMMIT);
+
+        for (String id : List.of("tooshort", "W".repeat(129))) {
+            iam("DeleteServiceSpecificCredential")
+                .formParam("UserName", userName)
+                .formParam("ServiceSpecificCredentialId", id)
+            .when().post("/").then().statusCode(400)
+                .body(containsString("1 validation error detected"))
+                .body(containsString("Member must have length less than or equal to 128 and "
+                        + "greater than or equal to 20"))
+                .body(not(containsString("NoSuchEntity")));
+        }
+
+        // Short and outside the pattern at once: both constraints are reported.
+        iam("DeleteServiceSpecificCredential")
+            .formParam("UserName", userName)
+            .formParam("ServiceSpecificCredentialId", "has-hyphens")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("2 validation errors detected"))
+            .body(containsString("Member must have length"))
+            .body(containsString("Member must satisfy regular expression pattern"));
+
+        // And an id of exactly the minimum length is accepted as well formed, so the bound is not
+        // off by one: it reaches the lookup and is reported missing rather than malformed.
+        iam("DeleteServiceSpecificCredential")
+            .formParam("UserName", userName)
+            .formParam("ServiceSpecificCredentialId", "A".repeat(20))
+        .when().post("/").then().statusCode(404)
+            .body(containsString("NoSuchEntity"));
+    }
+
+    @Test
+    void aWellFormedButUnknownCredentialIdIsReportedAsNoSuchCredential() {
+        String userName = user();
+        create(userName, CODECOMMIT);
+
+        for (String action : List.of("UpdateServiceSpecificCredential",
+                "ResetServiceSpecificCredential", "DeleteServiceSpecificCredential")) {
+            iam(action)
+                .formParam("UserName", userName)
+                .formParam("ServiceSpecificCredentialId", "satisfiesregexbutstillinvalid")
+                .formParam("Status", "Inactive")
+            .when().post("/").then().statusCode(404)
+                .body(containsString("NoSuchEntity"))
+                .body(containsString("No such credential satisfiesregexbutstillinvalid exists"))
+                .body(not(containsString("ValidationError")));
+        }
+    }
+
+    /**
+     * A live credential blocks {@code DeleteUser} with 409 {@code DeleteConflict}. This one has no
+     * message of its own: where access keys and policies each name themselves, AWS falls back to
+     * the generic referenced-objects wording here.
+     */
+    @Test
+    void aLiveCredentialBlocksDeletingItsUser() {
+        String userName = user();
+        String id = create(userName, CODECOMMIT);
+
+        iam("DeleteUser").formParam("UserName", userName)
+        .when().post("/").then().statusCode(409)
+            .body(containsString("DeleteConflict"))
+            .body(containsString("Cannot delete entity, must remove referenced objects first."));
+
+        // Remove the credential and the same delete succeeds, so the credential is what blocked it
+        // rather than anything else the user still owns.
+        iam("DeleteServiceSpecificCredential")
+            .formParam("UserName", userName)
+            .formParam("ServiceSpecificCredentialId", id)
+        .when().post("/").then().statusCode(200);
+
+        iam("DeleteUser").formParam("UserName", userName)
+        .when().post("/").then().statusCode(200);
     }
 
     /**

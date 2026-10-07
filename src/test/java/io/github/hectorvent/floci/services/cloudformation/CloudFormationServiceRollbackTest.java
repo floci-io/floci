@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -37,7 +38,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * Covers rollback cleanup when another actor removes a resource after its create succeeded, and
- * which resources a stack delete walks after a failed operation left them in a failed status.
+ * which resources a stack delete walks after a failed operation left them in a failed status, and
+ * that a stack which finished deleting is no longer updatable.
  */
 class CloudFormationServiceRollbackTest {
 
@@ -169,6 +171,27 @@ class CloudFormationServiceRollbackTest {
         assertEquals("DELETE_FAILED", stack.getStatus());
         assertEquals("The following resource(s) failed to delete: [Bucket].", stack.getStatusReason());
         assertEquals("DELETE_FAILED", bucket.getStatus());
+    }
+
+    @Test
+    void updateChangeSet_onStackThatFinishedDeleting_refusesItsIdAndMissesItsName() {
+        String template = "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}";
+        service.createChangeSet("finished-deleting", "create", "CREATE", template, null,
+                Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
+        Stack stack = service.describeStacks("finished-deleting", REGION, ACCOUNT).getFirst();
+        // A delete marks the stack DELETE_COMPLETE before it leaves the live map.
+        stack.setStatus("DELETE_COMPLETE");
+
+        for (String nameOrId : List.of(stack.getStackName(), stack.getStackId())) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createChangeSet(
+                    nameOrId, "update", "UPDATE", template, null, Map.of(), List.of(), Map.of(),
+                    REGION, ACCOUNT));
+            assertEquals("ValidationError", error.getErrorCode());
+            assertEquals(nameOrId.equals(stack.getStackId())
+                    ? "Stack:" + nameOrId + " is in DELETE_COMPLETE state and can not be updated."
+                    : "Stack with id " + nameOrId + " does not exist", error.getMessage());
+        }
+        assertEquals(Set.of("create"), stack.getChangeSets().keySet());
     }
 
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {
