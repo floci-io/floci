@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import com.github.dockerjava.api.DockerClient;
+import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -13,6 +14,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.Properties;
 
 import static io.restassured.RestAssured.given;
@@ -24,7 +26,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * The parameters a client puts in its PostgreSQL StartupMessage reach the instance through the
  * proxy, as they reach an RDS for PostgreSQL endpoint: {@code options} and
- * {@code application_name} here.
+ * {@code application_name} here, for a password login and for an IAM login whose session the
+ * proxy hands over to the token's role.
  */
 @QuarkusTest
 @Tag("docker")
@@ -73,6 +76,56 @@ class RdsPostgresStartupParametersIntegrationTest {
                 assertThat(show(connection, "search_path"), equalTo("floci_opts"));
                 assertThat(show(connection, "work_mem"), equalTo("64MB"));
                 assertThat(show(connection, "application_name"), equalTo("floci-startup-params"));
+            }
+        } finally {
+            rds("DeleteDBInstance")
+                    .formParam("DBInstanceIdentifier", dbId)
+                    .formParam("SkipFinalSnapshot", "true")
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void clientStartupParametersApplyToAnIamSessionAsTheTokenRole() throws Exception {
+        String dbId = "startup-params-iam-" + Long.toString(System.nanoTime(), 36);
+        int port = rds("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", dbId)
+                .formParam("Engine", "postgres")
+                .formParam("MasterUsername", MASTER_USER)
+                .formParam("MasterUserPassword", MASTER_PASSWORD)
+                .formParam("DBName", "appdb")
+                .formParam("AllocatedStorage", "20")
+                .formParam("DBInstanceClass", "db.t3.micro")
+                .formParam("EnableIAMDatabaseAuthentication", "true")
+        .when().post("/").then().statusCode(200)
+                .extract().xmlPath()
+                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+        try {
+            Properties master = new Properties();
+            master.setProperty("user", MASTER_USER);
+            master.setProperty("password", MASTER_PASSWORD);
+            master.setProperty("sslmode", "disable");
+            try (Connection connection = DriverManager.getConnection(
+                    "jdbc:postgresql://localhost:" + port + "/appdb", master);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("CREATE ROLE app_user LOGIN");
+                statement.execute("CREATE SCHEMA floci_opts AUTHORIZATION app_user");
+            }
+
+            Properties iam = new Properties();
+            iam.setProperty("user", "app_user");
+            iam.setProperty("password", SigV4TokenTestHelper.createRdsToken("localhost", port, "app_user",
+                    "test", "test", Instant.now(), 900));
+            iam.setProperty("sslmode", "disable");
+            iam.setProperty("options", "-c search_path=floci_opts -c work_mem=64MB");
+            iam.setProperty("ApplicationName", "floci-startup-params");
+
+            try (Connection connection = DriverManager.getConnection(
+                    "jdbc:postgresql://localhost:" + port + "/appdb", iam)) {
+                assertThat(show(connection, "search_path"), equalTo("floci_opts"));
+                assertThat(show(connection, "work_mem"), equalTo("64MB"));
+                assertThat(show(connection, "application_name"), equalTo("floci-startup-params"));
+                assertThat(show(connection, "session_authorization"), equalTo("app_user"));
             }
         } finally {
             rds("DeleteDBInstance")
