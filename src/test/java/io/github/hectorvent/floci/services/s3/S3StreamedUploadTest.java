@@ -46,8 +46,13 @@ class S3StreamedUploadTest {
             "b\r\nhello world\r\n0\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n";
     private static final String CHUNKED_MATCH =
             "b\r\nhello world\r\n0\r\nx-amz-checksum-crc32:DUoRhQ==\r\n\r\n";
+    private static final String CHUNKED_EXTRA =
+            "b\r\nhello world\r\n0\r\nx-amz-checksum-crc32:DUoRhQ==\r\nx-amz-checksum-sha256:abc\r\n\r\n";
+    private static final String CHUNKED_PLAIN = "b\r\nhello world\r\n0\r\nx-amz-trailer-signature:ghi\r\n\r\n";
     private static final String TRAILER_MISMATCH =
             "The CRC32 you specified did not match the calculated checksum.";
+    private static final String UNDECLARED_TRAILER =
+            "The SHA256 you specified did not match the calculated checksum.";
 
     @TempDir
     Path tempDir;
@@ -362,6 +367,51 @@ class S3StreamedUploadTest {
     }
 
     @Test
+    void aChunkedUploadWithoutATrailerIsStored() {
+        byte[] payload = "hello world".getBytes(StandardCharsets.US_ASCII);
+
+        for (S3Service service : List.of(s3Service, memoryService())) {
+            S3Object stored = service.putObject("bucket", "plain.txt",
+                    new AwsChunkedInputStream(new ByteArrayInputStream(CHUNKED_PLAIN.getBytes(StandardCharsets.US_ASCII))),
+                    NO_CHECKSUMS, "text/plain", Map.of(), new PutObjectOptions());
+
+            assertEquals(payload.length, stored.getSize());
+            assertArrayEquals(payload, service.getObject("bucket", "plain.txt").getData());
+        }
+        assertNothingStaged();
+    }
+
+    @Test
+    void anUndeclaredChecksumTrailerIsNotStored() {
+        UploadChecksums declared = new UploadChecksums(null, Map.of(), ChecksumAlgorithm.CRC32);
+
+        for (S3Service service : List.of(s3Service, memoryService())) {
+            AwsException extra = assertThrows(AwsException.class, () -> service.putObject("bucket", "extra.txt",
+                    chunked(CHUNKED_EXTRA), declared, "text/plain", Map.of(), new PutObjectOptions()));
+            assertEquals("BadDigest", extra.getErrorCode());
+            assertEquals(400, extra.getHttpStatus());
+            assertEquals(UNDECLARED_TRAILER, extra.getMessage());
+
+            AwsException undeclared = assertThrows(AwsException.class, () -> service.putObject("bucket", "none.txt",
+                    new AwsChunkedInputStream(new ByteArrayInputStream(CHUNKED_MATCH.getBytes(StandardCharsets.US_ASCII))),
+                    NO_CHECKSUMS, "text/plain", Map.of(), new PutObjectOptions()));
+            assertEquals("BadDigest", undeclared.getErrorCode());
+            assertEquals(TRAILER_MISMATCH, undeclared.getMessage());
+
+            assertEquals("NoSuchKey", assertThrows(AwsException.class,
+                    () -> service.headObject("bucket", "extra.txt")).getErrorCode());
+            assertEquals("NoSuchKey", assertThrows(AwsException.class,
+                    () -> service.headObject("bucket", "none.txt")).getErrorCode());
+
+            MultipartUpload upload = service.initiateMultipartUpload("bucket", "part.bin", null);
+            assertEquals("BadDigest", assertThrows(AwsException.class, () -> service.storePart("bucket", "part.bin",
+                    upload.getUploadId(), 1, chunked(CHUNKED_EXTRA), declared, null, null, null)).getErrorCode());
+            assertTrue(service.getMultipartUpload("bucket", "part.bin", upload.getUploadId()).getParts().isEmpty());
+        }
+        assertNothingStaged();
+    }
+
+    @Test
     void memoryModeReadsTheStreamIntoTheBytePaths() {
         S3Service memory = memoryService();
         S3Object fromBytes = memory.putObject("bucket", "bytes.txt", BODY, "text/plain", Map.of());
@@ -431,7 +481,8 @@ class S3StreamedUploadTest {
     }
 
     private static AwsChunkedInputStream chunked(String framed) {
-        return new AwsChunkedInputStream(new ByteArrayInputStream(framed.getBytes(StandardCharsets.US_ASCII)));
+        return new AwsChunkedInputStream(new ByteArrayInputStream(framed.getBytes(StandardCharsets.US_ASCII)),
+                ChecksumAlgorithm.CRC32);
     }
 
     /** A body the write should never get to reading. */

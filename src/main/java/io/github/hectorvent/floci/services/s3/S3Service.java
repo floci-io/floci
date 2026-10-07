@@ -657,7 +657,7 @@ public class S3Service implements Resettable, ResourceProvider {
         ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
                 : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
         DigestingInputStream digests = new DigestingInputStream(body,
-                digestAlgorithms(body, checksums, computed));
+                digestAlgorithms(checksums, computed));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
@@ -3869,7 +3869,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         ChecksumAlgorithm algorithm = declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
         DigestingInputStream digests = new DigestingInputStream(body,
-                digestAlgorithms(body, checksums, algorithm));
+                digestAlgorithms(checksums, algorithm));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
@@ -3905,7 +3905,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * with EntityTooLarge once it outgrows the largest array the JDK allocates.
      */
     private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
-        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(body, checksums, null));
+        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(checksums, null));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[64 * 1024];
         try {
@@ -3922,18 +3922,17 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * Algorithms hashed as a body is read. An aws-chunked body is hashed with every algorithm, so a
-     * trailing checksum can be checked even when it is not the algorithm stored on the object.
+     * Algorithms hashed as a body is read. A trailing checksum is hashed only when
+     * {@code x-amz-trailer} named it, which is the only trailer line that is checked.
      */
-    private static Set<ChecksumAlgorithm> digestAlgorithms(InputStream body, UploadChecksums checksums,
-                                                           ChecksumAlgorithm stored) {
+    private static Set<ChecksumAlgorithm> digestAlgorithms(UploadChecksums checksums, ChecksumAlgorithm stored) {
         Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
         algorithms.addAll(checksums.algorithms());
         if (stored != null) {
             algorithms.add(stored);
         }
-        if (body instanceof AwsChunkedInputStream) {
-            algorithms.addAll(EnumSet.allOf(ChecksumAlgorithm.class));
+        if (checksums.trailerAlgorithm() != null) {
+            algorithms.add(checksums.trailerAlgorithm());
         }
         return algorithms;
     }
@@ -3941,7 +3940,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private static void verifyChunkedTrailers(InputStream body, DigestingInputStream digests,
                                               UploadChecksums checksums) {
         if (body instanceof AwsChunkedInputStream chunked) {
-            checksums.verifyTrailers(chunked.trailers(), digests::checksum);
+            checksums.verifyTrailers(chunked, digests::checksum);
         }
     }
 

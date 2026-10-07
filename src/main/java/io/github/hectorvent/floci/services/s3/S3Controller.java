@@ -850,7 +850,8 @@ public class S3Controller {
                             copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
                 }
                 Part part = s3Service.storePart(bucket, key, uploadId, partNumber,
-                        decodedBody(body, contentEncoding, contentSha256), uploadChecksums(httpHeaders, uriInfo),
+                        decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
+                        uploadChecksums(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -891,7 +892,8 @@ public class S3Controller {
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
             s3Service.authorizePutObject(bucket, key, authorization);
-            S3Object obj = s3Service.putObject(bucket, key, decodedBody(body, contentEncoding, contentSha256),
+            S3Object obj = s3Service.putObject(bucket, key,
+                    decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                     uploadChecksums(httpHeaders, uriInfo), contentType, extractUserMetadata(httpHeaders, uriInfo),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
@@ -2102,20 +2104,27 @@ public class S3Controller {
     // --- AWS Chunked Decoding ---
 
     /**
-     * The object data of an upload body, read as it arrives. A streaming payload is decoded from its
-     * aws-chunked framing on the way through. A Content-Encoding naming aws-chunked without that
-     * declaration does not guarantee framing, so that body is read whole and kept as sent when it
-     * does not decode.
+     * The object data of an upload body, read as it arrives. A streaming payload, and any aws-chunked
+     * body that declares {@code x-amz-trailer}, is decoded from its framing on the way through so the
+     * trailing checksum can be checked. A Content-Encoding naming aws-chunked without either of those
+     * does not guarantee framing, so that body is read whole and kept as sent when it does not decode.
      */
-    private InputStream decodedBody(InputStream body, String contentEncoding, String contentSha256) {
+    private InputStream decodedBody(InputStream body, String contentEncoding, String contentSha256,
+                                    String trailer) {
         InputStream raw = body != null ? body : InputStream.nullInputStream();
-        if (declaresStreamingPayload(contentSha256)) {
-            return new AwsChunkedInputStream(raw);
+        boolean awsChunked = contentEncoding != null
+                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked");
+        if (declaresStreamingPayload(contentSha256) || (awsChunked && trailer != null && !trailer.isBlank())) {
+            return new AwsChunkedInputStream(raw, trailerChecksumAlgorithm(trailer));
         }
-        if (contentEncoding != null && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked")) {
+        if (awsChunked) {
             return new ByteArrayInputStream(decodeAwsChunked(readWholeBody(raw), contentEncoding, contentSha256));
         }
         return raw;
+    }
+
+    private static String trailerHeader(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        return resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer");
     }
 
     /** The whole of a body that is small by nature, such as a subresource's XML, or must be read whole to be decoded. */

@@ -61,29 +61,28 @@ record UploadChecksums(String contentMd5, Map<ChecksumAlgorithm, String> claimed
     }
 
     /**
-     * Compares each {@code x-amz-checksum-*} trailer line to the decoded body. {@code x-amz-trailer-signature}
-     * is not a checksum and is ignored. A declared {@code x-amz-trailer} whose checksum line is missing,
-     * or names a different algorithm, fails the same way as a value that does not match.
+     * Compares the trailing checksum named by {@code x-amz-trailer} to the decoded body.
+     * {@code x-amz-trailer-signature} is not a checksum and is ignored. A declared trailer whose
+     * checksum line is missing, or any other {@code x-amz-checksum-*} line, fails the same way as
+     * a value that does not match.
      */
-    void verifyTrailers(Map<String, String> trailers, Function<ChecksumAlgorithm, String> actualChecksum) {
-        if (trailerAlgorithm != null && !trailers.containsKey(checksumHeader(trailerAlgorithm))) {
+    void verifyTrailers(AwsChunkedInputStream chunked, Function<ChecksumAlgorithm, String> actualChecksum) {
+        String claimedValue = chunked.trailerChecksum();
+        if (trailerAlgorithm != null
+                && (claimedValue == null || !claimedValue.equals(actualChecksum.apply(trailerAlgorithm)))) {
             throw checksumMismatch(trailerAlgorithm);
         }
-        for (ChecksumAlgorithm algorithm : CHECK_ORDER) {
-            String claimedValue = trailers.get(checksumHeader(algorithm));
-            if (claimedValue != null && !claimedValue.equals(actualChecksum.apply(algorithm))) {
-                throw checksumMismatch(algorithm);
-            }
+        if (chunked.hasUndeclaredChecksum()) {
+            ChecksumAlgorithm reported = chunked.undeclaredTrailer() != null
+                    ? chunked.undeclaredTrailer() : trailerAlgorithm;
+            throw checksumMismatch(reported);
         }
-    }
-
-    private static String checksumHeader(ChecksumAlgorithm algorithm) {
-        return "x-amz-checksum-" + algorithm.wireValue();
     }
 
     private static AwsException checksumMismatch(ChecksumAlgorithm algorithm) {
+        String name = algorithm != null ? algorithm.name() : "checksum";
         return new AwsException("BadDigest",
-                "The " + algorithm.name() + " you specified did not match the calculated checksum.", 400);
+                "The " + name + " you specified did not match the calculated checksum.", 400);
     }
 
     private byte[] expectedMd5() {
