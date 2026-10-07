@@ -201,6 +201,7 @@ class EcrRegistryManagerTest {
         verify(lifecycleManager, times(2)).createAndStart(any());
         assertFalse(manager.isStarted());
         assertEquals(BASE_PORT, portAllocator.allocate(BASE_PORT, MAX_PORT), "refused ports must be released");
+        assertEquals(MAX_PORT, portAllocator.allocate(BASE_PORT, MAX_PORT), "refused ports must be released");
     }
 
     @Test

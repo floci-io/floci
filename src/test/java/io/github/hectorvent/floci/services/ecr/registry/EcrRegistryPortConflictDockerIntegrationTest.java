@@ -88,6 +88,7 @@ class EcrRegistryPortConflictDockerIntegrationTest {
                     ContainerStorageHelper.dockerName(configC, "ecr-registry")).isEmpty(),
                     "a container Docker refused to start must be removed");
             assertEquals(port, allocatorC.allocate(port, port + 1), "refused ports must be released");
+            assertEquals(port + 1, allocatorC.allocate(port, port + 1), "refused ports must be released");
         } finally {
             a.shutdown();
             b.shutdown();
