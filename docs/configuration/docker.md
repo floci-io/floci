@@ -72,6 +72,16 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
 
+When a pool is full, a Docker call waits for a free connection, then fails. The wait defaults to 30 seconds for both pools; a failed wait is not retried, because a full pool means Floci is saturated:
+
+```yaml
+floci:
+  docker:
+    connection-request-timeout-seconds: 30
+```
+
+Environment variable: `FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS`
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.

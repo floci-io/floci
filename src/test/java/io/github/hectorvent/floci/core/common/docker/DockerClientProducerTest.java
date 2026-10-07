@@ -12,6 +12,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -740,7 +741,8 @@ class DockerClientProducerTest {
 
         // An HTTP client that actually uses the SSL config must read the certificates, so
         // unreadable ones fail the build; one that ignores the config builds silently.
-        assertThrows(RuntimeException.class, () -> DockerClientProducer.newHttpClient(tlsConfig, 10));
+        assertThrows(RuntimeException.class,
+                () -> DockerClientProducer.newHttpClient(tlsConfig, 10, Duration.ofSeconds(30)));
     }
 
     @Test
@@ -752,7 +754,8 @@ class DockerClientProducerTest {
                         .withDockerTlsVerify(false)
                         .build();
 
-        try (FlociDockerHttpClient client = DockerClientProducer.newHttpClient(plainConfig, 10)) {
+        try (FlociDockerHttpClient client =
+                DockerClientProducer.newHttpClient(plainConfig, 10, Duration.ofSeconds(30))) {
             assertNull(plainConfig.getSSLConfig(), "a config without TLS verify carries no SSL config");
             assertEquals("tcp://127.0.0.1:2375", plainConfig.getDockerHost().toString());
         }

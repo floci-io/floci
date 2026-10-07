@@ -488,17 +488,19 @@ public class DockerClientProducer {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
 
-        return DockerClientImpl.getInstance(clientConfig,
-                wrapForRole(newHttpClient(clientConfig, maxConnections), role));
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(newHttpClient(clientConfig, maxConnections,
+                Duration.ofSeconds(config.docker().connectionRequestTimeoutSeconds())), role));
     }
 
-    static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections) {
+    static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
+                                               Duration connectionRequestTimeout) {
         return new FlociDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())
                 .sslConfig(clientConfig.getSSLConfig())
                 .maxConnections(maxConnections)
                 .connectionTimeout(Duration.ofSeconds(30))
                 .responseTimeout(Duration.ofMinutes(5))
+                .connectionRequestTimeout(connectionRequestTimeout)
                 .build();
     }
 

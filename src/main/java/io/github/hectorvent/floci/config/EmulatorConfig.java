@@ -3517,6 +3517,15 @@ public interface EmulatorConfig {
         int streamingMaxConnections();
 
         /**
+         * How long a Docker call waits for a free pooled connection before it fails with
+         * {@code ConnectionRequestTimeoutException}, in seconds, for both pools. A full pool means
+         * the emulator is saturated, so failing sooner beats httpclient5's default three-minute wait;
+         * the transport retry never replays a lease timeout.
+         */
+        @WithDefault("30")
+        int connectionRequestTimeoutSeconds();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */

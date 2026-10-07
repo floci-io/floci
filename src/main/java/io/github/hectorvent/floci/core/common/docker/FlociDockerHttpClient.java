@@ -74,7 +74,8 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
     private final String pathPrefix;
 
     private FlociDockerHttpClient(URI dockerHost, SSLConfig sslConfig, int maxConnections,
-                                  Duration connectionTimeout, Duration responseTimeout) {
+                                  Duration connectionTimeout, Duration responseTimeout,
+                                  Duration connectionRequestTimeout) {
         SSLContext sslContext;
         try {
             sslContext = sslConfig != null ? sslConfig.getSSLContext() : null;
@@ -115,6 +116,8 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                 .setDefaultRequestConfig(RequestConfig.custom()
                         .setResponseTimeout(responseTimeout != null
                                 ? Timeout.of(responseTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
+                        .setConnectionRequestTimeout(connectionRequestTimeout != null
+                                ? Timeout.of(connectionRequestTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
                         .build())
                 .disableConnectionState()
                 .build();
@@ -193,6 +196,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         private int maxConnections = Integer.MAX_VALUE;
         private Duration connectionTimeout;
         private Duration responseTimeout;
+        private Duration connectionRequestTimeout;
 
         public Builder dockerHost(URI value) {
             this.dockerHost = Objects.requireNonNull(value, "dockerHost");
@@ -219,9 +223,19 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
             return this;
         }
 
+        /**
+         * How long a call waits to lease a pooled connection before failing with
+         * {@code ConnectionRequestTimeoutException}; unset keeps httpclient5's own default (3 minutes).
+         */
+        public Builder connectionRequestTimeout(Duration value) {
+            this.connectionRequestTimeout = value;
+            return this;
+        }
+
         public FlociDockerHttpClient build() {
             Objects.requireNonNull(dockerHost, "dockerHost");
-            return new FlociDockerHttpClient(dockerHost, sslConfig, maxConnections, connectionTimeout, responseTimeout);
+            return new FlociDockerHttpClient(dockerHost, sslConfig, maxConnections, connectionTimeout, responseTimeout,
+                    connectionRequestTimeout);
         }
     }
 

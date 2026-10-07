@@ -320,6 +320,10 @@ floci:
     # they never starve create/start/stop/remove. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
     streaming-max-connections: 512
+    # FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS: how long a Docker call waits for a free pooled
+    # connection before failing, for both pools. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
+    connection-request-timeout-seconds: 30
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
