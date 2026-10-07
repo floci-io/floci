@@ -346,7 +346,7 @@ public class PostgresProtocolHandler {
         return !messages.isEmpty() && messages.get(messages.size() - 1)[0] == 'E';
     }
 
-    private static Map<String, String> parseStartupParams(byte[] data) {
+    static Map<String, String> parseStartupParams(byte[] data) {
         Map<String, String> params = new LinkedHashMap<>();
         int i = 0;
         while (i < data.length) {

@@ -634,7 +634,13 @@ class PostgresProtocolHandlerTest {
                 DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
                 DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
 
-                writeStartup(clientOut, "approle", "postgres");
+                // Applied while the backend session is still the master's, this would outlive the
+                // handover and let RESET ROLE regain the master.
+                Map<String, String> clientStartup = new LinkedHashMap<>();
+                clientStartup.put("user", "approle");
+                clientStartup.put("database", "postgres");
+                clientStartup.put("options", "-c role=dbadmin");
+                writeStartup(clientOut, clientStartup);
                 readCleartextPasswordChallenge(clientIn);
                 writePassword(clientOut, rdsToken("approle"));
                 readAuthenticationOk(clientIn);
@@ -652,60 +658,9 @@ class PostgresProtocolHandlerTest {
             }
 
             assertEquals("dbadmin", backendStartup.get().get("user"), "backend connection is still opened as master");
+            assertEquals(List.of("user", "database"), List.copyOf(backendStartup.get().keySet()),
+                    "client startup parameters are not applied to the master session");
             assertEquals("SET SESSION AUTHORIZATION \"approle\"", backendQuery.get());
-        }
-    }
-
-    @Test
-    void iamSessionForAnotherRoleDoesNotForwardClientStartupParameters() throws Exception {
-        AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
-
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
-
-            int backendPort = backendServer.getLocalPort();
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try {
-                    mockBackendRoleSwitch(backendServer, backendStartup, new AtomicReference<>(),
-                            "approle", true);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
-
-            Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
-
-                Thread authThread = startIamAuth(proxyClient, backend);
-
-                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
-                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
-
-                // Applied while the backend session is still the master's, this would outlive the
-                // handover and let RESET ROLE regain the master.
-                Map<String, String> clientStartup = new LinkedHashMap<>();
-                clientStartup.put("user", "approle");
-                clientStartup.put("database", "postgres");
-                clientStartup.put("options", "-c role=dbadmin");
-                writeStartup(clientOut, clientStartup);
-                readCleartextPasswordChallenge(clientIn);
-                writePassword(clientOut, rdsToken("approle"));
-                readAuthenticationOk(clientIn);
-                readParametersUntilReadyForQuery(clientIn);
-
-                ourClient.close();
-                proxyClient.close();
-                authThread.join(5_000);
-                backendThread.join(5_000);
-                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
-            }
-
-            assertEquals(List.of("user", "database"), List.copyOf(backendStartup.get().keySet()));
-            assertEquals("dbadmin", backendStartup.get().get("user"));
         }
     }
 
@@ -1044,14 +999,20 @@ class PostgresProtocolHandlerTest {
     }
 
     private Thread startIamAuth(Socket proxyClient, Socket backend) {
+        return startIamAuth(proxyClient, backend, true, true);
+    }
+
+    private Thread startIamAuth(Socket proxyClient, Socket backend,
+                                boolean iamEnabled, boolean forwardStartupParameters) {
         return Thread.ofVirtual().start(() -> {
             try {
                 PostgresProtocolHandler.AuthenticatedSession session =
                         PostgresProtocolHandler.authenticate(
                         proxyClient, () -> backend,
                         "dbadmin", "adminpass", "postgres",
-                        true, testSigV4Validator(), testBinding(), testTlsCertificates(),
-                        (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000, true);
+                        iamEnabled, testSigV4Validator(), testBinding(), testTlsCertificates(),
+                        (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
+                        forwardStartupParameters);
                 if (session != null) {
                     PostgresProtocolHandler.bridge(session);
                 }
@@ -1087,22 +1048,7 @@ class PostgresProtocolHandlerTest {
                 proxyClient = clientServer.accept();
                 Socket backend = new Socket("localhost", backendPort);
 
-                Thread authThread = Thread.ofVirtual().start(() -> {
-                    try {
-                        PostgresProtocolHandler.AuthenticatedSession session =
-                        PostgresProtocolHandler.authenticate(
-                                proxyClient, () -> backend,
-                                "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
-                                forwardStartupParameters);
-                        if (session != null) {
-                            PostgresProtocolHandler.bridge(session);
-                        }
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
+                Thread authThread = startIamAuth(proxyClient, backend, false, forwardStartupParameters);
 
                 DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
                 DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
@@ -1153,7 +1099,7 @@ class PostgresProtocolHandlerTest {
             int length = in.readInt();
             assertEquals(STARTUP_PROTOCOL_VERSION, in.readInt());
             byte[] payload = in.readNBytes(length - 8);
-            backendStartup.set(parseStartupParams(payload));
+            backendStartup.set(PostgresProtocolHandler.parseStartupParams(payload));
 
             out.writeByte('R');
             out.writeInt(8);
@@ -1383,7 +1329,7 @@ class PostgresProtocolHandlerTest {
             int proto = in.readInt();
             assertEquals(STARTUP_PROTOCOL_VERSION, proto);
             byte[] payload = in.readNBytes(length - 8);
-            backendStartup.set(parseStartupParams(payload));
+            backendStartup.set(PostgresProtocolHandler.parseStartupParams(payload));
             backendDatabase.set(backendStartup.get().get("database"));
 
             out.writeByte('R');
@@ -1556,33 +1502,6 @@ class PostgresProtocolHandlerTest {
         out.writeInt(4 + payload.length);
         out.write(payload);
         out.flush();
-    }
-
-    private static Map<String, String> parseStartupParams(byte[] data) {
-        Map<String, String> params = new LinkedHashMap<>();
-        int i = 0;
-        while (i < data.length) {
-            int keyStart = i;
-            while (i < data.length && data[i] != 0) {
-                i++;
-            }
-            if (i >= data.length) {
-                break;
-            }
-            String key = new String(data, keyStart, i - keyStart, StandardCharsets.UTF_8);
-            i++;
-            if (key.isEmpty()) {
-                break;
-            }
-            int valStart = i;
-            while (i < data.length && data[i] != 0) {
-                i++;
-            }
-            String value = new String(data, valStart, i - valStart, StandardCharsets.UTF_8);
-            i++;
-            params.put(key, value);
-        }
-        return params;
     }
 
     private static final class MemorySocket extends Socket {
