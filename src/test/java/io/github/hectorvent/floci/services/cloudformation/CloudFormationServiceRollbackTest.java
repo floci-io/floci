@@ -174,7 +174,7 @@ class CloudFormationServiceRollbackTest {
     }
 
     @Test
-    void updateChangeSet_onStackThatFinishedDeleting_reportsStackMissing() {
+    void updateChangeSet_onStackThatFinishedDeleting_refusesItsIdAndMissesItsName() {
         String template = "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}";
         service.createChangeSet("finished-deleting", "create", "CREATE", template, null,
                 Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
@@ -187,7 +187,9 @@ class CloudFormationServiceRollbackTest {
                     nameOrId, "update", "UPDATE", template, null, Map.of(), List.of(), Map.of(),
                     REGION, ACCOUNT));
             assertEquals("ValidationError", error.getErrorCode());
-            assertEquals("Stack with id " + nameOrId + " does not exist", error.getMessage());
+            assertEquals(nameOrId.equals(stack.getStackId())
+                    ? "Stack:" + nameOrId + " is in DELETE_COMPLETE state and can not be updated."
+                    : "Stack with id " + nameOrId + " does not exist", error.getMessage());
         }
         assertEquals(Set.of("create"), stack.getChangeSets().keySet());
     }

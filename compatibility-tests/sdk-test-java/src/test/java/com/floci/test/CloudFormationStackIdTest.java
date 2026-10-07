@@ -111,19 +111,30 @@ class CloudFormationStackIdTest {
     @DisplayName("A deleted stack's ID does not update a new stack of the same name")
     void staleStackIdIsRejected() throws InterruptedException {
         String staleStackId = createStack("first");
+        String refusal = "Stack:" + staleStackId + " is in DELETE_COMPLETE state and can not be updated.";
         deleteStack();
+        assertThatThrownBy(() -> cfn.updateStack(r -> r.stackName(staleStackId).templateBody(TEMPLATE)
+                .parameters(parameters("second"))))
+                .isInstanceOfSatisfying(CloudFormationException.class, e -> {
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                    assertThat(e.awsErrorDetails().errorMessage()).isEqualTo(refusal);
+                });
         String currentStackId = createStack("first");
         assertThat(currentStackId).isNotEqualTo(staleStackId);
 
         assertThatThrownBy(() -> cfn.updateStack(r -> r.stackName(staleStackId).templateBody(TEMPLATE)
                 .parameters(parameters("second"))))
-                .isInstanceOfSatisfying(CloudFormationException.class,
-                        e -> assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError"));
+                .isInstanceOfSatisfying(CloudFormationException.class, e -> {
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                    assertThat(e.awsErrorDetails().errorMessage()).isEqualTo(refusal);
+                });
         assertThatThrownBy(() -> cfn.createChangeSet(r -> r.stackName(staleStackId)
                 .changeSetName("update-by-stale-stack-id").changeSetType(ChangeSetType.UPDATE)
                 .templateBody(TEMPLATE).parameters(parameters("second"))))
-                .isInstanceOfSatisfying(CloudFormationException.class,
-                        e -> assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError"));
+                .isInstanceOfSatisfying(CloudFormationException.class, e -> {
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                    assertThat(e.awsErrorDetails().errorMessage()).isEqualTo(refusal);
+                });
 
         Stack stack = cfn.describeStacks(r -> r.stackName(stackName)).stacks().get(0);
         assertThat(stack.stackId()).isEqualTo(currentStackId);

@@ -158,6 +158,16 @@ class CloudFormationStackIdUpdateIntegrationTest {
         .then()
             .statusCode(200);
         CfnStackWaits.awaitStackDeleted(stackName);
+        String refusal = "Stack:" + staleStackId + " is in DELETE_COMPLETE state and can not be updated.";
+        withParameters(stackName, "second")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", staleStackId)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>ValidationError</Code>"))
+            .body(containsString(refusal));
         String currentStackId = createStack(stackName);
 
         withParameters(stackName, "second")
@@ -168,7 +178,7 @@ class CloudFormationStackIdUpdateIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("<Code>ValidationError</Code>"))
-            .body(containsString("Stack with id " + staleStackId + " does not exist"));
+            .body(containsString(refusal));
         withParameters(stackName, "second")
             .formParam("Action", "CreateChangeSet")
             .formParam("StackName", staleStackId)
@@ -179,7 +189,7 @@ class CloudFormationStackIdUpdateIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("<Code>ValidationError</Code>"))
-            .body(containsString("Stack with id " + staleStackId + " does not exist"));
+            .body(containsString(refusal));
 
         assertThat(CfnStackWaits.awaitTerminal(stackName).status(), equalTo("CREATE_COMPLETE"));
         assertThat(stackId(stackName), equalTo(currentStackId));
