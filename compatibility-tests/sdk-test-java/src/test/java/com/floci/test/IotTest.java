@@ -135,6 +135,7 @@ import software.amazon.awssdk.services.iotjobsdataplane.model.UpdateJobExecution
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
 import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
+import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 
@@ -149,6 +150,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -1071,6 +1073,75 @@ class IotTest {
                 assertThat(deletedPayload.path("clientToken").asText()).isEqualTo("delete-token");
             }
         }
+    }
+
+    @Test
+    void mqttPresenceEventsReachTopicRulesOverSqs() throws Exception {
+        String suffix = Long.toString(System.nanoTime());
+        String clientId = "tklocal-java-" + suffix;
+        String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("java-iot-presence-" + suffix)
+                .build()).queueUrl();
+        String connectedRule = "java_iot_presence_connected_" + suffix;
+        String disconnectedRule = "java_iot_presence_disconnected_" + suffix;
+        createSqsRule(connectedRule,
+                "SELECT * FROM '$aws/events/presence/connected/+' WHERE startswith(clientId, 'tklocal-')", queueUrl);
+        createSqsRule(disconnectedRule,
+                "SELECT * FROM '$aws/events/presence/disconnected/+' WHERE startswith(clientId, 'tklocal-')", queueUrl);
+        try {
+            try (Socket client = mqttConnect(clientId)) {
+                client.getOutputStream().write(new byte[] {(byte) 0xe0, 0x00});
+            }
+
+            Map<String, JsonNode> byType = new HashMap<>();
+            long deadline = System.currentTimeMillis() + 10_000;
+            while (byType.size() < 2 && System.currentTimeMillis() < deadline) {
+                for (Message message : sqs.receiveMessage(ReceiveMessageRequest.builder()
+                        .queueUrl(queueUrl)
+                        .maxNumberOfMessages(10)
+                        .build()).messages()) {
+                    JsonNode event = OBJECT_MAPPER.readTree(message.body());
+                    if (clientId.equals(event.path("clientId").asText())) {
+                        byType.put(event.path("eventType").asText(), event);
+                    }
+                }
+                Thread.sleep(100);
+            }
+
+            assertThat(byType).containsOnlyKeys("connected", "disconnected");
+            JsonNode connected = byType.get("connected");
+            JsonNode disconnected = byType.get("disconnected");
+            assertThat(connected.path("timestamp").isIntegralNumber()).isTrue();
+            assertThat(connected.path("ipAddress").asText()).isNotEmpty();
+            assertThat(disconnected.path("sessionIdentifier").asText())
+                    .isNotEmpty()
+                    .isEqualTo(connected.path("sessionIdentifier").asText());
+            assertThat(disconnected.path("versionNumber").asLong()).isEqualTo(connected.path("versionNumber").asLong());
+            assertThat(disconnected.path("clientInitiatedDisconnect").asBoolean()).isTrue();
+            assertThat(disconnected.path("disconnectReason").asText()).isEqualTo("CLIENT_INITIATED_DISCONNECT");
+        } finally {
+            iot.deleteTopicRule(DeleteTopicRuleRequest.builder().ruleName(connectedRule).build());
+            iot.deleteTopicRule(DeleteTopicRuleRequest.builder().ruleName(disconnectedRule).build());
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+        }
+    }
+
+    private void createSqsRule(String ruleName, String sql, String queueUrl) {
+        iot.createTopicRule(CreateTopicRuleRequest.builder()
+                .ruleName(ruleName)
+                .topicRulePayload(TopicRulePayload.builder()
+                        .sql(sql)
+                        .awsIotSqlVersion("2016-03-23")
+                        .ruleDisabled(false)
+                        .actions(Action.builder()
+                                .sqs(SqsAction.builder()
+                                        .roleArn(TestFixtures.globalArn("iam", "000000000000", "role/iot-rule-role"))
+                                        .queueUrl(queueUrl)
+                                        .useBase64(false)
+                                        .build())
+                                .build())
+                        .build())
+                .build());
     }
 
     private Socket mqttConnect(String clientId) throws IOException {

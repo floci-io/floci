@@ -252,6 +252,50 @@ username, the URL query or the `x-amz-customauthorizer-name` upgrade header, see
 [Authorizers](#authorizers); it does not verify a SigV4 signature, and a CONNECT that names no
 authorizer is accepted as is.
 
+### Lifecycle events
+
+The broker publishes AWS IoT's lifecycle events for every MQTT session, on 1883, 8883 and `/mqtt`:
+`$aws/events/presence/connected/<clientId>` once the client is accepted, and
+`$aws/events/presence/disconnected/<clientId>` once its session ends. The payloads carry AWS's fields
+in AWS's order:
+
+```json
+{"clientId":"sensor-1","timestamp":1791399692873,"eventType":"connected","sessionIdentifier":"64b3ed16-3f27-4a75-8dfc-388884c2c216","principalIdentifier":"<certificateId>","versionNumber":0,"ipAddress":"203.0.113.7"}
+{"clientId":"sensor-1","timestamp":1791399695210,"eventType":"disconnected","sessionIdentifier":"64b3ed16-3f27-4a75-8dfc-388884c2c216","principalIdentifier":"<certificateId>","versionNumber":0,"clientInitiatedDisconnect":true,"disconnectReason":"CLIENT_INITIATED_DISCONNECT"}
+```
+
+- `timestamp` is epoch milliseconds.
+- `sessionIdentifier` is a random UUID, the same on the connected and the disconnected event of one session.
+- `principalIdentifier` is the device certificate ID on 8883. It is omitted on 1883, on `/mqtt` (Floci does not verify SigV4) and for a connection admitted by a custom authorizer.
+- `ipAddress`, on the connected event only, is the client's address. A WebSocket client reports its own address, not the bridge's loopback socket; `GetConnection` returns the same address.
+- `versionNumber` counts per client id: `0` for a new client id, `+2` when the client id reconnects after its session ended (`0`, `2`, `4`), and `+1` for a session that takes over the client id from a connected one. AWS starts again from `0` after about an hour without a connection; Floci keeps counting, across state resets, until the process restarts.
+
+`clientInitiatedDisconnect` is `true` only for `CLIENT_INITIATED_DISCONNECT`:
+
+| Cause | `disconnectReason` |
+|---|---|
+| The client sent `DISCONNECT` (MQTT 3.1.1 or 5) | `CLIENT_INITIATED_DISCONNECT` |
+| The connection closed without `DISCONNECT`, or the keep-alive timed out | `CONNECTION_LOST` |
+| A new connection took over the client id; published for the old session, before the new session's connected event | `DUPLICATE_CLIENTID` |
+| IoT Data `DeleteConnection` | `API_INITIATED_DISCONNECT` |
+| A PUBLISH above 128 KB, or a QoS 2 PUBLISH | `CLIENT_ERROR` |
+
+An event goes the way a client publish goes: it is evaluated by the topic rules of every region,
+where `clientid()` returns the client id the event is about and `topic(3)` is `presence`, and
+delivered to matching MQTT subscribers. As MQTT 3.1.1 section 4.7.2 requires and AWS does, a topic
+filter whose first level is `#` or `+` does not match a topic starting with `$`, both for
+subscriptions (including retained messages) and for a rule's `FROM`: `#` and
+`+/events/presence/+/+` receive no lifecycle events, `$aws/events/presence/connected/+` does.
+
+As on AWS, events can arrive out of order across connections; `versionNumber` orders them.
+
+Differences from AWS and limits:
+
+- A keep-alive timeout is reported as `CONNECTION_LOST`; AWS reports `MQTT_KEEP_ALIVE_TIMEOUT`. The broker closes such a connection the way an abrupt close ends, so Floci cannot tell the two apart.
+- A client id containing `#` or `+` gets no lifecycle events, as on AWS.
+- A broker shutdown publishes no disconnected events.
+- `connect_failed`, `subscribed` and `unsubscribed` events are not emitted.
+
 ## Reserved Topics
 
 AWS IoT reserved topics such as `$aws/things/{thingName}/shadow/update` are service control topics, not ordinary application topics. Floci should handle these publishes by invoking IoT shadow behavior and then publishing the AWS-compatible response topics through the broker.
@@ -287,7 +331,7 @@ Implementation notes:
 - Normal client publishes call `IotService.publish(...)` so retained-message storage, event recording, and rule evaluation remain service-owned.
 - An MQTT publish stores the retained message and records the publish on the event loop, then hands topic rule evaluation to a single-thread worker the broker owns, which runs the rules of MQTT publishes one at a time in the order they arrived. A slow rule action therefore delays the rules of later publishes from every connection, but not their PUBACK or fan-out, and not other services' work.
 - A state reset or a broker shutdown skips the rules of MQTT publishes still waiting, and an MQTT publish received during the reset or while the broker is stopped never runs its rules. An evaluation already running finishes.
-- Internal broker publishes fan out only to MQTT subscribers and do not recursively evaluate IoT topic rules.
+- Shadow responses the broker publishes internally fan out only to MQTT subscribers and do not recursively evaluate IoT topic rules. [Lifecycle events](#lifecycle-events) do evaluate topic rules.
 
 Current accepted limitation:
 

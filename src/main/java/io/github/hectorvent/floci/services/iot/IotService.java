@@ -1982,6 +1982,10 @@ public class IotService {
             return false;
         }
         String[] filterParts = filter.split("/", -1);
+        // MQTT 3.1.1 section 4.7.2: a wildcard first level does not match a topic beginning with $.
+        if (topic.startsWith("$") && ("#".equals(filterParts[0]) || "+".equals(filterParts[0]))) {
+            return false;
+        }
         String[] topicParts = topic.split("/", -1);
         int i = 0;
         for (; i < filterParts.length; i++) {

@@ -201,6 +201,28 @@ class IotServiceTest {
         verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
     }
 
+    /** MQTT 3.1.1 section 4.7.2, which AWS applies to rule topic filters too: a wildcard first level does not match {@code $}. */
+    @Test
+    void aRuleWhoseTopicFilterStartsWithAWildcardDoesNotFireForADollarTopic() throws Exception {
+        String everything = "http://localhost:4566/000000000000/everything";
+        String anyPresence = "http://localhost:4566/000000000000/any-presence";
+        String presence = "http://localhost:4566/000000000000/presence";
+        createRule("everything", sqsRule("SELECT * FROM '#'", everything));
+        createRule("anyPresence", sqsRule("SELECT * FROM '+/events/presence/+/+'", anyPresence));
+        createRule("presence", sqsRule("SELECT * FROM '$aws/events/presence/connected/+'", presence));
+
+        service.handlePublish("$aws/events/presence/connected/x", "{\"clientId\":\"x\"}".getBytes(StandardCharsets.UTF_8),
+                true, REGION, "x", Runnable::run);
+
+        verify(sqs, never()).sendMessage(eq(everything), anyString(), anyInt(), anyString());
+        verify(sqs, never()).sendMessage(eq(anyPresence), anyString(), anyInt(), anyString());
+        verify(sqs).sendMessage(eq(presence), eq("{\"clientId\":\"x\"}"), eq(0), eq(REGION));
+
+        service.handlePublish("a/b", "{\"v\":1}".getBytes(StandardCharsets.UTF_8), true, REGION, null, Runnable::run);
+
+        verify(sqs).sendMessage(eq(everything), eq("{\"v\":1}"), eq(0), eq(REGION));
+    }
+
     @Test
     void aFailingActionDoesNotFailThePublishOrStopTheOtherActions() throws Exception {
         createRule("metricsRule", sqsThenLambdaRule(null));
