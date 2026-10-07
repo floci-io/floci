@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.ssm;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -17,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,11 +35,18 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SsmServiceTest {
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private final List<Map<String, Object>> events = new ArrayList<>();
     private SsmService ssmService;
 
     @BeforeEach
@@ -1403,6 +1414,163 @@ class SsmServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.getParameter("/aws/reference/secretsmanager/app", true, "us-east-1"));
         assertEquals("ParameterNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void putParameterPublishesCreateWithTheDescription() throws Exception {
+        SsmService service = serviceRecordingEvents();
+
+        service.putParameter("/events/a", "v", "SecureString", "the db", false, "us-east-1");
+
+        assertEquals(1, events.size());
+        assertEvent(events.getFirst(), service.getParameter("/events/a", "us-east-1").getArn(),
+                Map.of("operation", "Create", "name", "/events/a", "type", "SecureString",
+                        "description", "the db"));
+    }
+
+    @Test
+    void putParameterOverwritePublishesUpdateEvenForTheSameValue() throws Exception {
+        SsmService service = serviceRecordingEvents();
+        service.putParameter("/events/a", "v", "String", null, false, "us-east-1");
+
+        service.putParameter("/events/a", "v", "String", null, true, "us-east-1");
+
+        assertEquals(2, events.size());
+        assertEvent(events.get(1), service.getParameter("/events/a", "us-east-1").getArn(),
+                Map.of("operation", "Update", "name", "/events/a", "type", "String"));
+    }
+
+    @Test
+    void failedPutParameterPublishesNothing() {
+        SsmService service = serviceRecordingEvents();
+        service.putParameter("/events/a", "v", "String", null, false, "us-east-1");
+        events.clear();
+
+        assertThrows(AwsException.class, () ->
+                service.putParameter("/events/a", "w", "String", null, false, "us-east-1"));
+
+        assertTrue(events.isEmpty());
+    }
+
+    @Test
+    void deleteParameterPublishesDeleteWithTheDeletedParametersFields() throws Exception {
+        SsmService service = serviceRecordingEvents();
+        service.putParameter("/events/a", "x,y", "StringList", "list", false, "us-east-1");
+        String arn = service.getParameter("/events/a", "us-east-1").getArn();
+        events.clear();
+
+        service.deleteParameter("/events/a", "us-east-1");
+        assertThrows(AwsException.class, () -> service.deleteParameter("/events/a", "us-east-1"));
+
+        assertEquals(1, events.size());
+        assertEvent(events.getFirst(), arn,
+                Map.of("operation", "Delete", "name", "/events/a", "type", "StringList", "description", "list"));
+    }
+
+    @Test
+    void deleteParametersPublishesOneDeletePerDeletedName() throws Exception {
+        SsmService service = serviceRecordingEvents();
+        service.putParameter("/events/a", "v", "String", null, false, "us-east-1");
+        String arn = service.getParameter("/events/a", "us-east-1").getArn();
+        events.clear();
+
+        service.deleteParameters(List.of("/events/a", "/events/missing"), "us-east-1");
+
+        assertEquals(1, events.size());
+        assertEvent(events.getFirst(), arn, Map.of("operation", "Delete", "name", "/events/a", "type", "String"));
+    }
+
+    @Test
+    void labelParameterVersionPublishesOnlyLabelsThatAreAttachedOrMoved() throws Exception {
+        SsmService service = serviceRecordingEvents();
+        service.putParameter("/events/a", "v1", "String", null, false, "us-east-1");
+        service.putParameter("/events/a", "v2", "String", null, true, "us-east-1");
+        String arn = service.getParameter("/events/a", "us-east-1").getArn();
+        events.clear();
+
+        service.labelParameterVersion("/events/a", 1L, List.of("a"), "us-east-1");
+        service.labelParameterVersion("/events/a", 2L, List.of("a", "b", "1abc", "awsx"), "us-east-1");
+        service.labelParameterVersion("/events/a", 2L, List.of("a"), "us-east-1");
+
+        assertEquals(3, events.size());
+        assertEvent(events.get(0), arn, labelDetail("a", "", "1"));
+        assertEvent(events.get(1), arn, labelDetail("a", "1", "2"));
+        assertEvent(events.get(2), arn, labelDetail("b", "", "2"));
+    }
+
+    @Test
+    void labelParameterVersionPublishesTheLabelledVersionsTypeAndDescription() throws Exception {
+        SsmService service = serviceRecordingEvents();
+        service.putParameter("/events/a", "v", "String", "one", false, "us-east-1");
+        service.putParameter("/events/a", "x,y", "StringList", "two", true, "us-east-1");
+        String arn = service.getParameter("/events/a", "us-east-1").getArn();
+        events.clear();
+
+        service.labelParameterVersion("/events/a", 1L, List.of("old"), "us-east-1");
+
+        assertEquals(1, events.size());
+        assertEvent(events.getFirst(), arn, Map.of("operation", "LabelParameterVersion", "name", "/events/a",
+                "type", "String", "description", "one", "label", "old", "fromVersion", "", "toVersion", "1"));
+    }
+
+    @Test
+    void labelParameterVersionPublishesOutsideTheServiceMonitor() {
+        EventBridgeService eventBridge = mock(EventBridgeService.class);
+        SsmService service = serviceWith(eventBridge);
+        List<Boolean> monitorHeld = new ArrayList<>();
+        when(eventBridge.putEvents(anyList(), anyString())).thenAnswer(invocation -> {
+            monitorHeld.add(Thread.holdsLock(service));
+            return null;
+        });
+        service.putParameter("/events/a", "v", "String", null, false, "us-east-1");
+
+        service.labelParameterVersion("/events/a", 1L, List.of("a"), "us-east-1");
+        service.labelParameterVersion("/events/a", 1, List.of("b"), "us-east-1");
+
+        assertEquals(List.of(false, false, false), monitorHeld);
+    }
+
+    @Test
+    void aFailingEventBusNeitherFailsNorUndoesTheWrite() {
+        EventBridgeService eventBridge = mock(EventBridgeService.class);
+        when(eventBridge.putEvents(anyList(), anyString())).thenThrow(new RuntimeException("bus down"));
+        SsmService service = serviceWith(eventBridge);
+
+        assertEquals(1, service.putParameter("/events/a", "v", "String", null, false, "us-east-1"));
+
+        verify(eventBridge).putEvents(anyList(), eq("us-east-1"));
+        assertEquals("v", service.getParameter("/events/a", "us-east-1").getValue());
+    }
+
+    private SsmService serviceRecordingEvents() {
+        EventBridgeService eventBridge = mock(EventBridgeService.class);
+        when(eventBridge.putEvents(anyList(), eq("us-east-1"))).thenAnswer(invocation -> {
+            events.addAll(invocation.getArgument(0));
+            return null;
+        });
+        return serviceWith(eventBridge);
+    }
+
+    private static SsmService serviceWith(EventBridgeService eventBridge) {
+        return new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), 5,
+                new RegionResolver("us-east-1", "000000000000"), null, null,
+                new SsmEventPublisher(eventBridge, MAPPER));
+    }
+
+    private static Map<String, String> labelDetail(String label, String fromVersion, String toVersion) {
+        return Map.of("operation", "LabelParameterVersion", "name", "/events/a", "type", "String",
+                "label", label, "fromVersion", fromVersion, "toVersion", toVersion);
+    }
+
+    private static void assertEvent(Map<String, Object> entry, String arn, Map<String, String> detail)
+            throws Exception {
+        assertEquals("aws.ssm", entry.get("Source"));
+        assertEquals("Parameter Store Change", entry.get("DetailType"));
+        JsonNode expectedResources = MAPPER.valueToTree(List.of(arn));
+        assertEquals(expectedResources, MAPPER.valueToTree(entry.get("Resources")));
+        JsonNode expectedDetail = MAPPER.valueToTree(detail);
+        assertEquals(expectedDetail, MAPPER.readTree((String) entry.get("Detail")));
     }
 
     private List<String> describedNames(List<ParameterStringFilter> filters, String region) {
