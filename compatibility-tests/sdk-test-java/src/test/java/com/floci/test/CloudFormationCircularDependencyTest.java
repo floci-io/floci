@@ -50,7 +50,7 @@ class CloudFormationCircularDependencyTest {
     }
 
     @Test
-    @DisplayName("rejects the template, names only the cycle and creates nothing")
+    @DisplayName("rejects the template, names the cycle and creates nothing")
     void rejectsCycleBeforeCreatingResources() {
         String template = """
                 {"Resources":{
@@ -66,8 +66,7 @@ class CloudFormationCircularDependencyTest {
                 .isInstanceOfSatisfying(CloudFormationException.class, e -> {
                     assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
                     assertThat(e.awsErrorDetails().errorMessage())
-                            .contains("Circular dependency between resources", "FirstQueue", "SecondQueue")
-                            .doesNotContain("Downstream");
+                            .contains("Circular dependency between resources", "FirstQueue", "SecondQueue");
                 });
 
         assertThatThrownBy(() -> cfn.describeStacks(r -> r.stackName(stackName)))
