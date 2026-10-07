@@ -863,6 +863,33 @@ class S3ServiceTest {
         assertTrue(second.compareTo(first) > 0, first + " then " + second);
     }
 
+    @Test
+    void createdEventCarriesTheSequencerAssignedWhenTheObjectWasStored() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(lambdaInvoker, "notif-s3-sequencer-stored");
+
+        S3Object stored = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+
+        assertNotNull(stored.getEventSequencer());
+        assertEquals(stored.getEventSequencer(),
+                onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText());
+    }
+
+    @Test
+    void removalOfAStoredVersionGetsANewerSequencerThanItsCreation() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-sequencer-removal");
+
+        S3Object stored = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+        service.deleteObject("test-bucket", "k.txt", stored.getVersionId());
+        String removed = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+
+        assertTrue(removed.compareTo(stored.getEventSequencer()) > 0,
+                stored.getEventSequencer() + " then " + removed);
+    }
+
     private S3Service bucketNotifyingOnCreation(RecordingLambdaInvoker lambdaInvoker, String dataDir) {
         S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve(dataDir),
                 false, lambdaInvoker, new RegionResolver("us-east-1", "000000000000"));
