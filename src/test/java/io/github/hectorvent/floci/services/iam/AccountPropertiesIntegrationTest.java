@@ -75,16 +75,47 @@ class AccountPropertiesIntegrationTest {
             .body(not(containsString(second + "/Beta")));
     }
 
-    /** The key is Namespace/PropertyName: exactly one slash, not at either end. */
+    /**
+     * A key can be wrong in two ways that AWS reports differently, so they get a test each rather
+     * than one list asserting the same code for both.
+     *
+     * <p>These keys violate the published pattern {@code ^[A-Za-z][A-Za-z0-9/_-]*$}, either by
+     * starting with something other than a letter or by carrying a character outside the class.
+     * That is a format failure, which the API Reference gives to the common
+     * {@code ValidationError}.
+     */
     @Test
-    void aMalformedKeyIsRejected() {
-        for (String key : List.of("NoSlash", "/LeadingSlash", "Trailing/", "Two/Slashes/Here",
-                "1StartsWithADigit", "Has Space/Prop", "Ns/Prop!")) {
+    void aKeyOutsideThePublishedPatternIsAValidationError() {
+        for (String key : List.of("/LeadingSlash", "1StartsWithADigit", "Has Space/Prop",
+                "Ns/Prop!")) {
             iam("PutAccountProperties")
                 .formParam("Properties.entry.1.key", key)
                 .formParam("Properties.entry.1.value", "x")
             .when().post("/").then().statusCode(400)
-                .body(containsString("InvalidInput"));
+                .body(containsString("ValidationError"))
+                .body(not(containsString("InvalidInput")))
+                .body(containsString("failed to satisfy constraint"));
+        }
+    }
+
+    /**
+     * These three satisfy the published pattern, which admits no slash, several, and a trailing
+     * one, and fail only the Namespace/PropertyName rule. The service applies that after the
+     * format is already good, so it is {@code InvalidInput} rather than a constraint failure.
+     */
+    @Test
+    void aKeyThatIsNotNamespaceSlashPropertyIsInvalidInput() {
+        for (String key : List.of("NoSlash", "Trailing/", "Two/Slashes/Here")) {
+            iam("PutAccountProperties")
+                .formParam("Properties.entry.1.key", key)
+                .formParam("Properties.entry.1.value", "x")
+            .when().post("/").then().statusCode(400)
+                .body(containsString("InvalidInput"))
+                .body(not(containsString("ValidationError")))
+                // The wording matters as much as the code here: carrying the constraint phrasing
+                // on an InvalidInput is the mismatch this split exists to remove.
+                .body(containsString("is not Namespace/PropertyName"))
+                .body(not(containsString("failed to satisfy constraint")));
         }
     }
 
@@ -95,13 +126,13 @@ class AccountPropertiesIntegrationTest {
         iam("PutAccountProperties")
             .formParam("Properties.entry.1.key", ns + "/" + "P".repeat(60))
             .formParam("Properties.entry.1.value", "x")
-        .when().post("/").then().statusCode(400).body(containsString("InvalidInput"));
+        .when().post("/").then().statusCode(400).body(containsString("ValidationError"));
 
         // valueLength is 1 to 1024.
         iam("PutAccountProperties")
             .formParam("Properties.entry.1.key", ns + "/TooLongValue")
             .formParam("Properties.entry.1.value", "v".repeat(1025))
-        .when().post("/").then().statusCode(400).body(containsString("InvalidInput"));
+        .when().post("/").then().statusCode(400).body(containsString("ValidationError"));
 
         // And the top of the range is accepted, so the bound is not off by one.
         iam("PutAccountProperties")

@@ -2333,11 +2333,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 properties.size(), namespace);
     }
 
-    /** The namespace half of the key, having checked the whole key against the model. */
+    /**
+     * The namespace half of the key, having checked the whole key against the model.
+     *
+     * <p>The two rejections here are not the same kind of error. The length and the pattern are
+     * published constraints on the parameter, and the API Reference defines {@code ValidationError}
+     * as the common error for input that "doesn't meet the required format or constraints". The
+     * {@code Namespace/PropertyName} rule is not expressible in the published pattern, which admits
+     * no slash, several, and a trailing one, so it is a rule the service applies after the format
+     * is already satisfied: that is {@code InvalidInput}, "an invalid or out-of-range value".
+     */
     private String validateAccountPropertyKey(String key) {
         if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
                 || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
-            throw new AwsException("InvalidInput",
+            throw new AwsException("ValidationError",
                     "Value '" + key + "' at 'properties' failed to satisfy constraint: Map keys "
                             + "must satisfy constraint: [Member must have length less than or "
                             + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
@@ -2347,9 +2356,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         int separator = key.indexOf('/');
         if (separator <= 0 || separator != key.lastIndexOf('/') || separator == key.length() - 1) {
             throw new AwsException("InvalidInput",
-                    "Value '" + key + "' at 'properties' failed to satisfy constraint: a key is "
-                            + "Namespace/PropertyName, with exactly one forward slash and neither "
-                            + "a leading nor a trailing one.", 400);
+                    "The property key '" + key + "' is not Namespace/PropertyName: a key has "
+                            + "exactly one forward slash, and neither a leading nor a trailing "
+                            + "one.", 400);
         }
         return key.substring(0, separator);
     }
@@ -2357,7 +2366,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private void validateAccountPropertyValue(String key, String value) {
         if (value == null || value.isEmpty()
                 || value.length() > MAX_ACCOUNT_PROPERTY_VALUE_LENGTH) {
-            throw new AwsException("InvalidInput",
+            throw new AwsException("ValidationError",
                     "Value at 'properties." + key + "' failed to satisfy constraint: Member must "
                             + "have length between 1 and " + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH,
                     400);

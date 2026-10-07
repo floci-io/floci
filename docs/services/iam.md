@@ -549,6 +549,15 @@ states directly, so a request mixing namespaces is rejected whole rather than pa
 Manager is the only namespace AWS names, and any well-formed key is accepted rather than only that
 one, since an allowlist of one would refuse keys AWS takes.
 
+Those two rules are not the same kind of failure, and they answer differently. The length and the
+pattern are constraints the API Reference publishes on the parameter, and it defines
+`ValidationError` as the common error for input that "doesn't meet the required format or
+constraints", so a key that is too long or outside the pattern, and a value outside 1 to 1024, are
+`ValidationError` with status 400. The `Namespace/PropertyName` rule cannot be expressed in the
+published pattern, which admits a key with no slash, with several, and with a trailing one, so it is
+a rule applied once the format is already satisfied: that, and a request mixing namespaces, are
+`InvalidInput` with status 400, the "invalid or out-of-range value" the operation declares.
+
 **Enabling federation twice is an error, and so is disabling it twice**, which is the asymmetry
 worth noticing: `EnableOutboundWebIdentityFederation` answers `FeatureEnabled` with status 409,
 while `DisableOutboundWebIdentityFederation` answers `FeatureDisabled` with status **404**. AWS
