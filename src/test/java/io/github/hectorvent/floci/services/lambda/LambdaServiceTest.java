@@ -2327,11 +2327,13 @@ class LambdaServiceTest {
     @Test
     void updateFunctionCode_withMismatchedRevisionId_throwsPreconditionFailedException() throws Exception {
         // Catches: UpdateFunctionCode silently accepts a stale RevisionId and overwrites the function's code
+        // (the CodeSha256 assertion fails if the check ever runs after code extraction)
         Map<String, Object> createReq = baseRequest("revision-lock-func");
         service.createFunction(REGION, createReq);
 
         LambdaFunction fn = service.getFunction(REGION, "revision-lock-func");
         String initialRevisionId = fn.getRevisionId();
+        String initialCodeSha256 = fn.getCodeSha256();
         String mismatchingRevision = "stale-revision-id-abc123";
         String zipBase64 = createZipBase64("index.js");
 
@@ -2346,6 +2348,7 @@ class LambdaServiceTest {
 
         LambdaFunction unchangedFn = service.getFunction(REGION, "revision-lock-func");
         assertEquals(initialRevisionId, unchangedFn.getRevisionId());
+        assertEquals(initialCodeSha256, unchangedFn.getCodeSha256());
 
         updateReq.put("RevisionId", initialRevisionId);
         service.updateFunctionCode(REGION, "revision-lock-func", updateReq);
