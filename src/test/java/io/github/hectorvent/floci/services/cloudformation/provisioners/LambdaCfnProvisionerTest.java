@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -271,6 +272,7 @@ class LambdaCfnProvisionerTest {
 
         verify(lambda).updateFunctionConfiguration(eq(REGION), eq("my-fn"),
                 argThat(request -> "".equals(((Map<?, ?>) request.get("DurableConfig")).get("KMSKeyArn"))));
+        verify(lambda, times(1)).getFunction(REGION, "my-fn");
     }
 
     @SuppressWarnings("unchecked")

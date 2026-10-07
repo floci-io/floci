@@ -109,8 +109,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionLambda(StackResource r, JsonNode props, ProvisionContext ctx) {
         String region = ctx.region();
-        LambdaDesiredState desired = buildLambdaDesiredState(r, props, ctx);
         LambdaFunction existing = getExistingLambda(region, r.getPhysicalId());
+        LambdaDesiredState desired = buildLambdaDesiredState(r, props, ctx, existing);
         boolean replacement = lambdaRequiresReplacement(r, desired, existing);
 
         LambdaFunction func;
@@ -158,7 +158,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx) {
+    private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx,
+                                                       LambdaFunction existing) {
         CloudFormationTemplateEngine engine = ctx.engine();
         String stackName = ctx.stackName();
         String explicitName = ctx.resolveOptional(props, "FunctionName");
@@ -195,8 +196,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                 && !Objects.equals(oldPackageType, packageType);
         Map<String, Object> durableConfig = resolveDurableConfig(props, engine);
         // Lambda cannot add or remove a DurableConfig, so CloudFormation replaces the function.
-        LambdaFunction current = getExistingLambda(ctx.region(), r.getPhysicalId());
-        boolean durableReplacement = current != null && current.isDurable() != (durableConfig != null);
+        boolean durableReplacement = existing != null && existing.isDurable() != (durableConfig != null);
         boolean explicitRemoved = r.getPhysicalId() != null
                 && !hasExplicitName
                 && NAME_MODE_EXPLICIT.equals(previousNameMode);
@@ -290,7 +290,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        return new LambdaDesiredState(functionName, hasExplicitName, packageType, durableConfig != null,
+        return new LambdaDesiredState(functionName, hasExplicitName, packageType, durableReplacement,
                 createRequest, code, configRequest, tags, props != null && props.has("ReservedConcurrentExecutions"),
                 reservedConcurrentExecutions);
     }
@@ -394,7 +394,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             return true;
         }
         String existingPackageType = existing.getPackageType() != null ? existing.getPackageType() : "Zip";
-        return !Objects.equals(existingPackageType, desired.packageType()) || existing.isDurable() != desired.durable();
+        return !Objects.equals(existingPackageType, desired.packageType()) || desired.durableReplacement();
     }
 
     private LambdaFunction updateLambdaFunction(String region,
@@ -1001,7 +1001,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private record LambdaDesiredState(String functionName,
                                       boolean explicitFunctionName,
                                       String packageType,
-                                      boolean durable,
+                                      boolean durableReplacement,
                                       Map<String, Object> createRequest,
                                       LambdaCodeSpec code,
                                       Map<String, Object> configRequest,
