@@ -27,6 +27,7 @@ import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
 import io.quarkus.tls.TlsConfigurationRegistry;
 import io.quarkus.tls.runtime.config.TlsConfig;
+import io.vertx.core.Context;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -81,6 +82,7 @@ import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -100,10 +102,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
@@ -691,6 +695,25 @@ class IotMqttBrokerServiceTest {
         }
     }
 
+    /**
+     * A DeleteConnection that wins the session can still find the endpoint closed: the client's
+     * DISCONNECT, arriving in between, loses the session, yet Vert.x closes the endpoint after it.
+     */
+    @Test
+    void deleteConnectionOfAnEndpointAlreadyClosedByTheClientStillSucceeds() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("closed-by-client");
+        doThrow(new IllegalStateException("MQTT endpoint is closed")).when(endpoint).close();
+        broker.handleEndpoint(endpoint, false);
+
+        assertTrue(broker.disconnectClient("closed-by-client", false));
+
+        List<JsonNode> disconnected = awaitPresence("disconnected", "closed-by-client", 1);
+        assertEquals(1, disconnected.size(), disconnected.toString());
+        assertEquals("API_INITIATED_DISCONNECT", disconnected.get(0).get("disconnectReason").asText());
+    }
+
     @Test
     void aPayloadAboveTheAwsLimitEndsTheSessionWithAClientError() throws Exception {
         startBrokerRecordingPublishes();
@@ -1089,6 +1112,42 @@ class IotMqttBrokerServiceTest {
 
         broker.ruleWorker.executeBlocking(() -> null, false).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
         assertTrue(waitingRan.get(), "the evaluation waiting at the lone afterReset() still ran");
+    }
+
+    /**
+     * A lifecycle event is published once the callback that ended its session returns. Here that
+     * callback runs a whole reset first, so the event, queued behind it on the same context, is
+     * still recorded but skips the rules it was admitted to before the reset.
+     */
+    @Test
+    void aLifecycleEventQueuedBeforeAResetSkipsItsRules() throws Exception {
+        String topic = "$aws/events/presence/disconnected/reset-race";
+        IotService service = mock(IotService.class);
+        when(iotService.get()).thenReturn(service);
+        AtomicBoolean rulesRan = new AtomicBoolean();
+        doAnswer(invocation -> {
+            invocation.<Executor>getArgument(6).execute(() -> rulesRan.set(true));
+            return null;
+        }).when(service).publish(eq(topic), any(), anyBoolean(), anyInt(), any(), any(), any());
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("reset-race");
+        broker.handleEndpoint(endpoint, false);
+        Context context = vertx.getOrCreateContext();
+        AtomicBoolean disconnected = new AtomicBoolean();
+        CountDownLatch eventHandled = new CountDownLatch(1);
+
+        context.runOnContext(ignored -> {
+            disconnected.set(broker.disconnectClient("reset-race", false));
+            broker.beforeReset();
+            broker.afterReset();
+            context.runOnContext(queued -> eventHandled.countDown());
+        });
+
+        assertTrue(eventHandled.await(10, TimeUnit.SECONDS), "the queued lifecycle event was handled");
+        broker.ruleWorker.executeBlocking(() -> null, false).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+        assertTrue(disconnected.get(), "DeleteConnection ended the session");
+        verify(service).publish(eq(topic), any(), anyBoolean(), anyInt(), any(), any(), any());
+        assertFalse(rulesRan.get(), "the event's rules, admitted before the reset, were skipped");
     }
 
     /**

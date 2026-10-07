@@ -375,7 +375,11 @@ public class IotMqttBrokerService implements Resettable {
         }
         // ponytail: DeleteConnection counts as CONNECTION_LOST; AWS's reason for it was not measured.
         lastDisconnects.put(session.historyKey(), session.disconnected(CONNECTION_LOST));
-        session.endpoint().close();
+        try {
+            session.endpoint().close();
+        } catch (IllegalStateException e) {
+            LOG.debugv("IoT MQTT client {0} was already closed when DeleteConnection ended it", clientId);
+        }
         return true;
     }
 
@@ -680,7 +684,10 @@ public class IotMqttBrokerService implements Resettable {
      * its rules.
      */
     void evaluateRulesOnWorker(String topic, Runnable rules) {
-        long admitted = ruleState.get();
+        evaluateRulesOnWorker(topic, rules, ruleState.get());
+    }
+
+    void evaluateRulesOnWorker(String topic, Runnable rules, long admitted) {
         if ((admitted & (RULES_RESETTING | RULES_STOPPED)) != 0) {
             return;
         }
@@ -800,8 +807,11 @@ public class IotMqttBrokerService implements Resettable {
         byte[] payload = event.toString().getBytes(StandardCharsets.UTF_8);
         // Vert.x runs an endpoint callback holding that endpoint's monitor and the fan-out takes each subscriber's,
         // so the event is published once the callback returns; events scheduled from one thread keep their order.
+        // Its rules are admitted under the rule state at the time of the event.
+        long admitted = ruleState.get();
         vertx.runOnContext(ignored -> {
-            iotService.get().publish(topic, payload, false, 0, null, session.clientId(), rules -> evaluateRulesOnWorker(topic, rules));
+            iotService.get().publish(topic, payload, false, 0, null, session.clientId(),
+                    rules -> evaluateRulesOnWorker(topic, rules, admitted));
             fanOut(topic, payload, false);
         });
     }
