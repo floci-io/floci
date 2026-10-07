@@ -80,8 +80,6 @@ public class SesService {
 
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
-    private static final Set<String> TAGGABLE_RESOURCE_TYPES = Set.of("configuration-set", "template", "identity",
-            "contact-list", "custom-verification-email-template", "dedicated-ip-pool", "tenant");
     // Identities live in SesIdentityService (CRUD, verification, MAIL FROM, notifications, tags,
     // and the DKIM state machine with its Route53 lookup), which the v2 controller and the v1
     // handler call directly. The facade keeps the cross-domain flows (create's configuration-set
@@ -134,6 +132,8 @@ public class SesService {
     // Resolves the caller's account per request so send-event payloads report the sending account, not
     // the fixed default. Null in the package-private test constructor (falls back to defaultAccountId).
     private final RegionResolver regionResolver;
+    // The V2 tag endpoints' resource types, keyed by the ARN's type segment.
+    private final Map<String, SesTaggable> taggableDomains;
 
     @Inject
     public SesService(SesIdentityService identityService, SesCvetService cvetService,
@@ -160,6 +160,7 @@ public class SesService {
         this.defaultAccountId = config.defaultAccountId();
         this.baseUrl = config.effectiveBaseUrl();
         this.regionResolver = regionResolver;
+        this.taggableDomains = taggableDomains();
     }
 
     SesService(SesIdentityService identityService,
@@ -190,6 +191,18 @@ public class SesService {
         this.defaultAccountId = "000000000000";
         this.baseUrl = "http://localhost:4566";
         this.regionResolver = null;
+        this.taggableDomains = taggableDomains();
+    }
+
+    private Map<String, SesTaggable> taggableDomains() {
+        return Map.of(
+                "configuration-set", configSetService,
+                "template", templateService,
+                "identity", identityService,
+                "contact-list", contactService,
+                "custom-verification-email-template", cvetService,
+                "dedicated-ip-pool", dedicatedIpService,
+                "tenant", tenantService);
     }
 
     /**
@@ -1134,7 +1147,7 @@ public class SesService {
         ResourceRef ref = parseSesArn(arn);
         requireCallerAccount(ref);
         requireValidResourceName(ref);
-        List<Tag> tags = resourceTags(ref, region);
+        List<Tag> tags = taggableDomains.get(ref.type()).listTags(ref.name(), region);
         // AWS checks existence against the signing region but keys the tag store by the literal
         // ARN: a mismatched ARN region passes the existence check above yet addresses an ARN
         // nothing was ever tagged under, so the result is empty (probe-confirmed across all six
@@ -1151,7 +1164,8 @@ public class SesService {
         requireValidResourceName(ref);
         // Existence in the signing region is checked before the ARN's region is compared: a missing
         // resource is a 404 even when the regions also differ (probe-confirmed).
-        resourceTags(ref, region);
+        SesTaggable domain = taggableDomains.get(ref.type());
+        domain.listTags(ref.name(), region);
         if (!ref.region().equals(region)) {
             throw new AwsException("BadRequestException", "Failed to tag resource", 400);
         }
@@ -1159,16 +1173,7 @@ public class SesService {
         // checks and then applies the empty merge as a no-op (probe-confirmed).
         List<Tag> tags = newTags == null ? List.of() : newTags;
         SesTags.validate(tags);
-        switch (ref.type()) {
-            case "configuration-set" -> configSetService.tag(ref.name(), region, tags);
-            case "template" -> templateService.tag(ref.name(), region, tags);
-            case "identity" -> identityService.tag(ref.name(), region, tags);
-            case "contact-list" -> contactService.tag(ref.name(), region, tags);
-            case "custom-verification-email-template" -> cvetService.tag(ref.name(), region, tags);
-            case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), region, tags);
-            case "tenant" -> tenantService.tag(ref.name(), region, tags);
-            default -> throw invalidResourceArn();
-        }
+        domain.tag(ref.name(), region, tags);
     }
 
     public void untagResource(String arn, String region, List<String> tagKeys) {
@@ -1183,34 +1188,12 @@ public class SesService {
             throw new AwsException("ValidationException", null, 400);
         }
         requireValidResourceName(ref);
-        resourceTags(ref, region);
+        SesTaggable domain = taggableDomains.get(ref.type());
+        domain.listTags(ref.name(), region);
         if (!ref.region().equals(region)) {
             throw new AwsException("BadRequestException", "Failed to untag resource", 400);
         }
-        switch (ref.type()) {
-            case "configuration-set" -> configSetService.untag(ref.name(), region, tagKeys);
-            case "template" -> templateService.untag(ref.name(), region, tagKeys);
-            case "identity" -> identityService.untag(ref.name(), region, tagKeys);
-            case "contact-list" -> contactService.untag(ref.name(), region, tagKeys);
-            case "custom-verification-email-template" -> cvetService.untag(ref.name(), region, tagKeys);
-            case "dedicated-ip-pool" -> dedicatedIpService.untag(ref.name(), region, tagKeys);
-            case "tenant" -> tenantService.untag(ref.name(), region, tagKeys);
-            default -> throw invalidResourceArn();
-        }
-    }
-
-    // Existence is resolved in the signing region; the ARN's own region is compared by the caller.
-    private List<Tag> resourceTags(ResourceRef ref, String region) {
-        return switch (ref.type()) {
-            case "configuration-set" -> configSetService.listTags(ref.name(), region);
-            case "template" -> templateService.listTags(ref.name(), region);
-            case "identity" -> identityService.listTags(ref.name(), region);
-            case "contact-list" -> contactService.listTags(ref.name(), region);
-            case "custom-verification-email-template" -> cvetService.listTags(ref.name(), region);
-            case "dedicated-ip-pool" -> dedicatedIpService.listTags(ref.name(), region);
-            case "tenant" -> tenantService.listTags(ref.name(), region);
-            default -> throw invalidResourceArn();
-        };
+        domain.untag(ref.name(), region, tagKeys);
     }
 
     // name is everything after the type's first slash and may itself contain one: a tenant ARN's
@@ -1252,7 +1235,7 @@ public class SesService {
      * service are never compared, only required: any value addresses the same resource. The region
      * may be empty; it only meets the signing-region comparison.
      */
-    private static ResourceRef parseSesArn(String arn) {
+    private ResourceRef parseSesArn(String arn) {
         AwsArnUtils.Arn parsed;
         try {
             parsed = AwsArnUtils.parse(arn);
@@ -1269,7 +1252,7 @@ public class SesService {
         }
         String type = resource.substring(0, slash);
         String name = resource.substring(slash + 1);
-        if (!TAGGABLE_RESOURCE_TYPES.contains(type) || name.isBlank()) {
+        if (!taggableDomains.containsKey(type) || name.isBlank()) {
             throw invalidResourceArn();
         }
         // Identity names keep their pass-through: an email local part may legally hold either character.

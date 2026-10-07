@@ -31,7 +31,7 @@ import java.util.Set;
  * a domain used by the send path is not turned into a cross-service dependency.
  */
 @ApplicationScoped
-public class SesCvetService {
+public class SesCvetService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesCvetService.class);
 
@@ -125,6 +125,7 @@ public class SesCvetService {
         return cvetStore.get(cvetKey(region, templateName));
     }
 
+    @Override
     public List<Tag> listTags(String templateName, String region) {
         CustomVerificationEmailTemplate template = cvetStore.get(cvetKey(region, templateName))
                 .orElseThrow(() -> tagTargetNotFound(templateName));
@@ -136,6 +137,7 @@ public class SesCvetService {
      * lock so a concurrent update can't be overwritten with a stale object and a concurrent delete
      * can't be resurrected.
      */
+    @Override
     public void tag(String templateName, String region, List<Tag> newTags) {
         String key = cvetKey(region, templateName);
         synchronized (cvetMutationLock) {
@@ -148,6 +150,7 @@ public class SesCvetService {
                 templateName, region, newTags.size());
     }
 
+    @Override
     public void untag(String templateName, String region, List<String> tagKeys) {
         String key = cvetKey(region, templateName);
         synchronized (cvetMutationLock) {

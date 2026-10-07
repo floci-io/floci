@@ -46,7 +46,7 @@ import java.util.regex.Pattern;
  * {@link SesTags#validate} rather than depending back on the facade.
  */
 @ApplicationScoped
-public class SesTemplateService {
+public class SesTemplateService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesTemplateService.class);
 
@@ -212,10 +212,12 @@ public class SesTemplateService {
     }
 
     /** The ARN-dispatched tag operations, sharing the store behind {@code CreateEmailTemplate.Tags}. */
+    @Override
     public List<Tag> listTags(String name, String region) {
         return new ArrayList<>(requireForTags(name, region).getTags());
     }
 
+    @Override
     public void tag(String name, String region, List<Tag> newTags) {
         EmailTemplate template = requireForTags(name, region);
         template.setTags(SesTags.merge(template.getTags(), newTags));
@@ -223,6 +225,7 @@ public class SesTemplateService {
         LOG.infov("Tagged SES template: {0} (region {1}, +{2} tags)", name, region, newTags.size());
     }
 
+    @Override
     public void untag(String name, String region, List<String> tagKeys) {
         EmailTemplate template = requireForTags(name, region);
         Set<String> toRemove = new HashSet<>(tagKeys);

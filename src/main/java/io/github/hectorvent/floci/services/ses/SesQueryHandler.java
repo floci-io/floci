@@ -1504,12 +1504,9 @@ public class SesQueryHandler {
         return dest;
     }
 
-    // Only an empty name is "not specified"; a blank one reaches the shared name validation.
     private static String requireConfigurationSetName(MultivaluedMap<String, String> params, String name) {
         String v = params.getFirst(name);
-        if (v == null || v.isEmpty()) {
-            throw new AwsException("InvalidParameterValue", "The configuration set name must be specified.", 400);
-        }
+        SesConfigurationSetService.validateName(v);
         return v;
     }
 

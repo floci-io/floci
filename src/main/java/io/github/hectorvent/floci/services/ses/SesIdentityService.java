@@ -43,7 +43,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * cascade around {@link #delete}.
  */
 @ApplicationScoped
-public class SesIdentityService {
+public class SesIdentityService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesIdentityService.class);
 
@@ -427,10 +427,12 @@ public class SesIdentityService {
                 identityValue, notificationType, enabled);
     }
 
+    @Override
     public List<Tag> listTags(String identityValue, String region) {
         return new ArrayList<>(requireForTags(identityValue, region).getTags());
     }
 
+    @Override
     public void tag(String identityValue, String region, List<Tag> newTags) {
         Identity identity = requireForTags(identityValue, region);
         identity.setTags(SesTags.merge(identity.getTags(), newTags));
@@ -438,6 +440,7 @@ public class SesIdentityService {
         LOG.infov("Tagged SES identity: {0} (region {1}, +{2} tags)", identityValue, region, newTags.size());
     }
 
+    @Override
     public void untag(String identityValue, String region, List<String> tagKeys) {
         Identity identity = requireForTags(identityValue, region);
         Set<String> toRemove = new HashSet<>(tagKeys);

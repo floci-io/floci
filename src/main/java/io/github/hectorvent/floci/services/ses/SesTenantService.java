@@ -47,7 +47,7 @@ import java.util.regex.Pattern;
  * {@code DeleteTenant} callback. Tenant-scoped sending is a separate follow-up.
  */
 @ApplicationScoped
-public class SesTenantService {
+public class SesTenantService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesTenantService.class);
 
@@ -255,6 +255,7 @@ public class SesTenantService {
     }
 
     /** The ARN-dispatched tag operations; {@code resourceRemainder} is the ARN's {@code <name>/<tenantId>} part. */
+    @Override
     public List<Tag> listTags(String resourceRemainder, String region) {
         Tenant tenant = tenantForTagArn(resourceRemainder, region);
         // AWS returns a tenant's tags ordered by key (probe-confirmed).
@@ -263,12 +264,14 @@ public class SesTenantService {
                 .toList();
     }
 
+    @Override
     public void tag(String resourceRemainder, String region, List<Tag> newTags) {
         mutateTags(resourceRemainder, region, tags -> SesTags.merge(tags, newTags));
         LOG.infov("Tagged SES tenant <{0}> (region {1}, +{2} tags)",
                 resourceRemainder, region, newTags.size());
     }
 
+    @Override
     public void untag(String resourceRemainder, String region, List<String> tagKeys) {
         Set<String> toRemove = new HashSet<>(tagKeys);
         mutateTags(resourceRemainder, region, tags -> {

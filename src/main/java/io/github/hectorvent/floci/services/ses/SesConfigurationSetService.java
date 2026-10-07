@@ -48,11 +48,11 @@ import java.util.regex.Pattern;
  * reasons) and the tenant delete-guard around {@link #remove}.
  */
 @ApplicationScoped
-public class SesConfigurationSetService {
+public class SesConfigurationSetService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesConfigurationSetService.class);
 
-    private static final Pattern CONFIG_SET_NAME = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
+    private static final Pattern CONFIG_SET_NAME = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final int MAX_CONFIG_SET_NAME_LENGTH = 64;
     private static final Set<String> VDM_FEATURE_STATES = Set.of("ENABLED", "DISABLED");
 
@@ -86,7 +86,7 @@ public class SesConfigurationSetService {
             throw new AwsException("InvalidParameterValue",
                     "ConfigurationSetName is required.", 400);
         }
-        validateConfigurationSetName(configSet.getName());
+        validateName(configSet.getName());
         SesTags.validate(configSet.getTags());
         if (configSet.getSuppressionOptions() != null
                 && configSet.getSuppressionOptions().getSuppressedReasons() != null) {
@@ -344,10 +344,12 @@ public class SesConfigurationSetService {
     }
 
     /** The ARN-dispatched tag operations, sharing the store behind {@code CreateConfigurationSet.Tags}. */
+    @Override
     public List<Tag> listTags(String name, String region) {
         return new ArrayList<>(requireForTags(name, region).getTags());
     }
 
+    @Override
     public void tag(String name, String region, List<Tag> newTags) {
         ConfigurationSet cs = requireForTags(name, region);
         cs.setTags(SesTags.merge(cs.getTags(), newTags));
@@ -355,6 +357,7 @@ public class SesConfigurationSetService {
         LOG.infov("Tagged SES configuration set: {0} (region {1}, +{2} tags)", name, region, newTags.size());
     }
 
+    @Override
     public void untag(String name, String region, List<String> tagKeys) {
         ConfigurationSet cs = requireForTags(name, region);
         Set<String> toRemove = new HashSet<>(tagKeys);
@@ -385,7 +388,7 @@ public class SesConfigurationSetService {
 
     /** For guards that must not trip the key derivation's name validation (the tenant gate). */
     static boolean isValidName(String name) {
-        return name != null && CONFIG_SET_NAME.matcher(name).matches();
+        return name != null && name.length() <= MAX_CONFIG_SET_NAME_LENGTH && CONFIG_SET_NAME.matcher(name).matches();
     }
 
     // ──────────────────────── Domain-pure option setters ────────────────────────
@@ -724,7 +727,7 @@ public class SesConfigurationSetService {
         return count;
     }
 
-    private static void validateConfigurationSetName(String name) {
+    static void validateName(String name) {
         if (name == null || name.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
                     "The configuration set name must be specified.", 400);
@@ -741,7 +744,7 @@ public class SesConfigurationSetService {
     }
 
     private static String configSetKey(String region, String name) {
-        validateConfigurationSetName(name);
+        validateName(name);
         return "configSet::" + region + "::" + name;
     }
 }
