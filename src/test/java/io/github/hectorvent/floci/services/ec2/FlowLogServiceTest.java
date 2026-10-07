@@ -181,6 +181,23 @@ class FlowLogServiceTest {
         }
     }
 
+    /**
+     * A record's az-id is the zone id subnets and DescribeAvailabilityZones publish for the same
+     * zone. FlowLogService once derived its own ({@code use1-az1}, and {@code cnnorth1-az1} for
+     * China), so the two never agreed in any region.
+     */
+    @Test
+    void azIdMatchesTheZoneIdEc2PublishesForTheZone() throws Exception {
+        for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
+            List<String> lines = deliver(region, "${az-id}");
+
+            assertEquals("az-id", lines.get(0));
+            for (String row : records(lines)) {
+                assertEquals(Ec2Service.zoneIdForZoneName(region, region + "a"), row, "in " + region);
+            }
+        }
+    }
+
     /** The record lines of a delivered file, which must not be empty. */
     private static List<String> records(List<String> lines) {
         assertFalse(lines.size() < 2, "delivery carried a header and no records");
@@ -189,16 +206,21 @@ class FlowLogServiceTest {
 
     /** Deliver one file for a flow log with this LogFormat and return its lines. */
     private List<String> deliver(String logFormat) throws Exception {
+        return deliver("us-east-1", logFormat);
+    }
+
+    /** Deliver one file for a flow log in {@code region} with this LogFormat and return its lines. */
+    private List<String> deliver(String region, String logFormat) throws Exception {
         Ec2Service ec2Service = mock(Ec2Service.class);
         when(ec2Service.callerAccountId()).thenReturn("000000000000");
         when(ec2Service.describeInstances(any(), any(), any()))
-                .thenReturn(List.of(reservation()));
+                .thenReturn(List.of(reservation(region)));
         when(ec2Service.endpointNetworkInterfaces(any())).thenReturn(List.of());
         S3Service s3Service = mock(S3Service.class);
         FlowLogService service =
                 new FlowLogService(ec2Service, s3Service, new InMemoryStorage<>());
 
-        FlowLog fl = service.createFlowLog("us-east-1", "vpc-123", "VPC", "ALL", "s3",
+        FlowLog fl = service.createFlowLog(region, "vpc-123", "VPC", "ALL", "s3",
                 "arn:aws:s3:::flow-bucket", null, logFormat, 600);
         service.generateAndDeliver(fl);
 
@@ -209,20 +231,20 @@ class FlowLogServiceTest {
         return List.of(gunzip(body.getValue()).split("\n"));
     }
 
-    private static Reservation reservation() {
+    private static Reservation reservation(String region) {
         Reservation reservation = new Reservation();
-        reservation.setInstances(List.of(instance("i-aaa", "10.0.0.4"), instance("i-bbb", "10.0.0.5")));
+        reservation.setInstances(List.of(instance("i-aaa", "10.0.0.4", region), instance("i-bbb", "10.0.0.5", region)));
         return reservation;
     }
 
-    private static Instance instance(String instanceId, String privateIp) {
+    private static Instance instance(String instanceId, String privateIp, String region) {
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);
         instance.setPrivateIpAddress(privateIp);
         instance.setVpcId("vpc-123");
         instance.setSubnetId("subnet-123");
         Placement placement = new Placement();
-        placement.setAvailabilityZone("us-east-1a");
+        placement.setAvailabilityZone(region + "a");
         instance.setPlacement(placement);
         return instance;
     }

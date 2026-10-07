@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.iot.model.IotRetainedMessage;
 import io.netty.handler.codec.mqtt.MqttConnectReturnCode;
+import io.netty.handler.codec.mqtt.MqttProperties;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -49,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -118,6 +120,7 @@ public class IotMqttBrokerService implements Resettable {
     private final EmulatorConfig config;
     private final Vertx vertx;
     private final Instance<IotService> iotService;
+    private final IotCustomAuthorizer customAuthorizer;
     private final TlsConfigurationRegistry tlsRegistry;
     final WorkerExecutor ruleWorker;
     private final Map<String, ClientSession> sessionsByClient = new ConcurrentHashMap<>();
@@ -130,16 +133,18 @@ public class IotMqttBrokerService implements Resettable {
      * the one it was admitted under.
      */
     private final AtomicLong ruleState = new AtomicLong();
+    private final Map<SocketAddress, IotCustomAuthorizer.WebSocketUpgrade> webSocketUpgrades = new ConcurrentHashMap<>();
     private MqttServer server;
     private MqttServer tlsServer;
     private ReloadingKeyManager keyManager;
 
     @Inject
     public IotMqttBrokerService(EmulatorConfig config, Vertx vertx, Instance<IotService> iotService,
-                                TlsConfigurationRegistry tlsRegistry) {
+                                IotCustomAuthorizer customAuthorizer, TlsConfigurationRegistry tlsRegistry) {
         this.config = config;
         this.vertx = vertx;
         this.iotService = iotService;
+        this.customAuthorizer = customAuthorizer;
         this.tlsRegistry = tlsRegistry;
         this.ruleWorker = vertx.createSharedWorkerExecutor("floci-iot-mqtt-rules", 1);
     }
@@ -325,6 +330,15 @@ public class IotMqttBrokerService implements Resettable {
         ruleState.updateAndGet(state -> (state & reason) == 0 ? state : (state & ~reason) + RULE_STATE_STEP);
     }
 
+    /**
+     * The WebSocket bridge's upgrades, keyed by the address its connection to the plaintext
+     * listener comes from: put before the first frame is piped, taken by that connection's CONNECT,
+     * dropped when the bridge session ends. A method, as the bridge holds a client proxy.
+     */
+    Map<SocketAddress, IotCustomAuthorizer.WebSocketUpgrade> webSocketUpgrades() {
+        return webSocketUpgrades;
+    }
+
     public synchronized boolean isRunning() {
         return server != null;
     }
@@ -368,7 +382,7 @@ public class IotMqttBrokerService implements Resettable {
      * anything else is answered with CONNACK not authorized (return code 5, reason code 0x87 on
      * MQTT 5) and never becomes a session, so a client already holding that client id keeps its
      * connection. The plaintext listener, which the WebSocket bridge also lands on, stays open to
-     * every client.
+     * every client except one that names a custom authorizer, see {@link #authorizeCustom}.
      */
     void handleEndpoint(MqttEndpoint endpoint, boolean verifyDevice) {
         String clientId = endpoint.clientIdentifier();
@@ -383,7 +397,60 @@ public class IotMqttBrokerService implements Resettable {
                         : MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED);
                 return;
             }
+        } else {
+            IotCustomAuthorizer.WebSocketUpgrade upgrade = remoteAddress == null ? null : webSocketUpgrades.remove(remoteAddress);
+            String username = endpoint.auth() == null ? null : endpoint.auth().getUsername();
+            String authorizerName = IotCustomAuthorizer.authorizerName(username, upgrade);
+            if (authorizerName != null) {
+                authorizeCustom(endpoint, authorizerName, upgrade, upgrade == null ? sourceIp : upgrade.sourceIp());
+                return;
+            }
         }
+        admit(endpoint, principal);
+    }
+
+    /**
+     * A CONNECT naming a custom authorizer is admitted only when the authorizer's function allows
+     * it and the policies it returns allow {@code iot:Connect} for the client id. The function runs
+     * off the event loop. A refusal closes an MQTT 3.1.1 connection without a CONNACK and answers
+     * MQTT 5 with reason code 0x87, as AWS IoT does.
+     */
+    private void authorizeCustom(MqttEndpoint endpoint, String authorizerName, IotCustomAuthorizer.WebSocketUpgrade upgrade,
+                                 String sourceIp) {
+        String clientId = endpoint.clientIdentifier();
+        String username = endpoint.auth() == null ? null : endpoint.auth().getUsername();
+        String password = endpoint.auth() == null ? null : endpoint.auth().getPassword();
+        String serverName = upgrade == null ? null : upgrade.serverName();
+        AtomicBoolean closed = new AtomicBoolean();
+        endpoint.closeHandler(ignored -> closed.set(true));
+        vertx.executeBlocking(() -> {
+            List<String> policies = customAuthorizer.connectPolicies(authorizerName, clientId, username, password, upgrade);
+            return iotService.get().isConnectAllowedBy(policies, clientId, sourceIp, serverName);
+        }, false).onComplete(decision -> {
+            if (closed.get()) {
+                return;
+            }
+            if (decision.succeeded() && decision.result()) {
+                admit(endpoint, null);
+                return;
+            }
+            LOG.debugv("IoT MQTT client {0} refused by custom authorizer {1}: {2}", clientId, authorizerName,
+                    decision.failed() ? decision.cause().getMessage() : "iot:Connect is not allowed");
+            if (endpoint.protocolVersion() != 5) {
+                endpoint.close();
+                return;
+            }
+            MqttProperties properties = new MqttProperties();
+            properties.add(new MqttProperties.StringProperty(MqttProperties.MqttPropertyType.REASON_STRING.value(),
+                    "CONNACK:Client is not authenticated/authorized to send the message:" + UUID.randomUUID()));
+            endpoint.reject(MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED_5, properties);
+        });
+    }
+
+    private void admit(MqttEndpoint endpoint, String principal) {
+        String clientId = endpoint.clientIdentifier();
+        SocketAddress remoteAddress = endpoint.remoteAddress();
+        String sourceIp = remoteAddress == null ? null : remoteAddress.host();
         ClientSession session = new ClientSession(
                 clientId,
                 endpoint,
@@ -425,7 +492,7 @@ public class IotMqttBrokerService implements Resettable {
                 return null;
             }
             String certificateArn = device.get().certificate().getCertificateArn();
-            if (!iotService.get().isConnectAllowed(device.get(), clientId, sourceIp, requestedServerName(endpoint))) {
+            if (!iotService.get().isConnectAllowed(device.get(), clientId, sourceIp, requestedServerName(endpoint.sslSession()))) {
                 LOG.debugv("IoT MQTT TLS client {0} refused: iot:Connect is not allowed for {1}", clientId, certificateArn);
                 return null;
             }
@@ -460,8 +527,8 @@ public class IotMqttBrokerService implements Resettable {
      * {@code iot:DomainName}. An address literal is not a domain name: some clients send the
      * host they dialled as SNI even when it is an IP.
      */
-    private static String requestedServerName(MqttEndpoint endpoint) {
-        if (!(endpoint.sslSession() instanceof ExtendedSSLSession session)) {
+    static String requestedServerName(SSLSession sslSession) {
+        if (!(sslSession instanceof ExtendedSSLSession session)) {
             return null;
         }
         return session.getRequestedServerNames().stream()

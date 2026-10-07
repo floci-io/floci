@@ -293,7 +293,9 @@ public class EksService implements TagHandler, ResourceProvider {
                         cluster.getIdentity().getOidc().getIssuer());
                 continue;
             }
-            String issuer = oidcService.newIssuerUrl(config.defaultRegion());
+            // The cluster's own region, from its ARN: the issuer must match the one create mints there.
+            String issuer = oidcService.newIssuerUrl(
+                    AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion()));
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
             oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
             putClusterForAccount(accountId, cluster);

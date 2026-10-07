@@ -33,7 +33,7 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `TagResource` | Tag a log group by ARN |
 | `UntagResource` | Remove tags from a log group by ARN |
 | `ListTagsForResource` | List tags for a log group ARN |
-| `PutSubscriptionFilter` | Create or update a subscription filter (stored only, see note below) |
+| `PutSubscriptionFilter` | Create or update a subscription filter (see [Subscription filters](#subscription-filters)) |
 | `DescribeSubscriptionFilters` | List subscription filters on a log group |
 | `DeleteSubscriptionFilter` | Delete a subscription filter |
 | `PutMetricFilter` | Create or replace a metric filter on a log group (see [Metric filters](#metric-filters)) |
@@ -55,16 +55,31 @@ Log group deletion protection defaults to disabled and is persisted with the log
 enabled, `DeleteLogGroup` returns `ValidationException` until protection is explicitly disabled
 with `PutLogGroupDeletionProtection`.
 
-Three actions are currently simplified:
+Two actions are currently simplified:
 
-- **`PutSubscriptionFilter`** stores the filter so that `DescribeSubscriptionFilters`
-  returns it, but log events are **not** forwarded to the destination ARN. Lambda,
-  Kinesis, and Firehose subscription destinations are not wired up.
 - **`GetDataProtectionPolicy`** does not model data-protection policies. It returns
-  HTTP 200 with the resolved `logGroupIdentifier` and no `policyDocument` — including for
+  HTTP 200 with the resolved `logGroupIdentifier` and no `policyDocument`, including for
   a log group that does not exist, where real AWS returns `ResourceNotFoundException`.
 - **`FilterLogEvents`** matches `filterPattern` as a plain substring of the message. The full
-  filter pattern syntax described below is applied by metric filters.
+  filter pattern syntax described below is applied by metric filters and subscription filters.
+
+### Subscription filters {#subscription-filters}
+
+Subscription filters deliver newly ingested log events to a downstream destination. Floci delivers
+matching events to Lambda functions, Kinesis data streams, and Firehose delivery streams. Delivery
+happens synchronously on the calling thread when `PutLogEvents` persists events. A destination error,
+missing destination stream/function, or unresolvable destination ARN is logged and does not fail the
+log ingestion request.
+
+The delivered payload is a gzip-compressed JSON object containing `messageType` (`DATA_MESSAGE`),
+`owner` (the account ID), `logGroup`, `logStream`, `subscriptionFilters` (the matched filter names),
+and `logEvents` (an array of `{id, timestamp, message}`). Lambda receives the payload base64-encoded
+under `awslogs.data`. Kinesis and Firehose receive the gzip-compressed JSON bytes directly as record data.
+
+For Kinesis destinations, `distribution` controls the partition key: `ByLogStream` uses the log stream
+name, while `Random` assigns a randomized UUID partition key. Cross-account Logs destinations
+(`PutDestination`), IAM role permission checks, and the `CONTROL_MESSAGE` ping on filter creation
+are deferred.
 
 ### Metric filters {#metric-filters}
 

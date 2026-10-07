@@ -210,6 +210,7 @@ public class WebSocketHandler {
         String sourceIp = ctx.request().remoteAddress() != null
                 ? ctx.request().remoteAddress().host() : "127.0.0.1";
         String userAgent = ctx.request().getHeader("User-Agent");
+        boolean secureTransport = ctx.request().isSSL();
 
         // Load stage variables (default to empty map if null)
         Map<String, String> stageVariables = stage.getStageVariables() != null
@@ -238,7 +239,7 @@ public class WebSocketHandler {
                 vertx.<WebSocketAuthorizerService.AuthorizerResult>executeBlocking(() -> {
                     return authorizerService.invokeAndEvaluate(region, apiId, stageName,
                             connectRoute.getAuthorizerId(), finalConnectionId, finalConnectedAt,
-                            headers, queryParams, finalSourceIp, finalUserAgent, finalStageVariables);
+                            headers, queryParams, finalSourceIp, secureTransport, finalUserAgent, finalStageVariables);
                 }).onSuccess(authResult -> {
                     if (!authResult.allowed()) {
                         ctx.response().setStatusCode(authResult.statusCode()).end();

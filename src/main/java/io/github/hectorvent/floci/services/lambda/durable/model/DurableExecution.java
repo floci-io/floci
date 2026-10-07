@@ -52,6 +52,9 @@ public class DurableExecution {
     private int consecutiveInvocationFailures;
     private Long nextInvocationAttemptAt;
     private DurableCheckpointReplay lastCheckpoint;
+    /** Set on an execution a chained invoke started. Its close completes that operation of the parent. */
+    private String parentExecutionArn;
+    private String parentOperationId;
 
     public DurableExecution() {
     }
@@ -66,7 +69,7 @@ public class DurableExecution {
         return changeSequence > seenSequence;
     }
 
-    /** True while a wait or a step retry is still pending. */
+    /** True while a wait, a step retry, a callback or a chained invoke is still pending. */
     @JsonIgnore
     public boolean hasPendingOperations() {
         for (DurableOperation operation : operations.values()) {
@@ -80,6 +83,11 @@ public class DurableExecution {
                 case STEP -> {
                     if (operationStatus == DurableOperationStatus.PENDING
                             || operationStatus == DurableOperationStatus.READY) {
+                        return true;
+                    }
+                }
+                case CALLBACK, CHAINED_INVOKE -> {
+                    if (operationStatus == DurableOperationStatus.STARTED) {
                         return true;
                     }
                 }
@@ -193,6 +201,12 @@ public class DurableExecution {
     public void setNextInvocationAttemptAt(Long nextInvocationAttemptAt) {
         this.nextInvocationAttemptAt = nextInvocationAttemptAt;
     }
+
+    public String getParentExecutionArn() { return parentExecutionArn; }
+    public void setParentExecutionArn(String parentExecutionArn) { this.parentExecutionArn = parentExecutionArn; }
+
+    public String getParentOperationId() { return parentOperationId; }
+    public void setParentOperationId(String parentOperationId) { this.parentOperationId = parentOperationId; }
 
     public DurableCheckpointReplay getLastCheckpoint() { return lastCheckpoint; }
     public void setLastCheckpoint(DurableCheckpointReplay lastCheckpoint) { this.lastCheckpoint = lastCheckpoint; }

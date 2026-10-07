@@ -96,6 +96,7 @@ final class Ec2InstanceCredentials {
                 role.getArn(), now.plusSeconds(3600), null, account);
         session.setEc2InstanceId(instance.getInstanceId());
         session.setEc2RoleId(role.getRoleId());
+        session.setAssumedRoleId(role.getRoleId() + ":" + instance.getInstanceId());
         iam.registerEc2InstanceSession(session);
         history.add(new Issued(session, role.getRoleId(), instance.getIamInstanceProfileArn()));
         return Optional.of(session);

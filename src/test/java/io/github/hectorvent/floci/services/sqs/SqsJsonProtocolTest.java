@@ -713,4 +713,52 @@ class SqsJsonProtocolTest {
             .when().post("/");
         }
     }
+
+    @Test
+    void receiveMessageReturnsPerMessageSenderId() {
+        String testQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-sender-id-per-message-queue\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        try {
+            String auth1 = "AWS4-HMAC-SHA256 Credential=111122223333/20260215/us-east-1/sqs/aws4_request, "
+                    + "SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=abc";
+            String auth2 = "AWS4-HMAC-SHA256 Credential=444455556666/20260215/us-east-1/sqs/aws4_request, "
+                    + "SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=abc";
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .header("Authorization", auth1)
+                .body("{\"QueueUrl\":\"" + testQueueUrl + "\",\"MessageBody\":\"msg-sender-1\"}")
+            .when().post("/").then().statusCode(200);
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .header("Authorization", auth2)
+                .body("{\"QueueUrl\":\"" + testQueueUrl + "\",\"MessageBody\":\"msg-sender-2\"}")
+            .when().post("/").then().statusCode(200);
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + testQueueUrl + "\","
+                        + "\"MaxNumberOfMessages\":10,"
+                        + "\"VisibilityTimeout\":0,"
+                        + "\"MessageSystemAttributeNames\":[\"SenderId\"]}")
+            .when().post("/").then().statusCode(200)
+                .body("Messages", hasSize(2))
+                .body("Messages.Attributes.SenderId", hasItems("111122223333", "444455556666"));
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + testQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
 }

@@ -269,6 +269,78 @@ def test_collect_signing_names_reads_the_gzipped_models_the_botocore_wheel_ships
     assert r.collect_signing_names(tmp_path) == {"ecr": ["api.ecr"]}
 
 
+def partition_is(partition_id):
+    return {"fn": "stringEquals",
+            "argv": [{"fn": "getAttr", "argv": [{"ref": "PartitionResult"}, "name"]}, partition_id]}
+
+
+def endpoint_rule(conditions, url="https://example"):
+    return {"type": "endpoint", "conditions": conditions, "endpoint": {"url": url}}
+
+
+def test_ruleset_partitions_counts_only_explicit_branches_that_resolve_to_an_endpoint():
+    rules = [
+        {"type": "tree", "conditions": [partition_is("aws-eusc")],
+         "rules": [endpoint_rule([], "https://iam.eusc-de-east-1.amazonaws.eu")]},
+        endpoint_rule([partition_is("aws-iso-e")]),
+        {"type": "error", "conditions": [partition_is("aws-iso-f")], "error": "not here"},
+        {"type": "tree", "conditions": [partition_is("aws-iso-b")],
+         "rules": [{"type": "error", "conditions": [], "error": "FIPS is not supported"}]},
+        endpoint_rule([{"fn": "not", "argv": [partition_is("aws-cn")]}]),
+        endpoint_rule([], "https://iam.{Region}.{PartitionResult#dnsSuffix}"),
+    ]
+
+    assert r.ruleset_partitions(rules) == {"aws-eusc", "aws-iso-e"}
+
+
+def write_service(root, service, version, metadata, rules=None, gzipped=False):
+    directory = root / service / version
+    directory.mkdir(parents=True)
+    (directory / "service-2.json").write_text(json.dumps({"metadata": metadata}))
+    if rules is not None:
+        document = {"version": "1.0", "parameters": {}, "rules": rules}
+        if gzipped:
+            with gzip.open(directory / "endpoint-rule-set-1.json.gz", "wt", encoding="utf-8") as handle:
+                json.dump(document, handle)
+        else:
+            (directory / "endpoint-rule-set-1.json").write_text(json.dumps(document))
+
+
+def test_collect_ruleset_partitions_keys_by_endpoint_prefix_and_reads_gzipped_rulesets(tmp_path):
+    write_service(tmp_path, "iam", "2010-05-08", {"endpointPrefix": "iam"},
+                  [endpoint_rule([partition_is("aws-eusc")])], gzipped=True)
+    write_service(tmp_path, "sqs", "2012-11-05", {"endpointPrefix": "sqs"}, [endpoint_rule([])])
+    write_service(tmp_path, "nomodel", "2020-01-01", {"endpointPrefix": "nomodel"})
+
+    assert r.collect_ruleset_partitions(tmp_path) == {"iam": ["aws-eusc"]}
+
+
+def test_build_adds_ruleset_partitions_only_for_services_endpoints_json_lists_somewhere():
+    document = r.build(PARTITIONS, ENDPOINTS, r.parse_cdk_entities(ENTITIES), None, "test", {},
+                       {"iam": ["aws-eusc"], "fis": ["aws-eusc"], "sqs": ["aws-eusc"]})
+    eusc = by_id(document, "aws-eusc")
+
+    assert eusc["services"] == ["iam", "sqs"]
+    assert eusc["servicesFromRulesets"] == ["iam"]
+    assert by_id(document, "aws")["servicesFromRulesets"] == []
+
+
+def test_build_drops_a_signing_name_whose_own_prefix_service_is_listed_nowhere():
+    signing_names = {"execute-api": ["participant.connect"], "ecr": ["api.ecr"], "iam": ["iam-toolbox"]}
+    document = r.build(PARTITIONS, ENDPOINTS, r.parse_cdk_entities(ENTITIES), None, "test",
+                       signing_names, None, {"execute-api", "iam", "sqs"})
+
+    assert document["signingNames"] == {"ecr": ["api.ecr"], "iam": ["iam-toolbox"]}
+
+
+def test_collect_self_signed_prefixes_lists_services_signing_with_their_own_prefix(tmp_path):
+    write_service(tmp_path, "apigatewaymanagementapi", "2018-11-29", {"endpointPrefix": "execute-api"})
+    write_service(tmp_path, "connectparticipant", "2018-09-07",
+                  {"endpointPrefix": "participant.connect", "signingName": "execute-api"})
+
+    assert r.collect_self_signed_prefixes(tmp_path) == {"execute-api"}
+
+
 def test_build_refuses_a_partition_missing_from_endpoints_json():
     endpoints = {"partitions": [p for p in ENDPOINTS["partitions"] if p["partition"] != "aws-eusc"], "version": 3}
     with pytest.raises(ValueError, match="aws-eusc"):

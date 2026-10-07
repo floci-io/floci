@@ -4725,8 +4725,17 @@ public class DynamoDbService {
                     "Export not found: " + exportArn, 400);
         }
         return exportStore.get(exportArn)
+                .filter(d -> inRequestRegion(d.getExportArn()))
                 .orElseThrow(() -> new AwsException("ExportNotFoundException",
                         "Export not found: " + exportArn, 400));
+    }
+
+    /** Export and import jobs are stored by ARN for every region; a request sees only its own region's. */
+    private boolean inRequestRegion(String jobArn) {
+        if (jobArn == null || !AwsArnUtils.isArn(jobArn)) {
+            return true;
+        }
+        return AwsArnUtils.parse(jobArn).region().equals(regionResolver.getRegion());
     }
 
     public record ListExportsResult(List<ExportSummary> exportSummaries, String nextToken) {}
@@ -4736,6 +4745,7 @@ public class DynamoDbService {
             return new ListExportsResult(List.of(), null);
         }
         var all = exportStore.scan(k -> true).stream()
+                .filter(d -> inRequestRegion(d.getExportArn()))
                 .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
                 .toList();
         requirePageSize(maxResults, "maxResults");
@@ -4842,6 +4852,7 @@ public class DynamoDbService {
             return null;
         }
         var existing = importStore.scan(k -> true).stream()
+                .filter(d -> inRequestRegion(d.getImportArn()))
                 .filter(d -> clientToken.equals(d.getClientToken()))
                 .findFirst()
                 .orElse(null);
@@ -5042,6 +5053,7 @@ public class DynamoDbService {
     public ImportTableDescription describeImport(String importArn) {
         return Optional.ofNullable(importStore)
                 .flatMap(store -> store.get(importArn))
+                .filter(d -> inRequestRegion(d.getImportArn()))
                 .orElseThrow(() -> new AwsException("ImportNotFoundException",
                         "The specified import was not found.", 400));
     }
@@ -5053,6 +5065,7 @@ public class DynamoDbService {
             return new ListImportsResult(List.of(), null);
         }
         var all = importStore.scan(k -> true).stream()
+                .filter(d -> inRequestRegion(d.getImportArn()))
                 .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
                 .toList();
         requirePageSize(pageSize, "pageSize");

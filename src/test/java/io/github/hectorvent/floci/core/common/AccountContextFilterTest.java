@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -114,7 +115,7 @@ class AccountContextFilterTest {
         filter.filter(mockContext(
             "AWS4-HMAC-SHA256 Credential=000000000001/20260617/aws-cn-global/iam/aws4_request, SignedHeaders=host, Signature=abc",
             null));
-        assertEquals("aws-cn-global", requestContext.getRegion());
+        assertEquals("cn-northwest-1", requestContext.getRegion(), "a pseudo-region is never a request region");
         assertEquals("aws-cn", requestContext.getPartition());
     }
 
@@ -248,7 +249,7 @@ class AccountContextFilterTest {
     @Test
     void strictModeAlsoCoversPresignedCredentials() {
         strictPartitions = true;
-        ContainerRequestContext ctx = mockContext(null, "AKID/20260617/eusc-de-east-1/iam/aws4_request");
+        ContainerRequestContext ctx = mockContext(null, "AKID/20260617/cn-north-1/lightsail/aws4_request");
         filter.filter(ctx);
         ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
         verify(ctx).abortWith(aborted.capture());
@@ -391,14 +392,85 @@ class AccountContextFilterTest {
         assertTrue(body.contains("polygondwanaland-west-1"), body);
     }
 
+    @Test
+    void populatesAccessKeyIdInRequestContextFromAuthHeader() {
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        ContainerRequestContext ctx = mockContext(auth, null);
+        filter.filter(ctx);
+        assertEquals("AKIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
+    }
+
+    @Test
+    void populatesAccessKeyIdInRequestContextFromPresignedQuery() {
+        ContainerRequestContext ctx = mockContext(null,
+                "AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request", "AWS4-HMAC-SHA256");
+        filter.filter(ctx);
+        assertEquals("AKIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
+    }
+
+    @Test
+    void accessKeyIdIsNullWhenNoAuthInfo() {
+        ContainerRequestContext ctx = mockContext(null, null);
+        filter.filter(ctx);
+        assertNull(requestContext.getAccessKeyId());
+    }
+
+    @Test
+    void resolvesFromPresignedCredentialWhenAlgorithmIsMissing() {
+        ContainerRequestContext ctx = mockContext(null,
+                "AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request", null);
+        filter.filter(ctx);
+        assertEquals("AKIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals("us-east-1", requestContext.getRegion());
+    }
+
+    @Test
+    void populatesSessionTokenInRequestContextFromHeader() {
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        ContainerRequestContext ctx = mockContext(auth, null, null, "my-session-token");
+        filter.filter(ctx);
+        assertEquals("ASIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
+        assertEquals("my-session-token", requestContext.getSessionToken());
+    }
+
+    @Test
+    void populatesSessionTokenInRequestContextFromPresignedQuery() {
+        ContainerRequestContext ctx = mockContext(null,
+                "ASIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request", "AWS4-HMAC-SHA256", "query-token");
+        filter.filter(ctx);
+        assertEquals("ASIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
+        assertEquals("query-token", requestContext.getSessionToken());
+    }
+
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {
+        return mockContext(authHeader, xAmzCredential, xAmzCredential != null ? "AWS4-HMAC-SHA256" : null, null);
+    }
+
+    private ContainerRequestContext mockContext(String authHeader, String xAmzCredential, String xAmzAlgorithm) {
+        return mockContext(authHeader, xAmzCredential, xAmzAlgorithm, null);
+    }
+
+    private ContainerRequestContext mockContext(String authHeader, String xAmzCredential,
+                                                String xAmzAlgorithm, String xAmzSecurityToken) {
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);
         when(ctx.getHeaderString("Authorization")).thenReturn(authHeader);
+        if (xAmzSecurityToken != null) {
+            when(ctx.getHeaderString("X-Amz-Security-Token")).thenReturn(xAmzSecurityToken);
+        }
 
         UriInfo uriInfo = mock(UriInfo.class);
         MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
         if (xAmzCredential != null) {
             queryParams.add("X-Amz-Credential", xAmzCredential);
+        }
+        if (xAmzAlgorithm != null) {
+            queryParams.add("X-Amz-Algorithm", xAmzAlgorithm);
+        }
+        if (xAmzSecurityToken != null && authHeader == null) {
+            queryParams.add("X-Amz-Security-Token", xAmzSecurityToken);
         }
         when(uriInfo.getQueryParameters()).thenReturn(queryParams);
         when(uriInfo.getPath()).thenReturn("/");

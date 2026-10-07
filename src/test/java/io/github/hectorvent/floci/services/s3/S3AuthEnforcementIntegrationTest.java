@@ -3,9 +3,9 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
-import io.restassured.specification.RequestSpecification;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -29,9 +29,9 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
@@ -1573,13 +1573,16 @@ class S3AuthEnforcementIntegrationTest {
     void signedRequestWithTemporaryCredentialRequiresIssuedSessionToken() {
         String accessKeyId = "ASIAS3NORMALREQUEST";
         String sessionToken = "issued-session-token";
-        iamService.registerSession(
+        // A GetSessionToken session the account root minted.
+        iamService.registerIssuedSession(
                 accessKeyId,
                 "temp-key-material",
                 sessionToken,
                 null,
                 Instant.now().plusSeconds(3600),
-                null);
+                null,
+                "000000000000",
+                "000000000000");
         String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
 
         given().filter(S3RequestSigner.signedAs(accessKeyId, "temp-key-material", sessionToken))

@@ -721,6 +721,101 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void signUpCodeIsSentFromTheEmailConfigurationFrom() throws Exception {
+        verifySesEmailIdentity("noreply@repro.example");
+        String fromUsername = signUpWithEmailConfiguration("EmailConfigurationFromPool", """
+                {
+                  "EmailSendingAccount": "DEVELOPER",
+                  "SourceArn": "arn:aws:ses:us-east-1:000000000000:identity/noreply@repro.example",
+                  "From": "Repro App <noreply@repro.example>"
+                }
+                """);
+
+        // The sender name stays in Source, the From header, while the return path, which the SMTP
+        // relay uses as the envelope sender, is the bare address.
+        given()
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body("messages.findAll { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }",
+                        hasSize(1))
+                .body("messages.find { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }.Source",
+                        equalTo("Repro App <noreply@repro.example>"))
+                .body("messages.find { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }.ReturnPath",
+                        equalTo("noreply@repro.example"));
+    }
+
+    @Test
+    void signUpCodeIsSentFromTheDefaultAddressWhenSesHasNotVerifiedTheSourceArn() throws Exception {
+        String unverified = "noreply-" + UUID.randomUUID() + "@unverified.example";
+        String fromUsername = signUpWithEmailConfiguration("UnverifiedSourceArnPool", """
+                {
+                  "EmailSendingAccount": "DEVELOPER",
+                  "SourceArn": "arn:aws:ses:us-east-1:000000000000:identity/%s",
+                  "From": "Repro App <%s>"
+                }
+                """.formatted(unverified, unverified));
+
+        given()
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body("messages.findAll { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }",
+                        hasSize(1))
+                .body("messages.find { it.Destination?.ToAddresses?.contains('" + fromUsername + "') }.Source",
+                        equalTo("no-reply@verificationemail.com"));
+    }
+
+    /** Creates a pool with {@code emailConfiguration}, signs a new user up to it and returns the username. */
+    private static String signUpWithEmailConfiguration(String poolName, String emailConfiguration) throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "%s",
+                  "AutoVerifiedAttributes": ["email"],
+                  "EmailConfiguration": %s
+                }
+                """.formatted(poolName, emailConfiguration));
+        String fromPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "email-configuration-from-client"
+                }
+                """.formatted(fromPoolId));
+        String fromClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String fromUsername = "from+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(fromClientId, fromUsername, fromUsername))
+                .then()
+                .statusCode(200);
+        return fromUsername;
+    }
+
+    private static void verifySesEmailIdentity(String emailAddress) {
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+                .formParam("Action", "VerifyEmailIdentity")
+                .formParam("EmailAddress", emailAddress)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
     void resendConfirmationCodeReplacesTheSignUpCode() throws Exception {
         given().delete("/_aws/ses").then().statusCode(200);
 

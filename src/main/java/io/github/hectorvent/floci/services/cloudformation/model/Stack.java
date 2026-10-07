@@ -158,6 +158,7 @@ public class Stack {
     public void replaceOutputs(Map<String, String> source) { replace(outputs, source); }
     public void replaceExports(Map<String, String> source) { replace(exports, source); }
     public void replaceOutputExportNames(Map<String, String> source) { replace(outputExportNames, source); }
+    public void replaceTags(Map<String, String> source) { replace(tags, source); }
 
     private static <V> void replace(Map<String, V> target, Map<String, V> source) {
         synchronized (target) {

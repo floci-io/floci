@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
+import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -224,6 +225,9 @@ public class ResourceArnBuilder {
     // ── Lambda ──────────────────────────────────────────────────────────────────
     private String buildLambdaArn(String path, String region, String accountId) {
         String executionArn = durableExecutionArn(path);
+        if (executionArn == null) {
+            executionArn = durableCallbackExecutionArn(path);
+        }
         if (executionArn != null) {
             return executionArn;
         }
@@ -245,6 +249,19 @@ public class ResourceArnBuilder {
         }
         Matcher matcher = LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(path.substring(executions + prefix.length()));
         return matcher.lookingAt() ? matcher.group() : null;
+    }
+
+    /** A callback id carries its execution ARN, so the callback actions are authorized against that execution. */
+    private static String durableCallbackExecutionArn(String path) {
+        String prefix = "/durable-execution-callbacks/";
+        int callbacks = path.indexOf(prefix);
+        int action = path.lastIndexOf('/');
+        if (callbacks < 0 || action <= callbacks + prefix.length()) {
+            return null;
+        }
+        return DurableTokens.callbackExecutionArn(path.substring(callbacks + prefix.length(), action))
+                .filter(arn -> LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(arn).matches())
+                .orElse(null);
     }
 
     // ── SQS ─────────────────────────────────────────────────────────────────────

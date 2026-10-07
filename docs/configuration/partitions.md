@@ -45,7 +45,10 @@ The scope region of a global service is its *signing* region, not a place to put
 resources: China IAM always signs `cn-north-1` even from Ningxia, GovCloud IAM signs
 `us-gov-west-1`. Floci uses it to pick the partition and nothing else. The
 `<partition>-global` pseudo-regions the SDKs accept (`aws-global`, `aws-cn-global`, ...)
-resolve to their partition as well; `aws-eusc` publishes none.
+resolve to their partition as well; `aws-eusc` publishes none. AWS never signs with one (the SDKs
+map each to a real signing region), so a scope that names one is served as the partition's
+implicit global region: a request signed `aws-cn-global` is a `cn-northwest-1` request, and no
+ARN or storage namespace carries the pseudo-region.
 
 A scope region that no partition publishes or admits by its region pattern, such as
 `polygondwanaland-west-1`, is refused with a 400: an S3-signed request gets S3's
@@ -56,7 +59,9 @@ The pattern rule is the AWS SDKs' own, so a region AWS launches after the vendor
 refreshed (`eu-south-9`, say) is still served; it is looser than S3's `LocationConstraint` enum,
 which stays published-only. Set `FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS=true`
 (`floci.partitions.allow-unknown-regions`) to serve any label with its own namespace, as Floci
-did before.
+did before. Such a label belongs to the deployment's partition. ARNs minted through Floci's
+shared region resolver use that partition too; services that build their ARNs directly still fall
+back to `aws` for a label no partition publishes.
 
 ## What changes per partition
 
@@ -122,8 +127,8 @@ did before.
 
 ## Partition-absent services
 
-AWS publishes which services exist in each partition (CloudFront is not in GovCloud, IAM is
-not in `aws-eusc`). On AWS a request for an absent service never reaches an API: the SDK
+AWS publishes which services exist in each partition (CloudFront is not in GovCloud, Lightsail
+is not in China). On AWS a request for an absent service never reaches an API: the SDK
 fails to resolve the host and reports an `UnknownHostException`. Floci serves every enabled
 service in every partition by default.
 
@@ -136,6 +141,14 @@ service list, matching the signing name directly or through the endpoint prefixe
 while a GovCloud CloudFront client is refused. Only a service the data lists in some other
 partition is refused: `endpoints.json` omits the newer services that ship an endpoint ruleset
 alone (FIS, MWAA, S3 Tables), and those are served everywhere.
+
+A partition also offers a service when that service's endpoint ruleset names the partition in a
+branch with its own endpoint, even where `endpoints.json` leaves it out: IAM, Route 53, Budgets and
+Cost Explorer in `aws-eusc` (`iam.eusc-de-east-1.amazonaws.eu`), IAM and Cost Explorer in
+`aws-iso-e`. The vendored data records these under `servicesFromRulesets`. The `execute-api`
+signing name is never refused: API Gateway's invoke endpoints and its WebSocket management API
+(`apigatewaymanagementapi`) sign with it as well as Connect Participant, and `endpoints.json` lists
+the API Gateway side nowhere, so the data cannot say where the name is served.
 
 STS is regionalized everywhere and its global host `sts.amazonaws.com` exists only in `aws`, so
 IAM's `GetAccountSummary` reports `GlobalEndpointTokenVersion` only there.

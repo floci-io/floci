@@ -26,6 +26,7 @@ public class CognitoUser {
     private String srpSalt;
     private String srpVerifier;
     private EmailMfaSettings emailMfaSettings;
+    private SoftwareTokenMfaSettings softwareTokenMfaSettings;
     private String softwareTokenMfaSecret;
     private String pendingSoftwareTokenMfaSecret;
     private Integer pendingSoftwareTokenMfaAttemptsRemaining;
@@ -93,6 +94,11 @@ public class CognitoUser {
 
     public void setEmailMfaSettings(EmailMfaSettings emailMfaSettings) {
         this.emailMfaSettings = emailMfaSettings;
+    }
+
+    public SoftwareTokenMfaSettings getSoftwareTokenMfaSettings() { return softwareTokenMfaSettings; }
+    public void setSoftwareTokenMfaSettings(SoftwareTokenMfaSettings settings) {
+        this.softwareTokenMfaSettings = settings;
     }
 
     public String getSoftwareTokenMfaSecret() { return softwareTokenMfaSecret; }

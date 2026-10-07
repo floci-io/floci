@@ -18,6 +18,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -41,6 +42,12 @@ import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class RdsDataService implements Resettable {
+
+    /**
+     * The Data API fails an ExecuteStatement whose response is larger than 1 MiB. Only the
+     * serialized records are counted; the small remainder of the body is not.
+     */
+    private static final long MAX_RESPONSE_BYTES = 1024L * 1024L;
 
     private static final Logger LOG = Logger.getLogger(RdsDataService.class);
 
@@ -533,10 +540,17 @@ public class RdsDataService implements Resettable {
     private ArrayNode records(ResultSet rs, ResultSetMetaData meta) throws SQLException {
         ArrayNode records = objectMapper.createArrayNode();
         int columnCount = meta.getColumnCount();
+        // Serialized size of the records array: its two brackets plus one comma between rows.
+        long responseBytes = 2;
         while (rs.next()) {
             ArrayNode row = objectMapper.createArrayNode();
             for (int i = 1; i <= columnCount; i++) {
                 row.add(RdsDataFieldMapper.toField(objectMapper, rs.getObject(i), meta.getColumnType(i)));
+            }
+            responseBytes += row.toString().getBytes(StandardCharsets.UTF_8).length
+                    + (records.isEmpty() ? 0 : 1);
+            if (responseBytes > MAX_RESPONSE_BYTES) {
+                throw new AwsException("UnsupportedResultException", "Database response exceeded size limit", 400);
             }
             records.add(row);
         }

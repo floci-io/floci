@@ -18,6 +18,8 @@ public class ScalingActivity {
     private String statusCode;  // InProgress | Successful | Failed | Cancelled
     private String statusMessage;
     private int progress;       // 0-100
+    // The Auto Scaling group's region; null for activities persisted before it was recorded.
+    private String region;
 
     public ScalingActivity() {}
 
@@ -44,6 +46,9 @@ public class ScalingActivity {
 
     public String getStatusMessage() { return statusMessage; }
     public void setStatusMessage(String v) { this.statusMessage = v; }
+
+    public String getRegion() { return region; }
+    public void setRegion(String v) { this.region = v; }
 
     public int getProgress() { return progress; }
     public void setProgress(int v) { this.progress = v; }

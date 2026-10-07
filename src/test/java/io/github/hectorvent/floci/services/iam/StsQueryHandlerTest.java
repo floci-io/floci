@@ -502,6 +502,24 @@ class StsQueryHandlerTest {
                 extract(ARN, (String) response.getEntity()));
     }
 
+    @Test
+    void assumeRoleUsesRolesOwnRoleIdForAssumedRoleId() {
+        IamRole role = new IamRole();
+        role.setRoleName("sender");
+        role.setRoleId("AROAKX9OBMP2TSQJZ48H");
+        role.setArn("arn:aws:iam::000000000000:role/sender");
+        StsQueryHandler handler = newHandler(role);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("RoleArn", role.getArn());
+        params.add("RoleSessionName", "my-session");
+
+        Response response = handler.handle("AssumeRole", params);
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<AssumedRoleId>AROAKX9OBMP2TSQJZ48H:my-session</AssumedRoleId>"), body);
+    }
+
     private static String extract(Pattern pattern, String body) {
         Matcher matcher = pattern.matcher(body);
         assertTrue(matcher.find(), "expected " + pattern + " in " + body);

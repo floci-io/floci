@@ -24,6 +24,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -36,6 +37,7 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
 
@@ -371,7 +373,19 @@ class EventBridgeServiceTest {
     @Test
     void putRuleForNonExistentBusThrows() {
         assertThrows(AwsException.class, () ->
-                service.putRule("rule", "missing-bus", null, null, null, null, null, null, REGION));
+                service.putRule("rule", "missing-bus", "{\"source\":[\"my.app\"]}", null, null,
+                        null, null, null, REGION));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void putRuleWithoutPatternOrScheduleThrowsValidation(String missing) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("rule", null, missing, missing, RuleState.ENABLED, null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("Parameter(s) EventPattern or ScheduleExpression must be specified.", error.getMessage());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
     }
 
     @Test
@@ -681,6 +695,31 @@ class EventBridgeServiceTest {
         service.putTargets("my-rule", null, List.of(second), REGION);
         assertEquals(List.of("t1", "t2"),
                 currentTargets.getValue().get().stream().map(Target::getId).toList());
+    }
+
+    @Test
+    void putEventsDoesNotMatchAScheduleOnlyRule() {
+        service.putRule("nightly", null, null, "rate(1 day)", RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("nightly", null, List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("Source", "aws.ecs", "DetailType", "ECS Deployment State Change",
+                "Detail", "{}")), REGION);
+
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void putEventsMatchesARuleWithBothAPatternAndASchedule() {
+        Rule rule = service.putRule("both", null, "{\"source\":[\"my.app\"]}", "rate(1 day)",
+                RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("both", null, List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
+
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), anyString(), eq(REGION), any());
     }
 
     private void assertPutTargetsValidation(String expectedMessage, Target... targets) {

@@ -562,12 +562,20 @@ public class RedshiftServerlessService implements Resettable {
         }
         return new WorkgroupTarget(workgroup.getWorkgroupArn(), workgroup.getWorkgroupName(),
                 workgroup.getRuntimeHost(), workgroup.getRuntimePort(), namespace.getDbName(),
-                workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace));
+                workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace), namespace.getIamRoles());
     }
 
     /** Connection details of a workgroup's backend; {@code adminUsername} is the name clients log in with. */
     public record WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
-                                  String masterUsername, String masterPassword, String adminUsername) {
+                                  String masterUsername, String masterPassword, String adminUsername, List<String> iamRoleArns) {
+        public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                               String masterUsername, String masterPassword, String adminUsername) {
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername, List.of());
+        }
+
+        public WorkgroupTarget {
+            iamRoleArns = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
+        }
     }
 
     private Workgroup resolveWorkgroup(String nameOrArn, String region) {

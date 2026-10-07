@@ -476,6 +476,7 @@ public class CloudFormationService implements ResourceProvider {
             cs.setTemplateBody(resolvedTemplate);
             cs.setParameters(parameters);
             cs.setCapabilities(capabilities);
+            cs.setTags(tags);
             if (samTransformFailureReason != null) {
                 cs.setStatus("FAILED");
                 cs.setExecutionStatus("UNAVAILABLE");
@@ -975,7 +976,7 @@ public class CloudFormationService implements ResourceProvider {
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
         return submitOperation(() -> RequestScopes.runAs(accountId, region, () -> {
-            executeTemplate(stack, templateBody, params, isCreate, region, accountId);
+            executeTemplate(stack, templateBody, params, cs.getTags(), isCreate, region, accountId);
             String status = stack.getStatus();
             cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
                 ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
@@ -1439,6 +1440,7 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
+                                 Map<String, String> tags,
                                  boolean isCreate, String region, String accountId) {
         StackUpdateSnapshot previousState = snapshotForUpdate(stack);
         boolean updateCommitted = false;
@@ -1716,6 +1718,9 @@ public class CloudFormationService implements ResourceProvider {
 
             if (!isCreate) {
                 updateCommitted = true;
+                if (tags != null) {
+                    stack.replaceTags(tags);
+                }
                 if (hasReplacementUpdates(stack) || hasRemovedOrConditionFalseResources(stack, resources, conditions)) {
                     stack.setStatus("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
                     stack.setLastUpdatedTime(now());
@@ -2861,7 +2866,7 @@ public class CloudFormationService implements ResourceProvider {
                     childParams.put(e.getKey(), engine.resolve(e.getValue())));
         }
 
-        executeTemplate(childStack, childTemplate, childParams, childCreate, region, accountId);
+        executeTemplate(childStack, childTemplate, childParams, null, childCreate, region, accountId);
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());

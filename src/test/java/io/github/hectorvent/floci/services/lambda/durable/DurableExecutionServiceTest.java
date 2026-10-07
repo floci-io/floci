@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.lambda.durable.model.DurableOperation
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -27,7 +28,9 @@ import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -513,7 +516,326 @@ class DurableExecutionServiceTest {
         assertEquals(2, invoker.events.size(), "no extra invocation after the retry ran");
     }
 
+    @Test
+    void aCallbackCompletedFromOutsideReinvokesTheFunctionWithItsResult() {
+        invoker.script(event -> {
+            CheckpointResult started = checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            assertNotNull(started.newExecutionState().get(0).getCallbackId());
+            return pending();
+        });
+        invoker.script(event -> {
+            JsonNode callback = operation(event, "c1");
+            assertEquals("SUCCEEDED", callback.get("Status").asText());
+            assertEquals("\"approved\"", callback.at("/CallbackDetails/Result").asText());
+            assertEquals("c1", event.get("UpdatedOperationIds").get(0).asText());
+            return succeeded("\"done\"");
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        service.completeCallback(callbackId, ACCOUNT, REGION, true, "\"approved\"", null);
+
+        DurableExecution execution = service.get(arn);
+        assertEquals(DurableExecutionStatus.SUCCEEDED, execution.getStatus());
+        assertEquals(List.of("ExecutionStarted", "CallbackStarted", "InvocationCompleted", "CallbackSucceeded",
+                "InvocationCompleted", "ExecutionSucceeded"), eventTypes(execution));
+        assertCallbackClosed(() -> service.completeCallback(callbackId, ACCOUNT, REGION, false, null, null));
+        assertCallbackClosed(() -> service.heartbeatCallback(callbackId, ACCOUNT, REGION));
+    }
+
+    @Test
+    void aFailedCallbackCarriesTheErrorItWasSent() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            return pending();
+        });
+        invoker.script(event -> {
+            JsonNode callback = operation(event, "c1");
+            assertEquals("FAILED", callback.get("Status").asText());
+            assertEquals("Rejected", callback.at("/CallbackDetails/Error/ErrorType").asText());
+            return succeeded("\"handled\"");
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+
+        service.completeCallback(service.get(arn).getOperations().get("c1").getCallbackId(), ACCOUNT, REGION, false,
+                null, DurableErrorObject.of("denied", "Rejected"));
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(arn).getStatus());
+    }
+
+    @Test
+    void aFailureWithoutAnErrorIsRecordedButDoesNotInvokeTheFunction() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            return pending();
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        service.completeCallback(callbackId, ACCOUNT, REGION, false, null, null);
+
+        DurableExecution execution = service.get(arn);
+        assertEquals(1, invoker.events.size());
+        assertEquals(DurableExecutionStatus.RUNNING, execution.getStatus());
+        assertEquals(DurableOperationStatus.FAILED, execution.getOperations().get("c1").getStatus());
+        assertEquals("CallbackFailed", eventTypes(execution).get(eventTypes(execution).size() - 1));
+        assertCallbackClosed(() -> service.completeCallback(callbackId, ACCOUNT, REGION, true, "\"x\"", null));
+    }
+
+    @Test
+    void heartbeatsKeepACallbackAliveUntilTheyStop() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 3)));
+            return pending();
+        });
+        invoker.script(event -> {
+            assertEquals("Callback.Heartbeat", operation(event, "c1").at("/CallbackDetails/Error/ErrorType").asText());
+            return succeeded("\"gave up\"");
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        clock.advance(Duration.ofSeconds(2));
+        service.heartbeatCallback(callbackId, ACCOUNT, REGION);
+        clock.advance(Duration.ofSeconds(2));
+        service.sweep();
+        assertEquals(DurableOperationStatus.STARTED, service.get(arn).getOperations().get("c1").getStatus());
+
+        clock.advance(Duration.ofSeconds(1));
+        assertCallbackClosed(() -> service.heartbeatCallback(callbackId, ACCOUNT, REGION));
+        service.sweep();
+
+        assertEquals(DurableOperationStatus.TIMED_OUT, service.get(arn).getOperations().get("c1").getStatus());
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(arn).getStatus());
+    }
+
+    @Test
+    void callbackIdsThatMatchNoOpenCallbackAreRejected() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(callbackStart("c1", 0, 0)));
+            return pending();
+        });
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        String callbackId = service.get(arn).getOperations().get("c1").getCallbackId();
+
+        for (String malformed : List.of("QUJD", "not-valid!")) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.heartbeatCallback(malformed, ACCOUNT, REGION));
+            assertEquals("InvalidParameterValueException", rejected.getErrorCode());
+            assertEquals("Invalid callback id", rejected.getMessage());
+        }
+        assertCallbackClosed(() -> service.heartbeatCallback(callbackId, ACCOUNT, "eu-west-1"));
+        assertCallbackClosed(() -> service.heartbeatCallback(callbackId, "111111111111", REGION));
+
+        service.stop(arn, null);
+        assertCallbackClosed(() -> service.completeCallback(callbackId, ACCOUNT, REGION, true, "\"late\"", null));
+    }
+
+    @Test
+    void aChainedInvokeOfAPlainFunctionHandsItsResultToTheNextInvocation() {
+        invoker.plainFunctions.put("plain-fn", event -> handlerResponse("{\"echo\":" + event + "}"));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("i1", "plain-fn", "{\"a\":1}")));
+            return pending();
+        });
+        invoker.script(event -> {
+            JsonNode invoke = operation(event, "i1");
+            assertEquals("SUCCEEDED", invoke.get("Status").asText());
+            assertEquals("{\"echo\":{\"a\":1}}", invoke.at("/ChainedInvokeDetails/Result").asText());
+            return succeeded("\"done\"");
+        });
+
+        DurableExecution execution = service.get(start("exec-1", "{}", false).getExecutionArn());
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, execution.getStatus());
+        DurableHistoryEvent started = event(execution, "ChainedInvokeStarted");
+        assertEquals(Map.of("FunctionName", "plain-fn", "Input", Map.of("Payload", "{\"a\":1}", "Truncated", false),
+                "ExecutedVersion", "$LATEST"), started.getDetails().get("ChainedInvokeStartedDetails"));
+        assertTrue(eventTypes(execution).contains("ChainedInvokeSucceeded"));
+    }
+
+    @Test
+    void aChainedInvokeOfAPlainFunctionFailsWithItsErrorOrAnOversizedOutput() {
+        invoker.plainFunctions.put("raising-fn",
+                event -> functionError("{\"errorMessage\":\"child exploded\",\"errorType\":\"ValueError\"}"));
+        invoker.plainFunctions.put("chatty-fn", event -> handlerResponse("\"" + "x".repeat(1024 * 1024) + "\""));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("raise", "raising-fn", null),
+                    chainedStart("chatty", "chatty-fn", null)));
+            return pending();
+        });
+        invoker.script(event -> {
+            assertEquals("ValueError", operation(event, "raise").at("/ChainedInvokeDetails/Error/ErrorType").asText());
+            JsonNode chatty = operation(event, "chatty");
+            assertEquals("FAILED", chatty.get("Status").asText());
+            assertEquals("CHAINED_INVOKE output payload size must be less than or equal to 1048576 bytes.",
+                    chatty.at("/ChainedInvokeDetails/Error/ErrorMessage").asText());
+            return succeeded("\"handled\"");
+        });
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(start("exec-1", "{}", false).getExecutionArn())
+                .getStatus());
+    }
+
+    @Test
+    void aChainedInvokeThatCannotStartFailsAtOnce() {
+        invoker.childScript("child-fn", event -> succeeded("\"never\""));
+        invoker.script(event -> {
+            CheckpointResult result = checkpoint(event, token(event), List.of(chainedStart("missing", "missing-fn", null),
+                    chainedStart("unqualified", "child-fn", null)));
+            assertEquals(List.of(DurableOperationStatus.FAILED, DurableOperationStatus.FAILED),
+                    result.newExecutionState().stream().map(DurableOperation::getStatus).toList());
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"handled\""));
+
+        DurableExecution execution = service.get(start("exec-1", "{}", false).getExecutionArn());
+
+        DurableOperation missing = execution.getOperations().get("missing");
+        assertEquals("ResourceNotFoundException", missing.getError().getErrorType());
+        assertEquals("Function not found: arn:aws:lambda:us-east-1:000000000000:function:missing-fn:$LATEST",
+                missing.getError().getErrorMessage());
+        assertEquals("You cannot invoke a durable function using an unqualified ARN.",
+                execution.getOperations().get("unqualified").getError().getErrorMessage());
+        assertEquals(Map.of("FunctionName", "missing-fn"),
+                event(execution, "ChainedInvokeStarted").getDetails().get("ChainedInvokeStartedDetails"));
+        assertEquals(DurableExecutionStatus.SUCCEEDED, execution.getStatus());
+    }
+
+    @Test
+    void aDurableChildReportsHowItClosedToTheParentOperation() {
+        invoker.childScript("child-fn", event -> succeeded("\"child result\""));
+        invoker.childScript("child-fn", event -> handlerResponse(
+                "{\"Status\":\"FAILED\",\"Error\":{\"ErrorMessage\":\"child failed\",\"ErrorType\":\"ChildError\"}}"));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("ok", "child-fn:1", "{\"x\":1}"),
+                    chainedStart("bad", "child-fn:1", null)));
+            return pending();
+        });
+        invoker.script(event -> {
+            assertEquals("\"child result\"", operation(event, "ok").at("/ChainedInvokeDetails/Result").asText());
+            assertEquals("ChildError", operation(event, "bad").at("/ChainedInvokeDetails/Error/ErrorType").asText());
+            return succeeded("\"done\"");
+        });
+
+        DurableExecution parent = service.get(start("exec-1", "{}", false).getExecutionArn());
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, parent.getStatus());
+        String childArn = parent.getOperations().get("ok").getChildExecutionArn();
+        DurableExecution child = service.get(childArn);
+        assertEquals("{\"x\":1}", child.getInputPayload());
+        assertNull(service.get(parent.getOperations().get("bad").getChildExecutionArn()).getInputPayload(),
+                "a missing Payload starts the child with no input");
+        assertEquals(parent.getExecutionArn(), child.getParentExecutionArn());
+        assertEquals(childArn, ((Map<?, ?>) event(parent, "ChainedInvokeStarted").getDetails()
+                .get("ChainedInvokeStartedDetails")).get("DurableExecutionArn"));
+    }
+
+    @Test
+    void aDurableChildThatTimesOutOrIsStoppedClosesTheParentOperationTheSameWay() {
+        invoker.childExecutionTimeoutSeconds = 60;
+        invoker.childScript("child-fn", event -> {
+            checkpoint(event, token(event), List.of(waitStart("w1", 600)));
+            return pending();
+        });
+        invoker.childScript("child-fn", event -> {
+            checkpoint(event, token(event), List.of(waitStart("w1", 600)));
+            return pending();
+        });
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("slow", "child-fn:1", null),
+                    chainedStart("stopped", "child-fn:1", null)));
+            return pending();
+        });
+        invoker.script(event -> {
+            assertEquals("STOPPED", operation(event, "stopped").get("Status").asText());
+            assertEquals("stopped by test", operation(event, "stopped").at("/ChainedInvokeDetails/Error/ErrorMessage")
+                    .asText());
+            return pending();
+        });
+        invoker.script(event -> {
+            JsonNode slow = operation(event, "slow");
+            assertEquals("TIMED_OUT", slow.get("Status").asText());
+            assertEquals("CHAINED_INVOKE timed out after 60 seconds.",
+                    slow.at("/ChainedInvokeDetails/Error/ErrorMessage").asText());
+            assertEquals("ChainedInvoke.Timeout", slow.at("/ChainedInvokeDetails/Error/ErrorType").asText());
+            return succeeded("\"done\"");
+        });
+        String parentArn = start("exec-1", "{}", false).getExecutionArn();
+
+        service.stop(service.get(parentArn).getOperations().get("stopped").getChildExecutionArn(),
+                DurableErrorObject.of("stopped by test", "Test"));
+        assertEquals(2, invoker.events.size(), "the stopped child woke the parent");
+
+        clock.advance(Duration.ofSeconds(59));
+        service.sweep();
+        assertEquals(2, invoker.events.size(), "the child has not timed out yet");
+        clock.advance(Duration.ofSeconds(1));
+        service.sweep();
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(parentArn).getStatus());
+        assertEquals(3, invoker.events.size());
+    }
+
+    @Test
+    void aChainedInvokeInTheBatchThatClosesTheExecutionStillRuns() {
+        List<String> received = new ArrayList<>();
+        invoker.plainFunctions.put("plain-fn", event -> {
+            received.add(event.toString());
+            return handlerResponse("\"ignored\"");
+        });
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("i1", "plain-fn", "{\"n\":1}"),
+                    executionSucceed("\"closed\"")));
+            return succeeded("");
+        });
+
+        DurableExecution execution = service.get(start("exec-1", "{}", false).getExecutionArn());
+
+        assertEquals(List.of("{\"n\":1}"), received);
+        assertEquals("\"closed\"", execution.getResult());
+        assertTrue(eventTypes(execution).contains("ChainedInvokeStarted"));
+        assertFalse(eventTypes(execution).contains("ChainedInvokeSucceeded"));
+        assertEquals(1, invoker.events.size());
+    }
+
+    @Test
+    void stoppingTheParentLeavesADurableChildRunning() {
+        invoker.childScript("child-fn", event -> {
+            checkpoint(event, token(event), List.of(waitStart("w1", 600)));
+            return pending();
+        });
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("i1", "child-fn:1", null)));
+            return pending();
+        });
+        String parentArn = start("exec-1", "{}", false).getExecutionArn();
+        String childArn = service.get(parentArn).getOperations().get("i1").getChildExecutionArn();
+
+        service.stop(parentArn, null);
+
+        assertEquals(DurableExecutionStatus.RUNNING, service.get(childArn).getStatus());
+        assertFalse(eventTypes(service.get(parentArn)).contains("ChainedInvokeStopped"));
+    }
+
     // ──────────────────────────── helpers ────────────────────────────
+
+    private static DurableHistoryEvent event(DurableExecution execution, String eventType) {
+        return execution.getHistory().stream().filter(event -> eventType.equals(event.getEventType())).findFirst()
+                .orElseThrow(() -> new AssertionError("no " + eventType + " in " + eventTypes(execution)));
+    }
+
+    private static DurableOperationUpdate chainedStart(String id, String functionName, String payload) {
+        return new DurableOperationUpdate(id, null, null, DurableOperationType.CHAINED_INVOKE, "ChainedInvoke",
+                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null);
+    }
+
+    private static void assertCallbackClosed(Executable call) {
+        AwsException rejected = assertThrows(AwsException.class, call);
+        assertEquals("CallbackTimeoutException", rejected.getErrorCode());
+        assertEquals("The callback is either timed out or already completed", rejected.getMessage());
+        assertEquals(400, rejected.getHttpStatus());
+    }
 
     private static DurableExecutionService newService(InMemoryStorageFactory storage, ScriptedInvoker invoker,
                                                       MutableClock clock) {
@@ -553,22 +875,27 @@ class DurableExecutionServiceTest {
     private static DurableOperationUpdate step(String id, DurableOperationAction action, String payload,
                                                DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step", action, payload, error,
-                null, null, null);
+                null, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate stepRetry(String id, int delaySeconds, DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step",
-                DurableOperationAction.RETRY, null, error, delaySeconds, null, null);
+                DurableOperationAction.RETRY, null, error, delaySeconds, null, null, null, null, null, null);
+    }
+
+    private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds, int heartbeatSeconds) {
+        return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds, null, null);
     }
 
     private static DurableOperationUpdate waitStart(String id, int seconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.WAIT, "Wait",
-                DurableOperationAction.START, null, null, null, seconds, null);
+                DurableOperationAction.START, null, null, null, seconds, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate executionSucceed(String payload) {
         return new DurableOperationUpdate("execution-result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.SUCCEED, payload, null, null, null, null);
+                DurableOperationAction.SUCCEED, payload, null, null, null, null, null, null, null, null);
     }
 
     private static DurableFunctionInvoker.DurableInvocationResult succeeded(String result) {
@@ -593,7 +920,12 @@ class DurableExecutionServiceTest {
 
         final Deque<Function<JsonNode, DurableInvocationResult>> scripts = new ArrayDeque<>();
         final List<JsonNode> events = new ArrayList<>();
+        /** Durable functions other than the one under test, each with its own scripts. */
+        final Map<String, Deque<Function<JsonNode, DurableInvocationResult>>> childScripts = new HashMap<>();
+        /** Plain functions a chained invoke may call, answering the raw payload. */
+        final Map<String, Function<JsonNode, DurableInvocationResult>> plainFunctions = new HashMap<>();
         int executionTimeoutSeconds = 3600;
+        int childExecutionTimeoutSeconds = 3600;
         String functionName = FUNCTION;
         int retentionPeriodInDays = 7;
 
@@ -601,12 +933,26 @@ class DurableExecutionServiceTest {
             scripts.add(script);
         }
 
+        void childScript(String function, Function<JsonNode, DurableInvocationResult> script) {
+            childScripts.computeIfAbsent(function, ignored -> new ArrayDeque<>()).add(script);
+        }
+
         @Override
         public ResolvedDurableTarget resolve(String accountId, String region, String functionName, String qualifier) {
-            String version = qualifier == null ? "1" : qualifier;
-            return new ResolvedDurableTarget(accountId, region, this.functionName,
-                    "arn:aws:lambda:us-east-1:000000000000:function:" + this.functionName + ":" + version, version, true,
-                    executionTimeoutSeconds, retentionPeriodInDays);
+            String version = qualifier == null ? "$LATEST" : qualifier;
+            if (plainFunctions.containsKey(functionName)) {
+                return new ResolvedDurableTarget(accountId, region, functionName,
+                        "arn:aws:lambda:us-east-1:000000000000:function:" + functionName, version, false, 0, 0);
+            }
+            String name = FUNCTION.equals(functionName) ? this.functionName : functionName;
+            if (!name.equals(this.functionName) && !childScripts.containsKey(name)) {
+                throw new AwsException("ResourceNotFoundException", "Function not found: " + name, 404);
+            }
+            String durableVersion = qualifier == null ? "1" : qualifier;
+            return new ResolvedDurableTarget(accountId, region, name,
+                    "arn:aws:lambda:us-east-1:000000000000:function:" + name + ":" + durableVersion, durableVersion,
+                    true, name.equals(this.functionName) ? executionTimeoutSeconds : childExecutionTimeoutSeconds,
+                    retentionPeriodInDays);
         }
 
         @Override
@@ -616,6 +962,14 @@ class DurableExecutionServiceTest {
                 event = MAPPER.readTree(payload);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
+            }
+            if (!target.durable()) {
+                return plainFunctions.get(target.functionName()).apply(event);
+            }
+            Deque<Function<JsonNode, DurableInvocationResult>> queue = childScripts.get(target.functionName());
+            if (queue != null) {
+                Function<JsonNode, DurableInvocationResult> script = queue.poll();
+                return script != null ? script.apply(event) : pending();
             }
             events.add(event);
             Function<JsonNode, DurableInvocationResult> script = scripts.poll();

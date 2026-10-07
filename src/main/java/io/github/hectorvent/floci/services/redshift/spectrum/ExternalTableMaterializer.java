@@ -68,6 +68,32 @@ public class ExternalTableMaterializer {
     private final ConcurrentHashMap<String, String> schemaSignatures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ReentrantLock> locks = new ConcurrentHashMap<>();
     private final Set<String> sweptAccounts = ConcurrentHashMap.newKeySet();
+    private final Map<BackendSql, Map<String, PendingLoad>> pendingLoads = new ConcurrentHashMap<>();
+    private final Map<String, PendingLoad> latestLoads = new ConcurrentHashMap<>();
+
+    private record PendingLoad(String fingerprint, String definitions) { }
+
+    public void finishCycle(BackendSql backend) {
+        pendingLoads.remove(backend);
+    }
+
+    public void finishCycle(BackendSql backend, boolean committed) {
+        Map<String, PendingLoad> completed = pendingLoads.remove(backend);
+        if (committed && completed != null) {
+            completed.forEach((key, loaded) -> {
+                ReentrantLock lock = locks.computeIfAbsent(key, ignored -> new ReentrantLock());
+                lock.lock();
+                try {
+                    if (latestLoads.get(key) == loaded) {
+                        fingerprints.put(key, loaded.fingerprint());
+                        schemaSignatures.put(key, loaded.definitions());
+                    }
+                } finally {
+                    lock.unlock();
+                }
+            });
+        }
+    }
 
     public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
                                      IamService iamService, EmulatorConfig config) {
@@ -107,6 +133,12 @@ public class ExternalTableMaterializer {
             // An Iceberg snapshot can change through its metadata or manifests while the Glue table and the
             // listed objects stay the same, so no fingerprint can vouch for it: it is read on every query.
             boolean cacheable = !session.inTransaction() && !GlueTableResolver.isIcebergTable(table);
+            Map<String, PendingLoad> localLoads = backend.permitsCachePublication() ? Map.of()
+                    : pendingLoads.computeIfAbsent(backend, ignored -> new ConcurrentHashMap<>());
+            PendingLoad local = localLoads.get(cacheKey);
+            if (!GlueTableResolver.isIcebergTable(table) && local != null && fingerprint.equals(local.fingerprint())) {
+                return Outcome.CURRENT;
+            }
             if (cacheable && fingerprint.equals(fingerprints.get(cacheKey))) {
                 return Outcome.CURRENT;
             }
@@ -116,9 +148,18 @@ public class ExternalTableMaterializer {
                 if (cacheable && fingerprint.equals(fingerprints.get(cacheKey))) {
                     return Outcome.CURRENT;
                 }
-                String previousSignature = schemaSignatures.get(cacheKey);
+                String previousSignature = local == null ? schemaSignatures.get(cacheKey) : local.definitions();
+                latestLoads.remove(cacheKey);
                 String definitions = load(backend, session, binding, table, sources, previousSignature);
-                if (session.inTransaction()) {
+                if (!backend.permitsCachePublication()) {
+                    fingerprints.remove(cacheKey);
+                    PendingLoad loaded = new PendingLoad(fingerprint, definitions);
+                    localLoads.put(cacheKey, loaded);
+                    latestLoads.put(cacheKey, loaded);
+                    if (!definitions.equals(schemaSignatures.get(cacheKey))) {
+                        schemaSignatures.remove(cacheKey);
+                    }
+                } else if (session.inTransaction()) {
                     // Transactional DDL may roll back, so the rows cannot be trusted afterwards. The schema
                     // signature stays when this load kept the committed columns, so a view that depends on the
                     // table can still be refilled in place; a replaced table may roll back to the old columns.
@@ -182,6 +223,7 @@ public class ExternalTableMaterializer {
     private void forgetMatching(Predicate<String> matches) {
         fingerprints.keySet().removeIf(matches);
         schemaSignatures.keySet().removeIf(matches);
+        latestLoads.keySet().removeIf(matches);
         // Keep locks: removing a held lock lets another thread create a second lock for the same table.
     }
 

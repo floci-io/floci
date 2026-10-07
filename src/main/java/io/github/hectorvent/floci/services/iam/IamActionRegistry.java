@@ -68,6 +68,11 @@ public class IamActionRegistry {
         rule("lambda", "GET",    ".*/durable-executions/.+/history$",      "lambda:GetDurableExecutionHistory"),
         rule("lambda", "POST",   ".*/durable-executions/.+/stop$",         "lambda:StopDurableExecution"),
         rule("lambda", "GET",    ".*/durable-executions/.+$",              "lambda:GetDurableExecution"),
+        rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/succeed$",
+                "lambda:SendDurableExecutionCallbackSuccess"),
+        rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/fail$", "lambda:SendDurableExecutionCallbackFailure"),
+        rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/heartbeat$",
+                "lambda:SendDurableExecutionCallbackHeartbeat"),
 
         // ── DynamoDB (JSON 1.1, action from X-Amz-Target handled separately) ──
         // Handled via Query-style action extraction in the filter

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -46,6 +47,78 @@ class IamPolicyConditionMatchingTest {
         assertEquals(expected, decision(operator, List.of(pattern), List.of(value)));
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "203.0.113.0/24, 203.0.113.42, ALLOW",
+            "203.0.113.0/24, 203.0.114.42, DENY",
+            "203.0.113.129/25, 203.0.113.255, ALLOW",
+            "203.0.113.129/25, 203.0.113.127, DENY",
+            "0.0.0.0/0, 203.0.113.42, ALLOW",
+            "203.0.113.42/32, 203.0.113.42, ALLOW",
+            "203.0.113.42/32, 203.0.113.43, DENY",
+            "2001:db8::/32, 2001:db8::42, ALLOW",
+            "2001:db8::/32, 2001:db9::42, DENY",
+            "2001:db8::1234/33, 2001:db8:7fff::42, ALLOW",
+            "2001:db8::1234/33, 2001:db8:8000::42, DENY",
+            "::/0, 2001:db8::42, ALLOW",
+            "2001:db8::42/128, 2001:0db8:0:0:0:0:0:0042, ALLOW",
+            "2001:db8::42/128, 2001:db8::43, DENY",
+            "2001:db8::42/127, 2001:db8::43, ALLOW",
+            "2001:db8::42/127, 2001:db8::44, DENY",
+            "::/0, 203.0.113.42, DENY",
+            "0.0.0.0/0, 2001:db8::42, DENY",
+            "2001:db8::/129, 2001:db8::42, DENY",
+            "2001:db8::/-1, 2001:db8::42, DENY",
+            "203.0.113.0/33, 203.0.113.42, DENY",
+            "203.0.113.0/-1, 203.0.113.42, DENY",
+            "999.0.0.0/0, 203.0.113.42, DENY",
+            "example.com/0, 203.0.113.42, DENY",
+            "2001:db8::/32/extra, 2001:db8::42, DENY",
+            "2001:db8::/32, invalid, DENY"
+    })
+    void ipConditionsMatchAddressFamilyAndPrefix(String range, String sourceIp, Decision expected) {
+        assertEquals(expected, decision("IpAddress", List.of(range), List.of(sourceIp)));
+        Decision negated = expected == Decision.ALLOW ? Decision.DENY : Decision.ALLOW;
+        assertEquals(negated, decision("NotIpAddress", List.of(range), List.of(sourceIp)));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "NumericEquals, 10, invalid, DENY",
+            "NumericNotEquals, 10, invalid, DENY",
+            "NumericLessThanEquals, 10, invalid, DENY",
+            "NumericEquals, 10, 10.0, ALLOW",
+            "NumericLessThanEquals, 9007199254740992, 9007199254740993, DENY",
+            "NumericGreaterThan, 9007199254740992, 9007199254740993, ALLOW",
+            "DateEquals, 2026-01-01T00:00:00Z, invalid, DENY",
+            "DateNotEquals, 2026-01-01T00:00:00Z, invalid, DENY",
+            "DateLessThan, 2026-01-01T00:00:00Z, 2025-12-31T23:59:59Z, ALLOW",
+            "DateEquals, 1893456000, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01T00:00Z, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01T05:30+05:30, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01T00:00:00.000Z, 2030-01-01T00:00:00Z, ALLOW",
+            "DateGreaterThanEquals, 2020-01-01, 2026-10-05T04:58:46Z, ALLOW",
+            "DateLessThan, 2020-01-01, 1577836800, DENY",
+            "DateLessThan, 2020-01-01, 1577836799, ALLOW",
+            "DateEquals, 2030-01-01t00:00:00z, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01T00:00, 2030-01-01T00:00:00Z, DENY",
+            "DateEquals, 2030-13-01, 2030-01-01T00:00:00Z, DENY",
+            "DateEquals, 99999999999999999999, 2030-01-01T00:00:00Z, DENY"
+    })
+    void numericAndDateConditionsCompareExactlyAndRejectUnparsableValues(String operator, String policyValue,
+                                                                          String requestValue, Decision expected) {
+        assertEquals(expected, decision(operator, List.of(policyValue), List.of(requestValue)));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"NumericEquals, 10", "NumericNotEquals, 10", "DateEquals, 2026-01-01T00:00:00Z",
+            "DateNotEquals, 2026-01-01T00:00:00Z"})
+    void numericAndDateConditionsNeverMatchANullRequestValue(String operator, String policyValue) {
+        assertEquals(Decision.DENY, decision(operator, List.of(policyValue), Collections.singletonList(null)));
+    }
+
     @Test
     void setOperatorsRemainCaseSensitive() {
         assertEquals(Decision.DENY, decision("ForAllValues:StringLike",
@@ -72,16 +145,17 @@ class IamPolicyConditionMatchingTest {
     }
 
     private Decision decision(String operator, List<String> patterns, List<String> values) {
+        String conditionKey = operator.endsWith("IpAddress") ? "aws:SourceIp" : "aws:SourceArn";
         String policy;
         try {
             policy = new ObjectMapper().writeValueAsString(Map.of(
                     "Version", "2012-10-17",
                     "Statement", List.of(Map.of("Effect", "Allow", "Action", "s3:GetObject", "Resource", "*",
-                            "Condition", Map.of(operator, Map.of("aws:SourceArn", patterns))))));
+                            "Condition", Map.of(operator, Map.of(conditionKey, patterns))))));
         } catch (JsonProcessingException e) {
             throw new IllegalStateException(e);
         }
         return evaluator.simulateCustomPolicy(List.of(policy), "s3:GetObject", "*",
-                Map.of("aws:SourceArn", values));
+                Map.of(conditionKey, values));
     }
 }

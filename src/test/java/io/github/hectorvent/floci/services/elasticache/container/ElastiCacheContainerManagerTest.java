@@ -81,17 +81,20 @@ class ElastiCacheContainerManagerTest {
             when(regionResolver.getAccountId()).thenReturn("000000000000");
             when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
 
+            ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
             ElastiCacheContainerManager manager = new ElastiCacheContainerManager(containerBuilder, lifecycleManager,
-                    mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config, regionResolver);
+                    logStreamer, mock(ContainerDetector.class), config, regionResolver);
 
-            manager.start("my-group", "valkey/valkey:7.2");
+            // The group's region, not the default, names the container and receives its logs.
+            manager.start("my-group", "valkey/valkey:7.2", "eu-west-1");
 
             verify(builder).withLabels(Map.of(
                     "io.floci", "aws",
                     "io.floci.service", "elasticache",
                     "io.floci.resource-id", "my-group",
                     "io.floci.account", "000000000000",
-                    "io.floci.region", "us-east-1"));
+                    "io.floci.region", "eu-west-1"));
+            verify(logStreamer).attach(eq("container-id"), anyString(), any(), eq("eu-west-1"), anyString());
         }
     }
 
@@ -121,7 +124,7 @@ class ElastiCacheContainerManagerTest {
         ElastiCacheContainerManager manager = new ElastiCacheContainerManager(containerBuilder, lifecycleManager,
                 logStreamer, mock(ContainerDetector.class), config, mock(RegionResolver.class));
 
-        assertThrows(IllegalStateException.class, () -> manager.tryStart("my-group", "valkey/valkey:7.2"));
+        assertThrows(IllegalStateException.class, () -> manager.tryStart("my-group", "valkey/valkey:7.2", "us-east-1"));
 
         verify(lifecycleManager).stopAndRemove(eq("container-id"), any());
     }

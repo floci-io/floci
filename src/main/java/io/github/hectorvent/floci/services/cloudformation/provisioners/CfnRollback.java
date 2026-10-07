@@ -103,6 +103,14 @@ public final class CfnRollback {
     public static final String REST_API_UPDATE_SNAPSHOT_ATTR = "__FlociRestApiUpdateSnapshot";
 
     /**
+     * Holds the function ARN, status, caching flag, token settings and tags an IoT authorizer
+     * carried before an in-place update changed them, so a failed stack update can put them back.
+     * Written by {@code IotAuthorizerCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String AUTHORIZER_UPDATE_SNAPSHOT_ATTR = "__FlociAuthorizerUpdateSnapshot";
+
+    /**
      * Holds the customer id, description, enabled flag and tags an API key carried before an
      * in-place update changed them, or the key an update created because the one the stack held
      * was gone, so a failed stack update can put the key back or delete the created one. Written

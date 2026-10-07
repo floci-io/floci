@@ -28,6 +28,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -53,6 +54,7 @@ public class DurableExecutionController {
 
     /** Valid Statuses filters for a state Floci never puts an execution in. */
     private static final Set<String> UNMODELLED_STATUSES = Set.of("PAUSED", "PAUSING", "DELETING");
+    private static final int MAX_CALLBACK_PAYLOAD_BYTES = 1024 * 1024;
 
     private final DurableExecutionService service;
     private final LambdaService lambdaService;
@@ -179,6 +181,48 @@ public class DurableExecutionController {
         return Response.ok(response).build();
     }
 
+    @POST
+    @Path("/durable-execution-callbacks/{callbackId: .+}/succeed")
+    public Response callbackSucceed(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,
+                                    byte[] body) {
+        if (body != null && MAX_CALLBACK_PAYLOAD_BYTES < body.length) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value at 'result' failed to "
+                    + "satisfy constraint: Member must have length less than or equal to " + MAX_CALLBACK_PAYLOAD_BYTES,
+                    400);
+        }
+        String result = body == null || body.length == 0 ? null : new String(body, StandardCharsets.UTF_8);
+        service.completeCallback(callbackId, regionResolver.getAccountId(), regionResolver.resolveRegion(headers), true,
+                result, null);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * Without a body the callback fails with no Error, and AWS does not invoke the function for it.
+     * Any other body must be a JSON object.
+     */
+    @POST
+    @Path("/durable-execution-callbacks/{callbackId: .+}/fail")
+    public Response callbackFail(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId,
+                                 String body) {
+        DurableErrorObject error = body == null || body.isEmpty() ? null : parseCallbackError(body);
+        // AWS measures the error as compact JSON, whatever spacing the request used.
+        if (error != null
+                && MAX_CALLBACK_PAYLOAD_BYTES < DurableCheckpointApplier.utf8Length(DurableWire.error(error).toString())) {
+            throw new AwsException("InvalidParameterValueException", "Error object size must be less than or equal to "
+                    + MAX_CALLBACK_PAYLOAD_BYTES + " bytes.", 400);
+        }
+        service.completeCallback(callbackId, regionResolver.getAccountId(), regionResolver.resolveRegion(headers), false,
+                null, error);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/durable-execution-callbacks/{callbackId: .+}/heartbeat")
+    public Response callbackHeartbeat(@Context HttpHeaders headers, @PathParam("callbackId") String callbackId) {
+        service.heartbeatCallback(callbackId, regionResolver.getAccountId(), regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     /**
      * An execution of another account is not found. One of another region reads as "Function not found",
      * as AWS answers for an execution ARN of another region.
@@ -192,6 +236,20 @@ public class DurableExecutionController {
             throw new AwsException("ResourceNotFoundException", "Function not found", 404);
         }
         return arn;
+    }
+
+    /** AWS answers whitespace, null or broken JSON with a SerializationException that has no message. */
+    private DurableErrorObject parseCallbackError(String body) {
+        Map<String, Object> error;
+        try {
+            error = objectMapper.readValue(body, new TypeReference<Map<String, Object>>() {});
+        } catch (IOException e) {
+            error = null;
+        }
+        if (error == null) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        return DurableWire.parseError(error);
     }
 
     private Map<String, Object> readObject(String body) {

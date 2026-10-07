@@ -2,8 +2,6 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
-import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -24,17 +22,17 @@ public class RestLambdaAuthorizer {
     static final int MAX_ENTRIES = 1_000;
 
     private final ObjectMapper objectMapper;
-    private final IamPolicyEvaluator policyEvaluator;
+    private final AuthorizerPolicyEvaluator policyEvaluator;
     private final Clock clock;
     private final ConcurrentHashMap<CacheKey, Entry> cache = new ConcurrentHashMap<>();
     private final Set<Invocation> pendingInvocations = new HashSet<>();
 
     @Inject
-    public RestLambdaAuthorizer(ObjectMapper objectMapper, IamPolicyEvaluator policyEvaluator) {
+    public RestLambdaAuthorizer(ObjectMapper objectMapper, AuthorizerPolicyEvaluator policyEvaluator) {
         this(objectMapper, policyEvaluator, Clock.systemUTC());
     }
 
-    RestLambdaAuthorizer(ObjectMapper objectMapper, IamPolicyEvaluator policyEvaluator, Clock clock) {
+    RestLambdaAuthorizer(ObjectMapper objectMapper, AuthorizerPolicyEvaluator policyEvaluator, Clock clock) {
         this.objectMapper = objectMapper;
         this.policyEvaluator = policyEvaluator;
         this.clock = clock;
@@ -64,49 +62,8 @@ public class RestLambdaAuthorizer {
             throw new IllegalArgumentException("Authorizer must return a nonempty principalId");
         }
         JsonNode policy = output.path("policyDocument");
-        validatePolicy(policy);
+        AuthorizerPolicyEvaluator.validate(policy);
         return new Result(output.path("principalId").asText(), policy.toString(), parseContext(output.get("context")));
-    }
-
-    private static void validatePolicy(JsonNode policy) {
-        JsonNode statements = policy.path("Statement");
-        if (!policy.isObject() || (!statements.isObject() && !statements.isArray()) || statements.isEmpty()) {
-            throw new IllegalArgumentException("Authorizer must return a policy with statements");
-        }
-        if (statements.isObject()) {
-            validateStatement(statements);
-            return;
-        }
-        for (JsonNode statement : statements) {
-            validateStatement(statement);
-        }
-    }
-
-    private static void validateStatement(JsonNode statement) {
-        String effect = statement.path("Effect").asText();
-        if (!statement.isObject() || (!"Allow".equals(effect) && !"Deny".equals(effect))
-                || (statement.has("Action") == statement.has("NotAction"))
-                || (statement.has("Resource") == statement.has("NotResource"))
-                || !validStringOrList(statement.has("Action") ? statement.get("Action") : statement.path("NotAction"))
-                || !validStringOrList(statement.has("Resource") ? statement.get("Resource") : statement.path("NotResource"))
-                || (statement.has("Condition") && !statement.get("Condition").isObject())) {
-            throw new IllegalArgumentException("Invalid authorizer policy statement");
-        }
-    }
-
-    private static boolean validStringOrList(JsonNode value) {
-        if (value.isTextual()) {
-            return !value.asText().isEmpty();
-        }
-        if (!value.isArray() || value.isEmpty()) {
-            return false;
-        }
-        for (JsonNode item : value) {
-            if (!item.isTextual() || item.asText().isEmpty()) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private Map<String, Object> parseContext(JsonNode context) {
@@ -128,8 +85,7 @@ public class RestLambdaAuthorizer {
     }
 
     boolean permits(Result result, String methodArn, Map<String, List<String>> conditions) {
-        return policyEvaluator.evaluate(CallerContext.of(List.of(result.policyDocument())), null,
-                "execute-api:Invoke", methodArn, conditions) == IamPolicyEvaluator.Decision.ALLOW;
+        return policyEvaluator.permits(result.policyDocument(), methodArn, conditions);
     }
 
     Result get(CacheKey key) {

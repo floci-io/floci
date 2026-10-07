@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.Map;
@@ -106,6 +107,9 @@ final class BackendResponseCoordinator {
     void onBackendFrame(char type, byte[] body) {
         lock.lock();
         try {
+            if (type == 'C') {
+                updateStatusFromCommandTag(new String(body, StandardCharsets.UTF_8));
+            }
             if (type == 'Z') {
                 updateReadyStatus(body);
             }
@@ -212,6 +216,28 @@ final class BackendResponseCoordinator {
     private void resolveSkippedGate(PendingOperation operation) {
         if (operation.ticket().operation() == Operation.EXECUTE) {
             resolvedGates.put(operation.ticket().sequence(), GateResult.SKIPPED_AFTER_ERROR);
+        }
+    }
+
+    /**
+     * Tracks transaction boundaries as the tag arrives, so a statement pipelined after COMMIT sees them. The
+     * ROLLBACK tag is also sent for ROLLBACK TO SAVEPOINT, which leaves the transaction open, so only the
+     * ReadyForQuery status can say that a rollback ended it.
+     */
+    private void updateStatusFromCommandTag(String tag) {
+        boolean transactionEnded = switch (tag) {
+            case "BEGIN\0" -> {
+                lastReadyStatus = 'T';
+                yield false;
+            }
+            case "COMMIT\0", "END\0" -> {
+                lastReadyStatus = 'I';
+                yield true;
+            }
+            default -> false;
+        };
+        if (transactionEnded) {
+            session.transactionEnded();
         }
     }
 

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +12,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -70,6 +72,58 @@ class CfnResourceDispatcherTest {
         assertEquals(Map.of("Arn", "arn-prior"), seenAttributes.get());
         assertEquals("thing-prior", resource.getPhysicalId(), "an owner that sets nothing keeps the prior id");
         assertEquals("CREATE_COMPLETE", resource.getStatus());
+    }
+
+    @Test
+    void aProvisionerThatMigratesAStubWithoutWritingAnArnDropsTheStubArn() {
+        when(registry.forType(TYPE)).thenReturn(Optional.of(provisioner((resource, ctx) ->
+                resource.setPhysicalId("dash-real"))));
+
+        StackResource resource = dispatcher.provision("Dash", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack", "Dash-1a2b3c4d", Map.of("Arn", "arn:aws:stub:::Dash"));
+
+        assertFalse(resource.getAttributes().containsKey("Arn"),
+                "the real resource must not read as a stub on its next update");
+        assertEquals("dash-real", resource.getPhysicalId());
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+    }
+
+    @Test
+    void aProvisionerThatMigratesAStubAndWritesOtherAttributesStillDropsTheStubArn() {
+        when(registry.forType(TYPE)).thenReturn(Optional.of(provisioner((resource, ctx) ->
+                resource.getAttributes().put("FlociThingNameMode", "generated"))));
+
+        StackResource resource = dispatcher.provision("Dash", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack", "Dash-1a2b3c4d", Map.of("Arn", "arn:aws:stub:::Dash"));
+
+        assertEquals(Map.of("FlociThingNameMode", "generated"), resource.getAttributes());
+    }
+
+    @Test
+    void aProvisionerThatMigratesAStubKeepsTheArnItWrites() {
+        when(registry.forType(TYPE)).thenReturn(Optional.of(provisioner((resource, ctx) -> {
+            resource.setPhysicalId("dash-real");
+            resource.getAttributes().put("Arn", "arn:aws:test:us-east-1:000000000000:thing/dash-real");
+        })));
+
+        StackResource resource = dispatcher.provision("Dash", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack", "Dash-1a2b3c4d", Map.of("Arn", "arn:aws:stub:::Dash"));
+
+        assertEquals("arn:aws:test:us-east-1:000000000000:thing/dash-real", resource.getAttributes().get("Arn"));
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+    }
+
+    @Test
+    void aProvisionerThatThrowsLeavesTheResourceCreateFailed() {
+        when(registry.forType(TYPE)).thenReturn(Optional.of(provisioner((resource, ctx) -> {
+            throw new AwsException("ValidationError", "Thing requires Name", 400);
+        })));
+
+        StackResource resource = dispatcher.provision("Thing", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack");
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertEquals("Thing requires Name", resource.getStatusReason());
     }
 
     @Test

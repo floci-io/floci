@@ -84,7 +84,7 @@ class DocDbServiceTest {
         assertEquals(27017, cluster.getPort());
         assertTrue(cluster.getDbClusterArn().contains("mock-cluster"));
 
-        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString());
+        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString(), any());
     }
 
     @Test
@@ -166,7 +166,7 @@ class DocDbServiceTest {
         when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
 
         DocDbContainerManager noDaemonContainerManager = Mockito.mock(DocDbContainerManager.class);
-        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString()))
+        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString(), any()))
                 .thenReturn(null);
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         DocDbService noDaemonService = new DocDbService(config, regionResolver, noDaemonContainerManager, storageFactory,
@@ -520,7 +520,7 @@ class DocDbServiceTest {
         e = refused(new DocDbClusterSettings(null, null, null, null, null, null, "02:00-02:30", "tue:02:15-tue:02:45", null));
         assertEquals("The backup window and maintenance window must not overlap.", e.getMessage());
         assertThrows(AwsException.class, () -> docDbService.getDbCluster("c1"));
-        verify(containerManager, never()).tryStart(any(), any(), any(), any());
+        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any());
 
         // a window given alone is paired with a default clear of it
         docDbService.createDbCluster("alone", "5.0.0", "u", "pw", false,

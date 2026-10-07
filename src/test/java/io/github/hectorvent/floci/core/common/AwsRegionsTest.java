@@ -14,6 +14,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AwsRegionsTest {
 
+    @ParameterizedTest
+    @CsvSource({
+            "us-east-1, ec2.internal",
+            "us-west-2, us-west-2.compute.internal",
+            "eu-central-1, eu-central-1.compute.internal"})
+    void ec2PrivateDnsNamesUseTheRegionalDomain(String region, String domain) {
+        assertEquals(domain, AwsRegions.ec2PrivateDnsDomain(region));
+        assertEquals("ip-10-24-34-0." + domain,
+                AwsRegions.ec2PrivateIpDnsName("10.24.34.0", region));
+    }
+
     /**
      * {@code ALL} is what the emulator advertises; {@code KNOWN_IDS} is what it recognises. The
      * second must contain the first, or DescribeRegions could name a region that hostname parsing

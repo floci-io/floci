@@ -32,6 +32,7 @@ import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
@@ -80,6 +81,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
@@ -172,6 +174,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, String> snapshotData;
     private StorageBackend<String, RdsEvent> events = new InMemoryStorage<>();
     private final StorageBackend<String, EventSubscription> eventSubscriptions;
+    private final StorageBackend<String, DbClusterEndpoint> clusterEndpoints;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     // CreateDBCluster/CreateDBInstance register the new resource only after the
@@ -245,6 +248,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 new TypeReference<Map<String, DbInstance>>() {});
         this.eventSubscriptions = storageFactory.create("rds", "rds-event-subscriptions.json",
                 new TypeReference<Map<String, EventSubscription>>() {});
+        this.clusterEndpoints = storageFactory.create("rds", "rds-cluster-endpoints.json",
+                new TypeReference<Map<String, DbClusterEndpoint>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
                 new TypeReference<Map<String, DbCluster>>() {});
         this.parameterGroups = storageFactory.create("rds", "rds-parameter-groups.json",
@@ -406,6 +411,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.clusterSnapshots = new InMemoryStorage<>();
         this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
         this.eventSubscriptions = new InMemoryStorage<>();
+        this.clusterEndpoints = new InMemoryStorage<>();
     }
 
     public void restorePersistedRuntime() {
@@ -2339,6 +2345,14 @@ public class RdsService implements Resettable, ResourceProvider {
                     putSnapshotForScope(currentAccountId(), effectiveRegion, resourceId, snapshot);
                 });
             }
+            case "cluster-endpoint" -> {
+                DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, resourceId);
+                yield new TagHandle(endpoint.getTags(), updated -> {
+                    endpoint.setTags(updated);
+                    clusterEndpoints.put(clusterEndpointKey(effectiveRegion,
+                            endpoint.getDbClusterEndpointIdentifier()), endpoint);
+                });
+            }
             case "es" -> {
                 EventSubscription subscription = eventSubscriptions
                         .get(eventSubscriptionKey(effectiveRegion, resourceId))
@@ -3781,6 +3795,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 // Losing the writer promotes a remaining member, as Aurora fails over on its own.
                 cluster.setClusterWriterIdentifier(cluster.resolveWriterIdentifier());
                 putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+                dropFromClusterEndpoints(effectiveRegion, clusterId, id);
             }
         }
 
@@ -4496,6 +4511,9 @@ public class RdsService implements Resettable, ResourceProvider {
 
         releaseProxyPort(cluster.getProxyPort());
         deleteClusterForScope(currentAccountId(), effectiveRegion, id);
+        // Custom endpoints belong to their cluster and go with it.
+        clusterEndpointsOf(effectiveRegion, id).forEach(endpoint -> clusterEndpoints.delete(
+                clusterEndpointKey(effectiveRegion, endpoint.getDbClusterEndpointIdentifier())));
         LOG.infov("DB cluster {0} deleted", id);
     }
 
@@ -9297,6 +9315,310 @@ public class RdsService implements Resettable, ResourceProvider {
         return eventSubscriptions.get(eventSubscriptionKey(region, subscriptionName))
                 .orElseThrow(() -> new AwsException("SubscriptionNotFound",
                         "Subscription " + subscriptionName + " not found.", 404));
+    }
+
+    // ── Cluster endpoints ─────────────────────────────────────────────────────
+
+    private static final int MAX_CUSTOM_ENDPOINTS_PER_CLUSTER = 5;
+    private static final int MAX_CLUSTER_ENDPOINT_IDENTIFIER_LENGTH = 63;
+    // The Aurora user guide's custom endpoint types; WRITER is the built-in endpoint's type.
+    private static final Set<String> CUSTOM_ENDPOINT_TYPES = Set.of("READER", "ANY");
+
+    public record ClusterEndpointPage(List<DbClusterEndpoint> endpoints, String marker) {}
+
+    /**
+     * Creates an Aurora custom endpoint. It is modelled, not routed: it reports the cluster's own
+     * endpoint host, so connections through it go where the cluster endpoint sends them.
+     */
+    public synchronized DbClusterEndpoint createDbClusterEndpoint(String region, String clusterId, String endpointId,
+                                                                  String endpointType, List<String> staticMembers,
+                                                                  List<String> excludedMembers, Map<String, String> tags) {
+        String effectiveRegion = effectiveRegion(region);
+        if (isBlank(clusterId)) {
+            throw new AwsException("InvalidParameterValue", "DBClusterIdentifier is required.", 400);
+        }
+        String id = requireClusterEndpointIdentifier(endpointId);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        if (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBClusterStateFault",
+                    "DB cluster " + cluster.getDbClusterIdentifier() + " is not in available state.", 400);
+        }
+        String customType = requireCustomEndpointType(endpointType);
+        staticMembers = clusterMembersNamed(cluster, staticMembers);
+        excludedMembers = clusterMembersNamed(cluster, excludedMembers);
+        requireEndpointMembers(cluster, customType, staticMembers, excludedMembers);
+        String key = clusterEndpointKey(effectiveRegion, id);
+        if (clusterEndpoints.get(key).isPresent()) {
+            throw new AwsException("DBClusterEndpointAlreadyExistsFault",
+                    "DB cluster endpoint " + id + " already exists.", 400);
+        }
+        if (clusterEndpointsOf(effectiveRegion, cluster.getDbClusterIdentifier()).size()
+                >= MAX_CUSTOM_ENDPOINTS_PER_CLUSTER) {
+            throw new AwsException("DBClusterEndpointQuotaExceededFault",
+                    "DB cluster " + cluster.getDbClusterIdentifier() + " already has "
+                    + MAX_CUSTOM_ENDPOINTS_PER_CLUSTER + " custom endpoints.", 403);
+        }
+        DbClusterEndpoint endpoint = new DbClusterEndpoint();
+        endpoint.setDbClusterEndpointIdentifier(id);
+        endpoint.setDbClusterIdentifier(cluster.getDbClusterIdentifier());
+        endpoint.setDbClusterEndpointResourceIdentifier("cluster-endpoint-"
+                + UUID.randomUUID().toString().replace("-", "").substring(0, 24).toLowerCase(Locale.ROOT));
+        endpoint.setEndpoint(clusterEndpointHost(cluster));
+        endpoint.setStatus("available");
+        endpoint.setEndpointType("CUSTOM");
+        endpoint.setCustomEndpointType(customType);
+        endpoint.setStaticMembers(staticMembers != null ? new ArrayList<>(staticMembers) : new ArrayList<>());
+        endpoint.setExcludedMembers(excludedMembers != null ? new ArrayList<>(excludedMembers) : new ArrayList<>());
+        endpoint.setDbClusterEndpointArn(regionResolver.buildArn("rds", effectiveRegion, "cluster-endpoint:" + id));
+        endpoint.setTags(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
+        clusterEndpoints.put(key, endpoint);
+        return endpoint;
+    }
+
+    /**
+     * Changes a custom endpoint's type or member lists. A list in the request replaces the
+     * endpoint's list type: static members clear the exclusion list and the other way round.
+     */
+    public synchronized DbClusterEndpoint modifyDbClusterEndpoint(String region, String endpointId, String endpointType,
+                                                                  List<String> staticMembers,
+                                                                  List<String> excludedMembers) {
+        String effectiveRegion = effectiveRegion(region);
+        DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, endpointId);
+        DbCluster cluster = getDbCluster(endpoint.getDbClusterIdentifier(), effectiveRegion);
+        String customType = isBlank(endpointType) ? endpoint.getCustomEndpointType() : requireCustomEndpointType(endpointType);
+        boolean listsGiven = staticMembers != null || excludedMembers != null;
+        List<String> newStatic = listsGiven ? clusterMembersNamed(cluster, staticMembers) : endpoint.getStaticMembers();
+        List<String> newExcluded = listsGiven ? clusterMembersNamed(cluster, excludedMembers) : endpoint.getExcludedMembers();
+        // The writer rule applies to a list the request supplies. A kept list may name an instance
+        // that failover has since made the writer; it stays stored, so it is a member again after a
+        // failback, and the endpoint's view leaves it out while it is the writer.
+        requireEndpointMembers(cluster, listsGiven ? customType : null, newStatic, newExcluded);
+        endpoint.setCustomEndpointType(customType);
+        endpoint.setStaticMembers(newStatic != null ? new ArrayList<>(newStatic) : new ArrayList<>());
+        endpoint.setExcludedMembers(newExcluded != null ? new ArrayList<>(newExcluded) : new ArrayList<>());
+        clusterEndpoints.put(clusterEndpointKey(effectiveRegion, endpoint.getDbClusterEndpointIdentifier()), endpoint);
+        return currentView(endpoint, cluster);
+    }
+
+    /** Deletes a custom endpoint; the response reports it as {@code deleting}, as AWS does. */
+    public synchronized DbClusterEndpoint deleteDbClusterEndpoint(String region, String endpointId) {
+        String effectiveRegion = effectiveRegion(region);
+        DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, endpointId);
+        clusterEndpoints.delete(clusterEndpointKey(effectiveRegion, endpoint.getDbClusterEndpointIdentifier()));
+        DbClusterEndpoint deleted = currentView(endpoint,
+                findClusterForScope(currentAccountId(), effectiveRegion, endpoint.getDbClusterIdentifier()));
+        deleted.setStatus("deleting");
+        return deleted;
+    }
+
+    /**
+     * The built-in WRITER and READER endpoints of each cluster in scope, followed by its custom
+     * endpoints, narrowed by the request's cluster, endpoint identifier and filters. Filter names
+     * and values are those the API reference lists; values match case-insensitively.
+     */
+    public synchronized ClusterEndpointPage describeDbClusterEndpoints(String region, String clusterId, String endpointId,
+                                                                       Map<String, List<String>> filters,
+                                                                       Integer maxRecords, String marker) {
+        String effectiveRegion = effectiveRegion(region);
+        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
+        }
+        List<DbCluster> scope = !isBlank(clusterId)
+                ? List.of(getDbCluster(clusterId, effectiveRegion))
+                : listDbClusters(null, effectiveRegion).stream()
+                        .sorted(Comparator.comparing(DbCluster::getDbClusterIdentifier))
+                        .toList();
+        List<DbClusterEndpoint> all = new ArrayList<>();
+        for (DbCluster cluster : scope) {
+            if (isBlank(endpointId)) {
+                if (cluster.getEndpoint() != null) {
+                    all.add(builtInClusterEndpoint(cluster, "WRITER", cluster.getEndpoint().address()));
+                }
+                if (cluster.getReaderEndpoint() != null) {
+                    all.add(builtInClusterEndpoint(cluster, "READER", cluster.getReaderEndpoint().address()));
+                }
+            }
+            clusterEndpointsOf(effectiveRegion, cluster.getDbClusterIdentifier()).stream()
+                    .filter(e -> isBlank(endpointId)
+                            || e.getDbClusterEndpointIdentifier().equals(endpointId.toLowerCase(Locale.ROOT)))
+                    .sorted(Comparator.comparing(DbClusterEndpoint::getDbClusterEndpointIdentifier))
+                    .map(e -> currentView(e, cluster))
+                    .forEach(all::add);
+        }
+        List<DbClusterEndpoint> matching = all.stream()
+                .filter(e -> matchesFilter(filters, "db-cluster-endpoint-type", e.getEndpointType()))
+                .filter(e -> matchesFilter(filters, "db-cluster-endpoint-custom-type", e.getCustomEndpointType()))
+                .filter(e -> matchesFilter(filters, "db-cluster-endpoint-id", e.getDbClusterEndpointIdentifier()))
+                .filter(e -> matchesFilter(filters, "db-cluster-endpoint-status", e.getStatus()))
+                .toList();
+        int from = 0;
+        if (!isBlank(marker)) {
+            try {
+                from = Integer.parseInt(marker);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
+            }
+        }
+        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
+        int start = Math.min(Math.max(from, 0), matching.size());
+        int to = Math.min(matching.size(), start + limit);
+        return new ClusterEndpointPage(matching.subList(start, to),
+                to < matching.size() ? Integer.toString(to) : null);
+    }
+
+    private static boolean matchesFilter(Map<String, List<String>> filters, String name, String value) {
+        List<String> wanted = filters != null ? filters.get(name) : null;
+        if (wanted == null || wanted.isEmpty()) {
+            return true;
+        }
+        return value != null && wanted.stream().anyMatch(w -> w.equalsIgnoreCase(value));
+    }
+
+    private DbClusterEndpoint builtInClusterEndpoint(DbCluster cluster, String type, String address) {
+        DbClusterEndpoint endpoint = new DbClusterEndpoint();
+        endpoint.setDbClusterIdentifier(cluster.getDbClusterIdentifier());
+        endpoint.setEndpoint(address);
+        endpoint.setStatus("available");
+        endpoint.setEndpointType(type);
+        return endpoint;
+    }
+
+    /**
+     * A custom endpoint as it stands now. Its address follows the cluster's endpoint, which a
+     * restart can move to another proxy port. A READER endpoint leaves out the cluster's current
+     * writer, as Aurora adjusts READER membership on failover and promotion (user guide).
+     */
+    private static DbClusterEndpoint currentView(DbClusterEndpoint stored, DbCluster cluster) {
+        DbClusterEndpoint view = new DbClusterEndpoint();
+        view.setDbClusterEndpointIdentifier(stored.getDbClusterEndpointIdentifier());
+        view.setDbClusterIdentifier(stored.getDbClusterIdentifier());
+        view.setDbClusterEndpointResourceIdentifier(stored.getDbClusterEndpointResourceIdentifier());
+        view.setStatus(stored.getStatus());
+        view.setEndpointType(stored.getEndpointType());
+        view.setCustomEndpointType(stored.getCustomEndpointType());
+        view.setDbClusterEndpointArn(stored.getDbClusterEndpointArn());
+        view.setTags(stored.getTags());
+        view.setExcludedMembers(new ArrayList<>(stored.getExcludedMembers()));
+        List<String> staticMembers = new ArrayList<>(stored.getStaticMembers());
+        String host = stored.getEndpoint();
+        if (cluster != null) {
+            host = clusterEndpointHost(cluster) != null ? clusterEndpointHost(cluster) : host;
+            String writer = cluster.resolveWriterIdentifier();
+            if ("READER".equals(stored.getCustomEndpointType()) && writer != null) {
+                staticMembers.removeIf(writer::equalsIgnoreCase);
+            }
+        }
+        view.setEndpoint(host);
+        view.setStaticMembers(staticMembers);
+        return view;
+    }
+
+    /**
+     * The members as the cluster spells them: instance identifiers match regardless of case, as
+     * the failover lookup does. A name that is no instance of the cluster is kept as given, so the
+     * membership check reports it.
+     */
+    private static List<String> clusterMembersNamed(DbCluster cluster, List<String> members) {
+        if (members == null) {
+            return null;
+        }
+        return members.stream()
+                .map(member -> cluster.getDbClusterMembers().stream()
+                        .filter(member::equalsIgnoreCase)
+                        .findFirst()
+                        .orElse(member))
+                .toList();
+    }
+
+    private static String clusterEndpointHost(DbCluster cluster) {
+        return cluster.getEndpoint() != null ? cluster.getEndpoint().address() : null;
+    }
+
+    private DbClusterEndpoint requireClusterEndpoint(String region, String endpointId) {
+        if (isBlank(endpointId)) {
+            throw new AwsException("InvalidParameterValue", "DBClusterEndpointIdentifier is required.", 400);
+        }
+        String id = endpointId.toLowerCase(Locale.ROOT);
+        return clusterEndpoints.get(clusterEndpointKey(region, id))
+                .orElseThrow(() -> new AwsException("DBClusterEndpointNotFoundFault",
+                        "DB cluster endpoint " + id + " not found.", 400));
+    }
+
+    /** RDS identifier rules: a letter first, letters, digits and single hyphens, no trailing hyphen. */
+    private static String requireClusterEndpointIdentifier(String endpointId) {
+        if (isBlank(endpointId)) {
+            throw new AwsException("InvalidParameterValue", "DBClusterEndpointIdentifier is required.", 400);
+        }
+        if (endpointId.length() > MAX_CLUSTER_ENDPOINT_IDENTIFIER_LENGTH
+                || !DB_PROXY_NAME_PATTERN.matcher(endpointId).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "DBClusterEndpointIdentifier must begin with a letter, contain only letters, digits and "
+                    + "single hyphens, not end with a hyphen, and be at most "
+                    + MAX_CLUSTER_ENDPOINT_IDENTIFIER_LENGTH + " characters.", 400);
+        }
+        // Stored as a lowercase string (API reference).
+        return endpointId.toLowerCase(Locale.ROOT);
+    }
+
+    private static String requireCustomEndpointType(String endpointType) {
+        String type = endpointType == null ? "" : endpointType.toUpperCase(Locale.ROOT);
+        if (!CUSTOM_ENDPOINT_TYPES.contains(type)) {
+            throw new AwsException("InvalidParameterValue",
+                    "EndpointType must be READER or ANY for a custom endpoint.", 400);
+        }
+        return type;
+    }
+
+    /**
+     * A custom endpoint holds a static list or an exclusion list, never both; every member is an
+     * instance of the cluster, and a READER endpoint cannot name the writer. A null type skips the
+     * writer rule, for lists kept from before.
+     */
+    private static void requireEndpointMembers(DbCluster cluster, String customType,
+                                               List<String> staticMembers, List<String> excludedMembers) {
+        boolean hasStatic = staticMembers != null && !staticMembers.isEmpty();
+        boolean hasExcluded = excludedMembers != null && !excludedMembers.isEmpty();
+        if (hasStatic && hasExcluded) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A custom endpoint takes StaticMembers or ExcludedMembers, not both.", 400);
+        }
+        List<String> named = hasStatic ? staticMembers : hasExcluded ? excludedMembers : List.of();
+        for (String member : named) {
+            if (!cluster.getDbClusterMembers().contains(member)) {
+                throw new AwsException("DBInstanceNotFound",
+                        "DB instance " + member + " is not a member of DB cluster "
+                        + cluster.getDbClusterIdentifier() + ".", 404);
+            }
+        }
+        if (hasStatic && "READER".equals(customType)
+                && staticMembers.contains(cluster.resolveWriterIdentifier())) {
+            throw new AwsException("InvalidParameterValue",
+                    "A READER custom endpoint can't include the writer instance "
+                    + cluster.resolveWriterIdentifier() + ".", 400);
+        }
+    }
+
+    private List<DbClusterEndpoint> clusterEndpointsOf(String region, String clusterId) {
+        String prefix = clusterEndpointKey(region, "");
+        return clusterEndpoints.scan(k -> k.startsWith(prefix)).stream()
+                .filter(e -> clusterId.equals(e.getDbClusterIdentifier()))
+                .toList();
+    }
+
+    /** A deleted instance drops out of the static and exclusion lists that name it. */
+    private void dropFromClusterEndpoints(String region, String clusterId, String instanceId) {
+        for (DbClusterEndpoint endpoint : clusterEndpointsOf(region, clusterId)) {
+            boolean changed = endpoint.getStaticMembers().remove(instanceId)
+                    | endpoint.getExcludedMembers().remove(instanceId);
+            if (changed) {
+                clusterEndpoints.put(clusterEndpointKey(region, endpoint.getDbClusterEndpointIdentifier()), endpoint);
+            }
+        }
+    }
+
+    private static String clusterEndpointKey(String region, String endpointId) {
+        return "cep::" + region + "::" + endpointId;
     }
 
     private static String eventSubscriptionKey(String region, String subscriptionName) {

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common.dns;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsConfigSource;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.quarkus.runtime.Startup;
 import io.vertx.core.Vertx;
@@ -74,7 +75,8 @@ public class EmbeddedDnsServer {
     public static final String DEFAULT_SUFFIX = "localhost.floci.io";
     public static final String LOCALSTACK_SUFFIX = "localhost.localstack.cloud";
     private static final Pattern EC2_PRIVATE_DNS_NAME =
-            Pattern.compile("^ip-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})\\.ec2\\.internal$", Pattern.CASE_INSENSITIVE);
+            Pattern.compile("^ip-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})\\.(?:ec2|((?:[a-z0-9]+-)+\\d+)\\.compute)\\.internal$",
+                    Pattern.CASE_INSENSITIVE);
 
     // Well-known emulator wildcard DNS domains that always resolve to Floci's IP.
     // The suffix "localhost.X" covers "localhost.X" itself and "*.localhost.X"; it does
@@ -423,6 +425,9 @@ public class EmbeddedDnsServer {
         }
         Matcher matcher = EC2_PRIVATE_DNS_NAME.matcher(name);
         if (!matcher.matches()) {
+            return Optional.empty();
+        }
+        if (matcher.group(5) != null && !RegionResolver.isKnownRegion(matcher.group(5))) {
             return Optional.empty();
         }
 

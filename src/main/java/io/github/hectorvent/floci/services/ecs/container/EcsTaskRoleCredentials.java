@@ -74,6 +74,11 @@ public class EcsTaskRoleCredentials {
                 "ASIA" + random(UPPER_ALPHANUMERIC, 16), randomBase64(30), randomBase64(48),
                 roleArn, now.plusSeconds(ttlSeconds), null, accountId);
         session.setEcsTaskArn(taskArn);
+        String taskSessionName = taskArn.contains("/") ? taskArn.substring(taskArn.lastIndexOf('/') + 1) : taskArn;
+        session.setRoleSessionName(taskSessionName);
+        if (role.get().getRoleId() != null) {
+            session.setAssumedRoleId(role.get().getRoleId() + ":" + taskSessionName);
+        }
         iamService.registerEcsTaskRoleSession(session);
 
         String path = "/v2/credentials/" + UUID.randomUUID();

@@ -284,6 +284,35 @@ public final class LambdaUtils {
                     if request.get("fail"):
                         return {"Status": "FAILED",
                                 "Error": {"ErrorMessage": "asked to fail", "ErrorType": "TestFailure"}}
+                    if request.get("chain"):
+                        if "chain" not in operations:
+                            client.checkpoint_durable_execution(
+                                DurableExecutionArn=event["DurableExecutionArn"],
+                                CheckpointToken=event["CheckpointToken"],
+                                Updates=[{"Id": "chain", "Name": "greet", "Type": "CHAINED_INVOKE",
+                                          "SubType": "ChainedInvoke", "Action": "START",
+                                          "Payload": json.dumps({"name": "Durable"}),
+                                          "ChainedInvokeOptions": {"FunctionName": request["chain"]}}])
+                            return {"Status": "PENDING"}
+                        chain = operations["chain"]
+                        if chain["Status"] == "STARTED":
+                            return {"Status": "PENDING"}
+                        details = chain.get("ChainedInvokeDetails", {})
+                        return {"Status": "SUCCEEDED",
+                                "Result": details.get("Result") or json.dumps(details.get("Error"))}
+                    if request.get("callback"):
+                        if "callback" not in operations:
+                            client.checkpoint_durable_execution(
+                                DurableExecutionArn=event["DurableExecutionArn"],
+                                CheckpointToken=event["CheckpointToken"],
+                                Updates=[{"Id": "callback", "Name": "approval", "Type": "CALLBACK",
+                                          "SubType": "Callback", "Action": "START",
+                                          "CallbackOptions": {"HeartbeatTimeoutSeconds": 60}}])
+                            return {"Status": "PENDING"}
+                        callback = operations["callback"]
+                        if callback["Status"] == "STARTED":
+                            return {"Status": "PENDING"}
+                        return {"Status": "SUCCEEDED", "Result": callback["CallbackDetails"].get("Result", "")}
                     if "step" not in operations:
                         client.checkpoint_durable_execution(
                             DurableExecutionArn=event["DurableExecutionArn"],

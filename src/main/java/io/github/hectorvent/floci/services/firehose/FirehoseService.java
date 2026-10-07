@@ -901,7 +901,7 @@ public class FirehoseService implements ResourceProvider {
             S3Destination s3 = stream.s3Destination();
             List<byte[]> records = toFlush;
             if (s3 != null && s3.isProcessingEnabled()) {
-                ensureBucket(bucket);
+                ensureBucket(bucket, stream);
                 FirehoseLambdaTransformer.Outcome transformed =
                         lambdaTransformer.transform(stream, bucket, records, clock.instant());
                 LOG.infov("Transformed {0} records from stream {1} ({2} dropped, {3} failed)",
@@ -916,7 +916,7 @@ public class FirehoseService implements ResourceProvider {
                 }
             }
             if (s3 != null && s3.isDataFormatConversionEnabled()) {
-                ensureBucket(bucket);
+                ensureBucket(bucket, stream);
                 FirehoseParquetConverter.Outcome outcome =
                         parquetConverter.deliver(stream, bucket, records, clock.instant());
                 LOG.infov("Converted {0} records ({1} failed) from stream {2} to s3://{3}/{4}",
@@ -930,7 +930,7 @@ public class FirehoseService implements ResourceProvider {
             String key = S3ObjectKeyResolver.resolveKey(s3, stream.getDeliveryStreamName(),
                     stream.getVersionId(), clock.instant(), compression);
 
-            ensureBucket(bucket);
+            ensureBucket(bucket, stream);
 
             // Records are arbitrary bytes, so they are concatenated as bytes: routing
             // them through a String would corrupt any payload that is not valid UTF-8.
@@ -993,10 +993,22 @@ public class FirehoseService implements ResourceProvider {
         return DEFAULT_BUCKET;
     }
 
-    private void ensureBucket(String bucket) {
+    /**
+     * Creates a missing destination bucket. A stream's own destination goes in the stream's region,
+     * from its ARN; the shared default bucket, used by every stream without one, stays in the default
+     * region so the first stream to deliver does not decide it for all the others.
+     */
+    private void ensureBucket(String bucket, DeliveryStreamDescription stream) {
+        S3Destination s3 = stream.s3Destination();
+        boolean ownDestination = s3 != null && s3.bucketName() != null;
+        String region = ownDestination
+                ? AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion())
+                : regionResolver.getDefaultRegion();
         try {
-            s3Service.createBucket(bucket, regionResolver.getDefaultRegion());
-        } catch (Exception ignored) {}
+            s3Service.createBucket(bucket, region);
+        } catch (Exception ignored) {
+            // The bucket usually exists already; a real problem with it surfaces on the write that follows.
+        }
     }
 
     // ─── Resource Explorer 2 ───────────────────────────────────────────────────

@@ -277,6 +277,28 @@ class EksServiceTest {
     }
 
     @Test
+    void initBackfillsTheOidcIssuerInTheClustersOwnRegion() {
+        StorageBackend<String, Cluster> clusterStore = new InMemoryStorage<>();
+        StorageBackend<String, ClusterOidcKey> keyStore = new InMemoryStorage<>();
+
+        Cluster legacy = new Cluster();
+        legacy.setName("eu-legacy-cluster");
+        legacy.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/eu-legacy-cluster");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        clusterStore.put("eu-legacy-cluster", legacy);
+
+        EksOidcService oidcService = new EksOidcService(
+                fixedStorageFactory(keyStore), new ObjectMapper());
+        EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
+        restarted.init();
+
+        String issuer = clusterStore.get("eu-legacy-cluster").orElseThrow().getIdentity().getOidc().getIssuer();
+        assertTrue(issuer.startsWith("https://oidc.eks.eu-west-1.amazonaws.com/id/"), issuer);
+    }
+
+    @Test
     void initLeavesAnExistingOidcIssuerUnchanged() {
         StorageBackend<String, Cluster> clusterStore = new InMemoryStorage<>();
         StorageBackend<String, ClusterOidcKey> keyStore = new InMemoryStorage<>();

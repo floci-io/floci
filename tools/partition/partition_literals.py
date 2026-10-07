@@ -81,7 +81,9 @@ CATEGORIES: tuple[Category, ...] = (
     ),
     Category(
         "dns-suffix",
-        re.compile(r"amazonaws\.com(?!\.cn)|cloudfront\.net|signin\.aws|public\.ecr\.aws"),
+        # A dot may be escaped (amazonaws\\.com in a Java regex), so a hand-written host pattern
+        # is held to the same rule as a host.
+        re.compile(r"amazonaws\\*\.com(?!\\*\.cn)|cloudfront\\*\.net|signin\\*\.aws|public\\*\.ecr\\*\.aws"),
         True,
         "a commercial DNS suffix or host; derive from the partition's dnsSuffix",
     ),

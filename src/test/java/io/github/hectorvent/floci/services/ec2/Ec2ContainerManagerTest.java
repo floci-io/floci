@@ -125,6 +125,19 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void exposeReachablePrivateAddressUsesInstanceRegion() {
+        Instance instance = new Instance();
+        instance.setRegion("us-west-2");
+        InstanceNetworkInterface networkInterface = new InstanceNetworkInterface();
+        instance.setNetworkInterfaces(List.of(networkInterface));
+
+        Ec2ContainerManager.exposeReachablePrivateAddress(instance, "192.168.215.21");
+
+        assertEquals("ip-192-168-215-21.us-west-2.compute.internal", instance.getPrivateDnsName());
+        assertEquals(instance.getPrivateDnsName(), networkInterface.getPrivateDnsName());
+    }
+
+    @Test
     void exposeReachablePrivateAddressPreservesAllocatedIpWhenAwsFaithful() {
         // #1983: with awsFaithfulPrivateIp=true, the CFN/subnet-allocated private
         // IP set at launch is left untouched — the container bridge IP is not

@@ -32,6 +32,7 @@ class EventBridgeListTagsIntegrationTest {
             .body("""
                 {
                     "Name": "tagged-rule",
+                    "ScheduleExpression": "rate(1 day)",
                     "Tags": [
                         {"Key": "env", "Value": "test"},
                         {"Key": "team", "Value": "platform"}
@@ -80,7 +81,7 @@ class EventBridgeListTagsIntegrationTest {
         given()
             .contentType(EVENT_BRIDGE_CONTENT_TYPE)
             .header("X-Amz-Target", "AWSEvents.PutRule")
-            .body("{\"Name\":\"untagged-rule\"}")
+            .body("{\"Name\":\"untagged-rule\",\"ScheduleExpression\":\"rate(1 day)\"}")
         .when()
             .post("/")
         .then()

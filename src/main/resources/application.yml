@@ -65,6 +65,7 @@ quarkus:
         - eks/*.json
         - aws/*.json
         - cloudformation/*.json
+        - redshift/*.sql
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
@@ -112,6 +113,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.dms.DmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
@@ -145,7 +147,7 @@ floci:
     # id: aws  # Partition served (aws, aws-cn, aws-us-gov, aws-iso, aws-iso-b, aws-iso-e, aws-iso-f, aws-eusc).
                # Derived from default-region when unset. Env: FLOCI_PARTITIONS_ID
     strict: false  # true rejects requests signed for a service AWS does not publish in the request's
-                   # partition (CloudFront in aws-us-gov, IAM in aws-eusc). Env: FLOCI_PARTITIONS_STRICT
+                   # partition (CloudFront in aws-us-gov, Lightsail in aws-cn). Env: FLOCI_PARTITIONS_STRICT
     allow-unknown-regions: false  # true accepts a SigV4 scope region no partition publishes or admits by its
                                   # region pattern, giving it its own namespace. Env: FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS
   # Shared mock-response config for Textract/Comprehend/Rekognition/Translate. See AiMockConfigLoader.

@@ -122,6 +122,7 @@ public class ApiGatewayExecuteController {
     private final RequestContext requestContext;
     private final ExecuteApiSigV4Authorizer sigV4Authorizer;
     private final RestLambdaAuthorizer restLambdaAuthorizer;
+    private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -135,7 +136,8 @@ public class ApiGatewayExecuteController {
                                        ApiGatewayExecuteRouteContext routeContext,
                                        JwtSignatureVerifier jwtSignatureVerifier,
                                        RequestContext requestContext,
-                                       ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer) {
+                                       ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer,
+                                       AuthorizerPolicyEvaluator authorizerPolicyEvaluator) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -156,6 +158,7 @@ public class ApiGatewayExecuteController {
         this.requestContext = requestContext;
         this.sigV4Authorizer = sigV4Authorizer;
         this.restLambdaAuthorizer = restLambdaAuthorizer;
+        this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -1037,9 +1040,8 @@ public class ApiGatewayExecuteController {
                 }
             }
             String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, requestPath);
-            Map<String, List<String>> conditions = Map.of("aws:SourceIp", List.of(routeContext.sourceIp()),
-                    "aws:SecureTransport", List.of(Boolean.toString("https".equals(uriInfo.getRequestUri().getScheme()))),
-                    "aws:CurrentTime", List.of(Instant.now().toString()));
+            Map<String, List<String>> conditions = AuthorizerPolicyEvaluator.requestConditions(
+                    routeContext.sourceIp(), isSecureTransport(uriInfo));
             if (!restLambdaAuthorizer.permits(verified, methodArn, conditions)) {
                 return authorizerError(scope, GatewayResponseType.ACCESS_DENIED, 403);
             }
@@ -3111,26 +3113,11 @@ public class ApiGatewayExecuteController {
                         .type(MediaType.APPLICATION_JSON).build(), null);
             }
 
-            JsonNode statements = policyDocument.path("Statement");
-            if (statements.isMissingNode() || statements.isNull()
-                    || !statements.isArray() || statements.isEmpty()) {
-                LOG.warnv("Authorizer response missing or empty Statement array for API {0}", apiId);
-                return new RequestAuthorizerResult(Response.status(500)
-                        .entity(jsonMessage("Internal Server Error"))
-                        .type(MediaType.APPLICATION_JSON).build(), null);
-            }
-
-            String effect = statements.get(0).path("Effect").asText("Deny");
-            if ("Deny".equalsIgnoreCase(effect)) {
+            String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, path);
+            if (!authorizerPolicyEvaluator.permits(policyDocument, methodArn,
+                    routeContext.sourceIp(), isSecureTransport(uriInfo))) {
                 return new RequestAuthorizerResult(Response.status(403)
                         .entity(jsonMessage("User is not authorized to access this resource"))
-                        .type(MediaType.APPLICATION_JSON).build(), null);
-            }
-
-            if (!"Allow".equalsIgnoreCase(effect)) {
-                LOG.warnv("Authorizer response has unrecognized Effect '{0}' for API {1}", effect, apiId);
-                return new RequestAuthorizerResult(Response.status(500)
-                        .entity(jsonMessage("Internal Server Error"))
                         .type(MediaType.APPLICATION_JSON).build(), null);
             }
 
@@ -3153,6 +3140,10 @@ public class ApiGatewayExecuteController {
     private ObjectNode requestAuthorizerContext(JsonNode response) {
         JsonNode context = response.path("context");
         return context.isObject() && !context.isEmpty() ? (ObjectNode) context : null;
+    }
+
+    private static boolean isSecureTransport(UriInfo uriInfo) {
+        return "https".equals(uriInfo.getRequestUri().getScheme());
     }
 
     /**
@@ -3212,9 +3203,9 @@ public class ApiGatewayExecuteController {
      * Builds a REQUEST authorizer event in payload format version 2.0.
      * Uses the newer HTTP API-native shape with routeArn, routeKey, rawPath, and requestContext.http.
      */
-    private String buildRequestAuthorizerEventV2(String httpMethod, String path, String routeKey,
-                                                  String apiId, String stageName, String region,
-                                                  HttpHeaders headers, UriInfo uriInfo) {
+    String buildRequestAuthorizerEventV2(String httpMethod, String path, String routeKey,
+                                          String apiId, String stageName, String region,
+                                          HttpHeaders headers, UriInfo uriInfo) {
         // rawPath is by contract the raw, unmodified path, so recover the trailing slash the
         // JAX-RS {proxy} binding stripped. routeArn keeps the normalized path for the same reason
         // methodArn does in the 1.0 shape above.
@@ -3258,8 +3249,7 @@ public class ApiGatewayExecuteController {
         ctx.put("requestId", UUID.randomUUID().toString());
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
         ctx.put("stage", stageName);
-        ctx.put("time", java.time.format.DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
-                .format(java.time.ZonedDateTime.now()));
+        ctx.put("time", GATEWAY_REQUEST_TIME.format(Instant.now().atZone(ZoneOffset.UTC)));
         ctx.put("timeEpoch", System.currentTimeMillis());
 
         ObjectNode http = ctx.putObject("http");
@@ -3483,8 +3473,7 @@ public class ApiGatewayExecuteController {
         ctx.put("requestId", requestId);
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
         ctx.put("stage", stageName);
-        ctx.put("time", java.time.format.DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
-                .format(java.time.ZonedDateTime.now()));
+        ctx.put("time", GATEWAY_REQUEST_TIME.format(Instant.now().atZone(ZoneOffset.UTC)));
         ctx.put("timeEpoch", System.currentTimeMillis());
 
         ObjectNode http = ctx.putObject("http");
@@ -3579,8 +3568,8 @@ public class ApiGatewayExecuteController {
     // ──────────────────────────── Gateway responses ────────────────────────────
 
     private static final String GATEWAY_RESPONSE_HEADER_PREFIX = "gatewayresponse.header.";
-    private static final DateTimeFormatter GATEWAY_REQUEST_TIME =
-            DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z");
+    static final DateTimeFormatter GATEWAY_REQUEST_TIME =
+            DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z", Locale.ENGLISH);
 
     /**
      * The {@code {"message": ...}} answer a REST API gives when it, rather than the integration,

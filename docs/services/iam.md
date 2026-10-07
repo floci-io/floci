@@ -304,13 +304,14 @@ also checked against that policy's length and character-class requirements, with
 echoed back by any of these actions, matching AWS.
 
 `DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
-keys, inline policies, attached managed policies, group memberships, or an
-[enabled MFA device](#multi-factor-authentication): remove those first. Floci has no actions that
-create signing certificates, SSH public keys, or Git credentials, so there is nothing of those
-kinds to block on. Renaming a user with `UpdateUser` carries its login
-profile, access keys, and group membership to the new name. Unlike AWS, Floci does not rewrite
-policy documents that name the user's ARN, so a resource or trust policy that referred to the old
-name still refers to it after a rename.
+keys, inline policies, attached managed policies, group memberships, an
+[enabled MFA device](#multi-factor-authentication), a
+[signing certificate](#signing-certificates), an [SSH public key](#ssh-public-keys) or a
+[service-specific credential](#service-specific-credentials): remove those first. That is every
+item on AWS's own list of what to delete before deleting a user programmatically. Renaming a user
+with `UpdateUser` carries all of them to the new name, along with its login profile, access keys and
+group membership. Unlike AWS, Floci does not rewrite policy documents that name the user's ARN, so a
+resource or trust policy that referred to the old name still refers to it after a rename.
 
 ### Policy Simulation
 
@@ -530,6 +531,52 @@ ready. `GenerateCredentialReport`'s `State`/`Description` for the no-report-exis
 own documented example response (`STARTED` / "No report exists. Starting a new report generation
 task"); the wording for the report-expired case is Floci's own, since AWS does not document it.
 
+### Account Properties and Outbound Federation
+
+| Action | Description |
+|--------|-------------|
+| GetAccountProperties | Returns the account's properties as a `Namespace/PropertyName` to value map. |
+| PutAccountProperties | Sets account properties, all of which must share one namespace. |
+| SetSecurityTokenServicePreferences | Sets the account's global endpoint token version, `v1Token` or `v2Token`. |
+| EnableOutboundWebIdentityFederation | Turns on outbound web identity federation and returns the account's issuer URL. |
+| DisableOutboundWebIdentityFederation | Turns it off. |
+| GetOutboundWebIdentityFederationInfo | Returns the issuer URL and whether JWT vending is on. |
+
+A property key is `Namespace/PropertyName` with exactly one forward slash and neither a leading nor
+a trailing one, 1 to 50 characters matching `^[A-Za-z][A-Za-z0-9/_-]*$`, and a value of 1 to 1024.
+**Every key in one `PutAccountProperties` request must belong to the same namespace**, which AWS
+states directly, so a request mixing namespaces is rejected whole rather than partly applied. Role
+Manager is the only namespace AWS names, and any well-formed key is accepted rather than only that
+one, since an allowlist of one would refuse keys AWS takes.
+
+**Enabling federation twice is an error, and so is disabling it twice**, which is the asymmetry
+worth noticing: `EnableOutboundWebIdentityFederation` answers `FeatureEnabled` with status 409,
+while `DisableOutboundWebIdentityFederation` answers `FeatureDisabled` with status **404**. AWS
+documents both, including the message wording. `GetOutboundWebIdentityFederationInfo` answers
+`FeatureDisabled` too when the feature is off, reusing the disable operation's own text, so a getter
+reports that the feature cannot be disabled twice. That reads oddly and is matched rather than
+improved.
+
+The issuer URL is `https://<uuid>.tokens.sts.global.<dual-stack suffix>`, which the API Reference
+shows as `https://a1d2b0fd-1177-4468-9351-2fEXAMPLE723.tokens.sts.global.api.aws`. The suffix comes
+from the request's partition rather than the literal, since `api.aws` is only the commercial
+partition's. It is minted once per account and kept across a disable, so re-enabling returns the
+same URL. AWS does not document which way that goes; the reasoning is that a relying party
+verifying tokens will have pinned the URL, so regenerating it would break verification silently.
+
+Two things the feature references are not modeled. The issuer URL is documented as hosting OIDC
+discovery endpoints at `/.well-known/openid-configuration` and `/.well-known/jwks.json`, and the
+operation's description points at a `GetWebIdentityToken` API for obtaining JWTs. Neither is served
+here: these six are the management operations only. `JwtVendingEnabled` is therefore reported as
+true whenever the feature is enabled, which is the only reading available, since nothing in the API
+toggles it separately.
+
+`SetSecurityTokenServicePreferences` stores the version, and `GetAccountSummary` reports it as
+`GlobalEndpointTokenVersion`, which the operation's own description requires. What does not follow
+it is STS itself: Floci does not vary its token format by account preference, so the setting is
+observable in the summary rather than in a token. `v1Token` is reported as the default for an account
+that has never set one.
+
 ### Organizations Root Access
 
 | Action | Description |
@@ -675,6 +722,114 @@ Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `
 owning user's ARN, along with every other IAM action except the server-certificate operations. That
 is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979), not something
 specific to signing certificates.
+
+### Service-Specific Credentials
+
+| Action | Description |
+|--------|-------------|
+| CreateServiceSpecificCredential | Generates a credential for one service against an IAM user and returns its generated `ServiceSpecificCredentialId`. |
+| ListServiceSpecificCredentials | Lists a user's credentials, or every user's with `AllUsers`, optionally filtered by `ServiceName`. |
+| UpdateServiceSpecificCredential | Sets a credential's status to `Active`, `Inactive` or `Expired`. |
+| ResetServiceSpecificCredential | Replaces the secret half of a credential and returns the new one. |
+| DeleteServiceSpecificCredential | Deletes one of a user's service-specific credentials. |
+
+These are what AWS calls Git credentials when they are used with CodeCommit. A service that does not
+support them is `NoSuchEntity` with status 404 and the message "No such service `<name>` is
+supported for Service Specific Credentials".
+
+That is not what the wire model would suggest. The model declares `ServiceNotSupportedException`,
+code `NotSupportedService`, on both `CreateServiceSpecificCredential` and
+`ListServiceSpecificCredentials`, and AWS never raises it: recordings validated against AWS answer
+`NoSuchEntity` for a nonexistent service, for a name that is not a service principal at all, and for
+a real service that simply does not support these credentials. A client written against the model,
+catching the modelled exception, would catch nothing.
+
+**A credential has one of two shapes, decided by the service:**
+
+| Service | Shape |
+|---------|-------|
+| `codecommit.amazonaws.com` | `ServiceUserName` + `ServicePassword` |
+| `cassandra.amazonaws.com` | `ServiceUserName` + `ServicePassword` |
+| `bedrock.amazonaws.com` | long-term API key: `ServiceCredentialAlias` + `ServiceCredentialSecret` |
+| `aws-external-anthropic.amazonaws.com` | long-term API key |
+| `cloudwatch.amazonaws.com` | long-term API key |
+| `logs.amazonaws.com` | long-term API key |
+
+That list is the subset AWS's documentation actually names. The User Guide's own enumeration falls
+on a page boundary and is absent from the published PDF, so these come from two other passages: the
+`iam:ServiceSpecificCredentialServiceName` condition-key section, which gives CodeCommit,
+Keyspaces and Bedrock "with their
+exact value formatting", and the worked `create-service-specific-credential` CLI block, which
+creates the four long-term API key services. A service AWS supports that neither passage names would
+be refused here. A legacy per-partition form of a supported principal is accepted and folded to the
+universal one, so `bedrock.amazonaws.com.cn` works and comes back as `bedrock.amazonaws.com`; a bare
+`codecommit` does not, because AWS documents these with their exact formatting.
+
+Only the long-term API key services accept `CredentialAgeDays`, which the model restricts to
+"services that support long-term API keys" and which sets the `ExpirationDate`. It is 1 to 36600
+days. Without it the credential does not expire and no expiry is reported. A present but
+unparseable value is a validation error rather than a silent absence, since answering it with a
+credential that never expires is the opposite of what was asked for.
+
+**A key past its `ExpirationDate` reports `Expired`.** The status is derived when it is read rather
+than written back, so the value a caller set is left alone and an `UpdateServiceSpecificCredential`
+to `Active` cannot make an expired key report as usable. Expiry outranks `Inactive` as well, since a
+key past its expiry is finished either way and `Expired` says more.
+
+This one is a judgement call rather than a sourced behaviour, and worth knowing about. AWS does not
+document the transition: `Expired` is in the `statusType` enum, but that enum is shared with access
+keys, SSH public keys and signing certificates, most of which have no expiry at all, and the API
+Reference's prose describes only `Active` and `Inactive`. Of the two available guesses, reporting an
+expired key as `Active` is the worse one, because it tells a caller the key works while the same
+response carries the date saying it does not. Nothing authenticates with these credentials in Floci
+either way, so the status is the only place the expiry can show.
+
+The secret half, whichever shape it takes, is disclosed by `CreateServiceSpecificCredential` and
+`ResetServiceSpecificCredential` and never again: `ListServiceSpecificCredentials` returns
+`ServiceSpecificCredentialMetadata`, which the model defines without either secret. A reset keeps
+the id, the service and the service user name or alias: only what authenticates with the credential
+changes. Note that the User Guide calls the long-term key's secret `ServiceApiKeyValue` in prose;
+that is not a wire name, and both the API Reference and the model call it
+`ServiceCredentialSecret`.
+
+`ServiceUserName` is derived the way AWS derives it, as the IAM user name, the account, and a `+n`
+between them for the second credential: `anika-at-123456789012` and then
+`anika+1-at-123456789012`, which are the API Reference's own examples. `ServiceCredentialAlias`
+plays the same role for a long-term key, and AWS documents it only as including "the IAM user name
+and a suffix containing version and creation information" without publishing a format, so the one
+here is Floci's: `anika+v1-20261004`.
+
+In both cases the version is the lowest one not currently in use rather than a count of what
+exists, because a count repeats a name as soon as a credential is deleted out of order. Holding
+only `anika+1`, a count of one would mint `anika+1` again and two live credentials would share the
+name the caller authenticates with. It is taken inside the same lock as the write, so two
+concurrent creates cannot both claim the same version.
+
+**The quota is two per service, not two per user**: the User Guide gives "a maximum of two sets of
+service-specific credentials for each supported service per IAM user", so a user may hold two for
+each of the six while a third for any one of them is `LimitExceeded`. Unlike the SSH public key
+limit, this one has no row in the IAM service quotas table, matching the User Guide's framing of it
+as a fixed design limit rather than an adjustable quota.
+
+`AllUsers` cannot be given together with `UserName`, which the model says in as many words, so
+naming both is a validation error rather than one quietly winning.
+
+`UserName` is required on `CreateServiceSpecificCredential` and optional on the other four, where it
+resolves from the access key that signed the request. That is a third pattern again: the
+signing-certificate operations take it optionally throughout, and the SSH key operations require it
+everywhere but the list.
+
+A service-specific credential blocks `DeleteUser` until it is removed, the last of the items AWS
+lists as a prerequisite for deleting a user programmatically, and it follows the user across an
+`UpdateUser` rename: left behind, a credential would be stranded on a name that no longer exists,
+invisible to its owner because listing goes through the user. The `ServiceUserName` is left as it
+was minted rather than re-derived from the new name, because it is what the caller authenticates
+with and rewriting it would break a working credential; AWS does not document which way it goes, so
+this is a choice rather than a sourced behaviour.
+
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
+owning user's ARN, as the general gap in
+[#4979](https://github.com/floci-io/floci/issues/4979) describes.
 
 ## AWS Managed Policies
 

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
@@ -23,6 +24,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -32,6 +34,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -2371,5 +2375,109 @@ class SqsServiceTest {
         } else {
             sqsService.changeMessageVisibility(queueUrl, receiptHandle, 10, region);
         }
+    }
+
+    @Test
+    void copyForRedrivePreservesSenderId() {
+        Message message = new Message("body");
+        message.setSenderId("AIDAEXAMPLE");
+        Message copy = message.copyForRedrive();
+        assertEquals("AIDAEXAMPLE", copy.getSenderId());
+    }
+
+    @Test
+    void sendMessageStampsSenderIdFromCallerPrincipal() {
+        String region = "us-east-1";
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        RequestContext requestContext = new RequestContext();
+        requestContext.setAccessKeyId("AKIAIOSFODNN7EXAMPLE");
+        requestContext.setAccountId("123456789012");
+        when(requestContextInstance.get()).thenReturn(requestContext);
+
+        IamService iamService = mock(IamService.class);
+        when(iamService.resolveCallerUserId(eq("AKIAIOSFODNN7EXAMPLE"), any())).thenReturn(Optional.of("AIDAUSER123"));
+
+        SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
+                requestContextInstance, iamService);
+        Queue queue = service.createQueue("sender-id-queue", null, region);
+
+        assertEquals("AIDAUSER123", service.resolveCallerSenderId(queue.getQueueUrl()));
+    }
+
+    @Test
+    void sendMessageWithoutExplicitSenderIdIgnoresRequestScopeCaller() {
+        String region = "us-east-1";
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        RequestContext requestContext = new RequestContext();
+        requestContext.setAccessKeyId("AKIAIOSFODNN7EXAMPLE");
+        requestContext.setAccountId("123456789012");
+        when(requestContextInstance.get()).thenReturn(requestContext);
+
+        IamService iamService = mock(IamService.class);
+        when(iamService.resolveCallerUserId(eq("AKIAIOSFODNN7EXAMPLE"), any())).thenReturn(Optional.of("AIDAUSER123"));
+
+        SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
+                requestContextInstance, iamService);
+        Queue queue = service.createQueue("internal-producer-queue", null, region);
+        Message message = service.sendMessage(queue.getQueueUrl(), "hello", 0, region);
+
+        assertEquals(service.senderIdFor(queue.getQueueUrl()), message.getSenderId());
+    }
+
+    @Test
+    void sendMessageFallsBackToAccountIdWhenNoCallerPrincipal() {
+        String region = "us-east-1";
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        RequestContext requestContext = new RequestContext();
+        requestContext.setAccessKeyId("AKIAOTHERKEY");
+        requestContext.setAccountId("123456789012");
+        when(requestContextInstance.get()).thenReturn(requestContext);
+
+        IamService iamService = mock(IamService.class);
+        when(iamService.resolveCallerUserId(eq("AKIAOTHERKEY"), any())).thenReturn(Optional.empty());
+
+        SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
+                requestContextInstance, iamService);
+        Queue queue = service.createQueue("sender-id-fallback-queue", null, region);
+
+        assertEquals("123456789012", service.resolveCallerSenderId(queue.getQueueUrl()));
+    }
+
+    @Test
+    void sendMessageOutsideRequestContextFallsBackToQueueOwnerAccount() {
+        String region = "us-east-1";
+        RegionResolver customResolver = new RegionResolver("us-east-1", "999988887777");
+        SqsService service = new SqsService(new InMemoryStorage<>(), null, null, null,
+                30, 1048576, BASE_URL, customResolver, false, null, clock,
+                ReceiptHandle.DEFAULT_SECRET, null, null);
+        Queue queue = service.createQueue("foreign-account-queue", null, region);
+        Message message = service.sendMessage(queue.getQueueUrl(), "hello", 0, region);
+
+        assertEquals("999988887777", message.getSenderId());
+    }
+
+    @Test
+    void sendMessageUsesExplicitSenderIdWhenProvided() {
+        String region = "us-east-1";
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        RequestContext requestContext = new RequestContext();
+        requestContext.setAccessKeyId("AKIAIOSFODNN7EXAMPLE");
+        requestContext.setAccountId("123456789012");
+        when(requestContextInstance.get()).thenReturn(requestContext);
+
+        IamService iamService = mock(IamService.class);
+        when(iamService.resolveCallerUserId(eq("AKIAIOSFODNN7EXAMPLE"), any())).thenReturn(Optional.of("AIDAUSER123"));
+
+        SqsService service = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock,
+                requestContextInstance, iamService);
+        Queue queue = service.createQueue("sender-id-explicit-queue", null, region);
+        Message message = service.sendMessage(queue.getQueueUrl(), "hello", 0, null, null, null, null,
+                "sns.amazonaws.com", region);
+
+        assertEquals("sns.amazonaws.com", message.getSenderId());
     }
 }

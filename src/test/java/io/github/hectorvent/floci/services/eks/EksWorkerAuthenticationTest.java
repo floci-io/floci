@@ -43,7 +43,7 @@ class EksWorkerAuthenticationTest {
     private final IamRole role = new IamRole("AROA-original", "worker", "/path/", ROLE, "{}");
     private final EmulatorConfig config = mock(EmulatorConfig.class);
     private final EksWorkerAuthentication auth = new EksWorkerAuthentication(iam, eks, ec2, entries, config);
-    private final EksTokenValidator.VerifiedToken verified = new EksTokenValidator.VerifiedToken(KEY, REGION);
+    private final EksTokenValidator.VerifiedToken verified = new EksTokenValidator.VerifiedToken(KEY, REGION, null);
 
     @BeforeEach
     void setup() {
@@ -71,7 +71,8 @@ class EksWorkerAuthenticationTest {
 
     @Test
     void signedWorkerTokenProducesNodeIdentityWithoutAdministratorGroup() throws Exception {
-        when(iam.findSecretKeyInAnyAccount(KEY, "session-token")).thenReturn(Optional.of("worker-secret"));
+        when(iam.findSecretKeyInAnyAccount(KEY, "session-token"))
+                .thenReturn(Optional.of(new IamService.OwnedSecretKey("worker-secret", null)));
         String token = SigV4TokenTestHelper.createEksToken("demo", KEY, "worker-secret", Instant.now(), 60, "session-token");
         EksTokenWebhookController controller = new EksTokenWebhookController(new EksTokenValidator(iam), auth);
         Map<?, ?> response = (Map<?, ?>) controller.review("demo", ACCOUNT, REGION, CREATED.toString(),
@@ -90,37 +91,33 @@ class EksWorkerAuthenticationTest {
     @Test
     void longTermKeyOfTheClustersAccountGetsTheLegacyIdentity() {
         when(iam.findEksSessionIdentity(LONG_TERM_KEY)).thenReturn(Optional.empty());
-        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.of(ACCOUNT));
-        Optional<Map<String, Object>> user = auth.authenticate(longTermToken(), "demo", ACCOUNT, REGION, CREATED.toString());
+        Optional<Map<String, Object>> user = auth.authenticate(longTermToken(ACCOUNT), "demo", ACCOUNT, REGION, CREATED.toString());
         assertEquals(List.of("system:masters"), user.orElseThrow().get("groups"));
+        verify(iam, never()).resolveAccountId(any());
     }
 
     @Test
     void longTermKeyOfAnotherAccountIsRejected() {
         when(iam.findEksSessionIdentity(LONG_TERM_KEY)).thenReturn(Optional.empty());
-        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.of(OTHER_ACCOUNT));
-        assertTrue(auth.authenticate(longTermToken(), "demo", ACCOUNT, REGION, CREATED.toString()).isEmpty());
+        assertTrue(auth.authenticate(longTermToken(OTHER_ACCOUNT), "demo", ACCOUNT, REGION, CREATED.toString()).isEmpty());
     }
 
     @Test
     void longTermKeyOfNoKnownAccountIsRejected() {
         when(iam.findEksSessionIdentity(LONG_TERM_KEY)).thenReturn(Optional.empty());
-        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.empty());
-        assertTrue(auth.authenticate(longTermToken(), "demo", ACCOUNT, REGION, CREATED.toString()).isEmpty());
+        assertTrue(auth.authenticate(longTermToken(null), "demo", ACCOUNT, REGION, CREATED.toString()).isEmpty());
     }
 
     @Test
     void unscopedWebhookAdmitsOnlyTheDefaultAccountsKeys() {
         // Clusters created before scoped webhook paths call it without an account.
         when(iam.findEksSessionIdentity(LONG_TERM_KEY)).thenReturn(Optional.empty());
-        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.of(DEFAULT_ACCOUNT));
-        assertTrue(auth.authenticate(longTermToken(), "demo", null, null, null).isPresent());
-        when(iam.resolveAccountId(LONG_TERM_KEY)).thenReturn(Optional.of(OTHER_ACCOUNT));
-        assertTrue(auth.authenticate(longTermToken(), "demo", null, null, null).isEmpty());
+        assertTrue(auth.authenticate(longTermToken(DEFAULT_ACCOUNT), "demo", null, null, null).isPresent());
+        assertTrue(auth.authenticate(longTermToken(OTHER_ACCOUNT), "demo", null, null, null).isEmpty());
     }
 
-    private static EksTokenValidator.VerifiedToken longTermToken() {
-        return new EksTokenValidator.VerifiedToken(LONG_TERM_KEY, REGION);
+    private static EksTokenValidator.VerifiedToken longTermToken(String keyAccountId) {
+        return new EksTokenValidator.VerifiedToken(LONG_TERM_KEY, REGION, keyAccountId);
     }
 
     @Test

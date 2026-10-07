@@ -69,7 +69,8 @@ class RedshiftDataResourceResolverTest {
     private static RedshiftServerlessService.WorkgroupTarget workgroupTarget() {
         return new RedshiftServerlessService.WorkgroupTarget(
                 "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", "wg-1",
-                "127.0.0.1", 55433, "analytics", "root", "Secret123", "root");
+                "127.0.0.1", 55433, "analytics", "root", "Secret123", "root",
+                List.of("arn:aws:iam::" + ACCOUNT + ":role/Spectrum"));
     }
 
     @Test
@@ -88,6 +89,10 @@ class RedshiftDataResourceResolverTest {
         assertEquals("analytics", target.database());
         assertEquals("root", target.user());
         assertEquals("Secret123", target.password());
+        assertEquals(ACCOUNT, target.spectrum().accountId());
+        assertEquals(ACCOUNT + ":serverless_us-east-1_wg-1", target.spectrum().clusterKey());
+        assertEquals("analytics", target.spectrum().databaseName());
+        assertEquals(List.of("arn:aws:iam::" + ACCOUNT + ":role/Spectrum"), target.spectrum().iamRoleArns());
     }
 
     @Test

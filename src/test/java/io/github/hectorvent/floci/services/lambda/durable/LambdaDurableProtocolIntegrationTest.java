@@ -312,6 +312,182 @@ class LambdaDurableProtocolIntegrationTest {
             .body("Events[0].EventType", equalTo("ExecutionStopped"));
     }
 
+    @Test
+    void aCallbackCompletedOverTheApiResumesTheExecution() throws Exception {
+        Response accepted = given()
+                .header("X-Amz-Invocation-Type", "Event")
+                .header("X-Amz-Durable-Execution-Name", "callback-1")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations");
+        String arn = accepted.getHeader("X-Amz-Durable-Execution-Arn");
+
+        Invocation first = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode event = MAPPER.readTree(first.payload());
+        Response started = given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body("""
+                {
+                    "CheckpointToken": "%s",
+                    "Updates": [{"Id": "c1", "Name": "approval", "Type": "CALLBACK", "SubType": "Callback",
+                                 "Action": "START",
+                                 "CallbackOptions": {"TimeoutSeconds": 300, "HeartbeatTimeoutSeconds": 120}}]
+                }
+                """.formatted(event.get("CheckpointToken").asText()))
+            .post(DURABLE + "/durable-executions/" + arn + "/checkpoint");
+        started.then()
+            .statusCode(200)
+            .body("NewExecutionState.Operations[0].Status", equalTo("STARTED"))
+            .body("NewExecutionState.Operations[0].CallbackDetails.CallbackId", notNullValue());
+        String callbackId = started.jsonPath().getString("NewExecutionState.Operations[0].CallbackDetails.CallbackId");
+        first.response().complete(handlerResponse("{\"Status\": \"PENDING\"}"));
+
+        // The SDKs percent-encode the base64 id. The CLI and curl send it raw.
+        String encodedId = callbackId.replace("+", "%2B").replace("/", "%2F").replace("=", "%3D");
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .post(DURABLE + "/durable-execution-callbacks/" + callbackId + "/heartbeat")
+        .then()
+            .statusCode(200)
+            .body(equalTo("{}"));
+
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("application/octet-stream")
+            .body(new byte[1024 * 1024 + 1])
+        .when()
+            .post(DURABLE + "/durable-execution-callbacks/" + encodedId + "/succeed")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value at 'result' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 1048576"));
+
+        for (String notAnObject : List.of("   ", "null", "{")) {
+            given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body(notAnObject)
+            .when()
+                .post(DURABLE + "/durable-execution-callbacks/" + encodedId + "/fail")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        }
+
+        String oversizedError = "{\"ErrorType\":\"Big\",\"ErrorMessage\":\"" + "m".repeat(1024 * 1024) + "\"}";
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body(oversizedError)
+        .when()
+            .post(DURABLE + "/durable-execution-callbacks/" + encodedId + "/fail")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", equalTo("Error object size must be less than or equal to 1048576 bytes."));
+
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("application/octet-stream")
+            .body("{\"approved\":true}".getBytes(StandardCharsets.UTF_8))
+        .when()
+            .post(DURABLE + "/durable-execution-callbacks/" + encodedId + "/succeed")
+        .then()
+            .statusCode(200)
+            .body(equalTo("{}"));
+
+        Invocation second = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode resumed = MAPPER.readTree(second.payload());
+        JsonNode callback = resumed.at("/InitialExecutionState/Operations/1");
+        assertEquals("SUCCEEDED", callback.get("Status").asText());
+        assertEquals(callbackId, callback.at("/CallbackDetails/CallbackId").asText());
+        assertEquals("{\"approved\":true}", callback.at("/CallbackDetails/Result").asText());
+        second.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"\\\"ok\\\"\"}"));
+
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body("{\"ErrorMessage\": \"too late\"}")
+        .when()
+            .post(DURABLE + "/durable-execution-callbacks/" + encodedId + "/fail")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("CallbackTimeoutException"))
+            .body("message", equalTo("The callback is either timed out or already completed"));
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .post(DURABLE + "/durable-execution-callbacks/not-valid!/heartbeat")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", equalTo("Invalid callback id"));
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn + "/history?IncludeExecutionData=true")
+        .then()
+            .statusCode(200)
+            .body("Events.EventType", equalTo(List.of("ExecutionStarted", "CallbackStarted", "InvocationCompleted",
+                    "CallbackSucceeded", "InvocationCompleted", "ExecutionSucceeded")))
+            .body("Events[1].Name", equalTo("approval"))
+            .body("Events[1].CallbackStartedDetails.CallbackId", equalTo(callbackId))
+            .body("Events[1].CallbackStartedDetails.Timeout", equalTo(300))
+            .body("Events[1].CallbackStartedDetails.HeartbeatTimeout", equalTo(120))
+            .body("Events[3].CallbackSucceededDetails.Result.Payload", equalTo("{\"approved\":true}"));
+    }
+
+    @Test
+    void aChainedInvokeOfAnUnqualifiedDurableFunctionFailsInTheCheckpointResponse() throws Exception {
+        Response accepted = given()
+                .header("X-Amz-Invocation-Type", "Event")
+                .header("X-Amz-Durable-Execution-Name", "chained-1")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations");
+        String arn = accepted.getHeader("X-Amz-Durable-Execution-Arn");
+
+        Invocation first = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode event = MAPPER.readTree(first.payload());
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body("""
+                {
+                    "CheckpointToken": "%s",
+                    "Updates": [{"Id": "i1", "Name": "greet", "Type": "CHAINED_INVOKE", "SubType": "ChainedInvoke",
+                                 "Action": "START", "ChainedInvokeOptions": {"FunctionName": "%s"}}]
+                }
+                """.formatted(event.get("CheckpointToken").asText(), FUNCTION))
+        .when()
+            .post(DURABLE + "/durable-executions/" + arn + "/checkpoint")
+        .then()
+            .statusCode(200)
+            .body("NewExecutionState.Operations[0].Type", equalTo("CHAINED_INVOKE"))
+            .body("NewExecutionState.Operations[0].Status", equalTo("FAILED"))
+            .body("NewExecutionState.Operations[0].ChainedInvokeDetails.Error.ErrorType",
+                    equalTo("InvalidParameterValueException"))
+            .body("NewExecutionState.Operations[0].ChainedInvokeDetails.Error.ErrorMessage",
+                    equalTo("You cannot invoke a durable function using an unqualified ARN."));
+        first.response().complete(handlerResponse("{\"Status\": \"PENDING\"}"));
+
+        Invocation second = invoker.awaitInvocation(Duration.ofSeconds(30));
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn + "/history")
+        .then()
+            .statusCode(200)
+            .body("Events.EventType", equalTo(List.of("ExecutionStarted", "ChainedInvokeStarted",
+                    "ChainedInvokeFailed", "InvocationCompleted")))
+            .body("Events[1].ChainedInvokeStartedDetails.FunctionName", equalTo(FUNCTION))
+            .body("Events[2].ChainedInvokeFailedDetails.Error.Truncated", equalTo(true));
+        second.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"\\\"ok\\\"\"}"));
+    }
+
     private static DurableInvocationResult handlerResponse(String json) {
         return new DurableInvocationResult("req-" + System.nanoTime(), json.getBytes(StandardCharsets.UTF_8), null);
     }
