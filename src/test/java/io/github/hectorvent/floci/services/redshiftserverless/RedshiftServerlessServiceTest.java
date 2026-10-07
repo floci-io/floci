@@ -918,6 +918,23 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void restoreFailsWhenTheDumpFileIsGone() throws Exception {
+        create("gone-ns");
+        createWorkgroup("gone-wg", "gone-ns");
+        doAnswer(invocation -> {
+            Files.writeString(invocation.getArgument(5, Path.class), "-- dump");
+            return null;
+        }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("gone-snap", "gone-ns", null, null, REGION);
+        Files.delete(Path.of(snapshot.getSqlDump()));
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot("gone-ns", "gone-wg", "gone-snap", null, REGION));
+        assertEquals("InternalServerException", missing.getErrorCode());
+        verify(runtime, never()).restoreSnapshot(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void createSnapshotWithoutALiveWorkgroupIsMetadataOnly() {
         create("meta-ns");
         createWorkgroup("meta-wg", "meta-ns");

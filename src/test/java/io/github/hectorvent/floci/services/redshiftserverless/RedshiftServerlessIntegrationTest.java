@@ -8,6 +8,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
@@ -18,6 +21,7 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
@@ -190,6 +194,10 @@ class RedshiftServerlessIntegrationTest {
 
     @Test
     void snapshotLifecycleIsVisibleThroughSeparateReads() {
+        doAnswer(invocation -> {
+            Files.writeString(invocation.getArgument(5, Path.class), "-- dump");
+            return null;
+        }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
         call("CreateNamespace", "{\"namespaceName\":\"snap-life-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
         call("CreateWorkgroup", "{\"workgroupName\":\"snap-life-wg\",\"namespaceName\":\"snap-life-ns\"}")
                 .statusCode(200);

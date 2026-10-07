@@ -524,10 +524,12 @@ public class RedshiftServerlessService implements Resettable {
                     + namespaceName + ".");
         }
         Namespace namespace = getNamespace(namespaceName, region);
-        Optional<Path> dump = trustedDump(snapshot, region).filter(Files::exists);
-        if (dump.isPresent() && hasLiveRuntime(workgroup)) {
+        if (snapshot.getSqlDump() != null && hasLiveRuntime(workgroup)) {
+            Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> new AwsException(
+                    "InternalServerException", "The data of snapshot " + snapshotName + " is no longer available.",
+                    500));
             runtime.restoreSnapshot(workgroups.accountId(), region, workgroupName, workgroup.getMasterUsername(),
-                    namespace.getDbName(), dump.get());
+                    namespace.getDbName(), dump);
         }
         Namespace restored = new Namespace(namespace);
         restored.setStatus("AVAILABLE");

@@ -281,6 +281,15 @@ public class RedshiftContainerManager {
     }
 
     public void restoreSnapshot(String accountId, String clusterIdentifier, String username, String dbname, Path sqlDumpFile) {
+        restoreSnapshot(accountId, clusterIdentifier, username, dbname, sqlDumpFile, false);
+    }
+
+    /**
+     * Replays the dump with psql. With {@code stopOnError} the first failing statement aborts the
+     * replay and fails the call, instead of psql skipping it and exiting successfully.
+     */
+    public void restoreSnapshot(String accountId, String clusterIdentifier, String username, String dbname,
+                                Path sqlDumpFile, boolean stopOnError) {
         RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
@@ -301,7 +310,10 @@ public class RedshiftContainerManager {
                     .withRemotePath("/tmp")
                     .exec();
 
-            String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-f", "/tmp/" + fileName};
+            String[] cmd = stopOnError
+                    ? new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-v", "ON_ERROR_STOP=1",
+                            "-f", "/tmp/" + fileName}
+                    : new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-f", "/tmp/" + fileName};
             ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 60);
             if (result.exitCode() != 0) {
                 LOG.warnv("psql restore failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
@@ -315,11 +327,17 @@ public class RedshiftContainerManager {
         }
     }
 
+    private static final String DROP_USER_SCHEMAS_SQL = "DO $$ DECLARE s text; BEGIN "
+            + "FOR s IN SELECT nspname FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema') "
+            + "AND nspname NOT LIKE 'pg\\_%' LOOP EXECUTE format('DROP SCHEMA %I CASCADE', s); END LOOP; "
+            + "CREATE SCHEMA public; END $$;";
+
     /**
-     * Empties the {@code public} schema so a following {@link #restoreSnapshot} replays into a clean
-     * database rather than appending to what is already there.
+     * Drops every user schema and recreates an empty {@code public} one, so a following
+     * {@link #restoreSnapshot} replays into a clean database rather than appending to what is
+     * already there.
      */
-    public void resetPublicSchema(String accountId, String clusterIdentifier, String username, String dbname) {
+    public void resetUserSchemas(String accountId, String clusterIdentifier, String username, String dbname) {
         RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
@@ -327,7 +345,7 @@ public class RedshiftContainerManager {
         String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
         String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
         String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-c",
-                "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"};
+                DROP_USER_SCHEMAS_SQL};
         try {
             ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 30);
             if (result.exitCode() != 0) {

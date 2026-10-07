@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
@@ -26,6 +27,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -81,14 +83,29 @@ class RedshiftServerlessRuntimeTest {
     }
 
     @Test
-    void restoreSnapshotEmptiesTheSchemaBeforeReplayingTheDump() {
+    void restoreSnapshotEmptiesTheSchemasBeforeReplayingTheDumpAndStopsOnError() {
         Path dump = Path.of("/tmp/dump.sql");
 
         runtime.restoreSnapshot(ACCOUNT, REGION, "my-wg", "root", "analytics", dump);
 
         InOrder order = inOrder(containers);
-        order.verify(containers).resetPublicSchema(ACCOUNT, BACKEND_ID, "root", "analytics");
-        order.verify(containers).restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump);
+        order.verify(containers).takeSnapshot(eq(ACCOUNT), eq(BACKEND_ID), eq("root"), eq("analytics"), any(Path.class));
+        order.verify(containers).resetUserSchemas(ACCOUNT, BACKEND_ID, "root", "analytics");
+        order.verify(containers).restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump, true);
+    }
+
+    @Test
+    void aFailedReplayPutsTheEarlierContentsBack() {
+        Path dump = Path.of("/tmp/dump.sql");
+        doThrow(new AwsException("InternalFailure", "bad dump", 500)).when(containers)
+                .restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump, true);
+
+        assertThrows(AwsException.class,
+                () -> runtime.restoreSnapshot(ACCOUNT, REGION, "my-wg", "root", "analytics", dump));
+
+        verify(containers, times(2)).resetUserSchemas(ACCOUNT, BACKEND_ID, "root", "analytics");
+        verify(containers, times(2)).restoreSnapshot(eq(ACCOUNT), eq(BACKEND_ID), eq("root"), eq("analytics"),
+                any(Path.class), eq(true));
     }
 
     @Test
