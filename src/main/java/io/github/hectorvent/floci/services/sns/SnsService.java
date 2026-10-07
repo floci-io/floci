@@ -1842,7 +1842,7 @@ public class SnsService implements Resettable, ResourceProvider {
                     boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
                     String body = rawDelivery
                             ? protocolMessage
-                            : buildSnsSqsEnvelope(protocolMessage, subject, messageAttributes, topicArn, messageId,
+                            : buildSnsEnvelope(protocolMessage, subject, messageAttributes, topicArn, messageId,
                                     sub.getSubscriptionArn(), signatureVersion);
                     Map<String, MessageAttributeValue> sqsAttributes = rawDelivery
                             ? toSqsMessageAttributes(messageAttributes)
@@ -1940,7 +1940,8 @@ public class SnsService implements Resettable, ResourceProvider {
                             && "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
                     String body = rawDelivery
                             ? protocolMessage
-                            : buildSnsEnvelope(protocolMessage, subject, messageAttributes, topicArn, messageId);
+                            : buildSnsEnvelope(protocolMessage, subject, messageAttributes, topicArn, messageId,
+                                    null, null);
                     byte[] data = body.getBytes(StandardCharsets.UTF_8);
                     firehoseService.putRecord(accountId, region, streamName, new Record(data));
                     LOG.debugv("Delivered SNS message to Firehose: {0} ({1}) raw={2}", sub.getEndpoint(), streamName, rawDelivery);
@@ -2091,9 +2092,15 @@ public class SnsService implements Resettable, ResourceProvider {
         return new java.util.HashMap<>(snsAttributes);
     }
 
+    /**
+     * The JSON notification envelope SQS and Firehose share. With a {@code subscriptionArn} it is
+     * signed and carries {@code UnsubscribeURL}, as a non-raw SQS delivery does; without one it is
+     * the unsigned form Firehose receives.
+     */
     private String buildSnsEnvelope(String message, String subject,
                                     Map<String, MessageAttributeValue> messageAttributes,
-                                    String topicArn, String messageId) {
+                                    String topicArn, String messageId, String subscriptionArn,
+                                    String signatureVersion) {
         try {
             String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
             ObjectNode node = objectMapper.createObjectNode();
@@ -2105,43 +2112,10 @@ public class SnsService implements Resettable, ResourceProvider {
                 node.put("Subject", subject);
             }
             node.put("Message", message);
-            ObjectNode attrs = node.putObject("MessageAttributes");
-            if (messageAttributes != null) {
-                for (Map.Entry<String, MessageAttributeValue> entry : messageAttributes.entrySet()) {
-                    ObjectNode attr = attrs.putObject(entry.getKey());
-                    attr.put("Type", entry.getValue().getDataType());
-                    if (entry.getValue().getBinaryValue() != null) {
-                        attr.put("Value", Base64.getEncoder()
-                                .encodeToString(entry.getValue().getBinaryValue()));
-                    } else {
-                        attr.put("Value", entry.getValue().getStringValue());
-                    }
-                }
+            if (subscriptionArn != null) {
+                messageSigner.sign(node, signatureVersion, "SigningCertURL");
+                node.put("UnsubscribeURL", unsubscribeUrl(subscriptionArn));
             }
-            return objectMapper.writeValueAsString(node);
-        } catch (Exception e) {
-            return "{}";
-        }
-    }
-
-    /** The non-raw SQS envelope: the Firehose form plus the signature fields and UnsubscribeURL. */
-    private String buildSnsSqsEnvelope(String message, String subject,
-                                       Map<String, MessageAttributeValue> messageAttributes,
-                                       String topicArn, String messageId, String subscriptionArn,
-                                       String signatureVersion) {
-        try {
-            String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
-            ObjectNode node = objectMapper.createObjectNode();
-            node.put("Type", "Notification");
-            node.put("MessageId", messageId);
-            node.put("TopicArn", topicArn);
-            node.put("Timestamp", timestamp);
-            if (subject != null) {
-                node.put("Subject", subject);
-            }
-            node.put("Message", message);
-            messageSigner.sign(node, signatureVersion, "SigningCertURL");
-            node.put("UnsubscribeURL", unsubscribeUrl(subscriptionArn));
             ObjectNode attrs = node.putObject("MessageAttributes");
             if (messageAttributes != null) {
                 for (Map.Entry<String, MessageAttributeValue> entry : messageAttributes.entrySet()) {
@@ -2157,7 +2131,7 @@ public class SnsService implements Resettable, ResourceProvider {
             }
             return objectMapper.writeValueAsString(node);
         } catch (JsonProcessingException e) {
-            LOG.warnv("Failed to build SNS envelope for {0}: {1}", subscriptionArn, e.getMessage());
+            LOG.warnv("Failed to build SNS envelope for message {0}: {1}", messageId, e.getMessage());
             return "{}";
         }
     }
