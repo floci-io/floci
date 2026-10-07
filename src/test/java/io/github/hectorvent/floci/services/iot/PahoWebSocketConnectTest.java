@@ -29,6 +29,15 @@ class PahoWebSocketConnectTest {
     }
 
     @Test
+    void theConnectUsesMqtt311SoTheRaceIsNotHiddenByTheMqtt31Fallback() throws Exception {
+        MqttConnectOptions options = new MqttConnectOptions();
+
+        PahoWebSocketConnect.connect(new ScriptedClient(List.of()), options);
+
+        assertEquals(MqttConnectOptions.MQTT_VERSION_3_1_1, options.getMqttVersion());
+    }
+
+    @Test
     void anyOtherFailureIsThrownAtOnce() throws Exception {
         MqttException refused = new MqttException(new IOException("Connection refused"));
         ScriptedClient client = new ScriptedClient(List.of(refused));
