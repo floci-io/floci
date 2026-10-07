@@ -309,11 +309,15 @@ When adding functionality:
    value, while strict SDKs (Go, Java) reject the whole response. `javap -c` on the SDK
    model class shows the traits on each `SdkField`
 9. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
-10. Document it: `docs/services/<svc>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in
+10. If the service mints ARNs or AWS hosts (`buildArn`, `Arn.of`, `dnsSuffixFor`, `AwsEndpoints`),
+   add a case to `PartitionCrossServiceSmokeIntegrationTest` and its `COVERED_PACKAGES`, or a row
+   with a reason to `src/test/resources/partition/smoke-exemptions.tsv`;
+   `PartitionSmokeInventoryTest` fails until one of the two exists
+11. Document it: `docs/services/<svc>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in
    `docs/services/index.md`, and a row in the README category table
-11. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and
+12. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and
     `make docs-check`
-12. Add a `TestFixtures` client factory and a `<Svc>Test` in `compatibility-tests/sdk-test-java`
+13. Add a `TestFixtures` client factory and a `<Svc>Test` in `compatibility-tests/sdk-test-java`
 
 ---
 
