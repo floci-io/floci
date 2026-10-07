@@ -85,8 +85,9 @@ class PartitionStrictModeIntegrationTest {
         given()
             .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "execute-api"))
         .when().get("/execute-api/nosuchapi/prod/items").then()
-            .statusCode(not(equalTo(200)))
+            .statusCode(404)
             .header("X-Amzn-Errortype", not(equalTo("UnknownOperationException")))
+            .body("message", equalTo("Invalid API id specified"))
             .body(not(containsString("has no endpoint in partition")));
     }
 
