@@ -138,6 +138,51 @@ class ApiGatewayExportServiceTest {
         assertTrue(error.getMessage().contains("Missing authorizer for protected method"));
     }
 
+    @ParameterizedTest
+    @CsvSource({"TOKEN,oas30", "TOKEN,swagger", "COGNITO_USER_POOLS,oas30", "COGNITO_USER_POOLS,swagger"})
+    void unusedAuthorizerDoesNotBlockDefaultExportImportOrOverwrite(String kind, String format) {
+        String apiId = protectedApi(kind);
+        String rootId = service.getResources(REGION, apiId).get(0).getId();
+        service.putMethod(REGION, apiId, rootId, "GET", Map.of("authorizationType", "NONE"));
+        service.createDeployment(REGION, apiId, Map.of("stageName", "dev"));
+        JsonNode document = service.exportRestApi(REGION, apiId, "dev", format, null);
+        String restoredId = service.importRestApi(REGION, document.toString()).getId();
+        MethodConfig restored = service.getResources(REGION, restoredId).get(0).getResourceMethods().get("GET");
+        assertEquals("NONE", restored.getAuthorizationType());
+        assertFalse(restored.isApiKeyRequired());
+        service.putRestApi(REGION, apiId, "overwrite", document.toString());
+        assertEquals("NONE", service.getResources(REGION, apiId).get(0).getResourceMethods().get("GET").getAuthorizationType());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"get,false", "get,true", "x-amazon-apigateway-any-method,false", "x-amazon-apigateway-any-method,true"})
+    void incompleteAuthorizerCheckUsesEffectiveOperationSecurity(String verb, boolean overrideSecurity) {
+        String document = """
+                {
+                  "openapi": "3.0.1", "info": {"title": "user-definition", "version": "1"},
+                  "components": {"securitySchemes": {"Unused": {
+                    "type": "apiKey", "in": "header", "name": "Authorization",
+                    "x-amazon-apigateway-authtype": "custom"
+                  }}},
+                  "security": [{"Unused": []}],
+                  "paths": {"/": {"%s": {
+                    %s
+                    "responses": {"200": {"description": "OK"}}
+                  }}}
+                }
+                """.formatted(verb, overrideSecurity ? "\"security\": []," : "");
+        if (overrideSecurity) {
+            String apiId = service.importRestApi(REGION, document).getId();
+            MethodConfig method = service.getResources(REGION, apiId).get(0).getResourceMethods()
+                    .get("get".equals(verb) ? "GET" : "ANY");
+            assertEquals("NONE", method.getAuthorizationType());
+            assertFalse(method.isApiKeyRequired());
+        } else {
+            AwsException rejected = assertThrows(AwsException.class, () -> service.importRestApi(REGION, document));
+            assertTrue(rejected.getMessage().contains("authorizer definition"));
+        }
+    }
+
     private String protectedApi(String kind) {
         String apiId = service.createRestApi(REGION, Map.of("name", "protected-export")).getId();
         String rootId = service.getResources(REGION, apiId).get(0).getId();

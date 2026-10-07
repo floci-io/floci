@@ -29,8 +29,11 @@ class ApiGatewayExportCompatibilityTest {
             String restoredId = null;
             try {
                 String rootId = client.getResources(request -> request.restApiId(apiId)).items().get(0).id();
+                client.createModel(request -> request.restApiId(apiId).name("Widget").contentType("application/json")
+                        .schema("{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}}}"));
                 client.putMethod(request -> request.restApiId(apiId).resourceId(rootId).httpMethod("GET")
                         .authorizationType("AWS_IAM").apiKeyRequired(true)
+                        .requestModels(Map.of("application/json", "Widget"))
                         .requestParameters(Map.of("method.request.header.X-Trace", true)));
                 client.putIntegration(request -> request.restApiId(apiId).resourceId(rootId).httpMethod("GET")
                         .type(IntegrationType.MOCK).timeoutInMillis(9000)
@@ -56,6 +59,9 @@ class ApiGatewayExportCompatibilityTest {
                 assertThat(get.authorizationType()).isEqualTo("AWS_IAM");
                 assertThat(get.apiKeyRequired()).isTrue();
                 assertThat(get.requestParameters()).containsEntry("method.request.header.X-Trace", true);
+                assertThat(get.requestModels()).containsEntry("application/json", "Widget");
+                assertThat(client.getModel(request -> request.restApiId(importedId).modelName("Widget")).schema())
+                        .contains("name", "string");
                 assertThat(get.methodResponses().get("200").responseParameters()).containsEntry("method.response.header.X-Trace", false);
                 assertThat(get.methodIntegration().type()).isEqualTo(IntegrationType.MOCK);
                 assertThat(get.methodIntegration().timeoutInMillis()).isEqualTo(9000);
@@ -71,6 +77,45 @@ class ApiGatewayExportCompatibilityTest {
             }
         }
     }
+    @ParameterizedTest
+    @CsvSource({"TOKEN,oas30", "TOKEN,swagger", "COGNITO_USER_POOLS,oas30", "COGNITO_USER_POOLS,swagger"})
+    @DisplayName("Unused authorizers do not block default export re-import")
+    void unusedAuthorizerDoesNotProtectPublicMethods(String kind, String format) {
+        try (ApiGatewayClient client = TestFixtures.apiGatewayClient()) {
+            String apiId = client.createRestApi(request -> request.name(TestFixtures.uniqueName("unused-authorizer"))).id();
+            String restoredId = null;
+            try {
+                client.createAuthorizer(request -> {
+                    request.restApiId(apiId).name("Unused").type(AuthorizerType.fromValue(kind))
+                            .identitySource("method.request.header.Authorization");
+                    if ("TOKEN".equals(kind)) {
+                        request.authorizerUri("arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:auth/invocations");
+                    } else {
+                        request.providerARNs("arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_fixture");
+                    }
+                });
+                String rootId = client.getResources(request -> request.restApiId(apiId)).items().get(0).id();
+                client.putMethod(request -> request.restApiId(apiId).resourceId(rootId).httpMethod("GET")
+                        .authorizationType("NONE"));
+                client.createDeployment(request -> request.restApiId(apiId).stageName("dev"));
+                SdkBytes document = client.getExport(request -> request.restApiId(apiId).stageName("dev")
+                        .exportType(format).accepts("application/json")).body();
+                restoredId = client.importRestApi(request -> request.body(document)).id();
+                String importedId = restoredId;
+                Resource restored = client.getResources(request -> request.restApiId(importedId).embed("methods"))
+                        .items().stream().filter(resource -> resource.path().equals("/")).findFirst().orElseThrow();
+                assertThat(restored.resourceMethods().get("GET").authorizationType()).isEqualTo("NONE");
+                assertThat(restored.resourceMethods().get("GET").apiKeyRequired()).isFalse();
+            } finally {
+                if (restoredId != null) {
+                    String importedId = restoredId;
+                    client.deleteRestApi(request -> request.restApiId(importedId));
+                }
+                client.deleteRestApi(request -> request.restApiId(apiId));
+            }
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"TOKEN,oas30", "TOKEN,swagger", "COGNITO_USER_POOLS,oas30", "COGNITO_USER_POOLS,swagger"})
     @DisplayName("Protected exports need authorizer definitions for a safe re-import")

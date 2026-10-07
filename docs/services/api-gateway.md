@@ -404,6 +404,9 @@ By default, integration and authorizer definitions are omitted, while the author
 remains in each security scheme. A protected API exported without authorizer definitions cannot be
 safely re-imported: Floci returns `BadRequestException` before changing resources. For an importable
 protected definition, include `extensions=authorizers` or `extensions=apigateway`.
+Only schemes referenced by an operation's effective security requirements need a definition;
+unused schemes do not prevent re-import. Explicit operation security overrides API-level security,
+including an empty security list that makes the operation public.
 
 Request `extensions=integrations` or `extensions=authorizers` for the respective definitions;
 `extensions=apigateway` includes both, request validators, customized gateway responses, API policy

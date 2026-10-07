@@ -3194,14 +3194,16 @@ public class ApiGatewayService implements ResourceProvider {
         if (openAPI.getComponents() == null || openAPI.getComponents().getSecuritySchemes() == null) {
             return;
         }
-        for (var entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
+        Set<String> referencedSchemes = referencedSecuritySchemes(openAPI);
+        for (Map.Entry<String, SecurityScheme> entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
             String schemeName = entry.getKey();
             SecurityScheme scheme = entry.getValue();
             String authorizationType = importedAuthorizationType(scheme, schemeName);
             Map<String, Object> authDef = importedAuthorizerDefinition(scheme, schemeName);
             if (authDef == null) {
-                if ("custom".equalsIgnoreCase(authorizationType)
-                        || "cognito_user_pools".equalsIgnoreCase(authorizationType)) {
+                if (referencedSchemes.contains(schemeName)
+                        && ("custom".equalsIgnoreCase(authorizationType)
+                        || "cognito_user_pools".equalsIgnoreCase(authorizationType))) {
                     throw new AwsException("BadRequestException",
                             "Missing authorizer definition for security scheme " + schemeName
                                     + ". Export with extensions=authorizers or extensions=apigateway before importing.", 400);
@@ -3221,6 +3223,30 @@ public class ApiGatewayService implements ResourceProvider {
                         400);
             }
         }
+    }
+
+    private Set<String> referencedSecuritySchemes(OpenAPI openAPI) {
+        Set<String> schemes = new HashSet<>();
+        if (openAPI.getPaths() == null) {
+            return schemes;
+        }
+        for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
+            PathItem path = entry.getValue();
+            List<Operation> operations = new ArrayList<>(path.readOperations());
+            Object anyMethod = path.getExtensions() == null
+                    ? null : path.getExtensions().get("x-amazon-apigateway-any-method");
+            if (anyMethod != null) {
+                operations.add(parseAnyMethodOperation(entry.getKey(), anyMethod));
+            }
+            for (Operation operation : operations) {
+                List<SecurityRequirement> requirements = operation.getSecurity() != null
+                        ? operation.getSecurity() : openAPI.getSecurity();
+                if (requirements != null) {
+                    requirements.forEach(requirement -> schemes.addAll(requirement.keySet()));
+                }
+            }
+        }
+        return schemes;
     }
 
     @SuppressWarnings("unchecked")
