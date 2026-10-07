@@ -181,7 +181,19 @@ public class RedshiftContainerManager {
         return ContainerStorageHelper.dockerName(config, "redshift-" + accountId + "-" + clusterIdentifier);
     }
 
+    /** Schema {@code bootstrap-catalog.sql} owns; the catalog views read it, so snapshots leave it alone. */
+    public static final String BOOTSTRAP_SCHEMA = "floci_internal";
+
     public void takeSnapshot(String accountId, String clusterIdentifier, String username, String dbname, Path outputFile) {
+        takeSnapshot(accountId, clusterIdentifier, username, dbname, outputFile, false);
+    }
+
+    /**
+     * Dumps the database with pg_dump. With {@code skipBootstrapSchema} the {@link #BOOTSTRAP_SCHEMA}
+     * is left out, which a dump meant to be replayed into a live, already bootstrapped container needs.
+     */
+    public void takeSnapshot(String accountId, String clusterIdentifier, String username, String dbname,
+                             Path outputFile, boolean skipBootstrapSchema) {
         RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
@@ -190,7 +202,10 @@ public class RedshiftContainerManager {
         String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
         String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
 
-        String[] cmd = new String[]{"pg_dump", "-U", effectiveUser, effectiveDb, "-f", "/tmp/dump.sql"};
+        String[] cmd = skipBootstrapSchema
+                ? new String[]{"pg_dump", "-U", effectiveUser, "--exclude-schema=" + BOOTSTRAP_SCHEMA, effectiveDb,
+                        "-f", "/tmp/dump.sql"}
+                : new String[]{"pg_dump", "-U", effectiveUser, effectiveDb, "-f", "/tmp/dump.sql"};
         try {
             ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 30);
             if (result.exitCode() != 0) {
@@ -329,11 +344,11 @@ public class RedshiftContainerManager {
 
     private static final String DROP_USER_SCHEMAS_SQL = "DO $$ DECLARE s text; BEGIN "
             + "FOR s IN SELECT nspname FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema') "
-            + "AND nspname NOT LIKE 'pg\\_%' LOOP EXECUTE format('DROP SCHEMA %I CASCADE', s); END LOOP; "
+            + "AND nspname <> '" + BOOTSTRAP_SCHEMA + "' AND nspname NOT LIKE 'pg\\_%' LOOP EXECUTE format('DROP SCHEMA %I CASCADE', s); END LOOP; "
             + "CREATE SCHEMA public; END $$;";
 
     /**
-     * Drops every user schema and recreates an empty {@code public} one, so a following
+     * Drops every user schema except the bootstrap one and recreates an empty {@code public} one, so a following
      * {@link #restoreSnapshot} replays into a clean database rather than appending to what is
      * already there.
      */

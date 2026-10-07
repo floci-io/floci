@@ -88,7 +88,8 @@ public class RedshiftServerlessRuntime {
     /** Dumps the workgroup's database to {@code outputFile} with pg_dump. */
     public void takeSnapshot(String accountId, String region, String workgroupName, String masterUsername,
                              String dbName, Path outputFile) {
-        containerManager.takeSnapshot(accountId, backendId(region, workgroupName), masterUsername, dbName, outputFile);
+        containerManager.takeSnapshot(accountId, backendId(region, workgroupName), masterUsername, dbName, outputFile,
+                true);
     }
 
     /**
@@ -107,7 +108,7 @@ public class RedshiftServerlessRuntime {
                     "Failed to prepare the restore of workgroup " + workgroupName + ": " + e.getMessage(), 500);
         }
         try {
-            containerManager.takeSnapshot(accountId, backendId, masterUsername, dbName, safety);
+            containerManager.takeSnapshot(accountId, backendId, masterUsername, dbName, safety, true);
             try {
                 containerManager.resetUserSchemas(accountId, backendId, masterUsername, dbName);
                 containerManager.restoreSnapshot(accountId, backendId, masterUsername, dbName, dumpFile, true);

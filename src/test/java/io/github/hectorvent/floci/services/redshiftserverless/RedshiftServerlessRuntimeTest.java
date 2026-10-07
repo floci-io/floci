@@ -79,7 +79,7 @@ class RedshiftServerlessRuntimeTest {
 
         runtime.takeSnapshot(ACCOUNT, REGION, "my-wg", "root", "analytics", dump);
 
-        verify(containers).takeSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump);
+        verify(containers).takeSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump, true);
     }
 
     @Test
@@ -89,7 +89,7 @@ class RedshiftServerlessRuntimeTest {
         runtime.restoreSnapshot(ACCOUNT, REGION, "my-wg", "root", "analytics", dump);
 
         InOrder order = inOrder(containers);
-        order.verify(containers).takeSnapshot(eq(ACCOUNT), eq(BACKEND_ID), eq("root"), eq("analytics"), any(Path.class));
+        order.verify(containers).takeSnapshot(eq(ACCOUNT), eq(BACKEND_ID), eq("root"), eq("analytics"), any(Path.class), eq(true));
         order.verify(containers).resetUserSchemas(ACCOUNT, BACKEND_ID, "root", "analytics");
         order.verify(containers).restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump, true);
     }
