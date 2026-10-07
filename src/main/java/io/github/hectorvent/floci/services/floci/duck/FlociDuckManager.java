@@ -122,6 +122,7 @@ public class FlociDuckManager {
                 .withDynamicPort(DUCK_PORT)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withEmbeddedDns()
+                .withHostDockerInternalOnLinux()
                 .withLogRotation()
                 .build();
 

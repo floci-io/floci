@@ -429,6 +429,9 @@ final class CognitoAuthFlowHandler {
                 throw new AwsException("NotAuthorizedException", "Session not found", 400);
             }
         }
+        if (phase == TotpPhase.VERIFIED) {
+            service.activateSoftwareTokenMfaAfterSetup(pool.getId(), user.getUsername());
+        }
         Map<String, String> metadata = clientMetadata != null && !clientMetadata.isEmpty()
                 ? clientMetadata : state.clientMetadata();
         return authenticationResult(pool, client, user, state.triggerSource(), metadata);
@@ -1179,6 +1182,12 @@ final class CognitoAuthFlowHandler {
         List<String> available = availableUserAuthChallenges(user);
         List<String> allowed = allowedFirstAuthFactors(pool);
         available.removeIf(challenge -> !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
+        // Where MFA is optional, AWS lets a user who has turned on an MFA factor sign in with a password
+        // only, so that the second factor still follows. Floci asks for software-token codes, not for
+        // email or SMS ones, so only that factor restricts the choice here.
+        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && CognitoService.softwareTokenMfaEnabled(user)) {
+            available.removeIf(challenge -> !"PASSWORD".equals(challenge) && !"PASSWORD_SRP".equals(challenge));
+        }
         return available;
     }
 
@@ -1918,14 +1927,23 @@ final class CognitoAuthFlowHandler {
         }
     }
 
+    /**
+     * Ends a successful first factor with tokens, or with the MFA challenge the pool and user call for.
+     * A pool that requires MFA asks for the user's authenticator, or sets one up when the user has none.
+     * Where MFA is optional, only a user who has turned on software-token MFA with SetUserMFAPreference
+     * is asked for a code. AWS keeps accepting a registered authenticator after the pool stops offering
+     * software-token MFA, so the optional case does not look at the pool's software-token setting.
+     */
     private Map<String, Object> completePrimaryAuth(UserPool pool, UserPoolClient client, CognitoUser user,
                                                      String triggerSource, Map<String, String> clientMetadata) {
-        if (!"ON".equals(pool.getMfaConfiguration())
-                || !Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled())) {
+        TotpPhase phase;
+        if ("OPTIONAL".equals(pool.getMfaConfiguration()) && CognitoService.softwareTokenMfaEnabled(user)) {
+            phase = TotpPhase.CODE_REQUIRED;
+        } else if ("ON".equals(pool.getMfaConfiguration()) && Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled())) {
+            phase = user.getSoftwareTokenMfaSecret() == null ? TotpPhase.SETUP : TotpPhase.CODE_REQUIRED;
+        } else {
             return authenticationResult(pool, client, user, triggerSource, clientMetadata);
         }
-        TotpPhase phase = user.getSoftwareTokenMfaSecret() == null
-                ? TotpPhase.SETUP : TotpPhase.CODE_REQUIRED;
         String challengeName = phase == TotpPhase.SETUP ? "MFA_SETUP" : "SOFTWARE_TOKEN_MFA";
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);

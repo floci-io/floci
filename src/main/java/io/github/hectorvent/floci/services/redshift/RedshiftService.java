@@ -603,6 +603,7 @@ public class RedshiftService {
         }
 
         containerManager.stop(clusters.accountId(), identifier);
+        proxyManager.forgetSpectrumRuntime(relayKey(clusters.accountId(), identifier));
         clusters.delete(identifier);
         clusters.flush();
         // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this

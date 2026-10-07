@@ -272,6 +272,63 @@ current S3 emulator authorization mode, and role-specific Spectrum access enforc
 future phase. Parquet, JSON, Avro, ORC, partition discovery, `ALTER`, and `DROP` lifecycle
 operations are not supported in Phase 1.
 
+### Relational queries over Glue-backed external CSV tables
+
+An external schema bound to an existing local Glue database supports JOINs between external and
+internal tables, multiple external tables, aliases, bound predicates, GROUP BY, HAVING, ORDER BY
+and LIMIT. PostgreSQL evaluates the original SQL after Floci loads the referenced external
+relations. Simple Query, JDBC Extended Query and the Redshift Data API share this preparation path.
+Extended Query uses native PostgreSQL descriptions and cursors, including fetch-size cursors.
+
+Create the Glue database first, or use `CREATE EXTERNAL DATABASE IF NOT EXISTS`:
+
+```sql
+CREATE EXTERNAL SCHEMA lake FROM DATA CATALOG
+DATABASE 'analytics' IAM_ROLE '<associated-role-arn>'
+CREATE EXTERNAL DATABASE IF NOT EXISTS;
+
+CREATE EXTERNAL TABLE lake.events (customer_id INTEGER, amount INTEGER)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+STORED AS TEXTFILE LOCATION 's3://analytics/events/';
+
+SELECT c.country, SUM(e.amount) AS total
+FROM lake.events e JOIN public.customers c ON e.customer_id = c.id
+GROUP BY c.country ORDER BY total DESC;
+```
+
+This path needs Docker for PostgreSQL and the existing floci-duck runtime used to read external
+data. Use the `floci.duck` configuration described under [Athena](athena.md) to supply a reachable
+runtime when container management is unsuitable. This iteration validates CSV relational reads;
+it does not add new file formats or partition pruning.
+
+Materialized relations are cached in the cluster database. Each new query checks the associated
+role, trust policy and S3 access before using cached data, following the existing S3 enforcement
+configuration. Changes to Glue metadata or S3 objects reload the data. A missing Glue table is an
+error even if its previous contents remain cached. New prepared-statement bindings revalidate
+the data; repeated fetches from one active cursor retain that cursor's result. Loads inside a
+caller transaction do not publish a reusable fingerprint because the transaction may roll back.
+Temporary transfer objects and staging tables are cleaned up independently of cached relations.
+Extended Query loads retain a connection-local fingerprint until its transaction completes;
+the fingerprint becomes shared only after confirmed commit and is discarded on rollback.
+Creating an external schema or table
+inside a transaction, including a Data API batch (which runs as one transaction), is rejected before changing the catalogs: AWS does not allow `CREATE EXTERNAL TABLE` inside a transaction block (SQLSTATE `25001`).
+Cold loads and reloads require database privileges to maintain the materialized table and catalog;
+ordinary users with schema USAGE and table SELECT can read an existing committed cache entry.
+The current floci-duck transfer uses account-scoped development credentials. Cold loads and reloads
+with `FLOCI_SERVICES_S3_ENFORCE_AUTH=true` are not supported by that transfer path yet.
+Role association and trust are still checked before cached reads; S3 policy checks follow the
+configured enforcement mode. This is a Floci limitation, not AWS behavior.
+
+Writes to external relations are rejected. AWS prohibits external UPDATE/DELETE but supports
+some external INSERT operations; external INSERT is an intentional Floci limitation here. Use
+schema-qualified external table names. Full Glue IAM enforcement, Lake Formation, role chaining
+and `IAM_ROLE SESSION` are outside this implementation. Metadata is exposed through
+`svv_external_schemas`, `svv_external_tables`, `svv_external_columns` and `svv_external_partitions`.
+
+Schemas created without a matching Glue database retain the legacy Phase 1 path described above.
+Its single-table query restrictions still apply. PostgreSQL materialization approximates Spectrum
+execution and does not reproduce AWS distributed planning or a cross-service transaction snapshot.
+
 ### COPY from S3
 
 `COPY <table> [(<columns>)] FROM 's3://<bucket>/<keyOrPrefix>' [options]` sent over the Simple

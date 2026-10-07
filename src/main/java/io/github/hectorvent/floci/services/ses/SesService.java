@@ -873,6 +873,15 @@ public class SesService {
                 pool -> dedicatedIpService.dedicatedIpPoolExists(pool, region));
     }
 
+    /**
+     * True when {@code identity}, an email address or a domain, is a verified identity of the
+     * caller's account in {@code region}. Cognito reads it to decide whether a user pool's
+     * {@code SourceArn} may be its sender.
+     */
+    public boolean isVerifiedIdentity(String identity, String region) {
+        return identityService.isIdentityVerified(identity, region);
+    }
+
     private boolean isVerifiedDomainIdentity(String domain, String region) {
         Identity identity = identityService.getIdentityVerificationAttributes(domain, region);
         return identity != null && "Success".equals(identity.getVerificationStatus())
