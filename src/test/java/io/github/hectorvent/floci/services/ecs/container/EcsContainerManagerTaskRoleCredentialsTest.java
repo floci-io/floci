@@ -105,7 +105,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
 
     @Test
     void pointsEveryContainerOfATaskAtOneCredentialUriOnItsOwnAddress() {
-        manager.startTask(task(), taskDef(ROLE_ARN, "app", "sidecar"), null, "us-east-1");
+        manager.startTask(task(), taskDef(ROLE_ARN, "app", "sidecar"), null, List.of(), "us-east-1");
 
         verify(credentialsProxy).ensureProxyOn(NETWORK);
 
@@ -127,7 +127,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
 
     @Test
     void dropsTheBaselineCredentialsThatWouldShadowTheRole() {
-        manager.startTask(task(), taskDef(ROLE_ARN, "app"), null, "us-east-1");
+        manager.startTask(task(), taskDef(ROLE_ARN, "app"), null, List.of(), "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass(List.class);
@@ -146,7 +146,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
 
     @Test
     void keepsTheBaselineCredentialsForATaskWithNoRole() {
-        manager.startTask(task(), taskDef(null, "app"), null, "us-east-1");
+        manager.startTask(task(), taskDef(null, "app"), null, List.of(), "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass(List.class);
@@ -160,7 +160,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
         taskDef.getContainerDefinitions().getFirst().setEnvironment(
                 List.of(new KeyValuePair("AWS_ACCESS_KEY_ID", "AKIAOWN")));
 
-        manager.startTask(task(), taskDef, null, "us-east-1");
+        manager.startTask(task(), taskDef, null, List.of(), "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass(List.class);
@@ -175,7 +175,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
                 .when(credentialsProxy).ensureProxyOn(any());
 
         try {
-            manager.startTask(task(), taskDef(ROLE_ARN, "app"), null, "us-east-1");
+            manager.startTask(task(), taskDef(ROLE_ARN, "app"), null, List.of(), "us-east-1");
         } catch (RuntimeException expected) {
             // The proxy failure itself is not what this test is about.
         }
@@ -220,7 +220,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
                 taskRoleCredentials, credentialsProxy, linkLocalAddresses);
 
         try {
-            failing.startTask(task(), taskDef(ROLE_ARN, "app"), null, "us-east-1");
+            failing.startTask(task(), taskDef(ROLE_ARN, "app"), null, List.of(), "us-east-1");
         } catch (RuntimeException expected) {
             // The preflight failure itself is not what this test is about.
         }
@@ -270,7 +270,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
                 mock(SecretsManagerService.class), mock(S3Service.class), rewritingRegistry(),
                 mock(HostVolumePolicy.class), null, null,
                 taskRoleCredentials, credentialsProxy, linkLocalAddresses);
-        EcsTaskHandle handle = stopping.startTask(task(), taskDef(ROLE_ARN, "app"), null, "us-east-1");
+        EcsTaskHandle handle = stopping.startTask(task(), taskDef(ROLE_ARN, "app"), null, List.of(), "us-east-1");
 
         stopping.cleanupStoppedTask(handle);
 
@@ -301,7 +301,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
                 taskRoleCredentials, credentialsProxy, linkLocalAddresses);
 
         try {
-            failingManager.startTask(task(), taskDef(ROLE_ARN, "app", "sidecar"), null, "us-east-1");
+            failingManager.startTask(task(), taskDef(ROLE_ARN, "app", "sidecar"), null, List.of(), "us-east-1");
         } catch (RuntimeException expected) {
             // The launch failure itself is not what this test is about.
         }
@@ -313,7 +313,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
 
     @Test
     void issuesNothingForATaskWithNoRole() {
-        manager.startTask(task(), taskDef(null, "app"), null, "us-east-1");
+        manager.startTask(task(), taskDef(null, "app"), null, List.of(), "us-east-1");
 
         verify(taskRoleCredentials, never()).issue(any(), any(), any(), any());
         verify(credentialsProxy, never()).ensureProxyOn(any());
@@ -324,7 +324,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     void issuesNothingWhenTheFeatureIsDisabled() {
         when(config.services().ecs().taskRoleCredentials().enabled()).thenReturn(false);
 
-        manager.startTask(task(), taskDef(ROLE_ARN, "app"), null, "us-east-1");
+        manager.startTask(task(), taskDef(ROLE_ARN, "app"), null, List.of(), "us-east-1");
 
         verify(taskRoleCredentials, never()).issue(any(), any(), any(), any());
         verify(credentialsProxy, never()).ensureProxyOn(any());
@@ -334,7 +334,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     void startsNoProxyAndPublishesNoUriWhenTheRoleCannotBeResolved() {
         when(taskRoleCredentials.issue(any(), any(), any(), any())).thenReturn(Optional.empty());
 
-        manager.startTask(task(), taskDef(ROLE_ARN, "app"), null, "us-east-1");
+        manager.startTask(task(), taskDef(ROLE_ARN, "app"), null, List.of(), "us-east-1");
 
         // Issuing failed, so there is nothing to reach: no proxy, no address, no env var.
         verify(credentialsProxy, never()).ensureProxyOn(any());
@@ -348,7 +348,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
 
     @Test
     void revokesCredentialsAndFreesAddressesWhenTheTaskStops() {
-        EcsTaskHandle handle = manager.startTask(task(), taskDef(ROLE_ARN, "app", "sidecar"), null, "us-east-1");
+        EcsTaskHandle handle = manager.startTask(task(), taskDef(ROLE_ARN, "app", "sidecar"), null, List.of(), "us-east-1");
 
         manager.cleanupStoppedTask(handle);
 
@@ -372,7 +372,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
                 taskRoleCredentials, credentialsProxy, linkLocalAddresses);
 
         try {
-            failingManager.startTask(task(), taskDef(ROLE_ARN, "app"), null, "us-east-1");
+            failingManager.startTask(task(), taskDef(ROLE_ARN, "app"), null, List.of(), "us-east-1");
         } catch (RuntimeException expected) {
             // The launch failure itself is not what this test is about.
         }

@@ -217,6 +217,20 @@ public class EcsServiceDiscoveryRegistrar {
     }
 
     /** The Cloud Map services the ECS service's registries name. */
+    public List<String> networkAliases(EcsServiceModel svc) {
+        List<String> aliases = new ArrayList<>();
+        for (String id : cloudMapServiceIds(svc)) {
+            try {
+                io.github.hectorvent.floci.services.cloudmap.model.Service s = cloudMapService.getService(id);
+                if (s.getNamespaceId() != null) {
+                    io.github.hectorvent.floci.services.cloudmap.model.Namespace n = cloudMapService.getNamespace(s.getNamespaceId());
+                    aliases.add(s.getName() + "." + n.getName());
+                }
+            } catch (Exception e) {}
+        }
+        return aliases;
+    }
+
     public List<String> cloudMapServiceIds(EcsServiceModel svc) {
         List<String> ids = new ArrayList<>();
         for (Map<String, Object> registry : registries(svc)) {

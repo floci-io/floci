@@ -29,7 +29,7 @@ class EcsServiceContainerSecretsTest {
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         // resolveSecretValue wraps any resolution failure as a ResourceInitializationError-coded
         // AwsException; EcsService keys off that code to pass the reason through verbatim.
-        when(containerManager.startTask(any(), any(), any(), eq("us-east-1")))
+        when(containerManager.startTask(any(), any(), any(), any(), eq("us-east-1")))
                 .thenThrow(new AwsException("ResourceInitializationError",
                         "ResourceInitializationError: unable to pull secrets or registry auth: /missing: not found",
                         400));

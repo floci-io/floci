@@ -104,7 +104,7 @@ class EcsContainerManagerEcrRewriteTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        manager.startTask(task, taskDef, List.of(), "us-east-1");
+        manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
 
         // newContainer(...) is called once per container definition, in definition order.
         ArgumentCaptor<String> imageCaptor = ArgumentCaptor.forClass(String.class);
@@ -141,7 +141,7 @@ class EcsContainerManagerEcrRewriteTest {
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
         assertThrows(RuntimeException.class,
-                () -> manager.startTask(task, taskDef, List.of(), "us-east-1"));
+                () -> manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1"));
 
         // The earlier "sidecar" container must never have been created.
         verify(lifecycleManager, never()).createAndStart(any());

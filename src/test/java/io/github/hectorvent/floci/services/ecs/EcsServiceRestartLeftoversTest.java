@@ -72,7 +72,7 @@ class EcsServiceRestartLeftoversTest {
 
         restarted.releasePreviousRunLeftovers();
         restarted.reconcile();
-        verify(containerManager, never()).startTask(any(), any(), any(), anyString());
+        verify(containerManager, never()).startTask(any(), any(), any(), any(), anyString());
 
         restarted.reconcile();
         restarted.reconcile();
@@ -112,12 +112,12 @@ class EcsServiceRestartLeftoversTest {
 
         assertEquals("STOPPED", blocked.getLastStatus());
         assertThat(blocked.getStoppedReason(), containsString("previous run"));
-        verify(containerManager, never()).startTask(any(), any(), any(), anyString());
+        verify(containerManager, never()).startTask(any(), any(), any(), any(), anyString());
 
         restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION);
 
         verify(containerManager, times(3)).removeLeftoverContainers();
-        verify(containerManager).startTask(any(), any(), any(), anyString());
+        verify(containerManager).startTask(any(), any(), any(), any(), anyString());
     }
 
     @Test
@@ -158,7 +158,7 @@ class EcsServiceRestartLeftoversTest {
         restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION);
 
         verify(containerManager, never()).removeLeftoverContainers();
-        verify(containerManager).startTask(any(), any(), any(), anyString());
+        verify(containerManager).startTask(any(), any(), any(), any(), anyString());
         verify(lbRegistrar).releaseRecordedTargets();
         verify(discoveryRegistrar).releaseRecordedInstances();
     }
@@ -172,7 +172,7 @@ class EcsServiceRestartLeftoversTest {
         service.init();
         try {
             verify(containerManager).removeLeftoverContainers();
-            verify(containerManager, never()).startTask(any(), any(), any(), anyString());
+            verify(containerManager, never()).startTask(any(), any(), any(), any(), anyString());
         } finally {
             service.stopManagedContainers();
         }
@@ -182,7 +182,7 @@ class EcsServiceRestartLeftoversTest {
     void aStartingTaskEvictsTheUnrecordedRegistrationsAtItsAddress() {
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         when(containerManager.removeLeftoverContainers()).thenReturn(true);
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenAnswer(invocation -> {
             EcsTask task = invocation.getArgument(0);
             Container container = new Container();
             container.setName("web");

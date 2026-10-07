@@ -92,7 +92,7 @@ class EcsContainerManagerVolumesFromDockerIntegrationTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/volumes-from/" + suffix);
 
-        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), "us-east-1");
+        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), List.of(), "us-east-1");
         try {
             String appId = handle.getContainerIds().get("app");
             Integer status = dockerClient.waitContainerCmd(appId)

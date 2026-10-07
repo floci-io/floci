@@ -83,7 +83,7 @@ class EcsContainerManagerFirelensDockerIntegrationTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/firelens/" + UUID.randomUUID());
 
-        taskHandle = containerManager.startTask(task, taskDefinition, List.of(), "us-east-1");
+        taskHandle = containerManager.startTask(task, taskDefinition, List.of(), List.of(), "us-east-1");
 
         assertEquals(List.of("router", "app"), taskHandle.getContainerIds().keySet().stream().toList());
         String appId = taskHandle.getContainerIds().get("app");

@@ -258,7 +258,7 @@ class ContainerLifecycleManagerNetworkTest {
                                       List<Integer> exposedPorts) {
         return new ContainerSpec(
                 "busybox:stable", "probe", List.of(), null, null, null, portBindings, List.of(),
-                exposedPorts, networkMode, List.of(), List.of(), List.of(), List.of(), Map.of(), null,
+                exposedPorts, networkMode, List.of(), List.of(), List.of(), List.of(), List.of(), Map.of(), null,
                 false, null, List.of(), null, null, List.of(), List.of(), null, null, false,
                 List.of(), Map.of());
     }
@@ -266,7 +266,7 @@ class ContainerLifecycleManagerNetworkTest {
     private static ContainerSpec specWithLinkLocalIp(Map<Integer, Integer> portBindings) {
         return new ContainerSpec(
                 "busybox:stable", null, List.of(), null, null, null, portBindings, List.of(),
-                List.of(), "test-network", List.of(), List.of(), List.of(), List.of(), Map.of(), null,
+                List.of(), "test-network", List.of(), List.of(), List.of(), List.of(), List.of(), Map.of(), null,
                 false, null, List.of(), null, null, List.of(), List.of(), null, null, false,
                 List.of(LINK_LOCAL_IP), Map.of());
     }

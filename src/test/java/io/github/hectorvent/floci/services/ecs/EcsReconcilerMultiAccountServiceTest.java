@@ -37,7 +37,7 @@ class EcsReconcilerMultiAccountServiceTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
-        when(containerManager.startTask(any(), any(), any(), anyString()))
+        when(containerManager.startTask(any(), any(), any(), any(), anyString()))
                 .thenReturn(mock(EcsTaskHandle.class));
 
         AccountScopedStorageFactory storageFactory = new AccountScopedStorageFactory();

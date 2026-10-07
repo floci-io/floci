@@ -151,6 +151,6 @@ class EcsContainerManagerLogConfigurationTest {
         EcsTask task = new EcsTask();
         task.setTaskArn(taskArn);
 
-        manager.startTask(task, taskDef, List.of(), "us-east-1");
+        manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
     }
 }

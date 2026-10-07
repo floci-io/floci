@@ -108,7 +108,7 @@ class EcsContainerManagerOverridesTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        manager.startTask(task, taskDef, List.of(appOverride), "us-east-1");
+        manager.startTask(task, taskDef, List.of(appOverride), List.of(), "us-east-1");
 
         // newContainer/withCmd/withEnv are called once per container definition,
         // in definition order: index 0 = app (overridden), index 1 = sidecar (untouched).

@@ -156,6 +156,7 @@ public class ContainerBuilder {
         private final Map<Integer, String> portBindingHostIps = new HashMap<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
         private String networkMode;
+        private final List<String> networkAliases = new ArrayList<>();
         private final List<Mount> mounts = new ArrayList<>();
         private final List<Bind> binds = new ArrayList<>();
         private final List<VolumesFrom> volumesFrom = new ArrayList<>();
@@ -356,6 +357,16 @@ public class ContainerBuilder {
          * the global services.dockerNetwork() if not present.
          * This is the standard pattern for Floci container services.
          */
+        public Builder withNetworkAliases(java.util.List<String> aliases) {
+            if (aliases != null) this.networkAliases.addAll(aliases);
+            return this;
+        }
+
+        public Builder withNetworkAlias(String alias) {
+            if (alias != null && !alias.isBlank()) this.networkAliases.add(alias);
+            return this;
+        }
+
         public Builder withDockerNetwork(Optional<String> serviceNetwork) {
             ContainerBuilder.resolveDockerNetwork(serviceNetwork, config, currentContainerNetworkResolver)
                     .ifPresent(n -> this.networkMode = n);
@@ -673,6 +684,7 @@ public class ContainerBuilder {
                     List.copyOf(loopbackPortBindings),
                     List.copyOf(exposedPorts),
                     networkMode,
+                    List.copyOf(networkAliases),
                     List.copyOf(mounts),
                     List.copyOf(binds),
                     List.copyOf(volumesFrom),

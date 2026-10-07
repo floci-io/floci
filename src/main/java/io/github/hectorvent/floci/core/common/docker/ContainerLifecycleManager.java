@@ -284,13 +284,19 @@ public class ContainerLifecycleManager {
      * network-connect endpoint, so the container is reconnected before it starts.
      */
     private void attachNetworkBeforeStart(String containerId, ContainerSpec spec) {
-        if (!spec.hasPortBindings()) {
+        if (!spec.publishesPorts()) {
             dockerClient.disconnectFromNetworkCmd()
                     .withContainerId(containerId)
                     .withNetworkId(spec.networkMode())
                     .exec();
         }
-        ContainerNetwork endpoint = new ContainerNetwork().withIpamConfig(new LinkLocalIpam(spec.linkLocalIps()));
+        ContainerNetwork endpoint = new ContainerNetwork();
+        if (spec.hasLinkLocalIps()) {
+            endpoint.withIpamConfig(new LinkLocalIpam(spec.linkLocalIps()));
+        }
+        if (spec.networkAliases() != null && !spec.networkAliases().isEmpty()) {
+            endpoint.withAliases(spec.networkAliases());
+        }
         dockerClient.connectToNetworkCmd()
                 .withContainerId(containerId)
                 .withNetworkId(spec.networkMode())

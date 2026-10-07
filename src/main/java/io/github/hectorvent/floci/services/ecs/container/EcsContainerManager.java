@@ -210,7 +210,7 @@ public class EcsContainerManager {
      * Updates the task's container list in-place with runtime network bindings and docker IDs.
      */
     public EcsTaskHandle startTask(EcsTask task, TaskDefinition taskDef,
-                                   List<ContainerOverride> containerOverrides, String region) {
+                                   List<ContainerOverride> containerOverrides, List<String> networkAliases, String region) {
         String taskId = extractTaskId(task.getTaskArn());
 
         Map<String, String> containerIds = new LinkedHashMap<>();
@@ -332,6 +332,7 @@ public class EcsContainerManager {
                         .withName(containerName)
                         .withEnv(env)
                         .withDockerNetwork(config.services().ecs().dockerNetwork())
+                        .withNetworkAliases(networkAliases)
                         // Resolve Floci's endpoint from inside the task container the same way Lambda
                         // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
                         // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's

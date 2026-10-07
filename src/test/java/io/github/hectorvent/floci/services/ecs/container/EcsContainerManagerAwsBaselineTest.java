@@ -103,7 +103,7 @@ class EcsContainerManagerAwsBaselineTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        manager.startTask(task, taskDef, null, "us-east-1");
+        manager.startTask(task, taskDef, null, List.of(), "us-east-1");
 
         // The baseline is resolved for the task's region.
         verify(awsEnv).sdkBaselineEnv(eq("us-east-1"), any());
@@ -142,7 +142,7 @@ class EcsContainerManagerAwsBaselineTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        manager.startTask(task, taskDef, List.of(override), "us-east-1");
+        manager.startTask(task, taskDef, List.of(override), List.of(), "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
@@ -167,7 +167,7 @@ class EcsContainerManagerAwsBaselineTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        manager.startTask(task, taskDef, null, "us-east-1");
+        manager.startTask(task, taskDef, null, List.of(), "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
