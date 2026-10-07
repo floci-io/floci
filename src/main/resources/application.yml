@@ -35,6 +35,13 @@ quarkus:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
+  index-dependency:
+    swagger-models-v2:
+      group-id: io.swagger
+      artifact-id: swagger-models
+    swagger-models-v3:
+      group-id: io.swagger.core.v3
+      artifact-id: swagger-models
   native:
     # quarkus-jdbc-mysql used to force this. Without it the image has only UTF-8, UTF-16,
     # ISO-8859-1 and US-ASCII, which breaks latin1 MySQL columns and non-UTF-8 mail bodies.
@@ -71,6 +78,8 @@ quarkus:
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
         # driver reads its time zone table at connect time.
         - META-INF/services/java.sql.Driver
+        # OpenAPIParser discovers the Swagger 2.0 converter through ServiceLoader.
+        - META-INF/services/io.swagger.v3.parser.core.extensions.SwaggerParserExtension
         - com/mysql/cj/util/TimeZoneMapping.properties
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
       # for the running platform loads, so 23 are dropped. Linux x86_64 and

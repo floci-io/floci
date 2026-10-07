@@ -1,21 +1,12 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.util.HexFormat;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
+import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -59,6 +50,16 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Unified AWS API Gateway management endpoints (v1 REST and v2 HTTP).
@@ -275,6 +276,35 @@ public class ApiGatewayController {
         ArrayNode items = root.putArray("item");
         auths.forEach(a -> items.add(toAuthorizerNode(a)));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/stages/{stageName}/exports/{exportType}")
+    @Produces({MediaType.APPLICATION_JSON, "application/yaml"})
+    public Response getExport(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                              @PathParam("stageName") String stageName, @PathParam("exportType") String exportType,
+                              @QueryParam("extensions") String extensions) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode document = service.exportRestApi(region, apiId, stageName, exportType, extensions);
+        String contentType = MediaType.APPLICATION_JSON;
+        for (MediaType acceptable : headers.getAcceptableMediaTypes()) {
+            if (acceptable.isCompatible(MediaType.APPLICATION_JSON_TYPE)) {
+                break;
+            }
+            if (acceptable.isCompatible(MediaType.valueOf("application/yaml"))) {
+                contentType = "application/yaml";
+                break;
+            }
+        }
+        try {
+            String body = "application/yaml".equals(contentType)
+                    ? new YAMLMapper().writeValueAsString(document) : document.toString();
+            return Response.ok(body).type(contentType)
+                    .header("Content-Disposition", "attachment; filename=\"" + apiId + "-" + exportType
+                            + ("application/yaml".equals(contentType) ? ".yaml" : ".json") + "\"").build();
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot serialize API export", e);
+        }
     }
 
     @GET

@@ -9,6 +9,10 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 public record Deployment(
         String id,
         String description,
-        long createdDate
+        long createdDate,
+        String exportSnapshot
 ) {
+    public Deployment(String id, String description, long createdDate) {
+        this(id, description, createdDate, null);
+    }
 }
