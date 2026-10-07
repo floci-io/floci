@@ -53,7 +53,7 @@ class CodeArtifactServiceTest {
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
     private VerdaccioSidecarClient verdaccioClient;
     private ReposiliteSidecarClient reposiliteClient;
-    private PypiserverSidecarManager pypiserverManager;
+    private PypiserverSidecarClient pypiserverClient;
 
     @BeforeEach
     void setUp() {
@@ -75,11 +75,11 @@ class CodeArtifactServiceTest {
         when(verdaccioClient.format()).thenReturn("npm");
         reposiliteClient = mock(ReposiliteSidecarClient.class);
         when(reposiliteClient.format()).thenReturn("maven");
-        pypiserverManager = mock(PypiserverSidecarManager.class);
-        when(pypiserverManager.format()).thenReturn("pypi");
+        pypiserverClient = mock(PypiserverSidecarClient.class);
+        when(pypiserverClient.format()).thenReturn("pypi");
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
                 true, null, new CodeArtifactSidecarRegistry(
-                        List.of(verdaccioClient, reposiliteClient, pypiserverManager)));
+                        List.of(verdaccioClient, reposiliteClient, pypiserverClient)));
     }
 
     // -------------------------------------------------------------- domains
@@ -1122,7 +1122,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "wheel bytes".getBytes(StandardCharsets.UTF_8);
-        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+        when(pypiserverClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"), eq("1.0.0"), eq("my_pkg-1.0.0-py3-none-any.whl"))).thenReturn(Optional.of(content));
 
         PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "pypi",
@@ -1135,7 +1135,7 @@ class CodeArtifactServiceTest {
     void getPackageVersionAssetReturns404WhenTheSidecarHasNoSuchAssetForAContainerBackedFormat() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
-        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+        when(pypiserverClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"), eq("1.0.0"), eq("missing.whl"))).thenReturn(Optional.empty());
 
         AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom", null,
@@ -1150,7 +1150,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "wheel bytes".getBytes(StandardCharsets.UTF_8);
-        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+        when(pypiserverClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"), eq("1.0.0"), eq("my_pkg-1.0.0.whl"))).thenReturn(Optional.of(content));
         String realRevision = service.getPackageVersionAsset(REGION, "dom", null, "repo", "pypi", null, "my-pkg",
                 "1.0.0", "my_pkg-1.0.0.whl", null).packageVersionRevision();
