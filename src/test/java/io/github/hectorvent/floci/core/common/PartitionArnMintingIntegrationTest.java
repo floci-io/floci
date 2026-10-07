@@ -127,6 +127,37 @@ class PartitionArnMintingIntegrationTest {
         assertEquals("arn:aws-cn:ssm:" + REGION + ":000000000000:parameter" + name, arn);
     }
 
+    /**
+     * A hand-rolled client that signs with the {@code aws-cn-global} pseudo-region is served in
+     * China's implicit global region: the parameter lands in {@code cn-northwest-1}, is readable
+     * there, and no ARN carries the pseudo-region.
+     */
+    @Test
+    void aPseudoSigningRegionIsServedAsThePartitionsGlobalRegion() {
+        String name = "/partition-pseudo/" + Long.toString(System.nanoTime(), 36);
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("aws-cn-global", "ssm"))
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(JSON_1_1)
+            .body("{\"Name\":\"" + name + "\",\"Type\":\"String\",\"Value\":\"v\"}")
+        .when().post("/").then().statusCode(200);
+        cleanup.register(() -> given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("cn-northwest-1", "ssm"))
+            .header("X-Amz-Target", "AmazonSSM.DeleteParameter")
+            .contentType(JSON_1_1)
+            .body("{\"Name\":\"" + name + "\"}")
+        .when().post("/"));
+
+        String arn = given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("cn-northwest-1", "ssm"))
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(JSON_1_1)
+            .body("{\"Name\":\"" + name + "\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("Parameter.ARN");
+        assertEquals("arn:aws-cn:ssm:cn-northwest-1:000000000000:parameter" + name, arn);
+    }
+
     @Test
     void serviceCatalogPortfolioArnIsMintedInTheRequestPartition() {
         String token = Long.toString(System.nanoTime(), 36);

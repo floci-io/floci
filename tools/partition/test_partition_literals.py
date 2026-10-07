@@ -116,6 +116,10 @@ def test_arn_regex_dialect_does_not_match_a_plain_literal():
     ("public.ecr.aws/lambda/java", True),
     ("ec2.cn-north-1.amazonaws.com.cn", False),
     ("c2s.ic.gov", False),
+    # A host written as a Java regex, its dots escaped, is held to the same rule.
+    ("[0-9]{12}\\\\.dkr\\\\.ecr\\\\.[a-z0-9-]+\\\\.amazonaws\\\\.com", True),
+    ("[a-z]+\\\\.cloudfront\\\\.net", True),
+    ("ecr\\\\.[a-z0-9-]+\\\\.amazonaws\\\\.com\\\\.cn", False),
 ])
 def test_dns_suffix_matches_commercial_hosts_only(text, expected):
     assert ("dns-suffix" in categories_of(text)) is expected

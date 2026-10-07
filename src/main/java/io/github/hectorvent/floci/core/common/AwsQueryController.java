@@ -119,13 +119,30 @@ public class AwsQueryController {
             "CreateVirtualMFADevice", "DeleteVirtualMFADevice", "ListVirtualMFADevices",
             "EnableMFADevice", "DeactivateMFADevice", "ResyncMFADevice", "ListMFADevices",
             "TagMFADevice", "UntagMFADevice", "ListMFADeviceTags",
+            "GetAccountProperties", "PutAccountProperties",
+            "SetSecurityTokenServicePreferences", "EnableOutboundWebIdentityFederation",
+            "DisableOutboundWebIdentityFederation", "GetOutboundWebIdentityFederationInfo",
             "CreateServiceSpecificCredential", "ListServiceSpecificCredentials",
             "UpdateServiceSpecificCredential", "ResetServiceSpecificCredential",
             "DeleteServiceSpecificCredential",
             "UploadSSHPublicKey", "GetSSHPublicKey", "ListSSHPublicKeys",
             "UpdateSSHPublicKey", "DeleteSSHPublicKey",
             "UploadSigningCertificate", "ListSigningCertificates",
-            "UpdateSigningCertificate", "DeleteSigningCertificate"
+            "UpdateSigningCertificate", "DeleteSigningCertificate",
+            "CreateAccountAlias", "DeleteAccountAlias", "ListAccountAliases",
+            "GetAccountPasswordPolicy", "UpdateAccountPasswordPolicy", "DeleteAccountPasswordPolicy",
+            "GetAccessKeyLastUsed", "UpdateGroup", "UpdateAssumeRolePolicy",
+            "PutUserPermissionsBoundary", "DeleteUserPermissionsBoundary",
+            "PutRolePermissionsBoundary", "DeleteRolePermissionsBoundary",
+            "CreateOpenIDConnectProvider", "GetOpenIDConnectProvider",
+            "ListOpenIDConnectProviders", "DeleteOpenIDConnectProvider",
+            "AddClientIDToOpenIDConnectProvider", "RemoveClientIDFromOpenIDConnectProvider",
+            "UpdateOpenIDConnectProviderThumbprint", "TagOpenIDConnectProvider",
+            "UntagOpenIDConnectProvider", "ListOpenIDConnectProviderTags",
+            "ListOrganizationsFeatures",
+            "EnableOrganizationsRootCredentialsManagement",
+            "DisableOrganizationsRootCredentialsManagement",
+            "EnableOrganizationsRootSessions", "DisableOrganizationsRootSessions"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(

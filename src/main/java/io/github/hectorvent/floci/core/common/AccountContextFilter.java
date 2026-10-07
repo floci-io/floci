@@ -169,7 +169,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
 
     /**
      * Strict partition mode. AWS publishes no endpoint for a service outside the partitions it
-     * exists in (CloudFront in GovCloud, IAM in {@code aws-eusc}); a client there never reaches
+     * exists in (CloudFront in GovCloud, Lightsail in China); a client there never reaches
      * an API because the host does not resolve, which the SDKs surface as an
      * {@code UnknownHostException}. Floci cannot fail DNS, so it answers the request with the
      * same 404 shape the unknown-service-scope guard uses. Only a service the published data

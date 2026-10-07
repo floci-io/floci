@@ -19,6 +19,15 @@ from two sources and a rule:
   differs from their `endpoints.json` key (`ecr` signs what `api.ecr` publishes, `bedrock`
   covers `bedrock-runtime`). `signingNames` maps each such signing name to its endpoint
   prefixes so a request's credential scope can be checked against a partition's service list.
+  A signing name is left out when a model whose own endpoint prefix is that signing name is
+  listed in no partition (`execute-api` is Connect Participant's signing name, but also the
+  endpoint prefix of API Gateway's WebSocket management API, which `endpoints.json` lists
+  nowhere): the data cannot say where such a name is served.
+- botocore's per-service `endpoint-rule-set-1.json`, for the partitions a ruleset names in an
+  explicit branch that resolves to an endpoint (IAM's `iam.eusc-de-east-1.amazonaws.eu`).
+  `endpoints.json` omits some of those, so each partition's `services` adds them, recorded again
+  under `servicesFromRulesets`. Only a service `endpoints.json` lists in some partition is added:
+  a service it lists nowhere stays unknown everywhere rather than present in a few partitions.
 - The AWS CDK's `region-info/lib/aws-entities.ts` (Apache-2.0), whose ordered region list
   carries two rule markers: regions before `RULE_S3_WEBSITE_REGIONAL_SUBDOMAIN` use the
   legacy `s3-website-<region>` endpoint form, and commercial regions after
@@ -98,6 +107,14 @@ def service_model(version_dir: Path) -> Path | None:
     return None
 
 
+def ruleset_file(version_dir: Path) -> Path | None:
+    """A version directory's `endpoint-rule-set-1.json`, plain or gzipped, or None."""
+    for name in ("endpoint-rule-set-1.json", "endpoint-rule-set-1.json.gz"):
+        if (version_dir / name).is_file():
+            return version_dir / name
+    return None
+
+
 def load_model(path: Path) -> dict:
     if path.suffix == ".gz":
         with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -165,10 +182,81 @@ def collect_signing_names(botocore_data: Path) -> dict[str, list[str]]:
     return {name: sorted(prefixes) for name, prefixes in sorted(by_signing_name.items())}
 
 
+def collect_self_signed_prefixes(botocore_data: Path) -> set[str]:
+    """Endpoint prefixes of the services that sign with their own endpoint prefix."""
+    prefixes: set[str] = set()
+    for service_dir in sorted(p for p in botocore_data.iterdir() if p.is_dir()):
+        versions = sorted(v for v in service_dir.iterdir() if service_model(v) is not None)
+        if not versions:
+            continue
+        metadata = load_model(service_model(versions[-1])).get("metadata", {})
+        endpoint_prefix = metadata.get("endpointPrefix")
+        if endpoint_prefix and (metadata.get("signingName") or endpoint_prefix) == endpoint_prefix:
+            prefixes.add(endpoint_prefix)
+    return prefixes
+
+
+def partition_name_condition(condition: dict) -> str | None:
+    """The partition id a `stringEquals(getAttr(<partition>, "name"), "<id>")` condition tests."""
+    if condition.get("fn") != "stringEquals":
+        return None
+    argv = condition.get("argv", [])
+    if len(argv) != 2:
+        return None
+    for attribute, value in ((argv[0], argv[1]), (argv[1], argv[0])):
+        if (isinstance(attribute, dict) and attribute.get("fn") == "getAttr"
+                and attribute.get("argv", [None, None])[1] == "name" and isinstance(value, str)):
+            return value
+    return None
+
+
+def resolves_to_endpoint(rule: dict) -> bool:
+    if rule.get("type") == "endpoint":
+        return True
+    return rule.get("type") == "tree" and any(resolves_to_endpoint(child) for child in rule.get("rules", []))
+
+
+def ruleset_partitions(rules: list[dict]) -> set[str]:
+    """Partitions a ruleset names in a branch that resolves to an endpoint. A branch that only
+    raises an error, a negated test and the generic `{PartitionResult#dnsSuffix}` template name
+    no partition."""
+    named: set[str] = set()
+    for rule in rules:
+        if resolves_to_endpoint(rule):
+            for condition in rule.get("conditions", []):
+                partition_id = partition_name_condition(condition)
+                if partition_id:
+                    named.add(partition_id)
+        if rule.get("type") == "tree":
+            named |= ruleset_partitions(rule.get("rules", []))
+    return named
+
+
+def collect_ruleset_partitions(botocore_data: Path) -> dict[str, list[str]]:
+    """Endpoint prefix -> the partitions its endpoint ruleset names explicitly."""
+    by_prefix: dict[str, set[str]] = {}
+    for service_dir in sorted(p for p in botocore_data.iterdir() if p.is_dir()):
+        versions = sorted(v for v in service_dir.iterdir()
+                          if service_model(v) is not None and ruleset_file(v) is not None)
+        if not versions:
+            continue
+        endpoint_prefix = load_model(service_model(versions[-1])).get("metadata", {}).get("endpointPrefix")
+        named = ruleset_partitions(load_model(ruleset_file(versions[-1])).get("rules", []))
+        if endpoint_prefix and named:
+            by_prefix.setdefault(endpoint_prefix, set()).update(named)
+    return {prefix: sorted(partitions) for prefix, partitions in sorted(by_prefix.items())}
+
+
 def build(partitions_doc: dict, endpoints_doc: dict, entities: list[str] | None,
           carried: dict | None, provenance: str,
-          signing_names: dict[str, list[str]] | None = None) -> dict:
+          signing_names: dict[str, list[str]] | None = None,
+          rulesets: dict[str, list[str]] | None = None,
+          self_signed: set[str] | None = None) -> dict:
     endpoint_partitions = {p["partition"]: p for p in endpoints_doc["partitions"]}
+    listed_anywhere = {service for p in endpoints_doc["partitions"] for service in p.get("services", {})}
+    if signing_names is not None and self_signed is not None:
+        signing_names = {name: prefixes for name, prefixes in signing_names.items()
+                         if name not in self_signed or name in listed_anywhere}
     carried_flags = {}
     for partition in (carried or {}).get("partitions", []):
         for region in partition.get("regions", []):
@@ -228,6 +316,9 @@ def build(partitions_doc: dict, endpoints_doc: dict, entities: list[str] | None,
                 "signingRegion": signing_region,
                 "regionalized": service.get("isRegionalized", True) is not False,
             }
+        from_rulesets = sorted(
+            prefix for prefix, partitions in (rulesets or {}).items()
+            if partition_id in partitions and prefix in listed_anywhere and prefix not in services)
         result_partitions.append({
             "id": partition_id,
             "name": endpoints_partition.get("partitionName", partition_id),
@@ -239,7 +330,8 @@ def build(partitions_doc: dict, endpoints_doc: dict, entities: list[str] | None,
             "supportsDualStack": bool(outputs.get("supportsDualStack", False)),
             "supportsFips": bool(outputs.get("supportsFIPS", False)),
             "regions": regions,
-            "services": sorted(services),
+            "services": sorted(set(services) | set(from_rulesets)),
+            "servicesFromRulesets": from_rulesets,
             "globalServices": global_services,
             "s3DualStackRegions": s3_dualstack_regions,
         })
@@ -269,7 +361,8 @@ def generate(botocore_data: Path, provenance: str, cdk_root: Path | None, existi
     if cdk_root is not None and (cdk_root / CDK_ENTITIES).exists():
         entities = parse_cdk_entities((cdk_root / CDK_ENTITIES).read_text(encoding="utf-8"))
     carried = load_json(existing) if existing.exists() else None
-    return build(partitions_doc, endpoints_doc, entities, carried, provenance, collect_signing_names(botocore_data))
+    return build(partitions_doc, endpoints_doc, entities, carried, provenance, collect_signing_names(botocore_data),
+                 collect_ruleset_partitions(botocore_data), collect_self_signed_prefixes(botocore_data))
 
 
 def main(argv: list[str] | None = None) -> int:

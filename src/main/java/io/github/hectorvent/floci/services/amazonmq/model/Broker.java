@@ -63,6 +63,32 @@ public class Broker {
     @JsonProperty("tags")
     private Map<String, String> tags;
 
+    // Optional CreateBroker members, echoed back by DescribeBroker. Null when the
+    // request omitted them, and on records persisted before they were stored.
+    @JsonProperty("securityGroups")
+    private List<String> securityGroups;
+
+    @JsonProperty("subnetIds")
+    private List<String> subnetIds;
+
+    @JsonProperty("logs")
+    private Map<String, Object> logs;
+
+    @JsonProperty("maintenanceWindowStartTime")
+    private Map<String, Object> maintenanceWindowStartTime;
+
+    @JsonProperty("storageType")
+    private String storageType;
+
+    @JsonProperty("authenticationStrategy")
+    private String authenticationStrategy;
+
+    @JsonProperty("encryptionOptions")
+    private Map<String, Object> encryptionOptions;
+
+    @JsonProperty("configuration")
+    private Map<String, Object> configuration;
+
     // Internal bookkeeping. These are NOT part of the AWS response shape, but they ARE
     // persisted so the broker stays manageable after an emulator restart in persistent
     // mode (container teardown, volume cleanup, account-aware storage routing). The
@@ -101,6 +127,12 @@ public class Broker {
     }
 
     public String getBrokerId() { return brokerId; }
+
+    /**
+     * The CloudWatch log group the broker's general logs go to, as DescribeBroker
+     * reports it. Not a getter, so Jackson neither persists nor returns it.
+     */
+    public String generalLogGroup() { return "/aws/amazonmq/broker/" + brokerId + "/general"; }
     public void setBrokerId(String brokerId) { this.brokerId = brokerId; }
 
     public String getBrokerArn() { return brokerArn; }
@@ -141,6 +173,30 @@ public class Broker {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    public List<String> getSecurityGroups() { return securityGroups; }
+    public void setSecurityGroups(List<String> securityGroups) { this.securityGroups = securityGroups; }
+
+    public List<String> getSubnetIds() { return subnetIds; }
+    public void setSubnetIds(List<String> subnetIds) { this.subnetIds = subnetIds; }
+
+    public Map<String, Object> getLogs() { return logs; }
+    public void setLogs(Map<String, Object> logs) { this.logs = logs; }
+
+    public Map<String, Object> getMaintenanceWindowStartTime() { return maintenanceWindowStartTime; }
+    public void setMaintenanceWindowStartTime(Map<String, Object> maintenanceWindowStartTime) { this.maintenanceWindowStartTime = maintenanceWindowStartTime; }
+
+    public String getStorageType() { return storageType; }
+    public void setStorageType(String storageType) { this.storageType = storageType; }
+
+    public String getAuthenticationStrategy() { return authenticationStrategy; }
+    public void setAuthenticationStrategy(String authenticationStrategy) { this.authenticationStrategy = authenticationStrategy; }
+
+    public Map<String, Object> getEncryptionOptions() { return encryptionOptions; }
+    public void setEncryptionOptions(Map<String, Object> encryptionOptions) { this.encryptionOptions = encryptionOptions; }
+
+    public Map<String, Object> getConfiguration() { return configuration; }
+    public void setConfiguration(Map<String, Object> configuration) { this.configuration = configuration; }
 
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }

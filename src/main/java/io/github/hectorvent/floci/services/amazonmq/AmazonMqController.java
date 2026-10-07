@@ -40,7 +40,15 @@ public class AmazonMqController {
                 bool(request, "publiclyAccessible"),
                 bool(request, "autoMinorVersionUpgrade"),
                 parseUsers(request.get("users")),
-                tags(request.get("tags")));
+                tags(request.get("tags")),
+                strList(request.get("securityGroups")),
+                strList(request.get("subnetIds")),
+                map(request.get("logs")),
+                map(request.get("maintenanceWindowStartTime")),
+                str(request, "storageType"),
+                str(request, "authenticationStrategy"),
+                map(request.get("encryptionOptions")),
+                map(request.get("configuration")));
         Broker broker = service.createBroker(params);
         return Response.ok(Map.of(
                 "brokerArn", broker.getBrokerArn(),
@@ -91,7 +99,35 @@ public class AmazonMqController {
         body.put("created", b.getCreated());
         body.put("brokerInstances", b.getBrokerInstances());
         body.put("tags", b.getTags());
+        // Optional CreateBroker members: omitted when the request did not set them.
+        putIfPresent(body, "securityGroups", b.getSecurityGroups());
+        putIfPresent(body, "subnetIds", b.getSubnetIds());
+        body.put("logs", logsSummary(b));
+        putIfPresent(body, "maintenanceWindowStartTime", b.getMaintenanceWindowStartTime());
+        putIfPresent(body, "storageType", b.getStorageType());
+        putIfPresent(body, "authenticationStrategy", b.getAuthenticationStrategy());
+        putIfPresent(body, "encryptionOptions", b.getEncryptionOptions());
+        // DescribeBroker reports the CreateBroker configuration as configurations.current.
+        if (b.getConfiguration() != null) {
+            body.put("configurations", Map.of("current", b.getConfiguration()));
+        }
         return body;
+    }
+
+    // LogsSummary: general and generalLogGroup are required. Audit logs are ActiveMQ-only,
+    // so a RabbitMQ broker reports the general log group alone.
+    private static Map<String, Object> logsSummary(Broker b) {
+        boolean general = b.getLogs() != null && Boolean.TRUE.equals(b.getLogs().get("general"));
+        Map<String, Object> logs = new LinkedHashMap<>();
+        logs.put("general", general);
+        logs.put("generalLogGroup", b.generalLogGroup());
+        return logs;
+    }
+
+    private static void putIfPresent(Map<String, Object> body, String key, Object value) {
+        if (value != null) {
+            body.put(key, value);
+        }
     }
 
     @DELETE
@@ -184,6 +220,15 @@ public class AmazonMqController {
         if (raw instanceof Map<?, ?> map) {
             Map<String, String> result = new LinkedHashMap<>();
             map.forEach((k, v) -> result.put(String.valueOf(k), String.valueOf(v)));
+            return result;
+        }
+        return null;
+    }
+
+    private static Map<String, Object> map(Object raw) {
+        if (raw instanceof Map<?, ?> m) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            m.forEach((k, v) -> result.put(String.valueOf(k), v));
             return result;
         }
         return null;

@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -159,6 +160,37 @@ class RabbitMqManagerTest {
         assertEquals(java.util.List.of("amqp://172.17.0.5:5672"),
                 broker.getBrokerInstances().get(0).getEndpoints());
         assertEquals("http://172.17.0.5:15672", broker.getBrokerInstances().get(0).getConsoleURL());
+    }
+
+    /** Container logs stream to the log group DescribeBroker names as generalLogGroup. */
+    @Test
+    void startContainerStreamsLogsToGeneralLogGroup() {
+        EmulatorConfig config = configWithDefaultPortRanges();
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of(
+                        5672, new ContainerLifecycleManager.EndpointInfo("localhost", 5672),
+                        15672, new ContainerLifecycleManager.EndpointInfo("localhost", 15672))));
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        selfReturningBuilder(containerBuilder);
+
+        PortAllocator portAllocator = Mockito.mock(PortAllocator.class);
+        when(portAllocator.allocate(5672, 5699)).thenReturn(5672);
+        when(portAllocator.allocate(15672, 15699)).thenReturn(15672);
+
+        ContainerLogStreamer logStreamer = Mockito.mock(ContainerLogStreamer.class);
+        RabbitMqManager manager = new RabbitMqManager(containerBuilder, lifecycleManager,
+                logStreamer, Mockito.mock(ContainerDetector.class),
+                portAllocator, config, regionResolver());
+
+        Broker broker = broker("b-1");
+        manager.startContainer(broker);
+
+        assertEquals("/aws/amazonmq/broker/b-1/general", broker.generalLogGroup());
+        verify(logStreamer).attach(eq("container-id"), eq(broker.generalLogGroup()),
+                any(), any(), eq("amazonmq:b-1"));
     }
 
     /**

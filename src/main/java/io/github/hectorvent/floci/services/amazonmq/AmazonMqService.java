@@ -141,6 +141,14 @@ public class AmazonMqService implements ResourceProvider {
         if (params.tags() != null) {
             broker.setTags(new HashMap<>(params.tags()));
         }
+        broker.setSecurityGroups(params.securityGroups());
+        broker.setSubnetIds(params.subnetIds());
+        broker.setLogs(params.logs());
+        broker.setMaintenanceWindowStartTime(params.maintenanceWindowStartTime());
+        broker.setStorageType(params.storageType());
+        broker.setAuthenticationStrategy(params.authenticationStrategy());
+        broker.setEncryptionOptions(params.encryptionOptions());
+        broker.setConfiguration(params.configuration());
 
         if (config.services().amazonmq().mock()) {
             // No backing container: come up immediately with synthetic endpoints.

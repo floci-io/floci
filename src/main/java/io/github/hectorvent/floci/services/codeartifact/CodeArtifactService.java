@@ -676,7 +676,7 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
 
         // Maven, npm, and pypi are metadata-free passthroughs straight to their own sidecar
-        // (ReposiliteSidecarClient/VerdaccioSidecarManager/PypiserverSidecarManager): publish for
+        // (ReposiliteSidecarClient/VerdaccioSidecarClient/PypiserverSidecarManager): publish for
         // these formats never goes through publishPackageVersion (it only ever accepts "generic"),
         // so packageVersions can never hold a record for them. Bridge straight to the sidecar
         // that actually has the asset instead of always 404ing here.

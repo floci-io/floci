@@ -15,7 +15,7 @@ Only the **RabbitMQ** engine and the `SINGLE_INSTANCE` deployment mode are suppo
 | Action | Description |
 |---|---|
 | `CreateBroker` | Provisions a RabbitMQ container and seeds the admin user |
-| `DescribeBroker` | Get broker metadata, state, and connection endpoints |
+| `DescribeBroker` | Get broker metadata, state, and connection endpoints; echoes the `CreateBroker` settings (security groups, subnets, maintenance window, storage type, authentication strategy, encryption options, and the configuration as `Configurations.Current`), and logs as a `LogsSummary` with the general log group |
 | `ListBrokers` | List all emulated brokers |
 | `DeleteBroker` | Stops and removes the RabbitMQ container |
 | `RebootBroker` | Reboots the broker |

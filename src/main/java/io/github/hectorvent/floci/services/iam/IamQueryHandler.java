@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
+import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
@@ -205,6 +206,16 @@ public class IamQueryHandler {
             case "ListPolicies" -> handleListPolicies(params);
             case "ListEntitiesForPolicy" -> handleListEntitiesForPolicy(params);
             case "GetAccountSummary" -> handleGetAccountSummary(params);
+            case "GetAccountProperties" -> handleGetAccountProperties(params);
+            case "PutAccountProperties" -> handlePutAccountProperties(params);
+            case "SetSecurityTokenServicePreferences" ->
+                    handleSetSecurityTokenServicePreferences(params);
+            case "EnableOutboundWebIdentityFederation" ->
+                    handleEnableOutboundWebIdentityFederation(params);
+            case "DisableOutboundWebIdentityFederation" ->
+                    handleDisableOutboundWebIdentityFederation(params);
+            case "GetOutboundWebIdentityFederationInfo" ->
+                    handleGetOutboundWebIdentityFederationInfo(params);
             case "GetAccountAuthorizationDetails" -> handleGetAccountAuthorizationDetails(params);
             case "GenerateCredentialReport" -> handleGenerateCredentialReport(params);
             case "GetCredentialReport" -> handleGetCredentialReport(params);
@@ -1343,8 +1354,8 @@ public class IamQueryHandler {
     }
 
     private Response handleUpdateAssumeRolePolicy(MultivaluedMap<String, String> params) {
-        iamService.updateAssumeRolePolicy(getParam(params, "RoleName"),
-                getParam(params, "PolicyDocument"));
+        iamService.updateAssumeRolePolicy(requireParam(params, "RoleName"),
+                requireParam(params, "PolicyDocument"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAssumeRolePolicy", AwsNamespaces.IAM)).build();
     }
 
@@ -1430,6 +1441,69 @@ public class IamQueryHandler {
         }
         xml.end("SummaryMap");
         return Response.ok(AwsQueryResponse.envelope("GetAccountSummary", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleGetAccountProperties(MultivaluedMap<String, String> params) {
+        XmlBuilder xml = new XmlBuilder().start("Properties");
+        for (Map.Entry<String, String> entry : iamService.getAccountProperties().entrySet()) {
+            xml.start("entry").elem("key", entry.getKey())
+                    .elem("value", entry.getValue()).end("entry");
+        }
+        xml.end("Properties");
+        return Response.ok(AwsQueryResponse.envelope("GetAccountProperties",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * The Properties map arrives as {@code Properties.entry.N.key} and
+     * {@code Properties.entry.N.value}, which is how the API Reference spells the member.
+     */
+    private Response handlePutAccountProperties(MultivaluedMap<String, String> params) {
+        Map<String, String> properties = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = getParam(params, "Properties.entry." + i + ".key");
+            if (key == null) {
+                break;
+            }
+            properties.put(key, getParam(params, "Properties.entry." + i + ".value"));
+        }
+        iamService.putAccountProperties(properties);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("PutAccountProperties",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleSetSecurityTokenServicePreferences(
+            MultivaluedMap<String, String> params) {
+        iamService.setSecurityTokenServicePreferences(
+                requireParam(params, "GlobalEndpointTokenVersion"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("SetSecurityTokenServicePreferences",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleEnableOutboundWebIdentityFederation(
+            MultivaluedMap<String, String> params) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("IssuerIdentifier", iamService.enableOutboundWebIdentityFederation());
+        return Response.ok(AwsQueryResponse.envelope("EnableOutboundWebIdentityFederation",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDisableOutboundWebIdentityFederation(
+            MultivaluedMap<String, String> params) {
+        iamService.disableOutboundWebIdentityFederation();
+        return Response.ok(AwsQueryResponse.envelopeNoResult(
+                "DisableOutboundWebIdentityFederation", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleGetOutboundWebIdentityFederationInfo(
+            MultivaluedMap<String, String> params) {
+        OutboundWebIdentityFederation state = iamService.getOutboundWebIdentityFederationInfo();
+        XmlBuilder xml = new XmlBuilder()
+                .elem("IssuerIdentifier", state.getIssuerIdentifier())
+                // Vending is on whenever the feature is: nothing in the API toggles it apart.
+                .elem("JwtVendingEnabled", true);
+        return Response.ok(AwsQueryResponse.envelope("GetOutboundWebIdentityFederationInfo",
+                AwsNamespaces.IAM, xml.build())).build();
     }
 
     private Response handleGenerateCredentialReport(MultivaluedMap<String, String> params) {
@@ -1946,27 +2020,27 @@ public class IamQueryHandler {
     // =========================================================================
 
     private Response handlePutUserPermissionsBoundary(MultivaluedMap<String, String> params) {
-        String userName = getParam(params, "UserName");
-        String boundaryArn = getParam(params, "PermissionsBoundary");
+        String userName = requireParam(params, "UserName");
+        String boundaryArn = requireParam(params, "PermissionsBoundary");
         iamService.putUserPermissionsBoundary(userName, boundaryArn);
         return Response.ok(AwsQueryResponse.envelope("PutUserPermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handleDeleteUserPermissionsBoundary(MultivaluedMap<String, String> params) {
-        String userName = getParam(params, "UserName");
+        String userName = requireParam(params, "UserName");
         iamService.deleteUserPermissionsBoundary(userName);
         return Response.ok(AwsQueryResponse.envelope("DeleteUserPermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handlePutRolePermissionsBoundary(MultivaluedMap<String, String> params) {
-        String roleName = getParam(params, "RoleName");
-        String boundaryArn = getParam(params, "PermissionsBoundary");
+        String roleName = requireParam(params, "RoleName");
+        String boundaryArn = requireParam(params, "PermissionsBoundary");
         iamService.putRolePermissionsBoundary(roleName, boundaryArn);
         return Response.ok(AwsQueryResponse.envelope("PutRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handleDeleteRolePermissionsBoundary(MultivaluedMap<String, String> params) {
-        String roleName = getParam(params, "RoleName");
+        String roleName = requireParam(params, "RoleName");
         iamService.deleteRolePermissionsBoundary(roleName);
         return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }

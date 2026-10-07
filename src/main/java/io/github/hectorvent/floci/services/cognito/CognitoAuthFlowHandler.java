@@ -632,13 +632,7 @@ final class CognitoAuthFlowHandler {
 
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
 
-        if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
-        if ("RESET_REQUIRED".equals(user.getUserStatus())) {
-            throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
-        }
-        if ("UNCONFIRMED".equals(user.getUserStatus())) {
-            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
-        }
+        requireSignInEligible(user);
         if (user.getPasswordHash() == null || !user.getPasswordHash().equals(service.hashPassword(password))) {
             throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
         }
@@ -779,13 +773,7 @@ final class CognitoAuthFlowHandler {
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
 
-        if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
-        if ("RESET_REQUIRED".equals(user.getUserStatus())) {
-            throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
-        }
-        if ("UNCONFIRMED".equals(user.getUserStatus())) {
-            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
-        }
+        requireSignInEligible(user);
         if (user.getSrpVerifier() == null) {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
         }
@@ -856,13 +844,7 @@ final class CognitoAuthFlowHandler {
         validateSecretHash(client, responses, username);
 
         CognitoUser user = service.adminGetUser(pool.getId(), username);
-        if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
-        if ("RESET_REQUIRED".equals(user.getUserStatus())) {
-            throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
-        }
-        if ("UNCONFIRMED".equals(user.getUserStatus())) {
-            throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
-        }
+        requireSignInEligible(user);
         if (user.getSrpVerifier() == null) {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
         }
@@ -1246,14 +1228,19 @@ final class CognitoAuthFlowHandler {
     }
 
     private void requireSignInEligible(CognitoUser user) {
-        if (!user.isEnabled()) {
-            throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
-        }
+        requireEnabled(user);
         if ("RESET_REQUIRED".equals(user.getUserStatus())) {
             throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
         }
         if ("UNCONFIRMED".equals(user.getUserStatus())) {
             throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
+        }
+    }
+
+    /** AWS rejects a disabled user with NotAuthorizedException, not UserNotConfirmedException. */
+    private static void requireEnabled(CognitoUser user) {
+        if (!user.isEnabled()) {
+            throw new AwsException("NotAuthorizedException", "User is disabled.", 400);
         }
     }
 
@@ -1267,7 +1254,7 @@ final class CognitoAuthFlowHandler {
 
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
-        if (!user.isEnabled()) throw new AwsException("UserNotConfirmedException", "User is disabled", 400);
+        requireEnabled(user);
         if ("RESET_REQUIRED".equals(user.getUserStatus())) {
             throw new AwsException("PasswordResetRequiredException", "Password reset required", 400);
         }
@@ -1664,8 +1651,7 @@ final class CognitoAuthFlowHandler {
         TriggerResult result = invokeTrigger(pool, client, user,
                 "PreAuthentication", "PreAuthentication_Authentication", req);
         if (result.errored()) {
-            throw new AwsException("NotAuthorizedException",
-                    "PreAuthentication failed with error " + result.errorMessage() + ".", 400);
+            throw blockingTriggerFailure(result, "PreAuthentication");
         }
     }
 
@@ -1703,8 +1689,7 @@ final class CognitoAuthFlowHandler {
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
         TriggerResult result = invokeTrigger(pool, client, user, "PreSignUp", triggerSource, req);
         if (result.errored()) {
-            throw new AwsException("NotAuthorizedException",
-                    "PreSignUp trigger denied signup: " + result.errorMessage(), 400);
+            throw blockingTriggerFailure(result, "PreSignUp");
         }
         if (!result.configured() || result.response() == null) return PreSignUpResponse.empty();
         Map<String, Object> resp = result.response();
@@ -1726,14 +1711,23 @@ final class CognitoAuthFlowHandler {
         req.put("validationData", validationData == null ? Map.of() : validationData);
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
         TriggerResult result = invokeTrigger(pool, null, user, "PreSignUp", "PreSignUp_AdminCreateUser", req);
-        if (!result.errored()) {
-            return;
+        if (result.errored()) {
+            throw blockingTriggerFailure(result, "PreSignUp");
         }
+    }
+
+    /**
+     * Maps a failed PreSignUp/PreAuthentication invocation the way Cognito does: a function
+     * that returned an error payload surfaces as {@code UserLambdaValidationException}
+     * ("&lt;Trigger&gt; failed with error &lt;errorMessage&gt;."), while an uninvokable
+     * function or a malformed response keeps the generic Lambda error mapping.
+     */
+    private AwsException blockingTriggerFailure(TriggerResult result, String triggerName) {
         if (result.errorKind() == TriggerErrorKind.USER_VALIDATION) {
-            throw new AwsException("UserLambdaValidationException",
-                    "PreSignUp failed with error " + result.errorMessage() + ".", 400);
+            return new AwsException("UserLambdaValidationException",
+                    triggerName + " failed with error " + result.errorMessage() + ".", 400);
         }
-        throw triggerFailure(result, "PreSignUp");
+        return triggerFailure(result, triggerName);
     }
 
     /**

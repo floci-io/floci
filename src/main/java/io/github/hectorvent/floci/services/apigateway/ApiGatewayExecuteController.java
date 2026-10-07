@@ -3220,21 +3220,7 @@ public class ApiGatewayExecuteController {
         event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
                 ? uriInfo.getRequestUri().getRawQuery() : "");
 
-        // Headers (lowercase keys for v2)
-        ObjectNode headersNode = event.putObject("headers");
-        MultivaluedMap<String, String> reqHeaders = headers.getRequestHeaders();
-        for (Map.Entry<String, List<String>> e : reqHeaders.entrySet()) {
-            if (!e.getValue().isEmpty()) headersNode.put(e.getKey().toLowerCase(), e.getValue().get(0));
-        }
-
-        // Query string parameters
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
-        if (!queryParams.isEmpty()) {
-            ObjectNode qsp = event.putObject("queryStringParameters");
-            for (Map.Entry<String, List<String>> e : queryParams.entrySet()) {
-                if (!e.getValue().isEmpty()) qsp.put(e.getKey(), e.getValue().get(0));
-            }
-        }
+        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), uriInfo.getQueryParameters());
 
         event.putObject("pathParameters");
         event.putNull("stageVariables");
@@ -3443,21 +3429,10 @@ public class ApiGatewayExecuteController {
         event.put("routeKey", routeKey != null ? routeKey : "$default");
         event.put("rawPath", preservedPath);
 
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
         event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
                 ? uriInfo.getRequestUri().getRawQuery() : "");
 
-        ObjectNode headersNode = event.putObject("headers");
-        for (Map.Entry<String, java.util.List<String>> e : headers.getRequestHeaders().entrySet()) {
-            if (!e.getValue().isEmpty()) headersNode.put(e.getKey().toLowerCase(), e.getValue().get(0));
-        }
-
-        if (!queryParams.isEmpty()) {
-            ObjectNode qsp = event.putObject("queryStringParameters");
-            for (Map.Entry<String, java.util.List<String>> e : queryParams.entrySet()) {
-                if (!e.getValue().isEmpty()) qsp.put(e.getKey(), e.getValue().get(0));
-            }
-        }
+        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), uriInfo.getQueryParameters());
 
         Map<String, String> pathParams = extractV2PathParams(routeKey, path);
         if (!pathParams.isEmpty()) {
@@ -3543,6 +3518,58 @@ public class ApiGatewayExecuteController {
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize v2 proxy event", e);
         }
+    }
+
+    /**
+     * Writes {@code cookies}, {@code headers} and {@code queryStringParameters} the way payload
+     * format 2.0 carries them, for both the Lambda integration event and the Lambda authorizer
+     * event. Format 2.0 has no multi-value maps: AWS combines duplicate headers and duplicate
+     * query strings with commas, and lists the request's cookies in their own array, which is
+     * left out when the request has none.
+     */
+    private static void putV2CookiesHeadersAndQuery(ObjectNode event,
+                                                    MultivaluedMap<String, String> requestHeaders,
+                                                    MultivaluedMap<String, String> queryParams) {
+        List<String> cookies = v2Cookies(requestHeaders);
+        if (!cookies.isEmpty()) {
+            ArrayNode cookiesNode = event.putArray("cookies");
+            cookies.forEach(cookiesNode::add);
+        }
+
+        ObjectNode headersNode = event.putObject("headers");
+        for (Map.Entry<String, List<String>> e : requestHeaders.entrySet()) {
+            if (!e.getValue().isEmpty()) {
+                headersNode.put(e.getKey().toLowerCase(), String.join(",", e.getValue()));
+            }
+        }
+
+        if (!queryParams.isEmpty()) {
+            ObjectNode qsp = event.putObject("queryStringParameters");
+            for (Map.Entry<String, List<String>> e : queryParams.entrySet()) {
+                if (!e.getValue().isEmpty()) {
+                    qsp.put(e.getKey(), String.join(",", e.getValue()));
+                }
+            }
+        }
+    }
+
+    /** Every cookie-pair from every {@code Cookie} header, in request order. */
+    private static List<String> v2Cookies(MultivaluedMap<String, String> requestHeaders) {
+        List<String> cookies = new ArrayList<>();
+        for (Map.Entry<String, List<String>> e : requestHeaders.entrySet()) {
+            if (!HttpHeaders.COOKIE.equalsIgnoreCase(e.getKey())) {
+                continue;
+            }
+            for (String header : e.getValue()) {
+                for (String cookie : header.split(";")) {
+                    String trimmed = cookie.trim();
+                    if (!trimmed.isEmpty()) {
+                        cookies.add(trimmed);
+                    }
+                }
+            }
+        }
+        return cookies;
     }
 
     private static boolean isV2TextContentType(String contentType) {

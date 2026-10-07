@@ -24,7 +24,8 @@ import java.util.regex.Pattern;
  * @param globalPseudoRegion   the {@code <partition>-global} label the SDKs accept as a region,
  *                             or {@code null} where the partition has none ({@code aws-eusc})
  * @param regions              the published regions, in botocore order
- * @param services             every service key {@code endpoints.json} lists for the partition
+ * @param services             every service key {@code endpoints.json} lists for the partition,
+ *                             plus those whose endpoint ruleset names it explicitly
  * @param globalServices       services with a partition-wide endpoint, by service key
  * @param supportsDualStack    whether the partition publishes dual-stack endpoints
  * @param supportsFips         whether the partition publishes FIPS endpoints
@@ -86,7 +87,7 @@ public record AwsPartition(
         return region != null && s3DualStackRegions.contains(region.trim().toLowerCase(Locale.ROOT));
     }
 
-    /** True when {@code endpoints.json} lists {@code service} for this partition. */
+    /** True when the published data lists {@code service} for this partition (see {@link #services()}). */
     public boolean offers(String service) {
         return service != null && services.contains(service);
     }

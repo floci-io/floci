@@ -9339,6 +9339,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         String id = requireClusterEndpointIdentifier(endpointId);
         DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAuroraCluster(cluster);
         if (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + cluster.getDbClusterIdentifier() + " is not in available state.", 400);
@@ -9385,6 +9386,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, endpointId);
         DbCluster cluster = getDbCluster(endpoint.getDbClusterIdentifier(), effectiveRegion);
+        requireAuroraCluster(cluster);
         String customType = isBlank(endpointType) ? endpoint.getCustomEndpointType() : requireCustomEndpointType(endpointType);
         boolean listsGiven = staticMembers != null || excludedMembers != null;
         List<String> newStatic = listsGiven ? clusterMembersNamed(cluster, staticMembers) : endpoint.getStaticMembers();
@@ -9465,6 +9467,13 @@ public class RdsService implements Resettable, ResourceProvider {
         int to = Math.min(matching.size(), start + limit);
         return new ClusterEndpointPage(matching.subList(start, to),
                 to < matching.size() ? Integer.toString(to) : null);
+    }
+
+    private static void requireAuroraCluster(DbCluster cluster) {
+        if (!isAuroraEngine(cluster.getEngineIdentifier())) {
+            throw new AwsException("InvalidParameterValue",
+                    "Custom endpoints are supported only for Aurora DB clusters.", 400);
+        }
     }
 
     private static boolean matchesFilter(Map<String, List<String>> filters, String name, String value) {
