@@ -21,8 +21,6 @@ import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.WaitResponse;
-import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -1389,26 +1387,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * invocation waiting out the full function timeout to be told {@code Function.TimedOut}
      * instead of the {@code Runtime.ExitError} AWS reports immediately.
      *
-     * <p>Fires exactly once per container, on whatever exit eventually happens - including an
-     * intentional {@code docker stop} during normal teardown. {@link RuntimeApiServer
-     * #handleRuntimeProcessExited} itself distinguishes a genuine crash from that case (its own
-     * {@code stopped}/{@code faulted} guard), so this method only needs to forward the event;
-     * it does not need to be un-armed on the teardown path.
+     * <p>Fires once per container exit, including an intentional {@code docker stop} during
+     * normal teardown. {@link RuntimeApiServer#handleRuntimeProcessExited} itself distinguishes
+     * a genuine crash from that case (its own {@code stopped}/{@code faulted} guard). The watch
+     * survives its stream timing out on a quiet container; see {@link LambdaExitWatcher}.
      */
     private void watchForUnexpectedExit(DockerClient dockerClient, String containerId,
                                         RuntimeApiServer runtimeApiServer) {
-        try {
-            dockerClient.waitContainerCmd(containerId).exec(new WaitContainerResultCallback() {
-                @Override
-                public void onNext(WaitResponse response) {
-                    super.onNext(response);
-                    Integer statusCode = response.getStatusCode();
-                    runtimeApiServer.handleRuntimeProcessExited(statusCode != null ? statusCode : -1);
-                }
-            });
-        } catch (RuntimeException e) {
-            LOG.debugv(e, "Could not arm exit watcher for container {0}", containerId);
-        }
+        LambdaExitWatcher.watch(dockerClient, containerId, runtimeApiServer::handleRuntimeProcessExited);
     }
 
     private void launchExtensions(DockerClient dockerClient, String containerId, String functionName,
