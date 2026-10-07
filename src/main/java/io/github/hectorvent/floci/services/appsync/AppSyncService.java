@@ -4,8 +4,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -59,6 +60,7 @@ public class AppSyncService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String baseUrl;
+    private final String cloudFrontDomainSuffix;
     private final LambdaAuthorizerCache lambdaAuthorizerCache;
 
     @Inject
@@ -88,6 +90,7 @@ public class AppSyncService {
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.baseUrl = trimTrailingSlash(config.effectiveBaseUrl());
+        this.cloudFrontDomainSuffix = config.services().cloudfront().domainSuffix();
         this.lambdaAuthorizerCache = lambdaAuthorizerCache;
     }
 
@@ -735,9 +738,7 @@ public class AppSyncService {
         dn.setDomainName(domainName);
         dn.setDescription((String) request.get("description"));
         dn.setCertificateArn((String) request.get("certificateArn"));
-        String shortId = generateShortId();
-        dn.setAppsyncDomainName(shortId + "." + AwsEndpoints.host("appsync-api", regionResolver.getRegion()));
-        dn.setHostedZoneId("Z" + generateShortId());
+        applyCloudFrontFront(dn, regionResolver.getRegion());
         dn.setDomainNameArn(regionResolver.buildArn("appsync", regionResolver.getRegion(),
             "domainnames/" + domainName));
 
@@ -750,6 +751,20 @@ public class AppSyncService {
 
         domainStore.put(domainName, dn);
         return dn;
+    }
+
+    /**
+     * AppSync fronts a custom domain with a CloudFront distribution: the CDK aliases
+     * {@code appsyncDomainName} into the CloudFront hosted zone of the partition
+     * ({@code aws-route53-targets/lib/appsync-target.ts}), so the name is a distribution name and
+     * the zone is CloudFront's, never a zone of its own. Built like an edge-optimized API
+     * Gateway domain.
+     */
+    private void applyCloudFrontFront(DomainName dn, String region) {
+        dn.setAppsyncDomainName("d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + "."
+                + cloudFrontDomainSuffix);
+        dn.setHostedZoneId(AwsRegionFacts.cloudFrontHostedZoneId(
+                AwsPartitions.forRegionOrCommercial(region).id()).orElse(null));
     }
 
     public DomainName getDomainName(String domainName) {
