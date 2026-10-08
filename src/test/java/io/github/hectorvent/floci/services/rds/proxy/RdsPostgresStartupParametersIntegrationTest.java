@@ -21,6 +21,7 @@ import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -110,21 +111,19 @@ class RdsPostgresStartupParametersIntegrationTest {
                  Statement statement = connection.createStatement()) {
                 statement.execute("CREATE ROLE app_user LOGIN");
                 statement.execute("CREATE SCHEMA floci_opts AUTHORIZATION app_user");
+                // A database that refuses \' in string literals must still accept the parameters.
+                statement.execute("ALTER DATABASE appdb SET backslash_quote = off");
             }
 
-            Properties iam = new Properties();
-            iam.setProperty("user", "app_user");
-            iam.setProperty("password", SigV4TokenTestHelper.createRdsToken("localhost", port, "app_user",
-                    "test", "test", Instant.now(), 900));
-            iam.setProperty("sslmode", "disable");
+            Properties iam = iamLogin(port, "app_user");
             iam.setProperty("options", "-c search_path=floci_opts -c work_mem=64MB");
-            iam.setProperty("ApplicationName", "floci-startup-params");
+            iam.setProperty("ApplicationName", "floci's startup params");
 
             try (Connection connection = DriverManager.getConnection(
                     "jdbc:postgresql://localhost:" + port + "/appdb", iam)) {
                 assertThat(show(connection, "search_path"), equalTo("floci_opts"));
                 assertThat(show(connection, "work_mem"), equalTo("64MB"));
-                assertThat(show(connection, "application_name"), equalTo("floci-startup-params"));
+                assertThat(show(connection, "application_name"), equalTo("floci's startup params"));
                 assertThat(show(connection, "session_authorization"), equalTo("app_user"));
             }
         } finally {
@@ -133,6 +132,59 @@ class RdsPostgresStartupParametersIntegrationTest {
                     .formParam("SkipFinalSnapshot", "true")
             .when().post("/");
         }
+    }
+
+    @Test
+    void anIamSessionCannotTakeTheMasterIdentityThroughStartupParameters() throws Exception {
+        String dbId = "startup-params-iam-escalation-" + Long.toString(System.nanoTime(), 36);
+        int port = rds("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", dbId)
+                .formParam("Engine", "postgres")
+                .formParam("MasterUsername", MASTER_USER)
+                .formParam("MasterUserPassword", MASTER_PASSWORD)
+                .formParam("DBName", "appdb")
+                .formParam("AllocatedStorage", "20")
+                .formParam("DBInstanceClass", "db.t3.micro")
+                .formParam("EnableIAMDatabaseAuthentication", "true")
+        .when().post("/").then().statusCode(200)
+                .extract().xmlPath()
+                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+        try {
+            Properties master = new Properties();
+            master.setProperty("user", MASTER_USER);
+            master.setProperty("password", MASTER_PASSWORD);
+            master.setProperty("sslmode", "disable");
+            try (Connection connection = DriverManager.getConnection(
+                    "jdbc:postgresql://localhost:" + port + "/appdb", master);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("CREATE ROLE app_user LOGIN");
+            }
+
+            for (String options : new String[] {
+                    "-c session_authorization=" + MASTER_USER,
+                    "-c session_replication_role=replica --Session-Authorization=" + MASTER_USER,
+                    "-c role=" + MASTER_USER}) {
+                Properties iam = iamLogin(port, "app_user");
+                iam.setProperty("options", options);
+                SQLException refused = assertThrows(SQLException.class, () -> DriverManager.getConnection(
+                        "jdbc:postgresql://localhost:" + port + "/appdb", iam).close(), options);
+                assertThat(options, refused.getSQLState(), equalTo("42501"));
+            }
+        } finally {
+            rds("DeleteDBInstance")
+                    .formParam("DBInstanceIdentifier", dbId)
+                    .formParam("SkipFinalSnapshot", "true")
+            .when().post("/");
+        }
+    }
+
+    private static Properties iamLogin(int port, String user) throws Exception {
+        Properties iam = new Properties();
+        iam.setProperty("user", user);
+        iam.setProperty("password", SigV4TokenTestHelper.createRdsToken("localhost", port, user,
+                "test", "test", Instant.now(), 900));
+        iam.setProperty("sslmode", "disable");
+        return iam;
     }
 
     private static String show(Connection connection, String parameter) throws SQLException {

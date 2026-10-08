@@ -261,11 +261,15 @@ public class PostgresProtocolHandler {
                 // Phase 5c: Apply the client's startup parameters now that the session belongs to
                 // the role, so PostgreSQL checks each one against the role's privileges, as it
                 // does when the role logs in directly. A parameter PostgreSQL refuses fails the
-                // login with PostgreSQL's own reason, as it would at startup.
+                // login with PostgreSQL's own reason, as it would at startup. One check cannot be
+                // left to PostgreSQL: it authorizes session_authorization against the user the
+                // backend connection authenticated as, the superuser master, so a change of it is
+                // refused here before anything is applied, and the outcome is checked again below.
                 if (forwardStartupParameters) {
                     List<SessionSetting> settings;
                     try {
                         settings = sessionSettings(startup.parameters());
+                        refuseSessionAuthorizationChange(settings, clientUsername);
                     } catch (StartupParameterException e) {
                         sendErrorResponse(clientOut, "FATAL", e.sqlState(), e.getMessage());
                         clientOut.flush();
@@ -279,6 +283,16 @@ public class PostgresProtocolHandler {
                             byte[] refusal = applied.get(applied.size() - 1);
                             sendErrorResponse(clientOut, "FATAL", errorField(refusal, 'C', "42601"),
                                     errorField(refusal, 'M', "invalid startup parameter"));
+                            clientOut.flush();
+                            closeQuietly(client);
+                            closeQuietly(backend);
+                            return null;
+                        }
+                        if (reportsAnotherSessionAuthorization(applied, iamRole)) {
+                            LOG.warnv("RDS IAM session for role {0} changed its session authorization "
+                                    + "through startup parameters; refusing the login", iamRole);
+                            sendErrorResponse(clientOut, "FATAL", "42501",
+                                    "permission denied to set session authorization");
                             clientOut.flush();
                             closeQuietly(client);
                             closeQuietly(backend);
@@ -810,7 +824,13 @@ public class PostgresProtocolHandler {
                 continue;
             }
             if ("replication".equals(name)) {
-                if (!isFalse(parameter.getValue())) {
+                String value = parameter.getValue();
+                Boolean replication = "database".equals(value) ? Boolean.TRUE : parseBool(value);
+                if (replication == null) {
+                    throw new StartupParameterException("22023",
+                            "invalid value for parameter \"replication\": \"" + value + "\"");
+                }
+                if (replication) {
                     throw new StartupParameterException("0A000",
                             "replication connections are not supported for IAM sessions through the proxy");
                 }
@@ -821,17 +841,71 @@ public class PostgresProtocolHandler {
         return settings;
     }
 
-    private static boolean isFalse(String value) {
-        String normalized = value.trim().toLowerCase(Locale.ROOT);
-        return "false".equals(normalized) || "off".equals(normalized) || "no".equals(normalized)
-                || "0".equals(normalized);
+    /**
+     * A boolean as PostgreSQL's {@code parse_bool} reads it: any case-insensitive prefix of
+     * {@code true}, {@code false}, {@code yes} or {@code no}, at least two letters of {@code on}
+     * or {@code off}, or exactly {@code 1} or {@code 0}. {@code null} for anything else,
+     * including the ambiguous {@code o}.
+     */
+    static Boolean parseBool(String value) {
+        if (value.isEmpty()) {
+            return null;
+        }
+        String lower = value.toLowerCase(Locale.ROOT);
+        if ("true".startsWith(lower) || "yes".startsWith(lower)) {
+            return Boolean.TRUE;
+        }
+        if ("false".startsWith(lower) || "no".startsWith(lower)) {
+            return Boolean.FALSE;
+        }
+        if (lower.length() >= 2 && "on".startsWith(lower)) {
+            return Boolean.TRUE;
+        }
+        if (lower.length() >= 2 && "off".startsWith(lower)) {
+            return Boolean.FALSE;
+        }
+        if ("1".equals(lower)) {
+            return Boolean.TRUE;
+        }
+        if ("0".equals(lower)) {
+            return Boolean.FALSE;
+        }
+        return null;
+    }
+
+    /**
+     * Refuses a {@code session_authorization} setting naming anyone but {@code role}. PostgreSQL
+     * would authorize it against the superuser the backend connection authenticated as, not the
+     * token's role, so it would hand the session back to the master.
+     */
+    static void refuseSessionAuthorizationChange(List<SessionSetting> settings, String role)
+            throws StartupParameterException {
+        for (SessionSetting setting : settings) {
+            if ("session_authorization".equalsIgnoreCase(setting.name()) && !role.equals(setting.value())) {
+                throw new StartupParameterException("42501", "permission denied to set session authorization");
+            }
+        }
+    }
+
+    /** Whether {@code messages} report a {@code session_authorization} other than {@code role}. */
+    private static boolean reportsAnotherSessionAuthorization(List<byte[]> messages, String role) {
+        for (byte[] message : messages) {
+            if (!"session_authorization".equals(parameterStatusName(message))) {
+                continue;
+            }
+            String[] status = parameterStatus(message, 5);
+            if (status != null && !role.equals(status[1])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
      * The settings an {@code options} startup parameter carries: {@code -c name=value},
-     * {@code -cname=value} or {@code --name=value}, with arguments split on unescaped whitespace
-     * and a backslash taking the next character literally, as PostgreSQL's {@code pg_split_opts}
-     * does. A dash in a name stands for an underscore. The proxy cannot apply PostgreSQL's other
+     * {@code -cname=value} or {@code --name=value}, with arguments split on unescaped ASCII
+     * whitespace and a backslash taking the next character literally, as PostgreSQL's
+     * {@code pg_split_opts} does; a backslash that ends the string is dropped. A dash in a name stands for an underscore. The proxy cannot apply PostgreSQL's other
      * server switches to a session that has already started, so it refuses them.
      */
     static List<SessionSetting> parseOptions(String options) throws StartupParameterException {
@@ -873,16 +947,19 @@ public class PostgresProtocolHandler {
         List<String> arguments = new ArrayList<>();
         int i = 0;
         while (i < options.length()) {
-            while (i < options.length() && Character.isWhitespace(options.charAt(i))) {
+            while (i < options.length() && isAsciiSpace(options.charAt(i))) {
                 i++;
             }
             if (i >= options.length()) {
                 break;
             }
             StringBuilder argument = new StringBuilder();
-            while (i < options.length() && !Character.isWhitespace(options.charAt(i))) {
-                if (options.charAt(i) == '\\' && i + 1 < options.length()) {
+            while (i < options.length() && !isAsciiSpace(options.charAt(i))) {
+                if (options.charAt(i) == '\\') {
                     i++;
+                    if (i >= options.length()) {
+                        break;
+                    }
                 }
                 argument.append(options.charAt(i));
                 i++;
@@ -890,6 +967,11 @@ public class PostgresProtocolHandler {
             arguments.add(argument.toString());
         }
         return arguments;
+    }
+
+    /** The characters C's {@code isspace} accepts in the C locale. */
+    private static boolean isAsciiSpace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\u000B' || c == '\f' || c == '\r';
     }
 
     /**
@@ -921,9 +1003,12 @@ public class PostgresProtocolHandler {
         return sql.toString();
     }
 
-    /** An escape-string literal, so it reads the same whatever standard_conforming_strings says. */
+    /**
+     * An escape-string literal, so it reads the same whatever standard_conforming_strings says.
+     * Apostrophes are doubled rather than backslash-escaped, which backslash_quote can forbid.
+     */
     static String quoteLiteral(String value) {
-        return "E'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
+        return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
     /**
