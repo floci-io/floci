@@ -113,6 +113,9 @@ public class IotMqttBrokerService implements Resettable {
 
     static final int MAX_PENDING_RULE_EVALUATIONS = 1_000;
 
+    static final String CLIENT_INITIATED_DISCONNECT = "CLIENT_INITIATED_DISCONNECT";
+    static final String CONNECTION_LOST = "CONNECTION_LOST";
+
     private static final long RULES_RESETTING = 1;
     private static final long RULES_STOPPED = 2;
     private static final long RULE_STATE_STEP = 4;
@@ -125,6 +128,8 @@ public class IotMqttBrokerService implements Resettable {
     final WorkerExecutor ruleWorker;
     private final Map<String, ClientSession> sessionsByClient = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Subscription>> subscriptionsByClient = new ConcurrentHashMap<>();
+    /** How a client id's last session in an account and region ended, for fleet indexing. */
+    private final Map<HistoryKey, Connectivity> lastDisconnects = new ConcurrentHashMap<>();
     private final AtomicInteger pendingRuleEvaluations = new AtomicInteger();
     private final AtomicBoolean ruleEvaluationsThrottled = new AtomicBoolean();
     /**
@@ -193,11 +198,12 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * The broker keeps nothing in Floci storage; a reset only suspends rules, in
-     * {@link #beforeReset()}.
+     * The broker keeps nothing in Floci storage; a reset forgets how earlier sessions ended, and
+     * suspends rules in {@link #beforeReset()}. Live sessions stay connected.
      */
     @Override
     public void clear() {
+        lastDisconnects.clear();
     }
 
     synchronized void startIfEnabled() {
@@ -355,6 +361,8 @@ public class IotMqttBrokerService implements Resettable {
         if (cleanSession) {
             subscriptionsByClient.remove(clientId);
         }
+        // ponytail: DeleteConnection counts as CONNECTION_LOST; AWS's reason for it was not measured.
+        lastDisconnects.put(session.historyKey(), session.disconnected(CONNECTION_LOST));
         session.endpoint().close();
         return true;
     }
@@ -368,6 +376,21 @@ public class IotMqttBrokerService implements Resettable {
             return Optional.empty();
         }
         return Optional.of(new ConnectionInfo(session.clientId(), session.sourceIp(), session.sourcePort()));
+    }
+
+    /**
+     * A client id's connection as fleet indexing reports it in an account and region: its live
+     * session, else how its last one ended. Empty when it has not connected there since the last
+     * reset. A plaintext session counts in the default account and region, as the broker's shadow
+     * topics do; a TLS session in its certificate's.
+     */
+    Optional<Connectivity> connectivity(String accountId, String region, String clientId) {
+        ClientSession session = sessionsByClient.get(clientId);
+        if (session != null && session.endpoint().isConnected()
+                && accountId.equals(session.accountId()) && region.equals(session.region())) {
+            return Optional.of(session.connected());
+        }
+        return Optional.ofNullable(lastDisconnects.get(new HistoryKey(accountId, region, clientId)));
     }
 
     List<String> listSubscriptions(String clientId) {
@@ -388,10 +411,10 @@ public class IotMqttBrokerService implements Resettable {
         String clientId = endpoint.clientIdentifier();
         SocketAddress remoteAddress = endpoint.remoteAddress();
         String sourceIp = remoteAddress == null ? null : remoteAddress.host();
-        String principal = null;
+        IotService.RegisteredDevice device = null;
         if (verifyDevice) {
-            principal = admittedDevice(endpoint, clientId, sourceIp);
-            if (principal == null) {
+            device = admittedDevice(endpoint, clientId, sourceIp);
+            if (device == null) {
                 endpoint.reject(endpoint.protocolVersion() == 5
                         ? MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED_5
                         : MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED);
@@ -406,7 +429,7 @@ public class IotMqttBrokerService implements Resettable {
                 return;
             }
         }
-        admit(endpoint, principal);
+        admit(endpoint, device);
     }
 
     /**
@@ -447,7 +470,7 @@ public class IotMqttBrokerService implements Resettable {
         });
     }
 
-    private void admit(MqttEndpoint endpoint, String principal) {
+    private void admit(MqttEndpoint endpoint, IotService.RegisteredDevice device) {
         String clientId = endpoint.clientIdentifier();
         SocketAddress remoteAddress = endpoint.remoteAddress();
         String sourceIp = remoteAddress == null ? null : remoteAddress.host();
@@ -456,7 +479,11 @@ public class IotMqttBrokerService implements Resettable {
                 endpoint,
                 sourceIp,
                 remoteAddress == null ? -1 : remoteAddress.port(),
-                endpoint.isCleanSession());
+                endpoint.isCleanSession(),
+                device == null ? config.defaultAccountId() : device.accountId(),
+                device == null ? config.defaultRegion() : device.region(),
+                System.currentTimeMillis(),
+                endpoint.keepAliveTimeSeconds());
 
         endpoint.subscriptionAutoAck(false);
         endpoint.publishAutoAck(false);
@@ -464,8 +491,8 @@ public class IotMqttBrokerService implements Resettable {
         endpoint.subscribeHandler(message -> handleSubscribe(session, message));
         endpoint.unsubscribeHandler(message -> handleUnsubscribe(session, message));
         endpoint.publishHandler(message -> handlePublish(session, message));
-        endpoint.disconnectHandler(ignored -> removeSession(session));
-        endpoint.closeHandler(ignored -> removeSession(session));
+        endpoint.disconnectHandler(ignored -> removeSession(session, CLIENT_INITIATED_DISCONNECT));
+        endpoint.closeHandler(ignored -> removeSession(session, CONNECTION_LOST));
 
         ClientSession previous = sessionsByClient.put(clientId, session);
         if (previous != null && previous.endpoint() != endpoint) {
@@ -473,18 +500,18 @@ public class IotMqttBrokerService implements Resettable {
         }
 
         endpoint.accept();
-        if (principal != null) {
-            LOG.debugv("IoT MQTT TLS client {0} admitted as {1}", clientId, principal);
+        if (device != null) {
+            LOG.debugv("IoT MQTT TLS client {0} admitted as {1}", clientId, device.certificate().getCertificateArn());
         }
     }
 
     /**
-     * The certificate ARN of the device behind the connection when it may connect, otherwise null.
+     * The registered device behind the connection when it may connect, otherwise null.
      * A failure while deciding refuses the client rather than leaving the CONNECT unanswered. A
      * refusal is the client's own doing and reaches it as the CONNACK, so it is logged at debug
      * only: the CONNECT is reachable by anyone.
      */
-    private String admittedDevice(MqttEndpoint endpoint, String clientId, String sourceIp) {
+    private IotService.RegisteredDevice admittedDevice(MqttEndpoint endpoint, String clientId, String sourceIp) {
         try {
             Optional<IotService.RegisteredDevice> device = presentedDevice(endpoint);
             if (device.isEmpty()) {
@@ -496,7 +523,7 @@ public class IotMqttBrokerService implements Resettable {
                 LOG.debugv("IoT MQTT TLS client {0} refused: iot:Connect is not allowed for {1}", clientId, certificateArn);
                 return null;
             }
-            return certificateArn;
+            return device.get();
         } catch (RuntimeException e) {
             LOG.warnv(e, "IoT MQTT TLS client {0} refused: device verification failed: {1}", clientId, e.getMessage());
             return null;
@@ -600,7 +627,7 @@ public class IotMqttBrokerService implements Resettable {
 
         String topic = message.topicName();
         if (topic.startsWith("$aws/")) {
-            iotService.get().handleReservedMqttPublish(topic, payload, this::publish);
+            iotService.get().handleReservedMqttPublish(topic, payload, rules -> evaluateRulesOnWorker(topic, rules));
             return;
         }
 
@@ -688,8 +715,11 @@ public class IotMqttBrokerService implements Resettable {
         }
     }
 
-    private void removeSession(ClientSession session) {
-        sessionsByClient.remove(session.clientId(), session);
+    /** Ends the session if it is still the client id's current one, recording how it ended. */
+    private void removeSession(ClientSession session, String disconnectReason) {
+        if (sessionsByClient.remove(session.clientId(), session)) {
+            lastDisconnects.put(session.historyKey(), session.disconnected(disconnectReason));
+        }
         if (session.cleanSession()) {
             subscriptionsByClient.remove(session.clientId());
         }
@@ -738,12 +768,36 @@ public class IotMqttBrokerService implements Resettable {
             MqttEndpoint endpoint,
             String sourceIp,
             int sourcePort,
-            boolean cleanSession) {
+            boolean cleanSession,
+            String accountId,
+            String region,
+            long connectedAt,
+            int keepAliveDuration) {
+
+        HistoryKey historyKey() {
+            return new HistoryKey(accountId, region, clientId);
+        }
+
+        Connectivity connected() {
+            return new Connectivity(true, connectedAt, null, keepAliveDuration, cleanSession);
+        }
+
+        Connectivity disconnected(String reason) {
+            return new Connectivity(false, System.currentTimeMillis(), reason, keepAliveDuration, cleanSession);
+        }
+    }
+
+    private record HistoryKey(String accountId, String region, String clientId) {
     }
 
     private record Subscription(String topicFilter, int qos) {
     }
 
     record ConnectionInfo(String clientId, String address, int port) {
+    }
+
+    /** Timestamps are epoch milliseconds: the connect while connected, the disconnect after. */
+    record Connectivity(boolean connected, long timestamp, String disconnectReason, int keepAliveDuration,
+                        boolean cleanSession) {
     }
 }
