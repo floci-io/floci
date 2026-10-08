@@ -20,6 +20,7 @@ import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.DBCluster;
 import software.amazon.awssdk.services.rds.model.DBClusterEndpoint;
 import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
+import software.amazon.awssdk.services.rds.model.DBEngineVersion;
 import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DBSnapshot;
@@ -31,6 +32,7 @@ import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetsResponse;
+import software.amazon.awssdk.services.rds.model.EngineDefaults;
 import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
@@ -49,6 +51,8 @@ import software.amazon.awssdk.services.rds.model.OptionSetting;
 import software.amazon.awssdk.services.rds.model.RdsException;
 import software.amazon.awssdk.services.rds.model.RegisterDbProxyTargetsResponse;
 import software.amazon.awssdk.services.rds.model.Tag;
+import software.amazon.awssdk.services.rds.model.UpgradeTarget;
+import software.amazon.awssdk.services.rds.model.ValidStorageOptions;
 
 import java.time.Instant;
 import java.util.List;
@@ -750,6 +754,39 @@ class RdsControlPlaneTest {
             } catch (Exception e) {
                 LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
             }
+        }
+    }
+
+    @Test
+    @DisplayName("Catalogue reads: engine versions, engine defaults and valid instance modifications")
+    void sdkReadsTheEngineCatalogue() {
+        DBEngineVersion postgres = rds.describeDBEngineVersions(b -> b
+                .engine("postgres").engineVersion("16.3")).dbEngineVersions().get(0);
+        assertThat(postgres.dbParameterGroupFamily()).isEqualTo("postgres16");
+        assertThat(postgres.validUpgradeTarget()).extracting(UpgradeTarget::engineVersion).contains("17.4");
+        assertThat(postgres.supportedEngineModes()).containsExactly("provisioned");
+
+        assertThat(rds.describeDBEngineVersions(b -> b.engine("mysql").defaultOnly(true)).dbEngineVersions())
+                .extracting(DBEngineVersion::engineVersion).containsExactly("8.0.36");
+
+        EngineDefaults defaults = rds.describeEngineDefaultParameters(b -> b
+                .dbParameterGroupFamily("postgres16")).engineDefaults();
+        assertThat(defaults.dbParameterGroupFamily()).isEqualTo("postgres16");
+        assertThat(rds.describeEngineDefaultClusterParameters(b -> b
+                .dbParameterGroupFamily("aurora-postgresql16")).engineDefaults().dbParameterGroupFamily())
+                .isEqualTo("aurora-postgresql16");
+
+        String instanceName = TestFixtures.uniqueName("rds-valid-mods");
+        try {
+            createDbInstance(rds, instanceName, "catalogue-secret");
+            ValidStorageOptions storage = rds.describeValidDBInstanceModifications(b -> b
+                    .dbInstanceIdentifier(instanceName)).validDBInstanceModificationsMessage().storage().get(0);
+            assertThat(storage.storageType()).isEqualTo("gp2");
+            // 20 GiB stays as it is, and any increase stores at least 10% more (22 GiB).
+            assertThat(storage.storageSize()).extracting(r -> r.from() + "-" + r.to())
+                    .containsExactly("20-20", "22-65536");
+        } finally {
+            deleteDbInstance(rds, instanceName);
         }
     }
 

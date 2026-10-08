@@ -3023,30 +3023,146 @@ public class RdsService implements Resettable, ResourceProvider {
                 + "] does not exist, is not enabled or you do not have permissions to access it.", 400);
     }
 
+    /**
+     * The orderable classes the engine catalogue lists, narrowed by engine, version and class. The
+     * version matches exactly or as a prefix ending at a dot, so {@code 8.0} still finds the MySQL
+     * 8.0 rows now that the catalogue names {@code 8.0.36}.
+     */
     public List<Map<String, String>> describeOrderableDbInstanceOptions(String engine,
                                                                         String engineVersion,
                                                                         String dbInstanceClass) {
-        List<Map<String, String>> options = List.of(
-                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "postgres", "engineVersion", "16.14", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "postgres", "engineVersion", "18.1", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "postgres", "engineVersion", "18.1", "dbInstanceClass", "db.m8g.large"),
-                Map.of("engine", "postgres", "engineVersion", "18.4", "dbInstanceClass", "db.m8g.large"),
-                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.micro"),
-                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.small"),
-                Map.of("engine", "postgres", "engineVersion", "16.14", "dbInstanceClass", "db.t4g.small"),
-                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.medium"),
-                Map.of("engine", "mysql", "engineVersion", "8.0", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "mariadb", "engineVersion", "11", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "sqlserver-se", "engineVersion", "15.00", "dbInstanceClass", "db.t3.micro")
-        );
+        List<Map<String, String>> options = new ArrayList<>();
+        for (RdsEngineCatalog.EngineVersion version : RdsEngineCatalog.VERSIONS) {
+            for (String instanceClass : version.instanceClasses()) {
+                options.add(Map.of("engine", version.engine(), "engineVersion", version.version(),
+                        "dbInstanceClass", instanceClass));
+            }
+        }
         return options.stream()
                 .filter(option -> engine == null || engine.isBlank() || engine.equalsIgnoreCase(option.get("engine")))
                 .filter(option -> engineVersion == null || engineVersion.isBlank()
-                        || engineVersion.equalsIgnoreCase(option.get("engineVersion")))
+                        || RdsEngineCatalog.versionMatches(option.get("engineVersion"), engineVersion))
                 .filter(option -> dbInstanceClass == null || dbInstanceClass.isBlank()
                         || dbInstanceClass.equalsIgnoreCase(option.get("dbInstanceClass")))
                 .toList();
+    }
+
+    // ── Catalogue reads ───────────────────────────────────────────────────────
+
+    // The largest allocation, in GiB, the RDS user guide gives for general purpose storage.
+    private static final int MAX_STORAGE_GIB = 65_536;
+    private static final int MAX_SQLSERVER_STORAGE_GIB = 16_384;
+
+    public record EngineVersionPage(List<RdsEngineCatalog.EngineVersion> versions, String marker) {}
+
+    /**
+     * The catalogue's engine versions, narrowed by engine, version (exact, or a major version such
+     * as {@code 16}), family and the documented filters. Every version is available, so
+     * {@code IncludeAll} changes nothing. With {@code DefaultOnly}, each engine (or engine and major
+     * version, when the request names a version) contributes its default: the flagged one, or the
+     * latest of that major version.
+     */
+    public EngineVersionPage describeDbEngineVersions(String engine, String engineVersion, String family,
+                                                      boolean defaultOnly, Map<String, List<String>> filters,
+                                                      Integer maxRecords, String marker) {
+        if (maxRecords != null && (maxRecords < MIN_MAX_RECORDS || maxRecords > MAX_MAX_RECORDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_MAX_RECORDS + " and " + MAX_MAX_RECORDS + ".", 400);
+        }
+        List<RdsEngineCatalog.EngineVersion> matching = RdsEngineCatalog.VERSIONS.stream()
+                .filter(v -> isBlank(engine) || v.engine().equalsIgnoreCase(engine))
+                .filter(v -> isBlank(engineVersion) || RdsEngineCatalog.versionMatches(v.version(), engineVersion))
+                .filter(v -> isBlank(family) || v.family().equalsIgnoreCase(family))
+                .filter(v -> matchesFilter(filters, "engine", v.engine()))
+                .filter(v -> matchesFilter(filters, "db-parameter-group-family", v.family()))
+                .filter(v -> filterValues(filters, "engine-version").isEmpty()
+                        || filterValues(filters, "engine-version").stream()
+                                .anyMatch(w -> RdsEngineCatalog.versionMatches(v.version(), w)))
+                .filter(v -> filterValues(filters, "engine-mode").isEmpty()
+                        || v.engineModes().stream().anyMatch(m -> matchesFilter(filters, "engine-mode", m)))
+                .filter(v -> matchesFilter(filters, "status", "available"))
+                .toList();
+        if (defaultOnly) {
+            boolean byMajor = !isBlank(engineVersion);
+            Map<String, RdsEngineCatalog.EngineVersion> defaults = new LinkedHashMap<>();
+            for (RdsEngineCatalog.EngineVersion v : matching) {
+                String group = byMajor ? v.engine() + "/" + v.majorVersion() : v.engine();
+                RdsEngineCatalog.EngineVersion current = defaults.get(group);
+                if (current == null || (!current.isDefault() && (v.isDefault()
+                        || RdsEngineCatalog.compareVersions(v.version(), current.version()) > 0))) {
+                    defaults.put(group, v);
+                }
+            }
+            matching = List.copyOf(defaults.values());
+        }
+        int from = 0;
+        if (!isBlank(marker)) {
+            try {
+                from = Integer.parseInt(marker);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
+            }
+        }
+        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
+        int start = Math.min(Math.max(from, 0), matching.size());
+        int to = Math.min(matching.size(), start + limit);
+        return new EngineVersionPage(matching.subList(start, to), to < matching.size() ? Integer.toString(to) : null);
+    }
+
+    private static List<String> filterValues(Map<String, List<String>> filters, String name) {
+        List<String> values = filters != null ? filters.get(name) : null;
+        return values != null ? values : List.of();
+    }
+
+    /**
+     * Checks a family for DescribeEngineDefaultParameters and DescribeEngineDefaultClusterParameters.
+     * Floci's default parameter groups hold no parameters (DescribeDBParameters lists only values set
+     * on a group), so a known family's defaults are an empty list.
+     */
+    public List<Map<String, String>> describeEngineDefaultParameters(String family) {
+        if (isBlank(family)) {
+            throw new AwsException("InvalidParameterValue", "DBParameterGroupFamily is required.", 400);
+        }
+        if (!RdsEngineCatalog.knowsFamily(family)) {
+            throw new AwsException("InvalidParameterValue",
+                    "DBParameterGroupFamily " + family + " is not supported.", 400);
+        }
+        return List.of();
+    }
+
+    /** What ModifyDBInstance can change about an instance's storage: its type and the sizes it can take. */
+    public record StorageModification(String storageType, List<SizeRange> sizes) {}
+
+    public record SizeRange(int from, int to) {}
+
+    /**
+     * The storage an instance can move to: its storage type and the sizes ModifyDBInstance stores as
+     * asked. Storage only grows. For PostgreSQL, MySQL and MariaDB an increase under 10% is rounded
+     * up to 10%, so the sizes are the current one (no change) and from 10% more up to the engine's
+     * maximum; SQL Server takes any larger size. An Aurora instance has no storage of its own to
+     * modify, so it has none.
+     */
+    public List<StorageModification> describeValidDbInstanceModifications(String id, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        if (isBlank(id)) {
+            throw new AwsException("InvalidParameterValue", "DBInstanceIdentifier is required.", 400);
+        }
+        DbInstance instance = getDbInstance(id, effectiveRegion);
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + id + " is not in available state.", 400);
+        }
+        if (!isBlank(instance.getDbClusterIdentifier())) {
+            return List.of();
+        }
+        int maximum = instance.getEngine() == DatabaseEngine.SQLSERVER ? MAX_SQLSERVER_STORAGE_GIB : MAX_STORAGE_GIB;
+        int current = Math.min(instance.getAllocatedStorage(), maximum);
+        int smallestIncrease = instance.getEngine() == DatabaseEngine.SQLSERVER
+                ? current + 1 : Math.ceilDiv(current * 11, 10);
+        List<SizeRange> sizes = smallestIncrease <= maximum
+                ? List.of(new SizeRange(current, current), new SizeRange(smallestIncrease, maximum))
+                : List.of(new SizeRange(current, current));
+        return List.of(new StorageModification(DbInstance.DEFAULT_STORAGE_TYPE, sizes));
     }
 
     // ── Stop, start and reboot ────────────────────────────────────────────────
@@ -6737,7 +6853,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private String expectedClusterParameterGroupFamily(String engineParam, String engineVersion) {
+    String expectedClusterParameterGroupFamily(String engineParam, String engineVersion) {
         String normalizedEngine = effectiveEngineName(engineParam).toLowerCase();
         String effectiveVersion = engineVersion;
         if (effectiveVersion == null || effectiveVersion.isBlank()) {

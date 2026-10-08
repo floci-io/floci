@@ -1724,6 +1724,35 @@ class RdsServiceTest {
     }
 
     @Test
+    void engineCatalogueFamiliesMatchTheFamilyCreateComputes() {
+        for (RdsEngineCatalog.EngineVersion version : RdsEngineCatalog.VERSIONS) {
+            assertEquals(rdsService.expectedClusterParameterGroupFamily(version.engine(), version.version()),
+                    version.family(), version.engine() + " " + version.version());
+        }
+    }
+
+    @Test
+    void engineCatalogueOffersEveryOrderableVersionAndOneDefaultPerEngine() {
+        for (Map<String, String> option : rdsService.describeOrderableDbInstanceOptions(null, null, null)) {
+            assertEquals(1, rdsService.describeDbEngineVersions(option.get("engine"), option.get("engineVersion"),
+                    null, false, Map.of(), null, null).versions().stream()
+                    .filter(v -> v.version().equals(option.get("engineVersion"))).count());
+        }
+        Map<String, Long> defaults = RdsEngineCatalog.VERSIONS.stream()
+                .filter(RdsEngineCatalog.EngineVersion::isDefault)
+                .collect(Collectors.groupingBy(RdsEngineCatalog.EngineVersion::engine, Collectors.counting()));
+        RdsEngineCatalog.VERSIONS.forEach(v -> assertEquals(1L, defaults.get(v.engine()), v.engine()));
+    }
+
+    @Test
+    void engineVersionsSortNumericallyForUpgradeTargets() {
+        RdsEngineCatalog.EngineVersion pg163 = RdsEngineCatalog.VERSIONS.stream()
+                .filter(v -> v.engine().equals("postgres") && v.version().equals("16.3")).findFirst().orElseThrow();
+        assertEquals(List.of("16.14", "17.4", "18.1", "18.4"),
+                RdsEngineCatalog.upgradeTargets(pg163).stream().map(RdsEngineCatalog.EngineVersion::version).toList());
+    }
+
+    @Test
     void describeOrderableDbInstanceOptionsFiltersByEngineVersionAndClass() {
         List<Map<String, String>> result = rdsService.describeOrderableDbInstanceOptions(
                 "postgres", "18.1", "db.t3.micro");

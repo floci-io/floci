@@ -92,6 +92,12 @@ public class RdsQueryHandler {
                 case "PromoteReadReplica" -> handlePromoteReadReplica(params, region);
                 case "SwitchoverReadReplica" -> handleSwitchoverReadReplica(params, region);
                 case "PromoteReadReplicaDBCluster" -> handlePromoteReadReplicaDbCluster(params, region);
+                case "DescribeDBEngineVersions" -> handleDescribeDbEngineVersions(params);
+                case "DescribeEngineDefaultParameters" -> handleDescribeEngineDefaultParameters(params,
+                        "DescribeEngineDefaultParameters");
+                case "DescribeEngineDefaultClusterParameters" -> handleDescribeEngineDefaultParameters(params,
+                        "DescribeEngineDefaultClusterParameters");
+                case "DescribeValidDBInstanceModifications" -> handleDescribeValidDbInstanceModifications(params, region);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "DescribeEvents" -> handleDescribeEvents(params, region);
                 case "CreateEventSubscription" -> handleCreateEventSubscription(params, region);
@@ -706,6 +712,98 @@ public class RdsQueryHandler {
             throw new AwsException("InvalidParameterValue",
                     "Value " + value + " is not a valid integer.", 400);
         }
+    }
+
+    private Response handleDescribeDbEngineVersions(MultivaluedMap<String, String> params) {
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (String name : List.of("db-parameter-group-family", "engine", "engine-mode", "engine-version", "status")) {
+            List<String> values = extractRdsFilterValues(params, name);
+            if (!values.isEmpty()) {
+                filters.put(name, values);
+            }
+        }
+        RdsService.EngineVersionPage page = service.describeDbEngineVersions(
+                params.getFirst("Engine"),
+                params.getFirst("EngineVersion"),
+                params.getFirst("DBParameterGroupFamily"),
+                Boolean.parseBoolean(params.getFirst("DefaultOnly")),
+                filters,
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("DBEngineVersions");
+        for (RdsEngineCatalog.EngineVersion v : page.versions()) {
+            xml.start("DBEngineVersion")
+               .elem("Engine", v.engine())
+               .elem("MajorEngineVersion", v.majorVersion())
+               .elem("EngineVersion", v.version())
+               .elem("DBParameterGroupFamily", v.family())
+               .elem("DBEngineDescription", v.engineDescription())
+               .elem("DBEngineVersionDescription", v.versionDescription())
+               .elem("Status", "available")
+               .start("SupportedEngineModes");
+            v.engineModes().forEach(mode -> xml.elem("member", mode));
+            xml.end("SupportedEngineModes").start("ValidUpgradeTarget");
+            for (RdsEngineCatalog.EngineVersion target : RdsEngineCatalog.upgradeTargets(v)) {
+                xml.start("UpgradeTarget")
+                   .elem("Engine", target.engine())
+                   .elem("EngineVersion", target.version())
+                   .elem("Description", target.versionDescription())
+                   .elem("AutoUpgrade", false)
+                   .elem("IsMajorVersionUpgrade", !target.majorVersion().equals(v.majorVersion()))
+                   .end("UpgradeTarget");
+            }
+            xml.end("ValidUpgradeTarget").end("DBEngineVersion");
+        }
+        xml.end("DBEngineVersions");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBEngineVersions", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    /** Serves both engine default calls; they share the request and the EngineDefaults shape. */
+    private Response handleDescribeEngineDefaultParameters(MultivaluedMap<String, String> params, String action) {
+        String family = params.getFirst("DBParameterGroupFamily");
+        List<Map<String, String>> parameters = service.describeEngineDefaultParameters(family);
+        XmlBuilder xml = new XmlBuilder().start("EngineDefaults")
+                .elem("DBParameterGroupFamily", family)
+                .start("Parameters");
+        for (Map<String, String> parameter : parameters) {
+            xml.start("Parameter")
+               .elem("ParameterName", parameter.get("name"))
+               .elem("ParameterValue", parameter.get("value"))
+               .end("Parameter");
+        }
+        xml.end("Parameters").end("EngineDefaults");
+        return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleDescribeValidDbInstanceModifications(MultivaluedMap<String, String> params, String region) {
+        List<RdsService.StorageModification> storage = service.describeValidDbInstanceModifications(
+                params.getFirst("DBInstanceIdentifier"), region);
+        XmlBuilder xml = new XmlBuilder().start("ValidDBInstanceModificationsMessage").start("Storage");
+        for (RdsService.StorageModification option : storage) {
+            xml.start("ValidStorageOptions")
+               .elem("StorageType", option.storageType())
+               .start("StorageSize");
+            for (RdsService.SizeRange range : option.sizes()) {
+                xml.start("Range")
+                   .elem("From", range.from())
+                   .elem("To", range.to())
+                   .elem("Step", 1)
+                   .end("Range");
+            }
+            xml.end("StorageSize")
+               .elem("SupportsStorageAutoscaling", true)
+               .end("ValidStorageOptions");
+        }
+        xml.end("Storage")
+           .start("ValidProcessorFeatures").end("ValidProcessorFeatures")
+           .elem("SupportsDedicatedLogVolume", false)
+           .end("ValidDBInstanceModificationsMessage");
+        return Response.ok(AwsQueryResponse.envelope("DescribeValidDBInstanceModifications", AwsNamespaces.RDS,
+                xml.build())).build();
     }
 
     private Response handleDescribeOrderableDbInstanceOptions(MultivaluedMap<String, String> params) {
