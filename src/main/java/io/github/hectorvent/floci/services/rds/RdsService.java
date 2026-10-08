@@ -3447,11 +3447,11 @@ public class RdsService implements Resettable, ResourceProvider {
      * require that, PostgreSQL proxies unless {@code services.rds.iam-token-endpoint-binding} is
      * turned off for clients that generate tokens for a name the endpoint does not publish.
      */
-    private RdsProxyBinding proxyBinding(DatabaseEngine engine, String advertisedHost, int publishedPort,
+    private RdsProxyBinding proxyBinding(DatabaseEngine engine, String advertisedHost, int proxyPort,
                                          String region, String accountId, String resourceId) {
         boolean tokensBoundToEndpoint = engine != DatabaseEngine.POSTGRES
                 || config.services().rds().iamTokenEndpointBinding();
-        return new RdsProxyBinding(advertisedHost, publishedPort, region, accountId, resourceId,
+        return new RdsProxyBinding(advertisedHost, proxyEndpoint(proxyPort).port(), region, accountId, resourceId,
                 tokensBoundToEndpoint);
     }
 

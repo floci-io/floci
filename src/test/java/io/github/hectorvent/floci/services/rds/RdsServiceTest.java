@@ -956,6 +956,11 @@ class RdsServiceTest {
         assertEquals("localhost", instance.getEndpoint().address());
         assertEquals(49173, instance.getEndpoint().port());
         assertEquals(7000, instance.getProxyPort());
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), anyBoolean(), eq(7000), any(), anyInt(),
+                any(), any(), any(), any(), any(), binding.capture());
+        assertEquals(new RdsProxyBinding("localhost", 49173, "us-east-1", "123456789012",
+                instance.getDbiResourceId(), true), binding.getValue());
     }
 
     @Test
