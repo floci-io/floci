@@ -446,8 +446,9 @@ Floci-side rules:
 - No wildcard imports in `src/main`. Static wildcards stay fine in tests, where
   `Assertions.*`, `Mockito.*` and `Matchers.*` are the established idiom.
 - Import order: non-`java`/`javax` imports alphabetically, then `java.*` and
-  `javax.*` last. This is the IntelliJ default layout and what most of the tree
-  already uses.
+  `javax.*` together alphabetically, then static imports alphabetically. Separate
+  these groups with a blank line. This follows the IntelliJ layout used by most
+  of the tree and is enforced by Checkstyle.
 
 ### Conventions the codebase already follows
 

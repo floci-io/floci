@@ -10,6 +10,14 @@
         <property name="file" value="${config_loc}/suppressions.xml"/>
     </module>
     <module name="TreeWalker">
+        <!-- IntelliJ layout from AGENTS.md: other imports, JDK imports, then static imports. -->
+        <module name="ImportOrder">
+            <property name="groups" value="*,/^javax?\./"/>
+            <property name="ordered" value="true"/>
+            <property name="separated" value="true"/>
+            <property name="option" value="bottom"/>
+            <property name="sortStaticImportsAlphabetically" value="true"/>
+        </module>
         <!-- Reviewers need the concrete type, such as LinkedHashMap versus Map.
              Record pattern components (case Node(var left, var right)) are allowed. -->
         <module name="MatchXpath">

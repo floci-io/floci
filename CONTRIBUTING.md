@@ -155,6 +155,8 @@ before your first PR:
   `new ArrayList<>()`, never `new java.util.ArrayList<>()`. Qualify inline only for
   a genuine name collision in that file, and say in a comment what collides.
 - **No wildcard imports in `src/main`.** Static wildcards are fine in tests.
+- **Keep imports ordered.** Alphabetize non-JDK imports, then `java`/`javax`
+  imports together, then static imports, with a blank line between groups.
 - **Never leave a `catch` block empty.** If swallowing is correct, name the
   variable `ignored` or `expected` and say why in a comment.
 - **Always use braces in conditionals**, and use constructor injection.
