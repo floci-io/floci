@@ -39,7 +39,7 @@ public class ScriptedDurableFunctionInvoker implements DurableFunctionInvoker {
     }
 
     @Override
-    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload) {
+    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
         Invocation invocation = new Invocation(target, payload, new CompletableFuture<>());
         invocations.add(invocation);
         try {

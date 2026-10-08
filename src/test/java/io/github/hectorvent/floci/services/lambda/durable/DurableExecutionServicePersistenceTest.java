@@ -373,7 +373,7 @@ class DurableExecutionServicePersistenceTest {
         }
 
         @Override
-        public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload) {
+        public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
             if (!target.durable()) {
                 plainPayloads.add(new String(payload, StandardCharsets.UTF_8));
                 return new DurableInvocationResult("req", plainOutput.getBytes(StandardCharsets.UTF_8), null);

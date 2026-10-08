@@ -223,11 +223,6 @@ final class DurableCheckpointApplier {
                 execution.setResult(closingResult);
                 execution.setError(closingError);
                 execution.setEndTimestamp(now);
-                if (closingStatus == DurableExecutionStatus.SUCCEEDED) {
-                    DurableHistory.executionSucceeded(execution, now);
-                } else {
-                    DurableHistory.executionEnded(execution, "ExecutionFailed", now);
-                }
             }
         }
 

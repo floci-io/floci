@@ -248,6 +248,12 @@ public class DurableExecutionService implements Resettable {
             DurableExecution execution = loadWithCurrentToken(arn, checkpointToken);
             long now = clock.millis();
             DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution, updates, now);
+            if (outcome.closed()) {
+                // AWS ends the invocation here and ignores what the handler returns after it.
+                DurableHistory.invocationCompleted(execution, execution.getCurrentInvocationStartedAt(), now,
+                        execution.getCurrentInvocationId(), null);
+                execution.setCurrentInvocationId(null);
+            }
             // AWS runs a target started in the batch that closes the execution, and ignores its result.
             List<DurableExecution> children = new ArrayList<>();
             for (String operationId : outcome.chainedInvokes()) {
@@ -259,6 +265,7 @@ public class DurableExecutionService implements Resettable {
             List<DurableOperation> changed = unseenOperations(execution);
             String nextToken = null;
             if (outcome.closed()) {
+                closeEvent(execution, now);
                 closeBookkeeping(execution, now, effects);
             } else {
                 execution.setCheckpointSequence(execution.getCheckpointSequence() + 1);
@@ -537,6 +544,7 @@ public class DurableExecutionService implements Resettable {
                 return;
             }
             startedAt = clock.millis();
+            execution.setCurrentInvocationStartedAt(startedAt);
             String token = DurableTokens.checkpointToken(execution.getExecutionArn(), invocationId,
                     execution.getCheckpointSequence());
             List<String> updatedOperationIds = unseenOperations(execution).stream().map(DurableOperation::getId).toList();
@@ -558,7 +566,7 @@ public class DurableExecutionService implements Resettable {
             result = new DurableInvocationResult(null, null, "ResourceNotFoundException");
         } else {
             try {
-                result = invoker.invoke(target, payload);
+                result = invoker.invoke(target, payload, invocationId);
             } catch (AwsException e) {
                 result = new DurableInvocationResult(null, DurableWire.functionErrorPayload(
                         DurableErrorObject.of(e.getMessage(), e.getErrorCode())),
@@ -719,13 +727,17 @@ public class DurableExecutionService implements Resettable {
             root.setEndTimestamp(now);
             root.setChangeSequence(execution.nextChangeSequence());
         }
-        switch (status) {
+        closeEvent(execution, now);
+        closeBookkeeping(execution, now, effects);
+    }
+
+    private static void closeEvent(DurableExecution execution, long now) {
+        switch (execution.getStatus()) {
             case SUCCEEDED -> DurableHistory.executionSucceeded(execution, now);
             case TIMED_OUT -> DurableHistory.executionTimedOut(execution, now);
             case STOPPED -> DurableHistory.executionEnded(execution, "ExecutionStopped", now);
             default -> DurableHistory.executionEnded(execution, "ExecutionFailed", now);
         }
-        closeBookkeeping(execution, now, effects);
     }
 
     /** What every close shares, whether the applier or the service decided it. */
@@ -854,7 +866,7 @@ public class DurableExecutionService implements Resettable {
     private ChainedOutcome invokePlainFunction(ResolvedDurableTarget target, byte[] payload) {
         DurableInvocationResult result;
         try {
-            result = invoker.invoke(target, payload);
+            result = invoker.invoke(target, payload, UUID.randomUUID().toString());
         } catch (AwsException e) {
             return ChainedOutcome.failed(e);
         } catch (RuntimeException e) {
