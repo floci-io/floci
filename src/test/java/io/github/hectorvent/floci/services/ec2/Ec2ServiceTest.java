@@ -88,6 +88,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -4986,6 +4987,20 @@ class Ec2ServiceTest {
         assertTrue(released[0], "the hook must have released the host between the two checks");
         assertEquals("InvalidHostID.NotFound", e.getErrorCode());
         assertTrue(service.hostInstances("us-east-1", hostId[0]).isEmpty());
+    }
+
+    @Test
+    void seedDefaultRegionIfEnabledDoesNothingWhenEc2IsDisabled() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().enabled()).thenReturn(false);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        Ec2Service service = spy(new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+
+        service.seedDefaultRegionIfEnabled();
+
+        verify(service, never()).ensureDefaultResources(anyString());
     }
 
     @Test

@@ -9,8 +9,8 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RequestContext;
-import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -980,6 +980,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     @Override
     public void clear() {
         seededAccountRegions.clear();
+        seedDefaultRegionIfEnabled();
+    }
+
+    public void seedDefaultRegionIfEnabled() {
         if (config.services().ec2().enabled()) {
             ensureDefaultResources(config.defaultRegion());
         }
