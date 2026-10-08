@@ -50,7 +50,8 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Name", name);
         r.getAttributes().put("Type", type);
         r.getAttributes().put("Value", value);
-        r.getAttributes().put("Arn", parameterArn(name, ctx));
+        r.getAttributes().put("Arn", AwsArnUtils.Arn.of("ssm", ctx.region(), ctx.accountId(),
+                SsmService.parameterResource(name)).toString());
         // Tag keys cannot contain a comma, so the sorted keys join losslessly.
         if (tags.isEmpty()) {
             r.getAttributes().remove(SSM_TEMPLATE_TAG_KEYS_ATTR);
@@ -78,12 +79,6 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         if (!desired.isEmpty()) {
             ssmService.addTagsToResource(name, desired, region);
         }
-    }
-
-    /** AWS's form is {@code parameter/<name>} whether or not the name starts with a slash. */
-    private static String parameterArn(String name, ProvisionContext ctx) {
-        String path = name.startsWith("/") ? name : "/" + name;
-        return AwsArnUtils.Arn.of("ssm", ctx.region(), ctx.accountId(), "parameter" + path).toString();
     }
 
     @Override

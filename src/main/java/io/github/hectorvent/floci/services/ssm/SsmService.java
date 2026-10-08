@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ssm;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -75,10 +76,12 @@ public class SsmService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final Ec2ImageCatalog imageCatalog;
     private final SecretsManagerService secretsManager;
+    private final SsmEventPublisher eventPublisher;
 
     @Inject
     public SsmService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                      Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager) {
+                      Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager,
+                      SsmEventPublisher eventPublisher) {
         this(
                 storageFactory.create("ssm", "ssm-parameters.json",
                         new TypeReference<>() {
@@ -101,7 +104,8 @@ public class SsmService implements ResourceProvider {
                 config.services().ssm().maxParameterHistory(),
                 regionResolver,
                 imageCatalog,
-                secretsManager
+                secretsManager,
+                eventPublisher
         );
     }
 
@@ -161,6 +165,20 @@ public class SsmService implements ResourceProvider {
                StorageBackend<String, SsmAssociation> associationStore,
                int maxParameterHistory, RegionResolver regionResolver,
                Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager) {
+        this(parameterStore, historyStore, documentPermissionStore, documentStore, serviceSettingStore,
+                associationStore, maxParameterHistory, regionResolver, imageCatalog, secretsManager,
+                new SsmEventPublisher(null, new ObjectMapper()));
+    }
+
+    SsmService(StorageBackend<String, Parameter> parameterStore,
+               StorageBackend<String, List<ParameterHistory>> historyStore,
+               StorageBackend<String, List<String>> documentPermissionStore,
+               StorageBackend<String, SsmDocument> documentStore,
+               StorageBackend<String, ServiceSetting> serviceSettingStore,
+               StorageBackend<String, SsmAssociation> associationStore,
+               int maxParameterHistory, RegionResolver regionResolver,
+               Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager,
+               SsmEventPublisher eventPublisher) {
         this.parameterStore = parameterStore;
         this.historyStore = historyStore;
         this.documentPermissionStore = documentPermissionStore;
@@ -171,6 +189,7 @@ public class SsmService implements ResourceProvider {
         this.regionResolver = regionResolver;
         this.imageCatalog = imageCatalog;
         this.secretsManager = secretsManager;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -207,7 +226,7 @@ public class SsmService implements ResourceProvider {
         Parameter parameter = new Parameter(name, value, type != null ? type : "String");
         parameter.setVersion(version);
         parameter.setDescription(description);
-        parameter.setArn(regionResolver.buildArn("ssm", region, "parameter" + name));
+        parameter.setArn(regionResolver.buildArn("ssm", region, parameterResource(name)));
         parameter.setLastModifiedDate(Instant.now());
 
         if (existing != null && existing.getTags() != null) {
@@ -218,14 +237,20 @@ public class SsmService implements ResourceProvider {
 
         parameterStore.put(storageKey, parameter);
         addHistory(storageKey, parameter);
+        eventPublisher.parameterChanged(existing != null ? "Update" : "Create", parameter, region);
 
         LOG.infov("Put parameter: {0} in region {1} (version {2})", name, region, version);
         return version;
     }
 
-    /** Reads on behalf of ECS task secrets, CodeBuild and CloudFormation ssm-secure, which decrypt. */
-    public Parameter getParameter(String name, String region) {
-        return getParameter(name, true, region);
+    /** AWS's form is {@code parameter/<name>} whether or not the name starts with a slash. */
+    public static String parameterResource(String name) {
+        return "parameter" + (name.startsWith("/") ? name : "/" + name);
+    }
+
+    /** Reads on behalf of ECS task secrets, CodeBuild and CloudFormation ssm-secure, which decrypt and may pass an ARN. */
+    public Parameter getParameter(String nameOrArn, String region) {
+        return getParameter(parameterName(nameOrArn, region), true, region);
     }
 
     public Parameter getParameter(String name, boolean withDecryption, String region) {
@@ -478,12 +503,11 @@ public class SsmService implements ResourceProvider {
 
     public void deleteParameter(String name, String region) {
         String storageKey = regionKey(region, name);
-        if (parameterStore.get(storageKey).isEmpty()) {
-            throw new AwsException("ParameterNotFound",
-                    "Parameter " + name + " not found.", 400);
-        }
+        Parameter removed = parameterStore.get(storageKey).orElseThrow(() ->
+                new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400));
         parameterStore.delete(storageKey);
         historyStore.delete(storageKey);
+        eventPublisher.parameterChanged("Delete", removed, region);
         LOG.infov("Deleted parameter: {0}", name);
     }
 
@@ -491,10 +515,12 @@ public class SsmService implements ResourceProvider {
         List<String> deleted = new ArrayList<>();
         for (String name : names) {
             String storageKey = regionKey(region, name);
-            if (parameterStore.get(storageKey).isPresent()) {
+            Optional<Parameter> removed = parameterStore.get(storageKey);
+            if (removed.isPresent()) {
                 parameterStore.delete(storageKey);
                 historyStore.delete(storageKey);
                 deleted.add(name);
+                eventPublisher.parameterChanged("Delete", removed.get(), region);
             }
         }
         return deleted;
@@ -589,8 +615,18 @@ public class SsmService implements ResourceProvider {
 
     public record LabelParameterVersionResult(long parameterVersion, List<String> invalidLabels) {}
 
-    public synchronized LabelParameterVersionResult labelParameterVersion(String name, Long parameterVersion,
+    public LabelParameterVersionResult labelParameterVersion(String name, Long parameterVersion,
                                                              List<String> labels, String region) {
+        List<Runnable> events = new ArrayList<>();
+        LabelParameterVersionResult result = applyLabels(name, parameterVersion, labels, region, events);
+        events.forEach(Runnable::run);
+        return result;
+    }
+
+    /** Collects the events instead of publishing them: EventBridge delivers to targets while it runs. */
+    private synchronized LabelParameterVersionResult applyLabels(String name, Long parameterVersion,
+                                                                 List<String> labels, String region,
+                                                                 List<Runnable> events) {
         if (labels == null || labels.isEmpty()) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
@@ -660,9 +696,11 @@ public class SsmService implements ResourceProvider {
                 : new ArrayList<>();
 
         int newLabelCount = targetLabels.size();
+        Map<String, String> fromVersions = new LinkedHashMap<>();
         for (String validLabel : validLabels) {
             if (!targetLabels.contains(validLabel)) {
                 newLabelCount++;
+                fromVersions.put(validLabel, "");
             }
         }
         if (newLabelCount > 10) {
@@ -672,6 +710,9 @@ public class SsmService implements ResourceProvider {
 
         for (ParameterHistory h : updatedHistory) {
             if (h.getVersion() != targetVersion && h.getLabels() != null) {
+                for (String label : h.getLabels()) {
+                    fromVersions.computeIfPresent(label, (key, from) -> String.valueOf(h.getVersion()));
+                }
                 List<String> otherLabels = new ArrayList<>(h.getLabels());
                 if (otherLabels.removeAll(validLabels)) {
                     h.setLabels(otherLabels);
@@ -687,11 +728,14 @@ public class SsmService implements ResourceProvider {
         targetCopy.setLabels(targetLabels);
 
         historyStore.put(storageKey, updatedHistory);
+        ParameterHistory labelled = targetCopy;
+        fromVersions.forEach((label, from) ->
+                events.add(() -> eventPublisher.labelChanged(current.getArn(), labelled, label, from, region)));
         LOG.infov("Labeled parameter {0} version {1} with labels {2}", name, targetVersion, validLabels);
         return new LabelParameterVersionResult(targetVersion, invalidLabels);
     }
 
-    public synchronized LabelParameterVersionResult labelParameterVersion(String name, long parameterVersion,
+    public LabelParameterVersionResult labelParameterVersion(String name, long parameterVersion,
                                                              List<String> labels, String region) {
         return labelParameterVersion(name, Long.valueOf(parameterVersion), labels, region);
     }
@@ -719,8 +763,7 @@ public class SsmService implements ResourceProvider {
 
     public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
         validateTagKeys(tags);
-        String normalizedId = normalizeResourceId(resourceId);
-        String storageKey = regionKey(region, normalizedId);
+        String storageKey = regionKey(region, parameterName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -760,8 +803,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public Map<String, String> listTagsForResource(String resourceId, String region) {
-        String normalizedId = normalizeResourceId(resourceId);
-        String storageKey = regionKey(region, normalizedId);
+        String storageKey = regionKey(region, parameterName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -769,8 +811,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
-        String normalizedId = normalizeResourceId(resourceId);
-        String storageKey = regionKey(region, normalizedId);
+        String storageKey = regionKey(region, parameterName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -784,26 +825,28 @@ public class SsmService implements ResourceProvider {
         LOG.debugv("Removed tags from parameter: {0}", resourceId);
     }
 
-    private static String normalizeResourceId(String resourceId) {
-        if (resourceId != null && resourceId.startsWith("arn:")) {
+    /**
+     * The stored name a parameter name or ARN addresses. The ARN carries a leading slash the stored name may
+     * lack, so {@code parameter/foo} falls back to {@code foo} when only {@code foo} is stored.
+     */
+    private String parameterName(String nameOrArn, String region) {
+        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
             try {
-                AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceId);
-                if ("ssm".equals(arn.service())) {
-                    String resource = arn.resource();
-                    if (resource.startsWith("parameter/")) {
-                        return resource.substring("parameter".length());
+                AwsArnUtils.Arn arn = AwsArnUtils.parse(nameOrArn);
+                if ("ssm".equals(arn.service()) && arn.resource().startsWith("parameter")) {
+                    String name = arn.resource().substring("parameter".length());
+                    if (name.startsWith("/") && parameterStore.get(regionKey(region, name)).isEmpty()
+                            && parameterStore.get(regionKey(region, name.substring(1))).isPresent()) {
+                        return name.substring(1);
                     }
-                    if (resource.startsWith("parameter")) {
-                        return resource.substring("parameter".length());
-                    }
+                    return name;
                 }
             } catch (IllegalArgumentException e) {
-                // Not a valid ARN; fall through and use resourceId directly so callers
-                // querying parameterStore produce the standard InvalidResourceId error.
-                LOG.debugv("Failed to parse resourceId as ARN: {0}", resourceId);
+                // Not a valid ARN; use it as a name so the caller reports its usual not-found error.
+                LOG.debugv("Failed to parse resourceId as ARN: {0}", nameOrArn);
             }
         }
-        return resourceId;
+        return nameOrArn;
     }
 
     // ──────────────────────── Documents and Share Permissions ────────────────
