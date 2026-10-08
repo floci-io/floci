@@ -700,6 +700,13 @@ history is retained, and a previously running execution is marked `ABORTED` with
 `ExecutionAborted` event appended. After a further restart, the execution is already terminal, so
 no additional event is written.
 
+## Partitions
+
+Service integration resources carry the partition of the state machine's region
+(`arn:aws-cn:states:::lambda:invoke` in China, as the CDK writes them), and Floci dispatches them
+in every partition. State machine and execution ARNs follow the region they are created in. See
+[AWS Partitions](../configuration/partitions.md).
+
 ## Configuration
 
 | Variable | Default | Description |

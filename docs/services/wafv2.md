@@ -50,7 +50,7 @@ Floci emulates the AWS WAF v2 management API. Web ACLs, IP sets, regex pattern s
 
 ## Scope
 
-WAF v2 resources are partitioned by `Scope`: `REGIONAL` (ALB, API Gateway, AppSync) or `CLOUDFRONT`. Pass `--scope` on every call; `CLOUDFRONT`-scoped requests must target `us-east-1` as on real AWS.
+WAF v2 resources are partitioned by `Scope`: `REGIONAL` (ALB, API Gateway, AppSync) or `CLOUDFRONT`. Pass `--scope` on every call; `CLOUDFRONT`-scoped requests target the partition's CloudFront region (`us-east-1`, or `cn-northwest-1` in China) as on real AWS. The `CLOUDFRONT` scope exists only where CloudFront does, the commercial and China partitions; elsewhere it is a `WAFInvalidParameterException`. See [AWS Partitions](../configuration/partitions.md).
 
 ## IP set addresses
 

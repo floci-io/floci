@@ -1265,6 +1265,14 @@ Three deviations to be aware of:
   service-linked mark comes from the action that minted the role rather than from its path. Such
   a role stays fully modifiable, and `DeleteServiceLinkedRole` answers `NoSuchEntity` for it.
 
+## Partitions
+
+IAM is global, so its ARNs take the partition of the region a request is signed for:
+`arn:aws-cn:iam::<account>:role/...` for a China-signed request. AWS managed policies keep the
+`aws` owner in every partition (`arn:aws-cn:iam::aws:policy/ReadOnlyAccess`), with the commercial
+catalog's documents rewritten for the partition. An assumed-role session stays in the partition
+of the role it was issued for, whatever region later calls are signed for. See [AWS Partitions](../configuration/partitions.md).
+
 ## Configuration
 
 | Variable | Default | Description |

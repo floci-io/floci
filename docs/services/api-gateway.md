@@ -522,6 +522,14 @@ setups, and `floci:override-id` wins when both are present. Every other tag is p
 
 ---
 
+## Partitions
+
+Edge-optimized APIs and custom domains (`EDGE`) exist only in the commercial partition: China
+has CloudFront but no edge-optimized API Gateway, and GovCloud, EUSC and the ISO partitions have
+no CloudFront. Creating or switching to `EDGE` elsewhere is a `BadRequestException`; `REGIONAL` and
+`PRIVATE` work in every partition. Invoke URLs use the partition's DNS suffix
+(`<api-id>.execute-api.cn-north-1.amazonaws.com.cn`). See [AWS Partitions](../configuration/partitions.md).
+
 ## Configuration
 
 | Variable | Default | Description |
