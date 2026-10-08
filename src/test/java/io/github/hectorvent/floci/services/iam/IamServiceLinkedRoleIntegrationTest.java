@@ -1,12 +1,17 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URI;
+import java.util.ArrayList;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -14,6 +19,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Service-linked roles exist so Terraform's aws_iam_service_linked_role can apply and destroy
@@ -29,10 +35,46 @@ class IamServiceLinkedRoleIntegrationTest {
 
     private static final String SERVICE = "es.amazonaws.com";
 
+    private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
+
+    /** Created by the protection test and the only entity here that is not a role. */
+    private static final String PROTECTION_PROBE_PROFILE = "protectprobe-profile";
+
     private static final String OTHER_ACCOUNT_AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=222222222222/20260227/us-east-1/iam/aws4_request";
 
     private static String deletionTaskId;
+
+    /**
+     * Set by the test that creates the profile. A focused run of one method still fires the
+     * teardown, so without this it would ask for a profile nothing had made.
+     */
+    private static boolean protectionProfileCreated;
+
+    /**
+     * The roles already under {@code /aws-service-role/} when this class started. A QuarkusTest
+     * shares one application with every other test class, so these belong to someone else and
+     * the teardown has to leave them where they are. Taken on the first test rather than in
+     * {@code @BeforeAll}, where the injected URI is still null and nothing can reach the
+     * application yet.
+     */
+    private static List<String> rolesAlreadyThere;
+
+    /**
+     * Quarkus points RestAssured at the application for the duration of a test method and
+     * resets the port afterwards, so teardown has to say where the application is. The test
+     * port is random ({@code quarkus.http.test-port: 0}), which leaves the injected URI as
+     * the only place to read it from.
+     */
+    @TestHTTPResource("/")
+    static URI baseUri;
+
+    @BeforeEach
+    void notePreExistingServiceRoles() {
+        if (rolesAlreadyThere == null) {
+            rolesAlreadyThere = rolesUnderTheServiceRolePath();
+        }
+    }
 
     @Test
     @Order(1)
@@ -391,6 +433,19 @@ class IamServiceLinkedRoleIntegrationTest {
         .then()
             .statusCode(404)
             .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+
+        // The role is parked at the account root, so the teardown's sweep of the service-role
+        // path never sees it and it has to go from here. Expecting 200 is also the assertion
+        // that the rejected call above left it alone, the way the sibling test reaches for
+        // GetRole: this action answers NoSuchEntity for a role that is already gone.
+        given()
+            .formParam("Action", "DeleteRole")
+            .formParam("RoleName", "NotServiceLinked")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     private static void createServiceLinkedRole(String principal) {
@@ -520,17 +575,18 @@ class IamServiceLinkedRoleIntegrationTest {
 
         given()
             .formParam("Action", "CreateInstanceProfile")
-            .formParam("InstanceProfileName", "protectprobe-profile")
+            .formParam("InstanceProfileName", PROTECTION_PROBE_PROFILE)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200);
+        protectionProfileCreated = true;
 
         refusedAsUnmodifiable("AddRoleToInstanceProfile",
-                "InstanceProfileName", "protectprobe-profile", "RoleName", roleName);
+                "InstanceProfileName", PROTECTION_PROBE_PROFILE, "RoleName", roleName);
         refusedAsUnmodifiable("RemoveRoleFromInstanceProfile",
-                "InstanceProfileName", "protectprobe-profile", "RoleName", roleName);
+                "InstanceProfileName", PROTECTION_PROBE_PROFILE, "RoleName", roleName);
 
         // The trust policy is the one an attacker would rewrite, so pin that it survived intact.
         given()
@@ -593,7 +649,7 @@ class IamServiceLinkedRoleIntegrationTest {
     }
 
     @Test
-    @Order(24)
+    @Order(31)
     void cloud9UsesTheAwsCanonicalRoleName() {
         given()
             .formParam("Action", "CreateServiceLinkedRole")
@@ -740,5 +796,120 @@ class IamServiceLinkedRoleIntegrationTest {
             .statusCode(200)
             .body("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.RoleName",
                     equalTo("AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint_sixchr"));
+    }
+
+    /** The class spells its requests out in full; the teardown needs one line, so it gets this. */
+    private static RequestSpecification iam(String action) {
+        return given().port(baseUri.getPort())
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", action);
+    }
+
+    private static List<String> rolesUnderTheServiceRolePath() {
+        return iam("ListRoles")
+            .formParam("PathPrefix", SERVICE_LINKED_ROLE_PATH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath()
+            .getList("ListRolesResponse.ListRolesResult.Roles.member.RoleName", String.class);
+    }
+
+    /** What is under the path now, minus what was already there when this class started. */
+    private static List<String> rolesThisClassAdded() {
+        List<String> added = new ArrayList<>(rolesUnderTheServiceRolePath());
+        added.removeAll(rolesAlreadyThere);
+        return added;
+    }
+
+    /**
+     * Deletes everything this class creates: the roles it left under {@code /aws-service-role/}
+     * and the instance profile the protection test needs. The tests here make those as fixtures
+     * and mostly have no reason to remove them, and a QuarkusTest shares one application across
+     * classes, so without this the leftovers outlive the class and are visible to anything that
+     * lists roles or instance profiles unscoped.
+     *
+     * <p>Once at the end rather than after each test, on purpose: orders 1 to 8 are a single
+     * narrative where one test's role is the next one's fixture, and the delete in order 6 is
+     * itself under test. Cleaning between tests would take that apart.
+     *
+     * <p>Which roles are this class's own is decided by comparing the path against the snapshot
+     * taken before the first test, not by a list of the principals used here: a list goes stale
+     * the moment a test is added, and sweeping the whole path takes roles that other classes
+     * made and a later class can still be holding. The profile goes by name, since other classes
+     * keep their own profiles at the same path.
+     */
+    @AfterAll
+    static void cleanup() {
+        if (rolesAlreadyThere == null) {
+            // No test of this class got as far as the snapshot, so it created nothing and there
+            // is no record of what was already here. Sweeping without that record would take
+            // other classes' roles, and failing here would bury whatever stopped the snapshot.
+            return;
+        }
+
+        // A role created here and then found in the listing is what keeps the closing assertion
+        // honest. If the listing ever stopped returning anything for this path, the sweep below
+        // would delete nothing and the empty result would still read as clean.
+        String sentinel = iam("CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "cleanupprobe.amazonaws.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath()
+            .getString("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.RoleName");
+
+        try {
+            List<String> leftOver = rolesThisClassAdded();
+            assertTrue(leftOver.contains(sentinel),
+                    "the path listing should see the role just created, found: " + leftOver);
+
+            for (String roleName : leftOver) {
+                // Two kinds live under this path. Most are service-linked and only
+                // DeleteServiceLinkedRole will take them. A couple are ordinary roles the protection
+                // tests park there with CreateRole, and that action answers NoSuchEntity for those,
+                // because the mark comes from the action that minted the role, not from its path.
+                // Any other status leaves the role in place for the closing assertion to name.
+                int status = iam("DeleteServiceLinkedRole")
+                    .formParam("RoleName", roleName)
+                .when()
+                    .post("/")
+                .then()
+                    .extract().statusCode();
+                if (status == 404) {
+                    iam("DeleteRole")
+                        .formParam("RoleName", roleName)
+                    .when()
+                        .post("/")
+                    .then()
+                        .statusCode(200);
+                }
+            }
+
+            List<String> remaining = rolesThisClassAdded();
+            assertTrue(remaining.isEmpty(),
+                    "the class should leave no service-linked role behind, found: " + remaining);
+
+            if (protectionProfileCreated) {
+                // Expecting 200 is also the assertion that the profile was there to clean: this
+                // action answers NoSuchEntity for one that is already gone.
+                iam("DeleteInstanceProfile")
+                    .formParam("InstanceProfileName", PROTECTION_PROBE_PROFILE)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200);
+            }
+        } finally {
+            // The sweep above normally takes the probe with it, so a 404 here is the ordinary
+            // outcome. Nothing is asserted, both because there is nothing left to learn and
+            // because a throw here would bury whatever failed above.
+            iam("DeleteServiceLinkedRole")
+                .formParam("RoleName", sentinel)
+            .when()
+                .post("/");
+        }
     }
 }
