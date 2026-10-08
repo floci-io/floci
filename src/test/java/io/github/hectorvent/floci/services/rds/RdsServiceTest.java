@@ -1012,7 +1012,7 @@ class RdsServiceTest {
 
     @ParameterizedTest
     @CsvSource({"postgres,POSTGRESQL,5432", "mysql,MYSQL,3306"})
-    void dbProxyIamBindingUsesEngineDefaultPortForBareHostname(String engine, String family, int defaultPort) {
+    void dbProxyIamBindingUsesEachListenerPort(String engine, String family, int defaultPort) {
         CurrentContainerNetworkResolver resolver = mock(CurrentContainerNetworkResolver.class);
         when(config.services().rds().endpointHost()).thenReturn(Optional.of("localhost"));
         when(resolver.resolvePublishedPort(anyInt())).thenReturn(OptionalInt.of(49173));
@@ -1034,8 +1034,16 @@ class RdsServiceTest {
             verify(proxyManager).startProxy(any(), any(), anyBoolean(), eq(proxy.getProxyPort()), any(), anyInt(),
                     any(), any(), any(), any(), any(), binding.capture());
             assertEquals(proxy.getEndpointHost(), proxy.getEndpoint());
-            assertEquals(new RdsProxyBinding(proxy.getEndpointHost(), defaultPort, "us-east-1",
+            assertEquals(new RdsProxyBinding(proxy.getEndpointHost(), proxy.getProxyPort(), "us-east-1",
                     "123456789012", proxy.getDbProxyResourceId(), true), binding.getValue());
+            clearInvocations(proxyManager);
+            service.modifyDbProxy(proxy.getDbProxyName(), null, PROXY_AUTH, null, null, null,
+                    null, null, null, "us-east-1");
+            verify(proxyManager).startProxy(any(), any(), eq(false), eq(proxy.getProxyPort()), any(), anyInt(),
+                    any(), any(), any(), any(), any(), binding.capture());
+            assertEquals(new RdsProxyBinding(proxy.getEndpointHost(), proxy.getProxyPort(), "us-east-1",
+                    "123456789012", proxy.getDbProxyResourceId(), true), binding.getValue());
+            clearInvocations(proxyManager);
         }
         assertEquals(defaultPort, first.getProxyPort());
         assertNotEquals(defaultPort, second.getProxyPort());

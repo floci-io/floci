@@ -5077,9 +5077,9 @@ public class RdsService implements Resettable, ResourceProvider {
     // ── DB Proxies (AWS::RDS::DBProxy) ──────────────────────────────────────────
 
     /**
-     * Creates a DB Proxy. No relay is started here — the backend target is unknown until a target
+     * Creates a DB Proxy. No relay is started here: the backend target is unknown until a target
      * group registers a cluster/instance (see {@link #registerDbProxyTargets}). The relay listens on
-     * the engine family's default port so the endpoint is a bare host clients reach at 5432/3306.
+     * the engine family's default port when available, otherwise an allocated pool port.
      */
     public DbProxy createDbProxy(String dbProxyName, String engineFamily, boolean requireTls,
                                  boolean iamAuth, String roleArn, List<String> vpcSubnetIds,
@@ -5135,9 +5135,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         boolean mock = config.services().rds().mock();
-        // RDS Proxy exposes a bare hostname on the engine's default port. Floci currently models
-        // that contract directly; a separate endpoint-routing design is required before multiple
-        // same-engine proxies can be made externally reachable through one Docker host.
+        // Proxies share a hostname, so each needs its own listener port.
         int proxyPort = reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
         DbProxy proxy = new DbProxy();
         proxy.setDbProxyName(dbProxyName);
@@ -5459,7 +5457,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                         proxyAccountId, targetRegion, targetId, user, pw)
                                 : validateDbPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw),
-                        proxyBinding(engine, proxy.getEndpointHost(), defaultPortForEngineFamily(proxy.getEngineFamily()),
+                        proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
                                 targetRegion, proxyAccountId, proxy.getDbProxyResourceId()));
             }
             putTargetGroupForAccount(proxyAccountId, proxyKey, updatedTargetGroup);
@@ -7506,7 +7504,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                 accountId, proxyRegion, targetId, user, password)
                         : validateDbPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password),
-                proxyBinding(engine, proxy.getEndpointHost(), defaultPortForEngineFamily(proxy.getEngineFamily()),
+                proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
                         proxyRegion, accountId, proxy.getDbProxyResourceId()));
     }
 
@@ -7533,7 +7531,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 17);
     }
 
-    /** The engine's default listener port — an RDS Proxy endpoint is a bare host reached on this port. */
+    /** The preferred listener port, used when no other proxy has reserved it. */
     private int defaultPortForEngineFamily(String engineFamily) {
         if (engineFamily == null) {
             return 5432;
