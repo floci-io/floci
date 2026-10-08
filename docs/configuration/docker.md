@@ -72,7 +72,7 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
 
-When a pool is full, a Docker call waits for a free connection, then fails. The wait defaults to 30 seconds for both pools; a failed wait is not retried, because a full pool means Floci is saturated:
+When a pool is full, a Docker call waits for a free connection, then fails. The wait defaults to 30 seconds for both pools and must be at least 1 (httpclient5 reads 0 as no limit, so a call would wait forever); a failed wait is not retried, because a full pool means Floci is saturated:
 
 ```yaml
 floci:
