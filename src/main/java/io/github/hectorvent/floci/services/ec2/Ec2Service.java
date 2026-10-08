@@ -3386,6 +3386,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
                         Instance inst = new Instance();
                         inst.setInstanceId(instanceId);
+                        inst.setOwnerId(callerAccountId());
                         inst.setImageId(imageId);
                         inst.setState(InstanceState.pending());
                         inst.setInstanceType(effectiveInstanceType);

@@ -47,6 +47,7 @@ public class Ec2MetadataServer {
             .withZone(ZoneOffset.UTC);
     /** IMDSv2 tokens live from one second up to six hours. */
     private static final int MAX_TOKEN_TTL_SECONDS = 21_600;
+    private static final String IDENTITY_ROLE = "ec2-instance";
     private static final String INSTANCE_TAGS_PREFIX = "/latest/meta-data/tags/instance/";
 
     private final Vertx vertx;
@@ -142,6 +143,17 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/iam/info").handler(ctx -> handleIamInfo(ctx));
         router.get("/latest/meta-data/iam/security-credentials/").handler(ctx -> handleCredentialsList(ctx));
         router.get("/latest/meta-data/iam/security-credentials/:role").handler(ctx -> handleCredentials(ctx));
+        router.get("/latest/meta-data/identity-credentials").handler(ctx -> handleListing(ctx, "ec2/"));
+        router.get("/latest/meta-data/identity-credentials/").handler(ctx -> handleListing(ctx, "ec2/"));
+        router.get("/latest/meta-data/identity-credentials/ec2").handler(ctx -> handleListing(ctx, "info\nsecurity-credentials/"));
+        router.get("/latest/meta-data/identity-credentials/ec2/").handler(ctx -> handleListing(ctx, "info\nsecurity-credentials/"));
+        router.get("/latest/meta-data/identity-credentials/ec2/info").handler(ctx -> handleIdentityInfo(ctx));
+        router.get("/latest/meta-data/identity-credentials/ec2/security-credentials")
+                .handler(ctx -> handleListing(ctx, IDENTITY_ROLE));
+        router.get("/latest/meta-data/identity-credentials/ec2/security-credentials/")
+                .handler(ctx -> handleListing(ctx, IDENTITY_ROLE));
+        router.get("/latest/meta-data/identity-credentials/ec2/security-credentials/" + IDENTITY_ROLE)
+                .handler(ctx -> handleIdentityCredentials(ctx));
         router.get("/latest/meta-data/tags/instance").handler(ctx -> handleInstanceTagKeys(ctx));
         router.get("/latest/meta-data/tags/instance/").handler(ctx -> handleInstanceTagKeys(ctx));
         router.getWithRegex("/latest/meta-data/tags/instance/.+").handler(ctx -> handleInstanceTagValue(ctx));
@@ -314,14 +326,55 @@ public class Ec2MetadataServer {
             return;
         }
         SessionCredential session = result.get();
+        ctx.response().putHeader("content-type", "application/json").end(credentialsJson(session));
+    }
+
+    private void handleListing(RoutingContext ctx, String entries) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
+        ctx.response().setStatusCode(200).putHeader("content-type", "text/plain").end(entries);
+    }
+
+    private void handleIdentityInfo(RoutingContext ctx) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
         ctx.response().putHeader("content-type", "application/json").end(new JsonObject()
+                .put("Code", "Success")
+                .put("LastUpdated", ISO.format(clock.instant()))
+                .put("AccountId", ownerAccount(inst)).encode());
+    }
+
+    private void handleIdentityCredentials(RoutingContext ctx) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
+        Optional<SessionCredential> result = credentials.identity(inst, ownerAccount(inst), clock.instant());
+        if (result.isEmpty()) {
+            ctx.response().setStatusCode(404).end();
+            return;
+        }
+        ctx.response().putHeader("content-type", "application/json").end(credentialsJson(result.get()));
+    }
+
+    /** The account that launched the instance; instances persisted before it was recorded belong to the default one. */
+    private String ownerAccount(Instance inst) {
+        return inst.getOwnerId() != null ? inst.getOwnerId() : config.defaultAccountId();
+    }
+
+    private static String credentialsJson(SessionCredential session) {
+        return new JsonObject()
                 .put("Code", "Success")
                 .put("LastUpdated", ISO.format(session.getExpiration().minusSeconds(3600)))
                 .put("Type", "AWS-HMAC")
                 .put("AccessKeyId", session.getAccessKeyId())
                 .put("SecretAccessKey", session.getSecretAccessKey())
                 .put("Token", session.getSessionToken())
-                .put("Expiration", ISO.format(session.getExpiration())).encode());
+                .put("Expiration", ISO.format(session.getExpiration())).encode();
     }
 
     private void handleInstanceTagKeys(RoutingContext ctx) {
@@ -374,7 +427,7 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
-        String body = instanceIdentityDocument(inst, config.defaultAccountId(), config.defaultAvailabilityZone());
+        String body = instanceIdentityDocument(inst, ownerAccount(inst), config.defaultAvailabilityZone());
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "application/json")
                 .end(body);

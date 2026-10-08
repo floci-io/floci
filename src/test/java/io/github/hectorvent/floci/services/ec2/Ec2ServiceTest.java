@@ -814,6 +814,7 @@ class Ec2ServiceTest {
                 1, 1, null, List.of(), null, null, List.of(), null, null);
 
         assertEquals("arm64", reservation.getInstances().getFirst().getArchitecture());
+        assertEquals(reservation.getOwnerId(), reservation.getInstances().getFirst().getOwnerId());
     }
 
     @Test
