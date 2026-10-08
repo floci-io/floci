@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.ServiceLinkedRoles;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
@@ -73,7 +74,8 @@ public class RamController {
     public Response enableSharingWithAwsOrganization() {
         String callerAccountId = regionResolver.getAccountId();
         organizationsService.enableAWSServiceAccess(callerAccountId, ServicePrincipals.of("ram"));
-        if (iamService.findRole(callerAccountId, "AWSServiceRoleForResourceAccessManager").isEmpty()) {
+        String ramRoleName = ServiceLinkedRoles.roleName(ServicePrincipals.of("ram")).orElseThrow();
+        if (iamService.findRole(callerAccountId, ramRoleName).isEmpty()) {
             iamService.createServiceLinkedRole(ServicePrincipals.of("ram"), null,
                     "Allows AWS Resource Access Manager to access AWS Organizations on your behalf.");
         }

@@ -50,10 +50,11 @@ quarkus:
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      # The IAM managed-policy catalog (iam/*) is not listed on purpose.
-      # AwsManagedPolicies parses it while the image is built and the parsed
-      # catalog lives in the image heap, so the 3.5 MB of source files would
-      # only be a second copy of the same data.
+      # The IAM managed-policy catalog is not listed on purpose. AwsManagedPolicies
+      # parses it while the image is built and the parsed catalog lives in the image
+      # heap, so the 3.5 MB of source files would only be a second copy of the same
+      # data. The service-linked role table is listed, because at 13 KB that saving
+      # is not worth depending on the static initialiser running at build time.
       includes:
         - pricing-snapshots/**
         - ui/*.html
@@ -64,6 +65,7 @@ quarkus:
         - kms/*.yaml
         - eks/*.json
         - aws/*.json
+        - iam/service-linked-roles.tsv
         - cloudformation/*.json
         - redshift/*.sql
         - i18n/*.properties

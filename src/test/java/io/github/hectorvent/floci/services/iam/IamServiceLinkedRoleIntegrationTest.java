@@ -11,6 +11,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import io.quarkus.test.junit.QuarkusTest;
 import static io.restassured.RestAssured.given;
 
@@ -238,8 +240,9 @@ class IamServiceLinkedRoleIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
+            // The table carries AWS's recorded name, RDS rather than the derived Rds.
             .body("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.RoleName",
-                    equalTo("AWSServiceRoleForRds"));
+                    equalTo("AWSServiceRoleForRDS"));
 
         given()
             .formParam("Action", "CreateServiceLinkedRole")
@@ -249,6 +252,8 @@ class IamServiceLinkedRoleIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
+            // No recording covers this dimension, so it keeps the derived name. The point of
+            // the case is that the two principals stay distinct, which holds either way.
             .body("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.RoleName",
                     equalTo("AWSServiceRoleForRdsApplicationAutoscaling"));
     }
@@ -604,5 +609,137 @@ class IamServiceLinkedRoleIntegrationTest {
             .body("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.Arn",
                     equalTo("arn:aws:iam::000000000000:role/aws-service-role/cloud9.amazonaws.com/"
                             + "AWSServiceRoleForAWSCloud9"));
+    }
+
+    /**
+     * Most services refuse a {@code CustomSuffix}. AWS answers {@code InvalidInput} "Custom suffix
+     * is not allowed for &lt;service&gt;", recorded under {@code @markers.aws.validated} for 68 of
+     * the 71 service principals LocalStack exercises.
+     */
+    @Test
+    @Order(26)
+    void aCustomSuffixIsRefusedByAServiceRecordedAsRefusingOne() {
+        for (String service : List.of("ecs.amazonaws.com", "rds.amazonaws.com",
+                "elasticloadbalancing.amazonaws.com")) {
+            given()
+                .formParam("Action", "CreateServiceLinkedRole")
+                .formParam("AWSServiceName", service)
+                .formParam("CustomSuffix", "debug")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("Custom suffix is not allowed for " + service));
+        }
+    }
+
+    /**
+     * And the three that do take one still do, so the check is a denylist of what AWS was recorded
+     * refusing rather than a blanket refusal.
+     */
+    @Test
+    @Order(27)
+    void theServicesRecordedAsTakingASuffixStillTakeOne() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "connect.amazonaws.com")
+            .formParam("CustomSuffix", "allowed")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.RoleName",
+                    equalTo("AWSServiceRoleForAmazonConnect_allowed"));
+    }
+
+    /**
+     * A service the recordings do not cover keeps taking a suffix. This pins the decision rather
+     * than the behaviour: refusing an unrecorded service would be inventing AWS behaviour, and
+     * {@code es} is not in the recorded set at all, so it stays permitted.
+     */
+    @Test
+    @Order(28)
+    void aServiceTheRecordingsDoNotCoverStillTakesASuffix() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "unrecordedprobe.amazonaws.com")
+            .formParam("CustomSuffix", "kept")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.RoleName",
+                    equalTo("AWSServiceRoleForUnrecordedprobe_kept"));
+    }
+
+    /**
+     * Creating the same service-linked role twice is {@code InvalidInput} naming the role, not the
+     * parameter: "Service role name AWSServiceRoleForBatch has been taken in this account, please
+     * try a different suffix." Recorded against AWS for a second plain create of
+     * {@code batch.amazonaws.com}.
+     */
+    @Test
+    @Order(29)
+    void creatingTheSameRoleTwiceNamesTheRoleThatIsTaken() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "takenprobe.amazonaws.com")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "takenprobe.amazonaws.com")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("Service role name AWSServiceRoleForTakenprobe has been taken in this "
+                            + "account, please try a different suffix."));
+    }
+
+    /**
+     * A table name plus a suffix can breach the 64-character RoleName limit even though the name
+     * alone fits. Two entries are close enough for that to matter, and neither has a recording
+     * refusing a suffix, so the limit is the only thing standing between a caller and a role AWS
+     * could not name.
+     */
+    @Test
+    @Order(30)
+    void aSuffixThatPushesATableNamePastTheRoleNameLimitIsRejected() {
+        // AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint is 57 characters, so a
+        // seven-character suffix is one too many.
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "sagemaker.application-autoscaling.amazonaws.com")
+            .formParam("CustomSuffix", "sevench")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+            .body("ErrorResponse.Error.Message", containsString("exceeds the 64-character"));
+
+        // Six fits, and the name is the table's rather than the derived one.
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "sagemaker.application-autoscaling.amazonaws.com")
+            .formParam("CustomSuffix", "sixchr")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.RoleName",
+                    equalTo("AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint_sixchr"));
     }
 }

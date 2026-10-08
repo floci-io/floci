@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationFeature;
+import io.github.hectorvent.floci.services.iam.ServiceLinkedRoles;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -567,7 +568,8 @@ public class GuardDutyService {
 
     private static String serviceRoleArn(String region, String accountId) {
         return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
-                "role/aws-service-role/" + ServicePrincipals.of("guardduty") + "/AWSServiceRoleForAmazonGuardDuty")
+                "role/aws-service-role/" + ServicePrincipals.of("guardduty") + "/"
+                        + ServiceLinkedRoles.roleName(ServicePrincipals.of("guardduty")).orElseThrow())
                 .toString();
     }
 

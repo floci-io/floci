@@ -44,6 +44,7 @@ PREFIX ?= $(HOME)/.local
 .DEFAULT_GOAL := help
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
         docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test \
+        slr-check slr-table slr-audit slr-test \
         aws-data-sync aws-data-check aws-data-test \
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test
 
@@ -173,6 +174,28 @@ partition-audit: ## Print the per-package table of remaining partition literals
 
 partition-test: ## Run the partition tooling's unit tests
 	$(PYTHON) -m pytest tools/partition -q
+
+slr-check: ## CI gate: the service-linked role table must match the vendored AWS data
+	@$(PYTHON) tools/slr/service_linked_roles.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/iam/service-linked-roles.tsv drifted (see above)."; \
+		echo "       Run 'make slr-table SNAPSHOT=<localstack iam snapshot>' and commit the result."; \
+		exit 1; \
+	}
+
+slr-table: ## Regenerate the service-linked role table from an AWS-validated snapshot
+	@test -n "$(SNAPSHOT)" || { \
+		echo "error: set SNAPSHOT to a LocalStack tests/aws/services/iam/test_iam.snapshot.json"; \
+		echo "       the suffix column can only come from a recorded create"; \
+		exit 1; \
+	}
+	$(PYTHON) tools/slr/service_linked_roles.py --refresh "$(SNAPSHOT)"
+
+slr-audit: ## Print the service-linked role table, marking names that are not derivable
+	@$(PYTHON) tools/slr/service_linked_roles.py --audit
+
+slr-test: ## Run the service-linked role tooling's unit tests
+	$(PYTHON) -m pytest tools/slr -q
 
 aws-data-sync: ## Regenerate src/main/resources/aws/*.json from botocore, the CDK and Terraform (commit the result)
 	$(PYTHON) tools/aws/regen_partitions.py

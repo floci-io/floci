@@ -112,4 +112,24 @@ class MacieOrganizationIntegrationTest {
                 + "/20260101/us-east-1/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
+
+    /**
+     * GetMacieSession returns the service-linked role ARN, and its name comes from
+     * {@code iam/service-linked-roles.tsv}: AWS mints AmazonMacie where capitalising the principal
+     * would give Macie. Nothing asserted this role before, so replacing the name with a wrong one
+     * broke no test.
+     */
+    @Test
+    void theMacieSessionReportsTheServiceLinkedRoleAwsMints() {
+        // requireSession answers 404 until Macie is enabled for the region.
+        given().contentType("application/json")
+                .header("Authorization", auth(ADMIN_ACCOUNT, "macie2"))
+                .body("{}").post("/macie").then().statusCode(200);
+
+        given().header("Authorization", auth(ADMIN_ACCOUNT, "macie2"))
+                .get("/macie").then().statusCode(200)
+                .body("serviceRole", equalTo("arn:aws:iam::" + ADMIN_ACCOUNT
+                        + ":role/aws-service-role/macie.amazonaws.com/"
+                        + "AWSServiceRoleForAmazonMacie"));
+    }
 }

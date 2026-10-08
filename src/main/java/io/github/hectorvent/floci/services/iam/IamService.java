@@ -160,12 +160,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final SecureRandom secureRandom = new SecureRandom();
 
     private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
-    private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
-    private static final Map<String, String> SERVICE_LINKED_ROLE_NAMES = Map.of(
-            ServicePrincipals.of("autoscaling"), "AutoScaling",
-            ServicePrincipals.of("cloud9"), "AWSCloud9",
-            ServicePrincipals.of("ram"), "ResourceAccessManager"
-    );
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
@@ -1114,14 +1108,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("InvalidInput",
                     "CustomSuffix must be 1-64 characters matching [\\w+=,.@-].", 400);
         }
-        String roleName = SERVICE_LINKED_ROLE_NAME_PREFIX + derivedServiceName(awsServiceName)
+        // Most services refuse a suffix outright. The table carries what AWS was recorded
+        // doing, and UNKNOWN keeps taking one rather than refusing on an inference: the name
+        // as the caller sent it, since every recording used the canonical form and the two
+        // cannot be told apart from the evidence.
+        if (customSuffix != null && !customSuffix.isEmpty()
+                && ServiceLinkedRoles.customSuffixSupport(awsServiceName)
+                        == ServiceLinkedRoles.CustomSuffixSupport.REFUSED) {
+            throw new AwsException("InvalidInput",
+                    "Custom suffix is not allowed for " + awsServiceName, 400);
+        }
+        String baseName = ServiceLinkedRoles.roleName(awsServiceName)
+                .orElseThrow(() -> new AwsException("InvalidInput",
+                        "The request must include a valid AWSServiceName, for example "
+                                + "es.amazonaws.com.", 400)); // partition-literal: AWS's own message text
+        String roleName = baseName
                 + (customSuffix == null || customSuffix.isEmpty() ? "" : "_" + customSuffix);
-        // AWSServiceName allows 128 characters, but AWS caps RoleName at 64 — on every action that
-        // takes one, and on the Role this action returns — so a longer principal would derive a
-        // name AWS could not represent.
+        // AWSServiceName allows 128 characters and a CustomSuffix another 64, but AWS caps
+        // RoleName at 64, on every action that takes one and on the Role this action returns,
+        // so the two together can name a role AWS could not represent. The name is no longer
+        // always derived, now that the table carries what AWS mints, and a few of its entries are
+        // long enough that a suffix alone breaches the limit. The boundary is pinned by a test
+        // rather than counted here, since a margin quoted in a comment goes stale the moment the
+        // table changes.
         if (roleName.length() > ROLE_NAME_MAX_LENGTH) {
             throw new AwsException("InvalidInput",
-                    "The derived role name " + roleName + " exceeds the "
+                    "The role name " + roleName + " exceeds the "
                             + ROLE_NAME_MAX_LENGTH + "-character role name limit.", 400);
         }
         synchronized (resourceNameLock) {
@@ -1129,7 +1141,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // duplicate-suffix case is an InvalidInput as far as its published error list is concerned.
             if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
                 throw new AwsException("InvalidInput",
-                        "A role named " + roleName + " already exists; supply a different CustomSuffix.", 400);
+                        "Service role name " + roleName + " has been taken in this account, "
+                                + "please try a different suffix.", 400);
             }
             // A legacy spelling (es.amazonaws.com.cn) names the same role, so its path and trust
             // policy carry the universal principal the name was derived from.
@@ -1170,32 +1183,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 + roleName + "/" + UUID.randomUUID();
         serviceLinkedRoleDeletions.put(deletionTaskId, roleName);
         return deletionTaskId;
-    }
-
-    /**
-     * Every dot- and hyphen-separated label contributes, because the leading one alone is not unique:
-     * {@code rds.amazonaws.com} and {@code rds.application-autoscaling.amazonaws.com} are separate
-     * roles on AWS, and a config declaring both must not collide on one name here.
-     */
-    private static String derivedServiceName(String awsServiceName) {
-        // The principal may arrive in the partition form AWS accepted before the universal one
-        // (es.amazonaws.com.cn); the derived name is the same either way.
-        String canonicalName = SERVICE_LINKED_ROLE_NAMES.get(ServicePrincipals.canonical(awsServiceName));
-        if (canonicalName != null) {
-            return canonicalName;
-        }
-        String core = awsServiceName == null ? "" : ServicePrincipals.serviceName(awsServiceName);
-        StringBuilder derived = new StringBuilder();
-        for (String segment : core.split("[.-]")) {
-            if (!segment.isEmpty()) {
-                derived.append(Character.toUpperCase(segment.charAt(0))).append(segment.substring(1));
-            }
-        }
-        if (derived.isEmpty()) {
-            throw new AwsException("InvalidInput",
-                    "The request must include a valid AWSServiceName, for example es.amazonaws.com.", 400); // partition-literal: AWS's own message text
-        }
-        return derived.toString();
     }
 
     public String getServiceLinkedRoleDeletionStatus(String deletionTaskId) {
