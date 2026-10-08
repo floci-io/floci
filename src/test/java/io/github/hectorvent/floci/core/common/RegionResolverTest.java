@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
-import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Cookie;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;

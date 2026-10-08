@@ -1,31 +1,32 @@
 package io.github.hectorvent.floci.services.bedrockagentcore;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlService;
-import jakarta.inject.Inject;
-import jakarta.ws.rs.Consumes;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlService;
 import io.smallrye.common.annotation.Blocking;
-import jakarta.ws.rs.core.GenericEntity;
-import jakarta.ws.rs.core.StreamingOutput;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.util.function.Consumer;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.GenericEntity;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import org.jboss.logging.Logger;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.util.function.Consumer;
 
 /**
  * Amazon Bedrock AgentCore data-plane stub ({@code InvokeAgentRuntime}).

@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.ses.imports;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
-
 import io.github.hectorvent.floci.services.ses.model.ImportJob;
 
 import java.io.BufferedReader;

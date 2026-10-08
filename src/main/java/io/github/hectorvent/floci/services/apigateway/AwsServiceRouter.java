@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
@@ -22,6 +22,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+
 import java.util.regex.Matcher;
 
 /**

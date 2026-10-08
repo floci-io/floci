@@ -31,9 +31,9 @@ import software.amazon.awssdk.services.identitystore.model.ListGroupMembershipsR
 import software.amazon.awssdk.services.identitystore.model.ListGroupsRequest;
 import software.amazon.awssdk.services.identitystore.model.ListUsersRequest;
 import software.amazon.awssdk.services.identitystore.model.MemberId;
+import software.amazon.awssdk.services.identitystore.model.UniqueAttribute;
 import software.amazon.awssdk.services.identitystore.model.UpdateGroupRequest;
 import software.amazon.awssdk.services.identitystore.model.UpdateUserRequest;
-import software.amazon.awssdk.services.identitystore.model.UniqueAttribute;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;

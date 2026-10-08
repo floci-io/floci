@@ -4,12 +4,11 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateTenantRequest;
-import software.amazon.awssdk.services.sesv2.model.CreateTenantResponse;
 import software.amazon.awssdk.services.sesv2.model.CreateTenantResourceAssociationRequest;
+import software.amazon.awssdk.services.sesv2.model.CreateTenantResponse;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteTenantRequest;
 import software.amazon.awssdk.services.sesv2.model.ListResourceTenantsRequest;

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.mwaa;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -16,7 +17,6 @@ import io.github.hectorvent.floci.services.mwaa.model.UpdateEnvironmentRequest;
 import io.github.hectorvent.floci.services.mwaa.proxy.MwaaProxyManager;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;

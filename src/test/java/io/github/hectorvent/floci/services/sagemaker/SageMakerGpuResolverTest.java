@@ -1,13 +1,13 @@
 package io.github.hectorvent.floci.services.sagemaker;
 
+import com.github.dockerjava.api.model.DeviceRequest;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.SageMakerServiceConfig.GpuRequestMode;
-import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
-import com.github.dockerjava.api.model.DeviceRequest;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

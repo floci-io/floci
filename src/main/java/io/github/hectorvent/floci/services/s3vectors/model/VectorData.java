@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3vectors.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.List;
 import java.util.Map;
 

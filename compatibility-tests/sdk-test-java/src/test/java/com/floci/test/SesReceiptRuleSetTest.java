@@ -7,7 +7,6 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.AlreadyExistsException;
 import software.amazon.awssdk.services.ses.model.CannotDeleteException;
@@ -17,9 +16,9 @@ import software.amazon.awssdk.services.ses.model.DescribeReceiptRuleSetResponse;
 import software.amazon.awssdk.services.ses.model.InvalidSnsTopicException;
 import software.amazon.awssdk.services.ses.model.ListReceiptRuleSetsResponse;
 import software.amazon.awssdk.services.ses.model.ReceiptFilter;
+import software.amazon.awssdk.services.ses.model.ReceiptFilterPolicy;
 import software.amazon.awssdk.services.ses.model.ReceiptRule;
 import software.amazon.awssdk.services.ses.model.RuleDoesNotExistException;
-import software.amazon.awssdk.services.ses.model.ReceiptFilterPolicy;
 import software.amazon.awssdk.services.ses.model.RuleSetDoesNotExistException;
 import software.amazon.awssdk.services.ses.model.SesException;
 import software.amazon.awssdk.services.ses.model.TlsPolicy;

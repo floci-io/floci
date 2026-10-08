@@ -1,10 +1,6 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
-
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -21,6 +17,9 @@ import software.amazon.awssdk.services.s3.model.PutBucketVersioningRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectAnnotationRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectAnnotationResponse;
 import software.amazon.awssdk.services.s3.model.VersioningConfiguration;
+
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.*;
 

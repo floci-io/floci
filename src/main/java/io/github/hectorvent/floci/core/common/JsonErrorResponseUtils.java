@@ -1,9 +1,8 @@
 package io.github.hectorvent.floci.core.common;
-import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
+import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import jakarta.ws.rs.core.Response;
 
 import java.util.Map;

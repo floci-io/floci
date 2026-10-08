@@ -14,8 +14,8 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**

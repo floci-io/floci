@@ -1,12 +1,12 @@
 package io.github.hectorvent.floci.services.floci.ui;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import org.junit.jupiter.api.Test;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
-
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;

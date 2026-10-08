@@ -3,8 +3,6 @@ package io.github.hectorvent.floci.core.common.auth;
 import io.github.hectorvent.floci.services.iam.IamService;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -14,6 +12,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Optional;
 import java.util.stream.Collectors;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Verifies AWS SigV4 presigned-URL auth tokens: a GET request against the target's own

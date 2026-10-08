@@ -1,10 +1,5 @@
 package com.floci.test;
 
-import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.services.cloudhsmv2.CloudHsmV2Client;
-import software.amazon.awssdk.services.cloudhsmv2.model.*;
-
-import java.util.List;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
@@ -13,6 +8,9 @@ import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.util.io.pem.PemObject;
 import org.bouncycastle.util.io.pem.PemWriter;
+import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.cloudhsmv2.CloudHsmV2Client;
+import software.amazon.awssdk.services.cloudhsmv2.model.*;
 
 import java.io.StringWriter;
 import java.math.BigInteger;
@@ -20,6 +18,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.cert.X509Certificate;
 import java.util.Date;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;

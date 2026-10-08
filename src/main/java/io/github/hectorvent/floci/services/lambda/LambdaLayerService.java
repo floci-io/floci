@@ -11,8 +11,6 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -34,6 +32,8 @@ import java.util.Map;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Business logic for Lambda Layer management.

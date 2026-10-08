@@ -13,13 +13,13 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAu
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserPoolMfaType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.VerifySoftwareTokenResponse;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

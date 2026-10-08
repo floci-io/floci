@@ -1,13 +1,12 @@
 package io.github.hectorvent.floci.core.common;
 
-import io.quarkus.test.junit.QuarkusTest;
-import org.junit.jupiter.api.Test;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.notNullValue;
-
-import org.junit.jupiter.api.BeforeAll;
 
 /**
  * Verifies that {@link AwsRequestIdFilter} injects {@code x-amz-request-id} and

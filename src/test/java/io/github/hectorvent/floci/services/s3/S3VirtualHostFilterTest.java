@@ -13,7 +13,6 @@ import org.junit.jupiter.params.provider.NullSource;
 import org.mockito.ArgumentCaptor;
 
 import java.net.URI;
-
 import java.util.Optional;
 import java.util.Set;
 

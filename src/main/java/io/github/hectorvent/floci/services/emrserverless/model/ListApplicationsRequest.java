@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.emrserverless.model;
 
-import java.util.List;
-
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.util.List;
 
 @RegisterForReflection
 public class ListApplicationsRequest {

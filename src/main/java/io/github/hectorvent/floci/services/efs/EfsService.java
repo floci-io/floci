@@ -20,8 +20,8 @@ import io.github.hectorvent.floci.services.efs.model.DescribeMountTargetsRespons
 import io.github.hectorvent.floci.services.efs.model.FileSystem;
 import io.github.hectorvent.floci.services.efs.model.FileSystemProtectionDescription;
 import io.github.hectorvent.floci.services.efs.model.FileSystemSize;
-import io.github.hectorvent.floci.services.efs.model.LifecyclePolicy;
 import io.github.hectorvent.floci.services.efs.model.LifeCycleState;
+import io.github.hectorvent.floci.services.efs.model.LifecyclePolicy;
 import io.github.hectorvent.floci.services.efs.model.ListTagsForResourceResponse;
 import io.github.hectorvent.floci.services.efs.model.ModifyMountTargetSecurityGroupsRequest;
 import io.github.hectorvent.floci.services.efs.model.MountTarget;

@@ -2,10 +2,10 @@ package com.floci.test;
 
 import org.w3c.dom.Document;
 
-import javax.xml.XMLConstants;
-import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilderFactory;
 
 /** Secure XML parsing shared by compatibility-test fixtures. */
 final class XmlParser {
