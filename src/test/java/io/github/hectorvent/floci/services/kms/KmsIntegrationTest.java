@@ -27,6 +27,7 @@ import java.util.Base64;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.emptyString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasItem;
@@ -3381,6 +3382,45 @@ class KmsIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200)
                 .body("KeyMetadata.KeyState", equalTo("Enabled"));
+    }
+
+    @Test
+    void operationsWithoutOutputReturnEmptyBody() {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String otherKeyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String keyBody = "{\"KeyId\":\"%s\"}".formatted(keyArn);
+        String grantBody = """
+                {"KeyId":"%s","GranteePrincipal":"arn:aws:iam::000000000000:user/grantee","Operations":["Encrypt"]}
+                """.formatted(keyArn);
+        String revokableGrantId = callKms("CreateGrant", grantBody).then().statusCode(200).extract().path("GrantId");
+        String retirableGrantToken = callKms("CreateGrant", grantBody).then().statusCode(200).extract().path("GrantToken");
+
+        assertEmptyBody("DisableKey", keyBody);
+        assertEmptyBody("EnableKey", keyBody);
+        assertEmptyBody("EnableKeyRotation", keyBody);
+        assertEmptyBody("DisableKeyRotation", keyBody);
+        assertEmptyBody("UpdateKeyDescription",
+                "{\"KeyId\":\"%s\",\"Description\":\"updated\"}".formatted(keyArn));
+        assertEmptyBody("PutKeyPolicy", """
+                {"KeyId":"%s","PolicyName":"default","Policy":"{\\"Version\\":\\"2012-10-17\\",\\"Statement\\":[]}"}
+                """.formatted(keyArn));
+        assertEmptyBody("TagResource",
+                "{\"KeyId\":\"%s\",\"Tags\":[{\"TagKey\":\"env\",\"TagValue\":\"test\"}]}".formatted(keyArn));
+        assertEmptyBody("UntagResource", "{\"KeyId\":\"%s\",\"TagKeys\":[\"env\"]}".formatted(keyArn));
+        assertEmptyBody("CreateAlias",
+                "{\"AliasName\":\"alias/empty-body\",\"TargetKeyId\":\"%s\"}".formatted(keyArn));
+        assertEmptyBody("UpdateAlias",
+                "{\"AliasName\":\"alias/empty-body\",\"TargetKeyId\":\"%s\"}".formatted(otherKeyArn));
+        assertEmptyBody("DeleteAlias", "{\"AliasName\":\"alias/empty-body\"}");
+        assertEmptyBody("RevokeGrant",
+                "{\"KeyId\":\"%s\",\"GrantId\":\"%s\"}".formatted(keyArn, revokableGrantId));
+        assertEmptyBody("RetireGrant", "{\"GrantToken\":\"%s\"}".formatted(retirableGrantToken));
+    }
+
+    private static void assertEmptyBody(String operation, String body) {
+        callKms(operation, body).then()
+                .statusCode(200)
+                .body(emptyString());
     }
 
     /**

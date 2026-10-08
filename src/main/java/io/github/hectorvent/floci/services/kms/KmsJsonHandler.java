@@ -269,7 +269,7 @@ public class KmsJsonHandler {
         String grantId = request.path("GrantId").asText(null);
 
         service.revokeGrant(keyId, grantId, region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleRetireGrant(JsonNode request, String region) {
@@ -281,7 +281,7 @@ public class KmsJsonHandler {
                 ? null : request.path("GrantId").asText(null);
 
         service.retireGrant(grantToken, keyId, grantId, region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     // Blob fields arrive base64-encoded on the wire. A value that is not valid base64 is a
@@ -450,17 +450,17 @@ public class KmsJsonHandler {
 
     private Response handleCreateAlias(JsonNode request, String region) {
         service.createAlias(request.path("AliasName").asText(), request.path("TargetKeyId").asText(), region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleUpdateAlias(JsonNode request, String region) {
         service.updateAlias(request.path("AliasName").asText(), request.path("TargetKeyId").asText(), region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleDeleteAlias(JsonNode request, String region) {
         service.deleteAlias(request.path("AliasName").asText(), region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleListAliases(JsonNode request, String region) {
@@ -505,7 +505,7 @@ public class KmsJsonHandler {
         request.path("Tags").forEach(t -> tags.put(t.path("TagKey").asText(), t.path("TagValue").asText()));
         ReservedTags.rejectReservedTagsOnUpdate(tags);
         service.tagResource(keyId, tags, region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleUntagResource(JsonNode request, String region) {
@@ -513,7 +513,7 @@ public class KmsJsonHandler {
         java.util.List<String> keys = new java.util.ArrayList<>();
         request.path("TagKeys").forEach(k -> keys.add(k.asText()));
         service.untagResource(keyId, keys, region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleListResourceTags(JsonNode request, String region) {
@@ -540,7 +540,7 @@ public class KmsJsonHandler {
                 request.path("KeyId").asText(),
                 request.path("Policy").asText(),
                 region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleListKeyPolicies(JsonNode request, String region) {
@@ -556,7 +556,7 @@ public class KmsJsonHandler {
                 request.path("KeyId").asText(),
                 requiredText(request, "Description"),
                 region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private String requiredText(JsonNode request, String field) {
@@ -581,22 +581,22 @@ public class KmsJsonHandler {
             validateRange("rotationPeriodInDays", rotationPeriod.asInt(), 90, 2560);
         }
         service.enableKeyRotation(request.path("KeyId").asText(), region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleDisableKeyRotation(JsonNode request, String region) {
         service.disableKeyRotation(request.path("KeyId").asText(), region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleEnableKey(JsonNode request, String region) {
         service.enableKey(request.path("KeyId").asText(), region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleDisableKey(JsonNode request, String region) {
         service.disableKey(request.path("KeyId").asText(), region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     private Response handleRotateKeyOnDemand(JsonNode request, String region) {
