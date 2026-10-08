@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,6 +41,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -359,9 +361,7 @@ class S3CopySimulatorTest {
                 s3, null, 'I');
         joinBackend(backend);
 
-        verify(s3).deleteObject("wh", "out/old1");
-        verify(s3).deleteObject("wh", "out/old2");
-        verify(s3, times(2)).deleteObject(eq("wh"), any());
+        verify(s3).deleteObjectsWithPrefix(eq("wh"), eq("out/"), any());
         assertTrue(written.containsKey("out/0000_part_00"), written.keySet().toString());
     }
 
@@ -373,30 +373,29 @@ class S3CopySimulatorTest {
 
         try (S3CopySimulator.UnloadCollector collector =
                      S3CopySimulator.prepareUnload(unloadSpecWithOptions(false, true, false, null), s3, null)) {
-            verify(s3, never()).deleteObject(any(), any());
+            verify(s3, never()).deleteObjectsWithPrefix(any(), any(), any());
             collector.complete();
         }
 
         InOrder order = inOrder(s3);
-        order.verify(s3).deleteObject("wh", "out/old1");
+        order.verify(s3).deleteObjectsWithPrefix(eq("wh"), eq("out/"), any());
         order.verify(s3).putObject(eq("wh"), eq("out/0000_part_00"), any(), any(), any());
     }
 
     @Test
-    void cleanPathAlsoDeletesAnObjectUploadedBetweenPreparationAndOutput() throws Exception {
-        S3Object old1 = new S3Object("wh", "out/old1", new byte[0], "text/plain");
-        S3Object late = new S3Object("wh", "out/late", new byte[0], "text/plain");
-        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
-                .thenReturn(new S3Service.ListObjectsResult(List.of(old1), List.of(), false, null))
-                .thenReturn(new S3Service.ListObjectsResult(List.of(old1, late), List.of(), false, null));
+    void cleanPathAuthorizesEachDeleteThroughTheCallbackItHandsToS3() throws Exception {
+        doAnswer(inv -> {
+            Consumer<String> authorize = inv.getArgument(2);
+            authorize.accept("out/late");
+            return 1;
+        }).when(s3).deleteObjectsWithPrefix(eq("wh"), eq("out/"), any());
 
         try (S3CopySimulator.UnloadCollector collector =
                      S3CopySimulator.prepareUnload(unloadSpecWithOptions(false, true, false, null), s3, null)) {
             collector.complete();
         }
 
-        verify(s3).deleteObject("wh", "out/old1");
-        verify(s3).deleteObject("wh", "out/late");
+        verify(s3).authorizeAnonymousDeleteObject("wh", "out/late");
     }
 
     @Test
@@ -411,7 +410,7 @@ class S3CopySimulatorTest {
             assertNotNull(collector);
         }
 
-        verify(s3, never()).deleteObject(any(), any());
+        verify(s3, never()).deleteObjectsWithPrefix(any(), any(), any());
     }
 
     @Test
@@ -425,7 +424,7 @@ class S3CopySimulatorTest {
         assertThrows(S3CopySimulator.S3TransferException.class,
                 () -> S3CopySimulator.prepareUnload(unloadSpecWithOptions(false, true, false, null), s3, null));
 
-        verify(s3, never()).deleteObject(any(), any());
+        verify(s3, never()).deleteObjectsWithPrefix(any(), any(), any());
         verify(s3, never()).putObject(any(), any(), any(), any(), any());
     }
 

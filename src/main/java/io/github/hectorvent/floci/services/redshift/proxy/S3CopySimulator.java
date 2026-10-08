@@ -1008,13 +1008,7 @@ public final class S3CopySimulator {
     private static List<String> collectCleanPathKeys(CopyStatementParser.S3Unload spec, S3Service s3,
                                                      IamService iamService,
                                                      RedshiftRoleAccess.RoleSession roleSession) {
-        if (roleSession != null) {
-            RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket",
-                    RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket()));
-            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
-        } else {
-            s3.authorizeAnonymousListBucket(spec.bucket());
-        }
+        authorizeCleanPathList(spec, s3, iamService, roleSession);
         List<String> keys = new ArrayList<>();
         String continuationToken = null;
         do {
@@ -1029,16 +1023,34 @@ public final class S3CopySimulator {
         } while (continuationToken != null);
 
         for (String key : keys) {
-            if (roleSession != null) {
-                RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:DeleteObject",
-                        RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), key));
-                s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), roleSession.sessionToken(),
-                        spec.bucket(), key);
-            } else {
-                s3.authorizeAnonymousDeleteObject(spec.bucket(), key);
-            }
+            authorizeCleanPathDelete(spec, s3, iamService, roleSession, key);
         }
         return keys;
+    }
+
+    private static void authorizeCleanPathList(CopyStatementParser.S3Unload spec, S3Service s3,
+                                               IamService iamService,
+                                               RedshiftRoleAccess.RoleSession roleSession) {
+        if (roleSession != null) {
+            RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket",
+                    RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket()));
+            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
+        } else {
+            s3.authorizeAnonymousListBucket(spec.bucket());
+        }
+    }
+
+    private static void authorizeCleanPathDelete(CopyStatementParser.S3Unload spec, S3Service s3,
+                                                 IamService iamService,
+                                                 RedshiftRoleAccess.RoleSession roleSession, String key) {
+        if (roleSession != null) {
+            RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:DeleteObject",
+                    RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), key));
+            s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), roleSession.sessionToken(),
+                    spec.bucket(), key);
+        } else {
+            s3.authorizeAnonymousDeleteObject(spec.bucket(), key);
+        }
     }
 
     /** Server-side encryption headers requested by ENCRYPTED KMS_KEY_ID, or null when none apply. */
@@ -1234,9 +1246,9 @@ public final class S3CopySimulator {
         }
 
         /**
-         * CLEANPATH, second half: once, before the first write, lists the prefix again and removes
-         * what is there. The listing is repeated so an object uploaded since preparation does not
-         * survive next to the new export; every delete is authorized before the first one runs.
+         * CLEANPATH, second half: once, before the first write, removes what is under the prefix then.
+         * S3 lists, authorizes every delete and deletes under one bucket lock, so an object uploaded
+         * since preparation, or while this runs, does not survive next to the new export.
          */
         private void runCleanPath() {
             if (cleanPathDone || !cleanPathPending) {
@@ -1244,9 +1256,9 @@ public final class S3CopySimulator {
             }
             cleanPathDone = true;
             try {
-                for (String key : collectCleanPathKeys(spec, s3, iamService, roleSession)) {
-                    s3.deleteObject(spec.bucket(), key);
-                }
+                authorizeCleanPathList(spec, s3, iamService, roleSession);
+                s3.deleteObjectsWithPrefix(spec.bucket(), spec.prefix(),
+                        key -> authorizeCleanPathDelete(spec, s3, iamService, roleSession, key));
             } catch (RuntimeException e) {
                 fail(SQLSTATE_INTERNAL, "UNLOAD CLEANPATH failed", e);
             }

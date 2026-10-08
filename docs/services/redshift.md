@@ -381,10 +381,10 @@ the result to S3 as one or more objects under `<prefix>`.
 - `CLEANPATH` deletes every object whose key starts with the target prefix. The objects are listed and
   every delete is authorized up front, like the writes (with `FLOCI_SERVICES_S3_ENFORCE_AUTH` on, the
   role needs list and delete permission, and a denial fails the UNLOAD before anything is removed or
-  written). The deletes themselves run when the first output arrives, on a fresh listing (and
-  authorization) of the prefix, so a query that PostgreSQL rejects leaves the previous export in place,
-  and an object uploaded in the meantime does not survive; objects already deleted are not restored if the UNLOAD
-  fails later. The match is a plain string prefix, so `TO 's3://b/sales_' CLEANPATH` also removes
+  written). The deletes themselves run when the first output arrives, so a query that PostgreSQL
+  rejects leaves the previous export in place. They run on a fresh listing of the prefix, authorized
+  and deleted under one bucket lock, so an object uploaded in the meantime does not survive. Objects
+  already deleted are not restored if the UNLOAD fails later. The match is a plain string prefix, so `TO 's3://b/sales_' CLEANPATH` also removes
   `sales_archive/...`; end the prefix with `/` to limit it to one folder. It cannot be combined with
   `ALLOWOVERWRITE`, and an empty prefix (the bucket root) is not intercepted so a typo cannot wipe a
   bucket.
