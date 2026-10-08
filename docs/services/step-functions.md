@@ -493,6 +493,8 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess` | `{}` | `Sfn.InvalidTokenException` when no task is waiting on the token |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
 | `arn:aws:states:::aws-sdk:rdsdata:executeStatement` | RDS Data statement result | `RdsData.BadRequestException` for an invalid request |
+| `arn:aws:states:::aws-sdk:redshiftdata:executeStatement` | Data API statement handle (`Id`, `CreatedAt`, ...) | `RedshiftData.ValidationException` for an invalid request |
+| `arn:aws:states:::aws-sdk:redshiftdata:describeStatement` | statement status, `ResultRows` | `RedshiftData.ResourceNotFoundException` for an unknown `Id` |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
@@ -511,6 +513,15 @@ happened.
 PascalCase names such as `ResourceArn`, `SecretArn`, `Sql` and `Parameters`; the adapter translates
 them to the direct API shape and returns a recursively PascalCase result. Other RDS Data actions are
 not routed through Step Functions yet.
+
+Every Redshift Data API action Floci implements is reachable as `aws-sdk:redshiftdata:<action>`
+(`executeStatement`, `batchExecuteStatement`, `describeStatement`, `getStatementResult`,
+`getStatementResultV2`, `listStatements`, `cancelStatement`, `listDatabases`, `listSchemas`,
+`listTables`, `describeTable`). Arguments and results keep the Data API's PascalCase names, and
+`CreatedAt` and `UpdatedAt` are ISO-8601 strings. Use `ClusterIdentifier` for a provisioned cluster
+or `WorkgroupName` for a Serverless workgroup. A statement that fails in SQL is not a task failure:
+`executeStatement` succeeds and `describeStatement` reports `Status: FAILED`, as on AWS. There is no
+`.sync` variant, as on AWS.
 
 ## Publishing to SNS
 

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
@@ -39,7 +40,8 @@ import java.util.UUID;
  * Delivers an EventBridge Scheduler target invocation to the underlying service.
  * Supports templated SQS, Lambda, SNS, Step Functions, and EventBridge PutEvents targets, plus
  * universal targets ({@code arn:aws:scheduler:::aws-sdk:<service>:<action>}) for
- * {@code sns:publish} and {@code sqs:sendMessage}. Mirrors the subset handled by
+ * {@code sns:publish}, {@code sqs:sendMessage}, {@code redshiftdata:executeStatement} and
+ * {@code redshiftdata:batchExecuteStatement}. Mirrors the subset handled by
  * {@code EventBridgeInvoker} but using Scheduler's {@link Target} model (raw
  * {@code input} string, no JSONPath/template).
  */
@@ -54,9 +56,11 @@ public class ScheduleInvoker {
     private final EventBridgeService eventBridgeService;
     private final EcsService ecsService;
     private final StepFunctionsService stepFunctionsService;
+    private final RedshiftDataService redshiftDataService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
     private final String defaultRegion;
+    private final boolean redshiftDataEnabled;
 
     @Inject
     public ScheduleInvoker(SqsService sqsService,
@@ -65,6 +69,7 @@ public class ScheduleInvoker {
                            EventBridgeService eventBridgeService,
                            EcsService ecsService,
                            StepFunctionsService stepFunctionsService,
+                           RedshiftDataService redshiftDataService,
                            ObjectMapper objectMapper,
                            EmulatorConfig config) {
         this.sqsService = sqsService;
@@ -73,9 +78,13 @@ public class ScheduleInvoker {
         this.eventBridgeService = eventBridgeService;
         this.ecsService = ecsService;
         this.stepFunctionsService = stepFunctionsService;
+        this.redshiftDataService = redshiftDataService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
         this.defaultRegion = config.defaultRegion();
+        // Same effective enablement the Redshift Data wire endpoint applies in ResolvedServiceCatalog.
+        this.redshiftDataEnabled = config.services().redshift().enabled()
+                && config.services().redshiftData().enabled();
     }
 
     /**
@@ -91,7 +100,7 @@ public class ScheduleInvoker {
         String region = regionOf(schedule, defaultRegion);
         if (isUniversalTarget(arn)) {
             invokeUniversalTarget(arn.substring(arn.indexOf(":aws-sdk:") + ":aws-sdk:".length()),
-                    target.getInput(), region);
+                    target.getInput(), region, schedule.getAccountId());
             return universalTargetRequest(target);
         }
 
@@ -348,9 +357,11 @@ public class ScheduleInvoker {
      * Dispatches an EventBridge Scheduler universal target ({@code aws-sdk:<service>:<action>}),
      * reading the call parameters from the target's {@code Input} payload. Supports the
      * common {@code sns:publish} and {@code sqs:sendMessage} actions; other actions fail
-     * as unsupported.
+     * as unsupported. {@code scheduleAccountId} scopes the Redshift Data calls, whose cluster and
+     * statement storage is account-aware and the dispatcher thread carries no request account.
      */
-    private void invokeUniversalTarget(String serviceAction, String input, String region) {
+    private void invokeUniversalTarget(String serviceAction, String input, String region,
+                                       String scheduleAccountId) {
         JsonNode params;
         try {
             params = objectMapper.readTree(input == null || input.isBlank() ? "{}" : input);
@@ -383,8 +394,26 @@ public class ScheduleInvoker {
                         messageAttributes, region);
                 LOG.debugv("Scheduler delivered to SQS (universal target): {0}", queueUrl);
             }
+            case "redshiftdata:executeStatement" -> {
+                requireRedshiftData();
+                RequestScopes.runAs(scheduleAccountId, region,
+                        () -> redshiftDataService.executeStatement(params, region));
+                LOG.debugv("Scheduler delivered to the Redshift Data API (universal target): {0}", serviceAction);
+            }
+            case "redshiftdata:batchExecuteStatement" -> {
+                requireRedshiftData();
+                RequestScopes.runAs(scheduleAccountId, region,
+                        () -> redshiftDataService.batchExecuteStatement(params, region));
+                LOG.debugv("Scheduler delivered to the Redshift Data API (universal target): {0}", serviceAction);
+            }
             default -> throw new UnsupportedOperationException(
                     "Scheduler: unsupported universal target action: " + serviceAction);
+        }
+    }
+
+    private void requireRedshiftData() {
+        if (!redshiftDataEnabled) {
+            throw new AwsException("ServiceNotAvailableException", "Service redshift-data is not enabled.", 400);
         }
     }
 

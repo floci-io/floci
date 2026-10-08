@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataService;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataJsonHandler;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
@@ -253,6 +254,7 @@ public class AslExecutor {
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
     private final RdsDataService rdsDataService;
+    private final RedshiftDataJsonHandler redshiftDataHandler;
     private final ObjectMapper objectMapper;
     private final Configuration jsonPathConfiguration;
     private final JsonataEvaluator jsonataEvaluator;
@@ -282,13 +284,13 @@ public class AslExecutor {
                        SchedulerController schedulerController, RdsDataService rdsDataService,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
-                       CustomResourceLiveness customResourceLiveness) {
+                       CustomResourceLiveness customResourceLiveness, RedshiftDataJsonHandler redshiftDataHandler) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null);
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -302,8 +304,10 @@ public class AslExecutor {
                 ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness,
-                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
+                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride,
+                RedshiftDataJsonHandler redshiftDataHandler) {
         this.customResourceLiveness = customResourceLiveness;
+        this.redshiftDataHandler = redshiftDataHandler;
         this.lambdaExecutor = lambdaExecutor;
         this.targetResolver = targetResolver;
         this.dynamoDb = dynamoDb;
@@ -339,6 +343,47 @@ public class AslExecutor {
         } else {
             webClient = null;
         }
+    }
+
+    // Kept for tests that do not exercise the Redshift Data API integration.
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController, RdsDataService rdsDataService,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness) {
+        this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
+                ec2Service, s3Service, ecsService, ecsJsonHandler,
+                eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
+                objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null);
+    }
+
+    // Kept for tests that do not exercise the Redshift Data API integration.
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController, RdsDataService rdsDataService,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness,
+                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
+        this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
+                ec2Service, s3Service, ecsService, ecsJsonHandler,
+                eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
+                objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
+                clock, sleeper, maxWaitSecondsOverride, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -1207,6 +1252,12 @@ public class AslExecutor {
             String camelCaseAction = integration.api();
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeAwsSdkDynamoDb(camelCaseAction, input, region);
+        }
+
+        // AWS SDK service integrations: Redshift Data API (provisioned clusters and Serverless workgroups)
+        if (integration.isSdkService("redshiftdata") && integration.suffix().isEmpty()) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkRedshiftData(integration, input, region);
         }
 
         // AWS SDK service integration: RDS Data API ExecuteStatement
@@ -2284,6 +2335,45 @@ public class AslExecutor {
             return jsonNode;
         }
         return objectMapper.createObjectNode();
+    }
+
+    /**
+     * The Data API is a JSON 1.1 service, so the Task input is already the PascalCase wire request and
+     * the response needs no re-casing. Only the timestamps differ: the wire carries epoch seconds where
+     * the {@code aws-sdk:} integration renders the SDK's ISO-8601 {@code Instant}.
+     */
+    private JsonNode invokeAwsSdkRedshiftData(StatesIntegration integration, JsonNode input, String region) {
+        if (!config.services().redshift().enabled() || !config.services().redshiftData().enabled()) {
+            throw new FailStateException(sdkExceptionName("RedshiftData", "ServiceNotAvailableException"),
+                    "Service redshift-data is not enabled.");
+        }
+        JsonNode request = input != null && input.isObject() ? input : objectMapper.createObjectNode();
+        Response response;
+        try {
+            response = redshiftDataHandler.handle(capitalizeFirst(integration.api()), request, region);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("RedshiftData", e.getErrorCode()), e.getMessage());
+        }
+        if (!(response.getEntity() instanceof JsonNode body)) {
+            return objectMapper.createObjectNode();
+        }
+        JsonNode rendered = body.deepCopy();
+        renderRedshiftDataTimestamps(rendered);
+        return rendered;
+    }
+
+    private static void renderRedshiftDataTimestamps(JsonNode node) {
+        if (node instanceof ObjectNode object) {
+            for (String field : List.of("CreatedAt", "UpdatedAt")) {
+                JsonNode value = object.get(field);
+                if (value != null && value.isNumber()) {
+                    object.put(field, sdkTimestamp(value.asDouble()));
+                }
+            }
+            object.elements().forEachRemaining(AslExecutor::renderRedshiftDataTimestamps);
+        } else if (node instanceof ArrayNode array) {
+            array.elements().forEachRemaining(AslExecutor::renderRedshiftDataTimestamps);
+        }
     }
 
     private JsonNode invokeAwsSdkRdsData(StatesIntegration integration, JsonNode input, String region) {

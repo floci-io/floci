@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.scheduler;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -8,6 +9,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
@@ -21,6 +23,8 @@ import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -34,11 +38,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -56,6 +62,7 @@ class ScheduleInvokerTest {
     private EventBridgeService eventBridgeService;
     private EcsService ecsService;
     private StepFunctionsService stepFunctionsService;
+    private RedshiftDataService redshiftDataService;
     private ScheduleInvoker invoker;
 
     @BeforeEach
@@ -66,10 +73,18 @@ class ScheduleInvokerTest {
         eventBridgeService = mock(EventBridgeService.class);
         ecsService = mock(EcsService.class);
         stepFunctionsService = mock(StepFunctionsService.class);
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        redshiftDataService = mock(RedshiftDataService.class);
+        invoker = invokerWithRedshiftEnabled(true, true);
+    }
+
+    private ScheduleInvoker invokerWithRedshiftEnabled(boolean redshiftEnabled, boolean redshiftDataEnabled) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.baseUrl()).thenReturn("http://localhost:4566");
-        invoker = new ScheduleInvoker(sqsService, lambdaService, snsService,
-                eventBridgeService, ecsService, stepFunctionsService, new ObjectMapper(), config);
+        when(config.services().redshift().enabled()).thenReturn(redshiftEnabled);
+        when(config.services().redshiftData().enabled()).thenReturn(redshiftDataEnabled);
+        return new ScheduleInvoker(sqsService, lambdaService, snsService,
+                eventBridgeService, ecsService, stepFunctionsService, redshiftDataService,
+                new ObjectMapper(), config);
     }
 
     /** Delivers one occurrence of a schedule in {@code region} whose target is {@code target}. */
@@ -351,6 +366,105 @@ class ScheduleInvokerTest {
         assertEquals("Binary.Custom", binaryAttribute.getDataType());
         assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), binaryAttribute.getBinaryValue());
         assertNull(binaryAttribute.getStringValue());
+    }
+
+    @Test
+    void universalRedshiftDataExecuteStatementForwardsClusterRequestAndRegion() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\","
+                + "\"DbUser\":\"admin\",\"Sql\":\"select 1\"}");
+
+        invoke(target, "eu-west-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(redshiftDataService).executeStatement(request.capture(), eq("eu-west-1"));
+        assertEquals("select 1", request.getValue().path("Sql").asText());
+        assertEquals("analytics", request.getValue().path("ClusterIdentifier").asText());
+    }
+
+    @Test
+    void universalRedshiftDataExecuteStatementForwardsWorkgroupName() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"WorkgroupName\":\"wg-1\",\"Database\":\"dev\",\"Sql\":\"select 1\"}");
+
+        invoke(target, "us-east-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(redshiftDataService).executeStatement(request.capture(), eq("us-east-1"));
+        assertEquals("wg-1", request.getValue().path("WorkgroupName").asText());
+        assertTrue(request.getValue().path("ClusterIdentifier").isMissingNode());
+    }
+
+    @Test
+    void universalRedshiftDataBatchExecuteStatementForwardsSqls() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:batchExecuteStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\","
+                + "\"DbUser\":\"admin\",\"Sqls\":[\"select 1\",\"select 2\"]}");
+
+        invoke(target, "us-east-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(redshiftDataService).batchExecuteStatement(request.capture(), eq("us-east-1"));
+        assertEquals(2, request.getValue().path("Sqls").size());
+    }
+
+    @Test
+    void universalRedshiftDataRejectionPropagatesForRetryAndDeadLetterHandling() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"Sql\":\"select 1\"}");
+        when(redshiftDataService.executeStatement(any(JsonNode.class), anyString()))
+                .thenThrow(new AwsException("ValidationException", "no cluster", 400));
+
+        assertThrows(AwsException.class, () -> invoke(target, "us-east-1"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,true", "true,false"})
+    void universalRedshiftDataFailsWithoutCallingTheServiceWhenItIsDisabled(
+            boolean redshiftEnabled, boolean redshiftDataEnabled) {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Sql\":\"select 1\"}");
+        ScheduleInvoker disabledInvoker = invokerWithRedshiftEnabled(redshiftEnabled, redshiftDataEnabled);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> disabledInvoker.invoke(scheduleIn("us-east-1", target), SCHEDULED_AT));
+
+        assertEquals("ServiceNotAvailableException", failure.getErrorCode());
+        verifyNoInteractions(redshiftDataService);
+    }
+
+    @Test
+    void universalRedshiftDataNonJsonInputFailsWithInvalidParameterValue() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("not json");
+
+        AwsException failure = assertThrows(AwsException.class, () -> invoke(target, "us-east-1"));
+
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        verifyNoInteractions(redshiftDataService);
+    }
+
+    @Test
+    void universalRedshiftDataOtherActionsStayUnsupported() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:describeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"Id\":\"stmt-1\"}");
+
+        assertThrows(UnsupportedOperationException.class, () -> invoke(target, "us-east-1"));
+        verifyNoInteractions(redshiftDataService);
     }
 
     @Test
