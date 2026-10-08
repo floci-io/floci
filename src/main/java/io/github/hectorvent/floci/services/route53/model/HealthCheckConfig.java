@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.route53.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.Objects;
+
 @RegisterForReflection
 public class HealthCheckConfig {
 
@@ -37,4 +39,16 @@ public class HealthCheckConfig {
 
     public Integer getFailureThreshold() { return failureThreshold; }
     public void setFailureThreshold(Integer failureThreshold) { this.failureThreshold = failureThreshold; }
+
+    /** True when {@code other} asks for the same health check, so a create carrying it is a retry. */
+    public boolean sameSettingsAs(HealthCheckConfig other) {
+        return other != null
+                && Objects.equals(type, other.type)
+                && Objects.equals(ipAddress, other.ipAddress)
+                && Objects.equals(port, other.port)
+                && Objects.equals(resourcePath, other.resourcePath)
+                && Objects.equals(fullyQualifiedDomainName, other.fullyQualifiedDomainName)
+                && Objects.equals(requestInterval, other.requestInterval)
+                && Objects.equals(failureThreshold, other.failureThreshold);
+    }
 }

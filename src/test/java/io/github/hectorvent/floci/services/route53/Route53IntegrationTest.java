@@ -387,6 +387,51 @@ class Route53IntegrationTest {
 
     // ── Health Checks ─────────────────────────────────────────────────────────
 
+    private static String healthCheckRequest(String callerReference, String resourcePath) {
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHealthCheckRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <CallerReference>%s</CallerReference>
+                  <HealthCheckConfig>
+                    <Type>HTTPS</Type>
+                    <FullyQualifiedDomainName>example.com</FullyQualifiedDomainName>
+                    <Port>443</Port>
+                    <ResourcePath>%s</ResourcePath>
+                    <RequestInterval>30</RequestInterval>
+                    <FailureThreshold>3</FailureThreshold>
+                  </HealthCheckConfig>
+                </CreateHealthCheckRequest>
+                """.formatted(callerReference, resourcePath);
+    }
+
+    // Catches: an SDK retry of CreateHealthCheck (same caller reference and settings) answered with
+    // HealthCheckAlreadyExists instead of the health check it already created.
+    @Test
+    @Order(25)
+    void createHealthCheck_retryWithSameReferenceAndSettings_returnsTheSameHealthCheck() {
+        String reference = "hc-retry-" + System.nanoTime();
+        String firstId = given()
+                .contentType(XML).body(healthCheckRequest(reference, "/health"))
+                .when().post("/2013-04-01/healthcheck")
+                .then().statusCode(201)
+                .extract().path("CreateHealthCheckResponse.HealthCheck.Id");
+        try {
+            given()
+                    .contentType(XML).body(healthCheckRequest(reference, "/health"))
+                    .when().post("/2013-04-01/healthcheck")
+                    .then().statusCode(201)
+                    .body("CreateHealthCheckResponse.HealthCheck.Id", equalTo(firstId));
+
+            given()
+                    .contentType(XML).body(healthCheckRequest(reference, "/other"))
+                    .when().post("/2013-04-01/healthcheck")
+                    .then().statusCode(409)
+                    .body("ErrorResponse.Error.Code", equalTo("HealthCheckAlreadyExists"));
+        } finally {
+            given().when().delete("/2013-04-01/healthcheck/" + firstId).then().statusCode(200);
+        }
+    }
+
     @Test
     @Order(16)
     void createHealthCheck_returns201() {

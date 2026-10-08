@@ -468,9 +468,16 @@ public class Route53Service implements Resettable {
 
     // ── Health Checks ─────────────────────────────────────────────────────────
 
+    /**
+     * A caller reference makes the create safe to retry: the same reference with the same settings
+     * returns the health check it already created, and only different settings are refused.
+     */
     public synchronized HealthCheck createHealthCheck(String callerReference, HealthCheckConfig cfg) {
         for (HealthCheck existing : healthCheckStore.scan(k -> true)) {
             if (existing.getCallerReference().equals(callerReference)) {
+                if (existing.getConfig() != null && existing.getConfig().sameSettingsAs(cfg)) {
+                    return existing;
+                }
                 throw new AwsException("HealthCheckAlreadyExists",
                         "A health check with caller reference " + callerReference + " already exists.", 409);
             }
