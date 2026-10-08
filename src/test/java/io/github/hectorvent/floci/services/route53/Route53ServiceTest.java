@@ -384,9 +384,9 @@ class Route53ServiceTest {
     @Test
     void createHealthCheck_retryWithSameReferenceAndSettings_returnsTheExistingHealthCheck() {
         Route53Service service = newService();
-        HealthCheck first = service.createHealthCheck("tf-ref-1", httpsCheck("/health"));
+        HealthCheck first = service.createHealthCheck("tf-ref-1", httpsCheck("/health"), "ResourcePath=/health");
 
-        HealthCheck retried = service.createHealthCheck("tf-ref-1", httpsCheck("/health"));
+        HealthCheck retried = service.createHealthCheck("tf-ref-1", httpsCheck("/health"), "ResourcePath=/health");
 
         assertEquals(first.getId(), retried.getId());
         assertThat(service.listHealthChecks(null, 0), hasSize(1));
@@ -395,10 +395,10 @@ class Route53ServiceTest {
     @Test
     void createHealthCheck_sameReferenceWithDifferentSettings_isHealthCheckAlreadyExists() {
         Route53Service service = newService();
-        service.createHealthCheck("tf-ref-2", httpsCheck("/health"));
+        service.createHealthCheck("tf-ref-2", httpsCheck("/health"), "ResourcePath=/health");
 
         AwsException e = assertThrows(AwsException.class,
-                () -> service.createHealthCheck("tf-ref-2", httpsCheck("/other")));
+                () -> service.createHealthCheck("tf-ref-2", httpsCheck("/other"), "ResourcePath=/other"));
 
         assertEquals("HealthCheckAlreadyExists", e.getErrorCode());
         assertEquals(409, e.getHttpStatus());

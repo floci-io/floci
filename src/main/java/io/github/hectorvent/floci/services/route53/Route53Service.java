@@ -470,12 +470,14 @@ public class Route53Service implements Resettable {
 
     /**
      * A caller reference makes the create safe to retry: the same reference with the same settings
-     * returns the health check it already created, and only different settings are refused.
+     * (the request's canonical {@code requestSettings}) returns the health check it already created,
+     * and different settings are refused.
      */
-    public synchronized HealthCheck createHealthCheck(String callerReference, HealthCheckConfig cfg) {
+    public synchronized HealthCheck createHealthCheck(String callerReference, HealthCheckConfig cfg,
+                                                      String requestSettings) {
         for (HealthCheck existing : healthCheckStore.scan(k -> true)) {
             if (existing.getCallerReference().equals(callerReference)) {
-                if (existing.getConfig() != null && existing.getConfig().sameSettingsAs(cfg)) {
+                if (requestSettings.equals(existing.getRequestSettings())) {
                     return existing;
                 }
                 throw new AwsException("HealthCheckAlreadyExists",
@@ -483,7 +485,7 @@ public class Route53Service implements Resettable {
             }
         }
         String id = UUID.randomUUID().toString();
-        HealthCheck hc = new HealthCheck(id, callerReference, cfg);
+        HealthCheck hc = new HealthCheck(id, callerReference, cfg, requestSettings);
         healthCheckStore.put(id, hc);
         return hc;
     }

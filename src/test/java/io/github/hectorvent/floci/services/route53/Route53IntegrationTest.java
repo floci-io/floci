@@ -404,6 +404,18 @@ class Route53IntegrationTest {
                 """.formatted(callerReference, resourcePath);
     }
 
+    @Test
+    @Order(26)
+    void createHealthCheck_nonNumericFailureThreshold_isInvalidInput() {
+        given()
+                .contentType(XML)
+                .body(healthCheckRequest("hc-bad-" + System.nanoTime(), "/health")
+                        .replace("<FailureThreshold>3</FailureThreshold>", "<FailureThreshold>three</FailureThreshold>"))
+                .when().post("/2013-04-01/healthcheck")
+                .then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+    }
+
     // Catches: an SDK retry of CreateHealthCheck (same caller reference and settings) answered with
     // HealthCheckAlreadyExists instead of the health check it already created.
     @Test
@@ -427,6 +439,24 @@ class Route53IntegrationTest {
                     .when().post("/2013-04-01/healthcheck")
                     .then().statusCode(409)
                     .body("ErrorResponse.Error.Code", equalTo("HealthCheckAlreadyExists"));
+
+            given()
+                    .contentType(XML)
+                    .body(healthCheckRequest(reference, "/health")
+                            .replace("<FailureThreshold>3</FailureThreshold>",
+                                    "<FailureThreshold>3</FailureThreshold><EnableSNI>false</EnableSNI>"))
+                    .when().post("/2013-04-01/healthcheck")
+                    .then().statusCode(409)
+                    .body("ErrorResponse.Error.Code", equalTo("HealthCheckAlreadyExists"));
+
+            given()
+                    .contentType(XML)
+                    .body(healthCheckRequest(reference, "/health")
+                            .replace("<RequestInterval>30</RequestInterval>", "")
+                            .replace("<FailureThreshold>3</FailureThreshold>", ""))
+                    .when().post("/2013-04-01/healthcheck")
+                    .then().statusCode(201)
+                    .body("CreateHealthCheckResponse.HealthCheck.Id", equalTo(firstId));
         } finally {
             given().when().delete("/2013-04-01/healthcheck/" + firstId).then().statusCode(200);
         }
