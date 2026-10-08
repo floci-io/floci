@@ -82,6 +82,8 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS`
 
+A Docker call that gets no response within 5 minutes fails, on Unix-socket and TCP hosts alike. Requests that follow a container for as long as it runs (container waits, exec and attach output, followed logs, streamed stats, daemon events, image pulls and builds) have no such limit, since they can stay silent while healthy.
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.

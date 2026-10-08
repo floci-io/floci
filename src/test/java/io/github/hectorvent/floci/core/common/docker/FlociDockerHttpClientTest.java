@@ -3,17 +3,30 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.transport.DockerHttpClient;
 import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.net.SocketTimeoutException;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
 import java.net.Socket;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -72,5 +85,77 @@ class FlociDockerHttpClientTest {
 
     private static DockerHttpClient.Request get(String path) {
         return DockerHttpClient.Request.builder().method(DockerHttpClient.Request.Method.GET).path(path).build();
+    }
+
+    // Catches: on a unix:// host, a call to a silent daemon blocking forever because the socket ignored
+    // the response timeout, and a long-lived stream (a container wait) cut off by that timeout once it
+    // applies.
+    @Test
+    @Timeout(60)
+    void overAUnixSocketOrdinaryCallsTimeOutWhileLongLivedStreamsStayOpen(@TempDir Path dir) throws Exception {
+        Path socketPath = dir.resolve("docker.sock");
+        List<SocketChannel> accepted = new CopyOnWriteArrayList<>();
+        try (ServerSocketChannel server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+            server.bind(UnixDomainSocketAddress.of(socketPath));
+            Thread acceptor = Thread.ofVirtual().start(() -> {
+                try {
+                    while (true) {
+                        accepted.add(server.accept());
+                    }
+                } catch (IOException expected) {
+                    // The server channel closed at the end of the test.
+                }
+            });
+            try (FlociDockerHttpClient client = new FlociDockerHttpClient.Builder()
+                    .dockerHost(URI.create("unix://" + socketPath))
+                    .responseTimeout(Duration.ofSeconds(1))
+                    .build()) {
+                long start = System.nanoTime();
+                RuntimeException failure = assertThrows(RuntimeException.class,
+                        () -> client.execute(get("/containers/abc/json")));
+                long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+                assertTrue(failure.getCause() instanceof SocketTimeoutException,
+                        "an ordinary call should time out, got " + failure.getCause());
+                assertTrue(elapsedMillis < 10_000, "timed out after " + elapsedMillis + " ms");
+
+                CompletableFuture<Integer> wait = CompletableFuture.supplyAsync(() -> {
+                    try (DockerHttpClient.Response response = client.execute(DockerHttpClient.Request.builder()
+                            .method(DockerHttpClient.Request.Method.POST).path("/containers/abc/wait").build())) {
+                        return response.getStatusCode();
+                    }
+                });
+                Thread.sleep(2_500);
+                assertFalse(wait.isDone(), "a container wait must outlive the response timeout");
+
+                SocketChannel waitConnection = accepted.get(accepted.size() - 1);
+                waitConnection.write(ByteBuffer.wrap(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        + "Content-Length: 15\r\n\r\n{\"StatusCode\":0}").getBytes(StandardCharsets.UTF_8)));
+                assertEquals(200, wait.get(10, TimeUnit.SECONDS));
+            } finally {
+                for (SocketChannel channel : accepted) {
+                    channel.close();
+                }
+                acceptor.interrupt();
+            }
+        }
+    }
+
+    @Test
+    void streamingEndpointsAreRecognisedAndOrdinaryCallsAreNot() {
+        for (String streaming : List.of("POST /v1.43/containers/abc/wait", "POST /exec/xyz/start",
+                "POST /containers/abc/attach?stream=1", "GET /events?since=1", "GET /containers/abc/logs?follow=true",
+                "GET /containers/abc/stats", "POST /images/create?fromImage=alpine", "POST /build")) {
+            assertTrue(FlociDockerHttpClient.isLongLivedStream(request(streaming)), streaming);
+        }
+        for (String ordinary : List.of("GET /containers/abc/json", "GET /containers/abc/logs?tail=100",
+                "GET /containers/abc/stats?stream=0", "POST /containers/abc/start", "POST /containers/create",
+                "DELETE /containers/abc", "GET /_ping")) {
+            assertFalse(FlociDockerHttpClient.isLongLivedStream(request(ordinary)), ordinary);
+        }
+    }
+
+    private static DockerHttpClient.Request request(String methodAndPath) {
+        String[] parts = methodAndPath.split(" ", 2);
+        return DockerHttpClient.Request.builder().method(parts[0]).path(parts[1]).build();
     }
 }
