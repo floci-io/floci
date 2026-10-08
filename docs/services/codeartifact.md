@@ -40,6 +40,7 @@ the remaining formats (NuGet, etc.) have no real proxy behind them yet.
 | `PublishPackageVersion` | Uploads a generic-format asset, creating or extending a package version; requires `x-amz-content-sha256` and verifies it against the real hash of the bytes received. |
 | `DescribePackage` | Returns a package's format, namespace, name, and origin controls (`publish` and `upstream` restrictions). |
 | `DeletePackage` | Deletes a package and every one of its versions; `ResourceNotFoundException` for one that does not exist. |
+| `PutPackageOriginConfiguration` | Sets a package's `publish`/`upstream` origin-control restrictions; can create the package (with no versions) if it doesn't exist yet. |
 | `DescribePackageVersion` | Returns a package version's status, revision, and origin. |
 | `GetPackageVersionAsset` | Downloads one asset from a package version by name, optionally pinned to a specific revision. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
@@ -279,11 +280,20 @@ state.
   named file, and none of these sidecars expose that shape cheaply (Reposilite has no per-GAV
   metadata beyond file listings; Verdaccio's own registry API could answer it for npm but Maven and
   pypi have nothing equivalent), so it remains unbridged and still 404s for these three formats.
-- **`DescribePackage` origin controls are fixed.** Floci never ingests packages from an upstream
-  source and does not store origin controls, so every package reports `publish: ALLOW` and
-  `upstream: BLOCK`, the default for a package whose first version was published directly. For
-  Maven, npm, and pypi, `DescribePackage` asks the repository's sidecar whether the package exists,
-  which starts that sidecar if it is not already running.
+- **`DescribePackage`'s origin controls default to `publish: ALLOW`/`upstream: BLOCK`** (the
+  default for a package whose first version was published directly, since Floci never ingests
+  packages from an upstream source) **until a caller sets them explicitly with
+  `PutPackageOriginConfiguration`.** For Maven, npm, and pypi, `DescribePackage` asks the
+  repository's sidecar whether the package exists, which starts that sidecar if it is not already
+  running; a package that exists only because `PutPackageOriginConfiguration` created it (no
+  versions yet) is found without touching any sidecar.
+- **`PutPackageOriginConfiguration`'s `publish: BLOCK` is only enforced for the `generic`
+  format.** `PublishPackageVersion`, the one path it actually gates, accepts only `generic` to
+  begin with; Maven, npm, and pypi publishes go through their own native wire protocol (`mvn
+  deploy`, `npm publish`, `twine upload`) directly against the repository endpoint, which does not
+  yet check this setting. `upstream` is stored and reported faithfully for every format but is
+  never enforced for any of them, since Floci has no upstream ingestion path to block in the first
+  place.
 
 See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/latest/APIReference/Welcome.html).
 

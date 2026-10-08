@@ -356,6 +356,27 @@ public class CodeArtifactController {
         return ok(single("deletedPackage", deletedPackageDescription(deleted)));
     }
 
+    @POST
+    @Path("/v1/package")
+    public Response putPackageOriginConfiguration(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                                  @QueryParam("domain-owner") String domainOwner,
+                                                  @QueryParam("repository") String repository,
+                                                  @QueryParam("format") String format,
+                                                  @QueryParam("namespace") String namespace,
+                                                  @QueryParam("package") String packageName, String body) {
+        JsonNode req = readTree(body);
+        JsonNode restrictions = req.get("restrictions");
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageDescription described = service.putPackageOriginConfiguration(region, domain,
+                domainOwner, repository, format, namespace, packageName, text(restrictions, "publish"),
+                text(restrictions, "upstream"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode restrictionsNode = response.putObject("originConfiguration").putObject("restrictions");
+        restrictionsNode.put("publish", described.publishRestriction());
+        restrictionsNode.put("upstream", described.upstreamRestriction());
+        return ok(response);
+    }
+
     @GET
     @Path("/v1/package/version")
     public Response describePackageVersion(@Context HttpHeaders headers, @QueryParam("domain") String domain,

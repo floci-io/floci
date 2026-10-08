@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.Reso
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
+import io.github.hectorvent.floci.services.codeartifact.model.PackageOriginConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -63,6 +64,8 @@ class CodeArtifactServiceTest {
         repoStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore =
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
 
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -79,8 +82,8 @@ class CodeArtifactServiceTest {
         when(reposiliteClient.format()).thenReturn("maven");
         pypiserverClient = mock(PypiserverSidecarClient.class);
         when(pypiserverClient.format()).thenReturn("pypi");
-        service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
-                true, null, new CodeArtifactSidecarRegistry(
+        service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
+                regionResolver, config, true, null, new CodeArtifactSidecarRegistry(
                         List.of(verdaccioClient, reposiliteClient, pypiserverClient)));
     }
 
@@ -421,6 +424,34 @@ class CodeArtifactServiceTest {
         assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
+    /**
+     * createRepository already guarantees this for container-backed sidecar content, by design
+     * (a fresh sidecarContainerIds id on every creation, never derived from the repository's
+     * name). packageOriginConfigs is keyed by name instead, so deleteRepository has to clean it
+     * up explicitly, or a repository recreated under the same name would inherit a prior
+     * package's restrictions, including a publish:BLOCK the new repository's owner never set and
+     * has no way to discover.
+     */
+    @Test
+    void deleteRepositoryRemovesOriginConfigsSoARecreatedRepositoryDoesNotInheritThem() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "BLOCK");
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                "ns", "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+        assertEquals("Published", published.packageVersion().getStatus());
+    }
+
     @Test
     void createRepositoryAcceptsExistingUpstream() {
         service.createDomain(REGION, "dom", null, Map.of());
@@ -660,11 +691,22 @@ class CodeArtifactServiceTest {
     void clearRemovesAllPersistedState() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        // An origin-config-only package (no versions, see putPackageOriginConfiguration) is its
+        // own persisted record distinct from a domain, repository, or package version; clear()
+        // missing it would leave describePackage still finding a package that should be gone.
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "never-published",
+                "BLOCK", "BLOCK");
         service.clear();
         assertTrue(service.listDomains(REGION, null, null).items().isEmpty());
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        AwsException packageGone = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "never-published"));
+        assertEquals("ResourceNotFoundException", packageGone.getErrorCode());
     }
 
     // ---------------------------------------------------- authorization tokens
@@ -1104,6 +1146,156 @@ class CodeArtifactServiceTest {
         assertEquals("ValidationException", e.getErrorCode());
     }
 
+    /**
+     * The one package-level operation that works before the package exists at all: AWS documents
+     * that calling it creates the package with no versions and applies the requested restrictions,
+     * so a caller can lock a package down before anything is ever published to it.
+     */
+    @Test
+    void putPackageOriginConfigurationCreatesAPackageWithNoVersionsAndDescribePackageReflectsIt() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException notYetFound = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "never-published"));
+        assertEquals("ResourceNotFoundException", notYetFound.getErrorCode());
+
+        CodeArtifactService.PackageDescription configured = service.putPackageOriginConfiguration(REGION, "dom",
+                null, "repo", "generic", "ns", "never-published", "BLOCK", "BLOCK");
+        assertEquals("BLOCK", configured.publishRestriction());
+        assertEquals("BLOCK", configured.upstreamRestriction());
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "never-published");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("BLOCK", described.upstreamRestriction());
+    }
+
+    /**
+     * The same no-versions-needed existence proof applies uniformly to a container-backed format,
+     * not just generic: the pypi sidecar never heard of this package (its mock answers false by
+     * default, standing in for a real sidecar that was never asked to provision anything for it),
+     * yet the stored origin configuration alone must still be enough for describePackage to find
+     * the package rather than 404ing because the sidecar-exists check came back empty.
+     */
+    @Test
+    void putPackageOriginConfigurationCreatesAContainerBackedPackageWithNoVersionsToo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "never-published", "BLOCK",
+                "ALLOW");
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "pypi", null, "never-published");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
+        verify(pypiserverClient, never()).packageExists(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void putPackageOriginConfigurationOverridesTheDirectPublishDefaultsOfAnExistingPackage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "ALLOW");
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
+    }
+
+    @Test
+    void putPackageOriginConfigurationValidatesRestrictionsAndNamespaceShape() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException missingRestrictions = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", null, null));
+        assertEquals("ValidationException", missingRestrictions.getErrorCode());
+
+        AwsException missingUpstreamOnly = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                        null));
+        assertEquals("ValidationException", missingUpstreamOnly.getErrorCode());
+
+        AwsException badRestrictionValue = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg",
+                        "ALLOW_SPECIFIC_REPOSITORIES", "BLOCK"));
+        assertEquals("ValidationException", badRestrictionValue.getErrorCode());
+
+        AwsException badUpstreamValue = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                        "ALLOW_SPECIFIC_REPOSITORIES"));
+        assertEquals("ValidationException", badUpstreamValue.getErrorCode());
+
+        AwsException missingNamespaceForGeneric = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", null, "my-pkg", "ALLOW",
+                        "BLOCK"));
+        assertEquals("ValidationException", missingNamespaceForGeneric.getErrorCode());
+
+        AwsException namespaceForPypi = assertThrows(AwsException.class, () -> service
+                .putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", "bogus-namespace", "my-pkg",
+                        "ALLOW", "BLOCK"));
+        assertEquals("ValidationException", namespaceForPypi.getErrorCode());
+
+        // None of the rejections above may have created the package or changed anything about it:
+        // every one of them must still 404 just like before any of these calls were attempted.
+        AwsException stillAbsent = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", stillAbsent.getErrorCode());
+    }
+
+    /**
+     * Same rejections as above, but against a package that already carries a stored
+     * configuration: a rejected update must leave that prior configuration exactly as it was,
+     * not half-apply the new, invalid restrictions.
+     */
+    @Test
+    void putPackageOriginConfigurationLeavesAnExistingConfigurationUnchangedOnRejection() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                "BLOCK");
+
+        assertThrows(AwsException.class, () -> service.putPackageOriginConfiguration(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg", "ALLOW", "ALLOW_SPECIFIC_REPOSITORIES"));
+
+        CodeArtifactService.PackageDescription unchanged = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("ALLOW", unchanged.publishRestriction());
+        assertEquals("BLOCK", unchanged.upstreamRestriction());
+    }
+
+    /**
+     * Mirrors the AWS user guide's own worked example: once a package's origin configuration sets
+     * Publish to Block, a direct PublishPackageVersion for that package must be rejected, even for
+     * an otherwise brand-new version, and restoring Publish to Allow lifts the rejection again.
+     */
+    @Test
+    void publishPackageVersionIsRejectedOnceOriginConfigurationBlocksPublish() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "ALLOW");
+
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        AwsException blocked = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content));
+        assertEquals("ConflictException", blocked.getErrorCode());
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                "ALLOW");
+        PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                "ns", "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+        assertEquals("Published", published.packageVersion().getStatus());
+    }
+
     @Test
     void deletePackageRemovesEveryVersionAndAssetButLeavesOtherPackagesAlone() {
         service.createDomain(REGION, "dom", null, Map.of());
@@ -1143,6 +1335,93 @@ class CodeArtifactServiceTest {
         AwsException unknown = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null,
                 "repo", "generic", "ns", "no-such-package"));
         assertEquals("ResourceNotFoundException", unknown.getErrorCode());
+    }
+
+    /**
+     * The real DeletePackage response's deletedPackage.originConfiguration reports whatever
+     * restrictions were actually in effect, not CodeArtifact's bare ALLOW/BLOCK defaults.
+     */
+    @Test
+    void deletePackageReportsTheOriginConfigurationThatWasActuallyInEffect() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "ALLOW",
+                "ALLOW");
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("ALLOW", deleted.publishRestriction());
+        assertEquals("ALLOW", deleted.upstreamRestriction());
+    }
+
+    /**
+     * DeletePackage removes the package entity, origin configuration included (AWS's own doc:
+     * "Deletes a package and all associated package versions"). A leftover origin-config record
+     * must not resurrect the deleted package as a zero-version one on the next DescribePackage.
+     */
+    @Test
+    void deletePackageClearsTheOriginConfigurationSoDescribePackageStays404Afterward() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "BLOCK");
+
+        service.deletePackage(REGION, "dom", null, "repo", "generic", "ns", "my-pkg");
+
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    /**
+     * An origin-config-only package (no version ever published) is still a package
+     * describePackage finds; deletePackage must agree rather than 404ing on the same coordinates
+     * describePackage just reported as existing.
+     */
+    @Test
+    void deletePackageRemovesAnOriginConfigOnlyPackageThatWasNeverPublishedTo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "never-published",
+                "BLOCK", "BLOCK");
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "never-published");
+        assertEquals("BLOCK", deleted.publishRestriction());
+        assertEquals("BLOCK", deleted.upstreamRestriction());
+
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null,
+                "repo", "generic", "ns", "never-published"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    /**
+     * Same case for a container-backed format: the sidecar still gets asked (unlike
+     * describePackage's short-circuit, deletePackage cannot skip this: a package set up through
+     * PutPackageOriginConfiguration could also have real content published to it directly through
+     * the native protocol later, which deletePackage still has to find and remove), but it reports
+     * nothing there, and the stored origin configuration alone must still let deletePackage
+     * succeed rather than 404 on a package describePackage itself finds.
+     */
+    @Test
+    void deletePackageRemovesAnOriginConfigOnlyContainerBackedPackageThatTheSidecarNeverHeardOf() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "never-published", "ALLOW",
+                "BLOCK");
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("never-published")))
+                .thenReturn(false);
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo", "pypi",
+                null, "never-published");
+        assertEquals("ALLOW", deleted.publishRestriction());
+        verify(pypiserverClient, never()).deletePackage(any(), any(), any(), any(), any());
     }
 
     @Test

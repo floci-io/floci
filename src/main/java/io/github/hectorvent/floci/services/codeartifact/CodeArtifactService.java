@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackag
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
 import io.github.hectorvent.floci.services.codeartifact.model.ExternalConnection;
 import io.github.hectorvent.floci.services.codeartifact.model.PackageAsset;
+import io.github.hectorvent.floci.services.codeartifact.model.PackageOriginConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -74,6 +75,7 @@ public class CodeArtifactService implements Resettable {
      * repositories created before that format's proxy existed.
      */
     private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi");
+    private static final Set<String> ORIGIN_RESTRICTION_VALUES = Set.of("ALLOW", "BLOCK");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
@@ -109,6 +111,7 @@ public class CodeArtifactService implements Resettable {
     private final AccountAwareStorageBackend<CodeArtifactDomain> domains;
     private final AccountAwareStorageBackend<CodeArtifactRepository> repositories;
     private final AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions;
+    private final AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigs;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final CodeArtifactSidecarRegistry sidecarRegistry;
@@ -132,6 +135,8 @@ public class CodeArtifactService implements Resettable {
                         new TypeReference<Map<String, CodeArtifactRepository>>() {}),
                 storageFactory.create("codeartifact", "codeartifact-package-versions.json",
                         new TypeReference<Map<String, CodeArtifactPackageVersion>>() {}),
+                storageFactory.create("codeartifact", "codeartifact-package-origin-configs.json",
+                        new TypeReference<Map<String, PackageOriginConfig>>() {}),
                 regionResolver, config,
                 "memory".equals(serviceConfigAccess.storageMode("codeartifact")),
                 Path.of(config.storage().persistentPath()).resolve(ASSET_STORAGE_DIR),
@@ -142,11 +147,13 @@ public class CodeArtifactService implements Resettable {
     CodeArtifactService(AccountAwareStorageBackend<CodeArtifactDomain> domains,
                          AccountAwareStorageBackend<CodeArtifactRepository> repositories,
                          AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions,
+                         AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigs,
                          RegionResolver regionResolver, EmulatorConfig config,
                          boolean inMemory, Path assetRoot, CodeArtifactSidecarRegistry sidecarRegistry) {
         this.domains = domains;
         this.repositories = repositories;
         this.packageVersions = packageVersions;
+        this.packageOriginConfigs = packageOriginConfigs;
         this.regionResolver = regionResolver;
         this.config = config;
         this.sidecarRegistry = sidecarRegistry;
@@ -322,6 +329,16 @@ public class CodeArtifactService implements Resettable {
         // must not leave the repository stuck: a retry would just 404, since the record above is
         // already gone.
         releaseSidecarStorage(r, domain, repository);
+        // packageOriginConfigs is keyed by name (region/domain/repository/format/namespace/package),
+        // unlike sidecarContainerIds, which createRepository deliberately assigns a fresh id for on
+        // every creation so a repository recreated under the same name never inherits the previous
+        // one's sidecar content. Without this, the same recreated-under-the-same-name repository
+        // would still inherit any package's stored publish/upstream restrictions, including a
+        // publish:BLOCK that would reject a publish with no way for the caller to know why.
+        String originPrefix = region + "::" + domain + "::" + repository + "::";
+        packageOriginConfigs.keysForAccount(owner).stream()
+                .filter(k -> k.startsWith(originPrefix))
+                .forEach(k -> packageOriginConfigs.deleteForAccount(owner, k));
         return r;
     }
 
@@ -563,6 +580,19 @@ public class CodeArtifactService implements Resettable {
         requireNonBlank(domain, "domain");
         String owner = effectiveOwner(domainOwner);
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        // A caller-configured publish:BLOCK (see PutPackageOriginConfiguration) gates the whole
+        // operation before any idempotency check below, the same way a real prerequisite failure
+        // would: a retry of already-published bytes is still a PublishPackageVersion call, and
+        // AWS's own documented behavior ("version 1.2 cannot be published" once Publish is set to
+        // Block) draws no bytes-already-match exception to it.
+        String originKey = packageKey(region, domain, repository, format, namespace, packageName);
+        String publishRestriction = packageOriginConfigs.getForAccount(owner, originKey)
+                .map(PackageOriginConfig::getPublishRestriction)
+                .orElse("ALLOW");
+        if ("BLOCK".equals(publishRestriction)) {
+            throw conflict("Package '" + packageName + "' cannot be published because its origin configuration "
+                    + "blocks direct publish.", packageName, "package");
+        }
         String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
 
         CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
@@ -665,41 +695,87 @@ public class CodeArtifactService implements Resettable {
     /**
      * Floci never ingests packages from an upstream source, so every package it holds was first
      * published directly. That is the one case where CodeArtifact's default origin controls are
-     * publish ALLOW and upstream BLOCK.
+     * publish ALLOW and upstream BLOCK; a package a caller has configured via
+     * {@link #putPackageOriginConfiguration} carries whatever restrictions were set there instead.
      */
     public record PackageDescription(String format, String namespace, String packageName,
                                      String publishRestriction, String upstreamRestriction) {}
 
     public PackageDescription describePackage(String region, String domain, String domainOwner, String repository,
                                               String format, String namespace, String packageName) {
-        if (format == null || !PACKAGE_FORMATS.contains(format)) {
-            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        validatePackageCoordinates(format, namespace, packageName, "describing");
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        String originKey = packageKey(region, domain, repository, format, namespace, packageName);
+        Optional<PackageOriginConfig> originConfig = packageOriginConfigs.getForAccount(owner, originKey);
+        // PutPackageOriginConfiguration can be called on a package with no versions yet, creating
+        // it with no versions (its own documented behavior): a stored config, even with zero
+        // versions behind it, already proves the package exists, and the && below must short-circuit
+        // on originConfig.isEmpty() before packageExistsViaVersionsOrSidecar ever runs. For a
+        // container-backed format that call would otherwise start the real Maven/npm/pypi sidecar
+        // container (its own ensureReady lazily provisions one) just to answer a DescribePackage for
+        // a package nothing was ever actually published to.
+        if (originConfig.isEmpty()
+                && !packageExistsViaVersionsOrSidecar(region, domain, owner, repository, format, namespace,
+                        packageName)) {
+            throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
         }
-        validatePackageToken("package", packageName);
-        if (namespace != null) {
-            validatePackageToken("namespace", namespace);
+        String publishRestriction = originConfig.map(PackageOriginConfig::getPublishRestriction).orElse("ALLOW");
+        String upstreamRestriction = originConfig.map(PackageOriginConfig::getUpstreamRestriction).orElse("BLOCK");
+        return new PackageDescription(format, namespace, packageName, publishRestriction, upstreamRestriction);
+    }
+
+    /**
+     * Sets the publish/upstream origin-control restrictions for a package. Unlike every other
+     * package-level operation here, this one does not require the package to already exist:
+     * AWS documents that calling it on a package with no versions yet creates the package (with
+     * no versions) and applies the requested restrictions, specifically so a caller can lock down
+     * a package (block direct publish, block upstream ingestion, or both) before anything is ever
+     * published to it or connected to the repository.
+     *
+     * <p>{@code synchronized} for the same reason every other package-mutating method here is:
+     * {@link #publishPackageVersion} reads this same record to decide whether to allow a publish,
+     * and must never see a half-applied write.
+     */
+    public synchronized PackageDescription putPackageOriginConfiguration(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String publishRestriction, String upstreamRestriction) {
+        validatePackageCoordinates(format, namespace, packageName, "setting the origin configuration of");
+        // Both restrictions are required (the API reference: "You must include both the desired
+        // upstream and publish restrictions"), and package groups' extra ALLOW_SPECIFIC_REPOSITORIES
+        // / INHERIT values do not apply to a plain package's own restrictions. Set.of's own
+        // contains(null) throws rather than returning false, so a missing value needs its own
+        // null check first rather than falling into the membership test.
+        if (publishRestriction == null || !ORIGIN_RESTRICTION_VALUES.contains(publishRestriction)) {
+            throw validation("restrictions.publish must be one of " + ORIGIN_RESTRICTION_VALUES + ".");
         }
-        // The API reference's own namespace parameter doc for this action: "The namespace is
-        // required when requesting packages of the following formats: Maven, Swift, generic."
-        // pypi, nuget, ruby, and cargo packages have no namespace at all, so a supplied one can
-        // never be real; echoing it back in the response would misrepresent a package that way.
-        if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
-            throw validation("namespace is required when describing a " + format + " package.");
-        }
-        if ("pypi".equals(format) && namespace != null) {
-            throw validation("pypi packages do not have a namespace.");
+        if (upstreamRestriction == null || !ORIGIN_RESTRICTION_VALUES.contains(upstreamRestriction)) {
+            throw validation("restrictions.upstream must be one of " + ORIGIN_RESTRICTION_VALUES + ".");
         }
         requireNonBlank(domain, "domain");
         requireNonBlank(repository, "repository");
         String owner = effectiveOwner(domainOwner);
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
-        boolean exists = CONTAINER_BACKED_FORMATS.contains(format)
+        String key = packageKey(region, domain, repository, format, namespace, packageName);
+        packageOriginConfigs.putForAccount(owner, key, new PackageOriginConfig(publishRestriction,
+                upstreamRestriction));
+        return new PackageDescription(format, namespace, packageName, publishRestriction, upstreamRestriction);
+    }
+
+    /**
+     * Whether a package has any real version behind it: a stored {@code packageVersions} record
+     * for generic, or the repository's own sidecar for a container-backed format. Deliberately
+     * does not know about {@code packageOriginConfigs}; {@link #describePackage} checks that
+     * separately and short-circuits before ever calling this, so an origin-config-only package
+     * (no versions) never pays for a sidecar round trip just to be found.
+     */
+    private boolean packageExistsViaVersionsOrSidecar(String region, String domain, String owner, String repository,
+            String format, String namespace, String packageName) {
+        return CONTAINER_BACKED_FORMATS.contains(format)
                 ? containerBackedPackageExists(region, domain, owner, repository, format, namespace, packageName)
                 : genericPackageExists(region, domain, owner, repository, format, namespace, packageName);
-        if (!exists) {
-            throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
-        }
-        return new PackageDescription(format, namespace, packageName, "ALLOW", "BLOCK");
     }
 
     private boolean containerBackedPackageExists(String region, String domain, String owner, String repository,
@@ -739,35 +815,25 @@ public class CodeArtifactService implements Resettable {
      */
     public synchronized PackageDescription deletePackage(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName) {
-        if (format == null || !PACKAGE_FORMATS.contains(format)) {
-            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
-        }
-        validatePackageToken("package", packageName);
-        if (namespace != null) {
-            validatePackageToken("namespace", namespace);
-        }
-        // Same boundary as describePackage's own namespace rules (see its comment there for the
-        // API reference citation): a missing generic/maven namespace would delete under a
-        // null-namespace key nothing real ever publishes to, and a supplied pypi namespace would
-        // be silently ignored by the sidecar's existence check rather than rejected.
-        if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
-            throw validation("namespace is required when deleting a " + format + " package.");
-        }
-        if ("pypi".equals(format) && namespace != null) {
-            throw validation("pypi packages do not have a namespace.");
-        }
+        validatePackageCoordinates(format, namespace, packageName, "deleting");
         requireNonBlank(domain, "domain");
         requireNonBlank(repository, "repository");
         String owner = effectiveOwner(domainOwner);
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        // Looked up before any deletion below: an origin-config-only package (no version ever
+        // published, see putPackageOriginConfiguration) is the one case where neither branch below
+        // finds anything real to delete, yet the package still exists, the same way describePackage
+        // already recognizes it. hadRealContent carries whether the branch actually found something.
+        String originKey = packageKey(region, domain, repository, format, namespace, packageName);
+        Optional<PackageOriginConfig> originConfig = packageOriginConfigs.getForAccount(owner, originKey);
+        boolean hadRealContent;
         if (CONTAINER_BACKED_FORMATS.contains(format)) {
-            deleteContainerBackedPackage(region, domain, owner, repository, format, namespace, packageName);
+            hadRealContent = deleteContainerBackedPackageIfPresent(region, domain, owner, repository, format,
+                    namespace, packageName);
         } else {
             List<CodeArtifactPackageVersion> versions = genericPackageVersions(region, domain, owner, repository,
                     format, namespace, packageName);
-            if (versions.isEmpty()) {
-                throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
-            }
+            hadRealContent = !versions.isEmpty();
             for (CodeArtifactPackageVersion pv : versions) {
                 String versionKey = packageVersionKey(region, domain, repository, format, namespace, packageName,
                         pv.getVersion());
@@ -787,7 +853,19 @@ public class CodeArtifactService implements Resettable {
                 }
             }
         }
-        return new PackageDescription(format, namespace, packageName, "ALLOW", "BLOCK");
+        if (!hadRealContent && originConfig.isEmpty()) {
+            throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+        }
+        // DeletePackage removes the package entity itself, origin configuration included (AWS's
+        // own doc: "Deletes a package and all associated package versions"), and the real
+        // DeletePackage response's deletedPackage.originConfiguration reports whatever restrictions
+        // were actually in effect, not CodeArtifact's bare defaults. A later DescribePackage on the
+        // same coordinates must 404 rather than finding a zero-version package the deleted config
+        // left behind.
+        packageOriginConfigs.deleteForAccount(owner, originKey);
+        String publishRestriction = originConfig.map(PackageOriginConfig::getPublishRestriction).orElse("ALLOW");
+        String upstreamRestriction = originConfig.map(PackageOriginConfig::getUpstreamRestriction).orElse("BLOCK");
+        return new PackageDescription(format, namespace, packageName, publishRestriction, upstreamRestriction);
     }
 
     /**
@@ -799,14 +877,29 @@ public class CodeArtifactService implements Resettable {
      * {@link UnsupportedOperationException} for a sidecar that genuinely cannot do this, rather than
      * silently leaving the package in place or claiming a success it cannot back up; that becomes a
      * real, if deliberately blunt, AWS error here instead of an unhandled 500.
+     *
+     * <p>Returns whether the sidecar actually had the package, rather than throwing when it does
+     * not: the caller still has to decide between success (an origin-config-only package with
+     * nothing real behind it yet) and a genuine 404, which needs the origin-config lookup this
+     * method deliberately knows nothing about.
+     *
+     * <p>Always asks the sidecar, even for a package deletePackage otherwise knows only through a
+     * stored origin configuration: unlike describePackage's short-circuit, a package set up this
+     * way is a real target for a later native-protocol publish (PublishPackageVersion only ever
+     * accepts generic, but {@code mvn deploy}/{@code npm publish}/{@code twine upload} go straight
+     * to the sidecar and leave no record here), so skipping this call could silently leave real
+     * content behind. The cost is a lazily-started container on every container-backed delete,
+     * origin-config-only or not; that cost already existed for every real package before this
+     * method's origin-config awareness, this just stops it from being skipped by accident instead
+     * of by choice.
      */
-    private void deleteContainerBackedPackage(String region, String domain, String owner, String repository,
-            String format, String namespace, String packageName) {
+    private boolean deleteContainerBackedPackageIfPresent(String region, String domain, String owner,
+            String repository, String format, String namespace, String packageName) {
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
         RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                 .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName, "package"));
         if (!manager.packageExists(repoId, domain, repository, namespace, packageName)) {
-            throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+            return false;
         }
         try {
             manager.deletePackage(repoId, domain, repository, namespace, packageName);
@@ -814,6 +907,7 @@ public class CodeArtifactService implements Resettable {
             throw new AwsException("InternalServerException",
                     "Deleting a " + format + " package is not yet supported by this emulator.", 500);
         }
+        return true;
     }
 
     private void deleteAssetContent(String owner, String packageVersionKey, String assetName) {
@@ -1025,6 +1119,7 @@ public class CodeArtifactService implements Resettable {
         domains.clear();
         repositories.clear();
         packageVersions.clear();
+        packageOriginConfigs.clear();
         authorizationTokens.clear();
         if (inMemory) {
             memoryAssetStore.clear();
@@ -1189,6 +1284,33 @@ public class CodeArtifactService implements Resettable {
     private static void validatePackageToken(String field, String value) {
         if (value == null || value.isEmpty() || value.length() > 255 || !PACKAGE_TOKEN.matcher(value).matches()) {
             throw validation(field + " must be 1-255 characters with no '#', '/', or whitespace.");
+        }
+    }
+
+    /**
+     * The format/package/namespace coordinate validation shared by every package-level operation
+     * that takes them. {@code action} is a present-participle phrase ("describing", "setting the
+     * origin configuration of") substituted into the one message that otherwise differs per caller.
+     *
+     * <p>The namespace rule is the API reference's own namespace parameter doc for these actions:
+     * "The namespace is required when requesting packages of the following formats: Maven, Swift,
+     * generic." pypi, nuget, ruby, and cargo packages have no namespace at all, so a supplied one
+     * can never be real; echoing it back in a response would misrepresent a package that way.
+     */
+    private static void validatePackageCoordinates(String format, String namespace, String packageName,
+                                                     String action) {
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        validatePackageToken("package", packageName);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
+            throw validation("namespace is required when " + action + " a " + format + " package.");
+        }
+        if ("pypi".equals(format) && namespace != null) {
+            throw validation("pypi packages do not have a namespace.");
         }
     }
 
@@ -1388,6 +1510,12 @@ public class CodeArtifactService implements Resettable {
                                              String namespace, String packageName, String version) {
         return region + "::" + domain + "::" + repository + "::" + format + "::"
                 + (namespace == null ? "" : namespace) + "::" + packageName + "::" + version;
+    }
+
+    private static String packageKey(String region, String domain, String repository, String format,
+                                      String namespace, String packageName) {
+        return region + "::" + domain + "::" + repository + "::" + format + "::"
+                + (namespace == null ? "" : namespace) + "::" + packageName;
     }
 
     private static AwsException validation(String message) {

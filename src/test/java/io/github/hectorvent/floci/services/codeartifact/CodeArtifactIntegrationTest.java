@@ -251,6 +251,49 @@ class CodeArtifactIntegrationTest {
     }
 
     @Test
+    void putPackageOriginConfigurationCreatesAPackageAndItsRestrictionsSurviveDescribeAndDelete() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=origin-config-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=origin-config-domain&repository=repo")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"restrictions\":{\"publish\":\"BLOCK\",\"upstream\":\"ALLOW\"}}")
+                .post("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("package.originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("package.originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        byte[] content = "blocked".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=origin-config-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=never-published&version=1.0.0&asset=a.txt")
+                .then().statusCode(409).body("__type", equalTo("ConflictException"));
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("deletedPackage.originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("deletedPackage.originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
     void unfinishedPublishKeepsVersionOpenForMoreAssets() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{}").post("/v1/domain?domain=unfinished-domain").then().statusCode(200);

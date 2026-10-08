@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.Publ
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
+import io.github.hectorvent.floci.services.codeartifact.model.PackageOriginConfig;
 import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -83,6 +84,28 @@ class CodeArtifactAssetPersistenceTest {
 
         assertEquals("hello world", new String(result.asset().getContent(), StandardCharsets.UTF_8));
         assertEquals(published.packageVersion().getRevision(), result.packageVersionRevision());
+    }
+
+    /**
+     * {@code packageOriginConfigs} is wired through {@code StorageFactory} the same way
+     * {@code domains}/{@code repositories}/{@code packageVersions} are, but that similarity had
+     * never actually been exercised: this confirms a stored origin configuration, including one
+     * set on a package with no versions at all, actually round-trips through disk rather than only
+     * ever having been read back from the same in-memory instance that wrote it.
+     */
+    @Test
+    void packageOriginConfigurationSurvivesRestart(@TempDir Path dir) {
+        CodeArtifactService first = newService(dir);
+        first.createDomain(REGION, "dom", null, Map.of());
+        first.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        first.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "never-published", "BLOCK",
+                "ALLOW");
+
+        CodeArtifactService restarted = newService(dir);
+        CodeArtifactService.PackageDescription described = restarted.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "never-published");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
     }
 
     /**
@@ -443,6 +466,8 @@ class CodeArtifactAssetPersistenceTest {
                 "codeartifact-repositories.json", new TypeReference<Map<String, CodeArtifactRepository>>() {});
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore = accountAware(dir,
                 "codeartifact-package-versions.json", new TypeReference<Map<String, CodeArtifactPackageVersion>>() {});
+        AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore = accountAware(dir,
+                "codeartifact-package-origin-configs.json", new TypeReference<Map<String, PackageOriginConfig>>() {});
 
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -453,8 +478,9 @@ class CodeArtifactAssetPersistenceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
-        return new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
-                false, dir.resolve("codeartifact-assets"), new CodeArtifactSidecarRegistry(List.of()));
+        return new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
+                regionResolver, config, false, dir.resolve("codeartifact-assets"),
+                new CodeArtifactSidecarRegistry(List.of()));
     }
 
     private <V> AccountAwareStorageBackend<V> accountAware(Path dir, String fileName, TypeReference<Map<String, V>> type) {
