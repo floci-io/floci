@@ -56,7 +56,7 @@ public final class RuleSqlEvaluator {
     private static final Pattern NUMERIC_STRING = Pattern.compile("-?\\d+(\\.\\d+)?([eE]-?\\d+)?");
 
     /** What {@code clientid()} returns for a message that did not arrive over MQTT, as AWS documents. */
-    private static final String NO_MQTT_CLIENT = "n/a";
+    private static final String NO_MQTT_CLIENT = "N/A";
 
     private final ObjectMapper objectMapper;
     private final ObjectReader payloadReader;

@@ -41,6 +41,25 @@ import software.amazon.awssdk.services.iot.model.DescribeDomainConfigurationResp
 import software.amazon.awssdk.services.iot.model.DescribeEndpointRequest;
 import software.amazon.awssdk.services.iot.model.DescribeEndpointResponse;
 import software.amazon.awssdk.services.iot.model.DescribeJobRequest;
+import software.amazon.awssdk.services.iot.model.DescribeIndexRequest;
+import software.amazon.awssdk.services.iot.model.DescribeIndexResponse;
+import software.amazon.awssdk.services.iot.model.DeviceDefenderIndexingMode;
+import software.amazon.awssdk.services.iot.model.Field;
+import software.amazon.awssdk.services.iot.model.GetIndexingConfigurationRequest;
+import software.amazon.awssdk.services.iot.model.GetIndexingConfigurationResponse;
+import software.amazon.awssdk.services.iot.model.IndexNotReadyException;
+import software.amazon.awssdk.services.iot.model.IndexStatus;
+import software.amazon.awssdk.services.iot.model.NamedShadowIndexingMode;
+import software.amazon.awssdk.services.iot.model.ThingConnectivityIndexingMode;
+import software.amazon.awssdk.services.iot.model.ThingGroupIndexingConfiguration;
+import software.amazon.awssdk.services.iot.model.ThingGroupIndexingMode;
+import software.amazon.awssdk.services.iot.model.ThingIndexingConfiguration;
+import software.amazon.awssdk.services.iot.model.ThingIndexingMode;
+import software.amazon.awssdk.services.iot.model.UpdateIndexingConfigurationRequest;
+import software.amazon.awssdk.services.iot.model.SearchIndexRequest;
+import software.amazon.awssdk.services.iot.model.SearchIndexResponse;
+import software.amazon.awssdk.services.iot.model.ThingDocument;
+import software.amazon.awssdk.services.iot.model.ThingTypeDefinition;
 import software.amazon.awssdk.services.iot.model.DescribeThingRequest;
 import software.amazon.awssdk.services.iot.model.DescribeThingResponse;
 import software.amazon.awssdk.services.iot.model.DescribeThingTypeRequest;
@@ -116,6 +135,7 @@ import software.amazon.awssdk.services.iotjobsdataplane.model.UpdateJobExecution
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
 import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
+import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 
@@ -126,8 +146,15 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -259,6 +286,272 @@ class IotTest {
                 .domainConfigurationName(name)
                 .build()))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void fleetIndexingConfiguration() {
+        GetIndexingConfigurationResponse prior =
+                iot.getIndexingConfiguration(GetIndexingConfigurationRequest.builder().build());
+        try {
+            iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(ThingIndexingConfiguration.builder()
+                            .thingIndexingMode(ThingIndexingMode.REGISTRY)
+                            .thingConnectivityIndexingMode(ThingConnectivityIndexingMode.STATUS)
+                            .build())
+                    .thingGroupIndexingConfiguration(ThingGroupIndexingConfiguration.builder()
+                            .thingGroupIndexingMode(ThingGroupIndexingMode.ON)
+                            .build())
+                    .build());
+
+            GetIndexingConfigurationResponse enabled =
+                    iot.getIndexingConfiguration(GetIndexingConfigurationRequest.builder().build());
+            ThingIndexingConfiguration thing = enabled.thingIndexingConfiguration();
+            assertThat(thing.thingIndexingMode()).isEqualTo(ThingIndexingMode.REGISTRY);
+            assertThat(thing.thingConnectivityIndexingMode()).isEqualTo(ThingConnectivityIndexingMode.STATUS);
+            assertThat(thing.deviceDefenderIndexingMode()).isEqualTo(DeviceDefenderIndexingMode.OFF);
+            assertThat(thing.namedShadowIndexingMode()).isEqualTo(NamedShadowIndexingMode.OFF);
+            assertThat(thing.managedFields())
+                    .extracting(field -> field.name() + ":" + field.typeAsString())
+                    .containsExactlyInAnyOrder(
+                            "thingName:String", "thingId:String", "registry.version:Number",
+                            "registry.thingTypeName:String", "registry.thingGroupNames:String",
+                            "connectivity.connected:Boolean", "connectivity.timestamp:Number",
+                            "connectivity.disconnectReason:String", "connectivity.clientId:String",
+                            "connectivity.cleanSession:Boolean", "connectivity.keepAliveDuration:Number",
+                            "connectivity.sessionExpiry:Number", "connectivity.version:Number");
+            assertThat(thing.filter().namedShadowNames()).isEmpty();
+            assertThat(enabled.thingGroupIndexingConfiguration().thingGroupIndexingMode())
+                    .isEqualTo(ThingGroupIndexingMode.ON);
+            assertThat(enabled.thingGroupIndexingConfiguration().managedFields())
+                    .extracting(Field::name)
+                    .containsExactlyInAnyOrder("parentGroupNames", "description", "version", "thingGroupName",
+                            "thingGroupId");
+
+            DescribeIndexResponse things = iot.describeIndex(DescribeIndexRequest.builder()
+                    .indexName("AWS_Things")
+                    .build());
+            assertThat(things.schema()).isEqualTo("REGISTRY_AND_CONNECTIVITY_STATUS");
+            assertIndexStatus(things.indexStatus());
+            DescribeIndexResponse groups = iot.describeIndex(DescribeIndexRequest.builder()
+                    .indexName("AWS_ThingGroups")
+                    .build());
+            assertThat(groups.schema()).isEqualTo("REGISTRY");
+            assertIndexStatus(groups.indexStatus());
+
+            assertThatThrownBy(() -> iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(ThingIndexingConfiguration.builder()
+                            .thingIndexingMode(ThingIndexingMode.REGISTRY_AND_SHADOW)
+                            .namedShadowIndexingMode(NamedShadowIndexingMode.ON)
+                            .build())
+                    .build()))
+                    .isInstanceOf(InvalidRequestException.class)
+                    .hasMessageContaining("NamedShadowNames Filter must not be empty for enabling NamedShadowIndexingMode");
+
+            iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(ThingIndexingConfiguration.builder()
+                            .thingIndexingMode(ThingIndexingMode.OFF)
+                            .build())
+                    .build());
+            assertThatThrownBy(() -> iot.describeIndex(DescribeIndexRequest.builder().indexName("AWS_Things").build()))
+                    .isInstanceOf(ResourceNotFoundException.class)
+                    .hasMessageContaining("Index AWS_Things does not exist");
+            GetIndexingConfigurationResponse thingOff =
+                    iot.getIndexingConfiguration(GetIndexingConfigurationRequest.builder().build());
+            assertThat(thingOff.thingIndexingConfiguration().thingIndexingMode()).isEqualTo(ThingIndexingMode.OFF);
+            assertThat(thingOff.thingIndexingConfiguration().thingConnectivityIndexingMode())
+                    .isEqualTo(ThingConnectivityIndexingMode.OFF);
+            assertThat(thingOff.thingIndexingConfiguration().managedFields()).isEmpty();
+            assertThat(thingOff.thingGroupIndexingConfiguration().thingGroupIndexingMode())
+                    .isEqualTo(ThingGroupIndexingMode.ON);
+        } finally {
+            // Indexing is account wide on AWS: put back whatever the account had before this test.
+            iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(prior.thingIndexingConfiguration())
+                    .thingGroupIndexingConfiguration(prior.thingGroupIndexingConfiguration())
+                    .build());
+        }
+    }
+
+    @Test
+    void fleetIndexSearch() throws InterruptedException {
+        String prefix = "fleetsearch" + Long.toString(System.currentTimeMillis(), 36);
+        String group = prefix + "group";
+        String provider = prefix + "p";
+        // AWS keeps a deprecated thing type for five minutes before it can be deleted, so on AWS the
+        // test borrows a test thing type the account already has rather than creating one.
+        String thingType = TestFixtures.isRealAws() ? existingTestThingType() : prefix + "type";
+        GetIndexingConfigurationResponse prior =
+                iot.getIndexingConfiguration(GetIndexingConfigurationRequest.builder().build());
+        try {
+            iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(ThingIndexingConfiguration.builder()
+                            .thingIndexingMode(ThingIndexingMode.REGISTRY)
+                            .thingConnectivityIndexingMode(ThingConnectivityIndexingMode.STATUS)
+                            .build())
+                    .build());
+            if (!TestFixtures.isRealAws()) {
+                iot.createThingType(CreateThingTypeRequest.builder().thingTypeName(thingType).build());
+            }
+            iot.createThingGroup(CreateThingGroupRequest.builder().thingGroupName(group).build());
+            iot.createThing(CreateThingRequest.builder()
+                    .thingName(prefix + "a")
+                    .thingTypeName(thingType)
+                    .attributePayload(AttributePayload.builder()
+                            .attributes(Map.of("provider", provider + "1", "site", "north"))
+                            .build())
+                    .build());
+            iot.createThing(CreateThingRequest.builder()
+                    .thingName(prefix + "b")
+                    .attributePayload(AttributePayload.builder().attributes(Map.of("provider", provider + "1")).build())
+                    .build());
+            iot.createThing(CreateThingRequest.builder()
+                    .thingName(prefix + "c")
+                    .attributePayload(AttributePayload.builder().attributes(Map.of("provider", provider + "2")).build())
+                    .build());
+            iot.addThingToThingGroup(AddThingToThingGroupRequest.builder()
+                    .thingGroupName(group)
+                    .thingName(prefix + "a")
+                    .build());
+
+            List<ThingDocument> all = awaitSearch("thingName:" + prefix + "*", prefix, "a", "b", "c");
+            ThingDocument typed = all.get(0);
+            assertThat(typed.thingTypeName()).isEqualTo(thingType);
+            assertThat(typed.thingGroupNames()).containsExactly(group);
+            assertThat(typed.attributes()).containsOnly(Map.entry("provider", provider + "1"), Map.entry("site", "north"));
+            assertThat(typed.shadow()).isNull();
+            ThingDocument plain = all.get(1);
+            assertThat(plain.thingTypeName()).isNull();
+            assertThat(plain.hasThingGroupNames()).isFalse();
+            assertThat(plain.attributes()).containsOnly(Map.entry("provider", provider + "1"));
+            for (ThingDocument thing : all) {
+                assertThat(thing.thingId()).isNotBlank();
+                // A thing whose client id never connected, in the shape AWS reports it.
+                assertThat(thing.connectivity().clientId()).isEqualTo(thing.thingName());
+                assertThat(thing.connectivity().connected()).isFalse();
+                assertThat(thing.connectivity().timestamp()).isZero();
+                assertThat(thing.connectivity().disconnectReason()).isNull();
+                assertThat(thing.connectivity().keepAliveDuration()).isNull();
+                assertThat(thing.connectivity().cleanSession()).isNull();
+            }
+
+            awaitSearch("attributes.provider:" + provider + "1", prefix, "a", "b");
+            awaitSearch("thingName:" + prefix + "c", prefix, "c");
+            if (thingType != null) {
+                awaitSearch("thingTypeName:" + thingType, prefix, "a");
+                awaitSearch("thingTypeName:" + thingType + " AND attributes.provider:" + provider + "1", prefix, "a");
+            }
+            awaitSearch("attributes.provider:" + provider + "2 OR thingName:" + prefix + "a", prefix, "a", "c");
+            awaitSearch("thingName:" + prefix + "* AND NOT attributes.provider:" + provider + "1", prefix, "c");
+            awaitSearch("attributes.provider:" + provider + "?", prefix, "a", "b", "c");
+            awaitSearch("thingGroupNames:" + group, prefix, "a");
+            awaitSearch("connectivity.connected:false AND thingName:" + prefix + "*", prefix, "a", "b", "c");
+
+            Set<String> paged = new TreeSet<>();
+            String nextToken = null;
+            int pages = 0;
+            do {
+                SearchIndexResponse page = iot.searchIndex(SearchIndexRequest.builder()
+                        .queryString("thingName:" + prefix + "*")
+                        .maxResults(1)
+                        .nextToken(nextToken)
+                        .build());
+                assertThat(page.things()).hasSizeLessThanOrEqualTo(1);
+                page.things().forEach(thing -> paged.add(thing.thingName()));
+                nextToken = page.nextToken();
+                pages++;
+            } while (nextToken != null && pages < 10);
+            assertThat(paged).containsExactly(prefix + "a", prefix + "b", prefix + "c");
+            assertThat(pages).isBetween(3, 4);
+
+            assertThatThrownBy(() -> iot.searchIndex(SearchIndexRequest.builder()
+                    .queryString("thingName:" + prefix + "*")
+                    .nextToken("bogus")
+                    .build()))
+                    .isInstanceOf(InvalidRequestException.class)
+                    .hasMessageContaining("Invalid nextToken");
+            assertThatThrownBy(() -> iot.searchIndex(SearchIndexRequest.builder()
+                    .queryString("thingName:" + prefix + "*")
+                    .queryVersion("2017-09-31")
+                    .build()))
+                    .isInstanceOf(InvalidRequestException.class)
+                    .hasMessageContaining("Invalid queryVersion. Expected one of: [2017-09-30]");
+        } finally {
+            for (String suffix : List.of("a", "b", "c")) {
+                deleteIfPresent(() -> iot.deleteThing(DeleteThingRequest.builder().thingName(prefix + suffix).build()));
+            }
+            deleteIfPresent(() -> iot.deleteThingGroup(DeleteThingGroupRequest.builder().thingGroupName(group).build()));
+            if (!TestFixtures.isRealAws()) {
+                deleteIfPresent(() -> iot.deleteThingType(DeleteThingTypeRequest.builder().thingTypeName(thingType).build()));
+            }
+            // Indexing is account wide on AWS: put back whatever the account had before this test.
+            iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(prior.thingIndexingConfiguration())
+                    .thingGroupIndexingConfiguration(prior.thingGroupIndexingConfiguration())
+                    .build());
+        }
+    }
+
+    /** A thing type of the account meant for tests and not deprecated, or null when it has none. */
+    private String existingTestThingType() {
+        return iot.listThingTypesPaginator(ListThingTypesRequest.builder().build()).thingTypes().stream()
+                .filter(type -> !Boolean.TRUE.equals(type.thingTypeMetadata().deprecated()))
+                .map(ThingTypeDefinition::thingTypeName)
+                .filter(name -> name.contains("test"))
+                .sorted()
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * This test's things a query finds, in name order, polled until they are the expected ones: AWS
+     * indexes a change a few seconds after it and refuses searches while a new index builds.
+     */
+    private List<ThingDocument> awaitSearch(String query, String prefix, String... expectedSuffixes)
+            throws InterruptedException {
+        List<String> expected = Arrays.stream(expectedSuffixes).map(suffix -> prefix + suffix).toList();
+        Instant deadline = Instant.now().plusSeconds(120);
+        while (true) {
+            List<ThingDocument> found = new ArrayList<>();
+            String notReady = null;
+            try {
+                String nextToken = null;
+                do {
+                    SearchIndexResponse page = iot.searchIndex(SearchIndexRequest.builder()
+                            .queryString(query)
+                            .nextToken(nextToken)
+                            .build());
+                    page.things().stream().filter(thing -> thing.thingName().startsWith(prefix)).forEach(found::add);
+                    nextToken = page.nextToken();
+                } while (nextToken != null);
+            } catch (IndexNotReadyException e) {
+                notReady = e.getMessage();
+            }
+            found.sort(Comparator.comparing(ThingDocument::thingName));
+            List<String> names = found.stream().map(ThingDocument::thingName).toList();
+            if (notReady == null && names.equals(expected) || Instant.now().isAfter(deadline)) {
+                assertThat(notReady).as("index not ready").isNull();
+                assertThat(names).as(query).isEqualTo(expected);
+                return found;
+            }
+            Thread.sleep(2_000);
+        }
+    }
+
+    private static void deleteIfPresent(Runnable delete) {
+        try {
+            delete.run();
+        } catch (ResourceNotFoundException ignored) {
+            // The test failed before creating it.
+        }
+    }
+
+    private static void assertIndexStatus(IndexStatus status) {
+        if (TestFixtures.isRealAws()) {
+            // AWS builds the index in the background after a mode change; Floci has it ready at once.
+            assertThat(status).isIn(IndexStatus.ACTIVE, IndexStatus.BUILDING, IndexStatus.REBUILDING);
+        } else {
+            assertThat(status).isEqualTo(IndexStatus.ACTIVE);
+        }
     }
 
     @Test
@@ -546,6 +839,85 @@ class IotTest {
     }
 
     @Test
+    void namedShadowUpdateReachesATopicRuleOnItsAcceptedTopic() throws Exception {
+        String ruleName = "java_iot_shadow_rule";
+        String thingName = "java-iot-shadow-rule-thing";
+        String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("java-iot-shadow-rule-queue")
+                .build()).queueUrl();
+
+        try {
+            iot.createTopicRule(CreateTopicRuleRequest.builder()
+                    .ruleName(ruleName)
+                    .topicRulePayload(TopicRulePayload.builder()
+                            .sql("SELECT *, topic() AS topic, clientid() AS cid "
+                                    + "FROM '$aws/things/+/shadow/name/building/update/accepted' "
+                                    + "WHERE endswith(clientToken, 'inbound')")
+                            .ruleDisabled(false)
+                            .actions(Action.builder()
+                                    .sqs(SqsAction.builder()
+                                            .roleArn(TestFixtures.globalArn(
+                                                    "iam", "000000000000", "role/iot-rule-role"))
+                                            .queueUrl(queueUrl)
+                                            .useBase64(false)
+                                            .build())
+                                    .build())
+                            .build())
+                    .build());
+
+            iotData.updateThingShadow(UpdateThingShadowRequest.builder()
+                    .thingName(thingName)
+                    .shadowName("building")
+                    .payload(SdkBytes.fromUtf8String(
+                            "{\"state\":{\"desired\":{\"temp\":20}},\"clientToken\":\"x:outbound\"}"))
+                    .build());
+            UpdateThingShadowResponse updated = iotData.updateThingShadow(UpdateThingShadowRequest.builder()
+                    .thingName(thingName)
+                    .shadowName("building")
+                    .payload(SdkBytes.fromUtf8String(
+                            "{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"x:inbound\"}"))
+                    .build());
+            JsonNode accepted = OBJECT_MAPPER.readTree(updated.payload().asByteArray());
+
+            ReceiveMessageResponse received = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .maxNumberOfMessages(10)
+                    .waitTimeSeconds(5)
+                    .build());
+            assertThat(received.messages()).hasSize(1);
+            JsonNode message = OBJECT_MAPPER.readTree(received.messages().get(0).body());
+            assertThat(message.path("topic").asText())
+                    .isEqualTo("$aws/things/" + thingName + "/shadow/name/building/update/accepted");
+            assertThat(message.path("cid").asText()).isEqualTo("N/A");
+            assertThat(message.path("clientToken").asText()).isEqualTo("x:inbound");
+            assertThat(message.at("/state/desired/temp").asInt()).isEqualTo(21);
+            assertThat(message.path("version").asLong()).isEqualTo(accepted.path("version").asLong());
+
+            ReceiveMessageResponse outbound = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .maxNumberOfMessages(10)
+                    .waitTimeSeconds(1)
+                    .build());
+            assertThat(outbound.messages()).isEmpty();
+        } finally {
+            try {
+                iot.deleteTopicRule(DeleteTopicRuleRequest.builder().ruleName(ruleName).build());
+            } catch (ResourceNotFoundException ignored) {
+                // The rule was never created; there is nothing to clean up.
+            }
+            try {
+                iotData.deleteThingShadow(DeleteThingShadowRequest.builder()
+                        .thingName(thingName)
+                        .shadowName("building")
+                        .build());
+            } catch (software.amazon.awssdk.services.iotdataplane.model.ResourceNotFoundException ignored) {
+                // Name clash with the IoT control-plane ResourceNotFoundException; the shadow was never created.
+            }
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+        }
+    }
+
+    @Test
     void thingTypesGroupsAndJobs() {
         String thingType = "java-iot-type";
         String thingName = "java-iot-typed-thing";
@@ -701,6 +1073,75 @@ class IotTest {
                 assertThat(deletedPayload.path("clientToken").asText()).isEqualTo("delete-token");
             }
         }
+    }
+
+    @Test
+    void mqttPresenceEventsReachTopicRulesOverSqs() throws Exception {
+        String suffix = Long.toString(System.nanoTime());
+        String clientId = "tklocal-java-" + suffix;
+        String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("java-iot-presence-" + suffix)
+                .build()).queueUrl();
+        String connectedRule = "java_iot_presence_connected_" + suffix;
+        String disconnectedRule = "java_iot_presence_disconnected_" + suffix;
+        createSqsRule(connectedRule,
+                "SELECT * FROM '$aws/events/presence/connected/+' WHERE startswith(clientId, 'tklocal-')", queueUrl);
+        createSqsRule(disconnectedRule,
+                "SELECT * FROM '$aws/events/presence/disconnected/+' WHERE startswith(clientId, 'tklocal-')", queueUrl);
+        try {
+            try (Socket client = mqttConnect(clientId)) {
+                client.getOutputStream().write(new byte[] {(byte) 0xe0, 0x00});
+            }
+
+            Map<String, JsonNode> byType = new HashMap<>();
+            long deadline = System.currentTimeMillis() + 10_000;
+            while (byType.size() < 2 && System.currentTimeMillis() < deadline) {
+                for (Message message : sqs.receiveMessage(ReceiveMessageRequest.builder()
+                        .queueUrl(queueUrl)
+                        .maxNumberOfMessages(10)
+                        .build()).messages()) {
+                    JsonNode event = OBJECT_MAPPER.readTree(message.body());
+                    if (clientId.equals(event.path("clientId").asText())) {
+                        byType.put(event.path("eventType").asText(), event);
+                    }
+                }
+                Thread.sleep(100);
+            }
+
+            assertThat(byType).containsOnlyKeys("connected", "disconnected");
+            JsonNode connected = byType.get("connected");
+            JsonNode disconnected = byType.get("disconnected");
+            assertThat(connected.path("timestamp").isIntegralNumber()).isTrue();
+            assertThat(connected.path("ipAddress").asText()).isNotEmpty();
+            assertThat(disconnected.path("sessionIdentifier").asText())
+                    .isNotEmpty()
+                    .isEqualTo(connected.path("sessionIdentifier").asText());
+            assertThat(disconnected.path("versionNumber").asLong()).isEqualTo(connected.path("versionNumber").asLong());
+            assertThat(disconnected.path("clientInitiatedDisconnect").asBoolean()).isTrue();
+            assertThat(disconnected.path("disconnectReason").asText()).isEqualTo("CLIENT_INITIATED_DISCONNECT");
+        } finally {
+            iot.deleteTopicRule(DeleteTopicRuleRequest.builder().ruleName(connectedRule).build());
+            iot.deleteTopicRule(DeleteTopicRuleRequest.builder().ruleName(disconnectedRule).build());
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+        }
+    }
+
+    private void createSqsRule(String ruleName, String sql, String queueUrl) {
+        iot.createTopicRule(CreateTopicRuleRequest.builder()
+                .ruleName(ruleName)
+                .topicRulePayload(TopicRulePayload.builder()
+                        .sql(sql)
+                        .awsIotSqlVersion("2016-03-23")
+                        .ruleDisabled(false)
+                        .actions(Action.builder()
+                                .sqs(SqsAction.builder()
+                                        .roleArn(TestFixtures.globalArn("iam", "000000000000", "role/iot-rule-role"))
+                                        .queueUrl(queueUrl)
+                                        .useBase64(false)
+                                        .build())
+                                .build())
+                        .build())
+                .build());
     }
 
     private Socket mqttConnect(String clientId) throws IOException {

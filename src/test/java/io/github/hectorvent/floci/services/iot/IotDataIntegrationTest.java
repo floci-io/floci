@@ -37,6 +37,15 @@ class IotDataIntegrationTest {
             .post("/things/phase-five-thing/shadow")
         .then()
             .statusCode(200)
+            .body("state.desired", nullValue())
+            .body("state.reported.color", equalTo("green"))
+            .body("version", equalTo(2));
+
+        given()
+        .when()
+            .get("/things/phase-five-thing/shadow")
+        .then()
+            .statusCode(200)
             .body("state.desired.color", equalTo("blue"))
             .body("state.reported.color", equalTo("green"))
             .body("version", equalTo(2));
@@ -180,6 +189,14 @@ class IotDataIntegrationTest {
             .body("{\"version\":1,\"state\":{\"desired\":{\"color\":null}}}")
         .when()
             .post("/things/mvp1-shadow/shadow")
+        .then()
+            .statusCode(200)
+            .body("state.desired.color", nullValue())
+            .body("version", equalTo(2));
+
+        given()
+        .when()
+            .get("/things/mvp1-shadow/shadow")
         .then()
             .statusCode(200)
             .body("state.desired.color", nullValue())

@@ -147,7 +147,7 @@ class IotTopicRuleSqlIntegrationTest {
 
         publish("sqltest/functions/a", "{\"n\":null}");
 
-        assertEquals(List.of("{\"client\":\"n/a\",\"account\":\"000000000000\",\"u\":true}"),
+        assertEquals(List.of("{\"client\":\"N/A\",\"account\":\"000000000000\",\"u\":true}"),
                 republished("sqltest/functions-out"));
     }
 
@@ -174,7 +174,7 @@ class IotTopicRuleSqlIntegrationTest {
         .then()
             .statusCode(200);
 
-        assertEquals(List.of("{\"client\":\"n/a\"}"), republished("sqltest/httpclient-out"));
+        assertEquals(List.of("{\"client\":\"N/A\"}"), republished("sqltest/httpclient-out"));
     }
 
     @ParameterizedTest

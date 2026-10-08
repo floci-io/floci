@@ -317,7 +317,8 @@ def test_iot_data_retained_messages_and_shadow_conflicts(iot_data_client, unique
         thingName=thing_name,
         payload=json.dumps({"version": 1, "state": {"desired": {"color": None}}}).encode(),
     )
-    document = json.loads(updated["payload"].read())
+    assert json.loads(updated["payload"].read())["version"] == 2
+    document = json.loads(iot_data_client.get_thing_shadow(thingName=thing_name)["payload"].read())
     assert "color" not in document["state"]["desired"]
     assert document["state"]["desired"]["mode"] == "auto"
     try:
@@ -520,7 +521,7 @@ def test_mqtt_shadow_reserved_topics(unique_name):
             topic, payload = mqtt_read_publish(subscriber)
             assert topic == f"$aws/things/{thing_name}/shadow/delete/accepted"
             deleted = json.loads(payload)
-            assert deleted["state"]["desired"]["color"] == "blue"
+            assert deleted["version"] == got["version"]
             assert deleted["clientToken"] == "delete-token"
 
 

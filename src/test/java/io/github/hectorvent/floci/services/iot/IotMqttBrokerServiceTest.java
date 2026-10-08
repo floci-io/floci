@@ -27,6 +27,7 @@ import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
 import io.quarkus.tls.TlsConfigurationRegistry;
 import io.quarkus.tls.runtime.config.TlsConfig;
+import io.vertx.core.Context;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -37,9 +38,12 @@ import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttTopicSubscription;
 import io.vertx.mqtt.messages.MqttSubscribeMessage;
 import jakarta.enterprise.inject.Instance;
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
+import org.eclipse.paho.client.mqttv3.MqttCallback;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -56,7 +60,9 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509ExtendedKeyManager;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -72,9 +78,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -83,17 +91,23 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
@@ -104,11 +118,12 @@ import static org.mockito.Mockito.when;
  * The MQTT over TLS listener against a real Vert.x and a mocked TLS registry: what it serves,
  * when it is not opened, how a bind failure is reported, and how a reloaded server certificate
  * reaches the next handshake without a restart. Also that a publish's topic rules run on the
- * broker's own single-thread worker, off the event loop.
+ * broker's own single-thread worker, off the event loop, and the AWS lifecycle events of a session.
  */
 class IotMqttBrokerServiceTest {
 
     private static final CertificateGenerator GENERATOR = new CertificateGenerator();
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /**
      * AWS IoT's default security policy, IoTSecurityPolicy_TLS13_1_2_2022_10, in JSSE names: the
@@ -134,6 +149,7 @@ class IotMqttBrokerServiceTest {
     @SuppressWarnings("unchecked")
     private final Instance<IotService> iotService = mock(Instance.class);
     private final IotCustomAuthorizer customAuthorizer = mock(IotCustomAuthorizer.class);
+    private final IotPublishEventRecorder recorder = new IotPublishEventRecorder();
     private int plainPort;
     private int tlsPort;
     private IotMqttBrokerService broker;
@@ -508,6 +524,416 @@ class IotMqttBrokerServiceTest {
         verify(service, timeout(10_000)).isConnectAllowedBy(List.of("{}"), "ws-client", "203.0.113.7", null);
     }
 
+    @Test
+    void aWebSocketClientsConnectedEventCarriesTheWebSocketClientsAddress() throws Exception {
+        startBrokerRecordingPublishes();
+        SocketAddress bridge = SocketAddress.inetSocketAddress(50124, "127.0.0.1");
+        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(Map.of(), "", null, "203.0.113.7"));
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("ws-client");
+        when(endpoint.remoteAddress()).thenReturn(bridge);
+        when(endpoint.isConnected()).thenReturn(true);
+
+        broker.handleEndpoint(endpoint, false);
+
+        assertEquals("203.0.113.7", awaitPresence("connected", "ws-client", 1).get(0).get("ipAddress").asText(),
+                "the WebSocket client's address, not the bridge's loopback socket");
+        assertEquals("203.0.113.7", broker.getConnection("ws-client").orElseThrow().address());
+    }
+
+    @Test
+    void aConnectPublishesTheConnectedEventInAwsFieldOrder() throws Exception {
+        startBrokerRecordingPublishes();
+        long before = System.currentTimeMillis();
+        MqttClient client = connectPlain("presence-client");
+        try {
+            JsonNode connected = awaitPresence("connected", "presence-client", 1).get(0);
+
+            assertEquals(List.of("clientId", "timestamp", "eventType", "sessionIdentifier", "versionNumber", "ipAddress"),
+                    fieldNames(connected), "no principalIdentifier on the plaintext listener");
+            assertEquals("presence-client", connected.get("clientId").asText());
+            assertTrue(connected.get("timestamp").isIntegralNumber(), connected.toString());
+            assertTrue(connected.get("timestamp").asLong() >= before
+                    && connected.get("timestamp").asLong() <= System.currentTimeMillis(), "epoch milliseconds: " + connected);
+            assertEquals("connected", connected.get("eventType").asText());
+            assertDashedUuid(connected.get("sessionIdentifier").asText());
+            assertTrue(connected.get("versionNumber").isIntegralNumber(), connected.toString());
+            assertEquals(0, connected.get("versionNumber").asLong(), "a fresh client id starts at 0");
+            assertEquals("127.0.0.1", connected.get("ipAddress").asText());
+        } finally {
+            disconnect(client);
+        }
+    }
+
+    @Test
+    void aCleanDisconnectEndsTheSameSessionAndAReconnectCountsUpByTwo() throws Exception {
+        startBrokerRecordingPublishes();
+        disconnect(connectPlain("presence-client"));
+
+        JsonNode connected = awaitPresence("connected", "presence-client", 1).get(0);
+        JsonNode disconnected = awaitPresence("disconnected", "presence-client", 1).get(0);
+        assertEquals(List.of("clientId", "timestamp", "eventType", "sessionIdentifier", "versionNumber",
+                "clientInitiatedDisconnect", "disconnectReason"), fieldNames(disconnected), "no ipAddress on disconnected");
+        assertEquals("presence-client", disconnected.get("clientId").asText());
+        assertTrue(disconnected.get("timestamp").isIntegralNumber(), disconnected.toString());
+        assertEquals("disconnected", disconnected.get("eventType").asText());
+        assertEquals(connected.get("sessionIdentifier"), disconnected.get("sessionIdentifier"));
+        assertEquals(0, disconnected.get("versionNumber").asLong());
+        assertTrue(disconnected.get("clientInitiatedDisconnect").isBoolean(), disconnected.toString());
+        assertTrue(disconnected.get("clientInitiatedDisconnect").asBoolean());
+        assertEquals("CLIENT_INITIATED_DISCONNECT", disconnected.get("disconnectReason").asText());
+
+        disconnect(connectPlain("presence-client"));
+
+        JsonNode reconnected = awaitPresence("connected", "presence-client", 2).get(1);
+        assertEquals(2, reconnected.get("versionNumber").asLong(), "a reconnect after a session ended adds 2");
+        assertNotEquals(connected.get("sessionIdentifier"), reconnected.get("sessionIdentifier"));
+        JsonNode redisconnected = awaitPresence("disconnected", "presence-client", 2).get(1);
+        assertEquals(reconnected.get("sessionIdentifier"), redisconnected.get("sessionIdentifier"));
+        assertEquals(2, redisconnected.get("versionNumber").asLong());
+    }
+
+    @Test
+    void aConnectionClosedWithoutDisconnectIsReportedAsConnectionLost() throws Exception {
+        startBrokerRecordingPublishes();
+        try (Socket socket = rawConnect("abrupt")) {
+            awaitPresence("connected", "abrupt", 1);
+        }
+
+        JsonNode disconnected = awaitPresence("disconnected", "abrupt", 1).get(0);
+        assertEquals("CONNECTION_LOST", disconnected.get("disconnectReason").asText());
+        assertTrue(disconnected.get("clientInitiatedDisconnect").isBoolean(), disconnected.toString());
+        assertFalse(disconnected.get("clientInitiatedDisconnect").asBoolean());
+        assertEquals(0, disconnected.get("versionNumber").asLong());
+    }
+
+    @Test
+    void aSecondConnectWithTheSameClientIdEndsTheFirstSessionAsADuplicateBeforeTheNewOneConnects() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttClient first = connectPlain("shared");
+        MqttClient second = null;
+        try {
+            awaitPresence("connected", "shared", 1);
+            second = connectPlain("shared");
+            awaitPresence("connected", "shared", 2);
+            awaitDisconnected(first);
+            barrier();
+
+            List<JsonNode> events = presenceOf("shared");
+            assertEquals(List.of("connected", "disconnected", "connected"), eventTypes(events),
+                    "the replaced session's own close publishes nothing more: " + events);
+            JsonNode replaced = events.get(1);
+            assertEquals("DUPLICATE_CLIENTID", replaced.get("disconnectReason").asText());
+            assertFalse(replaced.get("clientInitiatedDisconnect").asBoolean());
+            assertEquals(events.get(0).get("sessionIdentifier"), replaced.get("sessionIdentifier"));
+            assertEquals(0, replaced.get("versionNumber").asLong());
+            assertEquals(1, events.get(2).get("versionNumber").asLong(), "a takeover adds 1");
+            assertNotEquals(events.get(0).get("sessionIdentifier"), events.get(2).get("sessionIdentifier"));
+        } finally {
+            disconnect(first);
+            if (second != null) {
+                disconnect(second);
+            }
+        }
+    }
+
+    @Test
+    void deleteConnectionReportsOneApiInitiatedDisconnect() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttClient client = connectPlain("deleted");
+        try {
+            awaitPresence("connected", "deleted", 1);
+
+            assertTrue(broker.disconnectClient("deleted", false));
+            awaitPresence("disconnected", "deleted", 1);
+            awaitDisconnected(client);
+            barrier();
+
+            List<JsonNode> disconnected = presence("disconnected", "deleted");
+            assertEquals(1, disconnected.size(), disconnected.toString());
+            assertEquals("API_INITIATED_DISCONNECT", disconnected.get(0).get("disconnectReason").asText());
+            assertFalse(disconnected.get(0).get("clientInitiatedDisconnect").asBoolean());
+        } finally {
+            disconnect(client);
+        }
+    }
+
+    /**
+     * A DeleteConnection that finds the session after another ending won it, here a broker stop
+     * still closing the endpoint, reports the client as not connected instead of closing the
+     * endpoint again.
+     */
+    @Test
+    void deleteConnectionLosingTheSessionToAnotherEndingReportsNotConnected() throws Exception {
+        startBrokerRecordingPublishes();
+        CountDownLatch closing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean closed = new AtomicBoolean();
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("racing");
+        doAnswer(invocation -> {
+            if (!closed.compareAndSet(false, true)) {
+                throw new IllegalStateException("MQTT endpoint is closed");
+            }
+            closing.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(endpoint).close();
+        broker.handleEndpoint(endpoint, false);
+        ExecutorService stopping = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> stop = stopping.submit(broker::stop);
+            assertTrue(closing.await(10, TimeUnit.SECONDS), "the stop is closing the endpoint");
+
+            assertFalse(broker.disconnectClient("racing", false));
+
+            release.countDown();
+            stop.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            stopping.shutdown();
+        }
+    }
+
+    /**
+     * A DeleteConnection that wins the session can still find the endpoint closed: the client's
+     * DISCONNECT, arriving in between, loses the session, yet Vert.x closes the endpoint after it.
+     */
+    @Test
+    void deleteConnectionOfAnEndpointAlreadyClosedByTheClientStillSucceeds() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("closed-by-client");
+        doThrow(new IllegalStateException("MQTT endpoint is closed")).when(endpoint).close();
+        broker.handleEndpoint(endpoint, false);
+
+        assertTrue(broker.disconnectClient("closed-by-client", false));
+
+        List<JsonNode> disconnected = awaitPresence("disconnected", "closed-by-client", 1);
+        assertEquals(1, disconnected.size(), disconnected.toString());
+        assertEquals("API_INITIATED_DISCONNECT", disconnected.get(0).get("disconnectReason").asText());
+    }
+
+    @Test
+    void aPayloadAboveTheAwsLimitEndsTheSessionWithAClientError() throws Exception {
+        startBrokerRecordingPublishes();
+        try (Socket socket = rawConnect("oversized")) {
+            rawPublish(socket, 0, "devices/d1/big", new byte[128 * 1024 + 1]);
+
+            awaitPresence("disconnected", "oversized", 1);
+        }
+        barrier();
+
+        List<JsonNode> disconnected = presence("disconnected", "oversized");
+        assertEquals(1, disconnected.size(), disconnected.toString());
+        assertEquals("CLIENT_ERROR", disconnected.get(0).get("disconnectReason").asText());
+        assertFalse(disconnected.get(0).get("clientInitiatedDisconnect").asBoolean());
+    }
+
+    @Test
+    void aQos2PublishEndsTheSessionWithAClientError() throws Exception {
+        startBrokerRecordingPublishes();
+        try (Socket socket = rawConnect("qos2")) {
+            rawPublish(socket, 2, "devices/d1/metrics", "{}".getBytes(StandardCharsets.UTF_8));
+
+            awaitPresence("disconnected", "qos2", 1);
+        }
+        barrier();
+
+        List<JsonNode> disconnected = presence("disconnected", "qos2");
+        assertEquals(1, disconnected.size(), disconnected.toString());
+        assertEquals("CLIENT_ERROR", disconnected.get(0).get("disconnectReason").asText());
+    }
+
+    /** A PUBLISH beyond the decoder's packet limit never reaches the publish handler, yet AWS reports the same client error. */
+    @Test
+    void aPacketAboveTheDecoderLimitEndsTheSessionWithAClientError() throws Exception {
+        startBrokerRecordingPublishes();
+        try (Socket socket = rawConnect("undecodable")) {
+            rawPublish(socket, 0, "devices/d1/huge", new byte[150 * 1024]);
+
+            awaitPresence("disconnected", "undecodable", 1);
+        }
+        barrier();
+
+        List<JsonNode> disconnected = presence("disconnected", "undecodable");
+        assertEquals(1, disconnected.size(), disconnected.toString());
+        assertEquals("CLIENT_ERROR", disconnected.get(0).get("disconnectReason").asText());
+        assertFalse(disconnected.get(0).get("clientInitiatedDisconnect").asBoolean());
+    }
+
+    @Test
+    void aClientIdHoldingAWildcardGetsNoLifecycleEvents() throws Exception {
+        startBrokerRecordingPublishes();
+        try (Socket plus = rawConnect("bad+id"); Socket hash = rawConnect("bad#id")) {
+            assertTrue(broker.getConnection("bad+id").isPresent(), "the client is admitted");
+            assertTrue(broker.getConnection("bad#id").isPresent(), "the client is admitted");
+        }
+        barrier();
+
+        assertEquals(List.of(), recorder.recentEvents().stream()
+                .map(IotPublishEvent::topic)
+                .filter(topic -> topic.contains("bad"))
+                .toList());
+    }
+
+    /**
+     * MQTT 3.1.1 section 4.7.2: a filter whose first level is a wildcard does not match a topic
+     * beginning with {@code $}. A later ordinary publish both wildcard subscribers match shows they
+     * got nothing before it.
+     */
+    @Test
+    void onlyASubscriptionWithALiteralFirstLevelReceivesLifecycleEvents() throws Exception {
+        startBrokerRecordingPublishes();
+        BlockingQueue<String> catchAll = new LinkedBlockingQueue<>();
+        BlockingQueue<String> wildcardFirst = new LinkedBlockingQueue<>();
+        BlockingQueue<String> literal = new LinkedBlockingQueue<>();
+        MqttClient catchAllSubscriber = subscribedPlain("catch-all", "#", catchAll);
+        MqttClient wildcardSubscriber = subscribedPlain("wildcard-first", "+/events/presence/+/+", wildcardFirst);
+        MqttClient literalSubscriber = subscribedPlain("literal", "$aws/events/presence/connected/+", literal);
+        try {
+            MqttClient watched = connectPlain("watched");
+            try {
+                assertEquals("$aws/events/presence/connected/watched", literal.poll(10, TimeUnit.SECONDS));
+                watched.publish("barrier/events/presence/connected/watched", new byte[0], 1, false);
+            } finally {
+                disconnect(watched);
+            }
+
+            assertEquals("barrier/events/presence/connected/watched", catchAll.poll(10, TimeUnit.SECONDS),
+                    "no lifecycle event reached the # subscriber");
+            assertEquals("barrier/events/presence/connected/watched", wildcardFirst.poll(10, TimeUnit.SECONDS),
+                    "no lifecycle event reached the +/events/presence/+/+ subscriber");
+        } finally {
+            disconnect(catchAllSubscriber);
+            disconnect(wildcardSubscriber);
+            disconnect(literalSubscriber);
+        }
+    }
+
+    @Test
+    void aBrokerStopPublishesNoDisconnectedEvent() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttClient client = connectPlain("stopped");
+        try {
+            awaitPresence("connected", "stopped", 1);
+
+            broker.stop();
+            awaitDisconnected(client);
+            awaitClosed(plainPort);
+            awaitClosed(tlsPort);
+            broker.startIfEnabled();
+            barrier();
+
+            assertEquals(List.of(), presence("disconnected", "stopped"));
+        } finally {
+            disconnect(client);
+        }
+    }
+
+    /**
+     * Vert.x runs an endpoint's disconnect callback holding that endpoint's monitor, and a
+     * subscriber's isConnected and publish take the subscriber's own. With the subscriber's monitor
+     * held, as by its event loop fanning out to the departing client, the callback still returns:
+     * the disconnected event reaches the subscriber only afterwards, so the two cannot deadlock.
+     */
+    @Test
+    void aDisconnectCallbackReturnsWhileASubscribersMonitorIsHeld() throws Exception {
+        startBrokerRecordingPublishes();
+        ReentrantLock subscriberMonitor = new ReentrantLock();
+        MqttEndpoint subscriber = mock(MqttEndpoint.class);
+        when(subscriber.clientIdentifier()).thenReturn("busy-subscriber");
+        when(subscriber.isConnected()).thenAnswer(invocation -> {
+            subscriberMonitor.lock();
+            try {
+                return true;
+            } finally {
+                subscriberMonitor.unlock();
+            }
+        });
+        AtomicReference<Handler<MqttSubscribeMessage>> subscribeHandler = new AtomicReference<>();
+        when(subscriber.subscribeHandler(any())).thenAnswer(invocation -> {
+            subscribeHandler.set(invocation.getArgument(0));
+            return subscriber;
+        });
+        MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
+        when(requested.topicName()).thenReturn("$aws/events/presence/+/departing");
+        when(requested.qualityOfService()).thenReturn(MqttQoS.AT_MOST_ONCE);
+        MqttSubscribeMessage subscribe = mock(MqttSubscribeMessage.class);
+        when(subscribe.topicSubscriptions()).thenReturn(List.of(requested));
+        broker.handleEndpoint(subscriber, false);
+        subscribeHandler.get().handle(subscribe);
+        MqttEndpoint departing = mock(MqttEndpoint.class);
+        when(departing.clientIdentifier()).thenReturn("departing");
+        AtomicReference<Handler<Void>> disconnectHandler = new AtomicReference<>();
+        when(departing.disconnectHandler(any())).thenAnswer(invocation -> {
+            disconnectHandler.set(invocation.getArgument(0));
+            return departing;
+        });
+        broker.handleEndpoint(departing, false);
+        verify(subscriber, timeout(10_000))
+                .publish(eq("$aws/events/presence/connected/departing"), any(), any(), anyBoolean(), anyBoolean());
+
+        ExecutorService departingEventLoop = Executors.newSingleThreadExecutor();
+        subscriberMonitor.lock();
+        try {
+            Future<?> callback = departingEventLoop.submit(() -> disconnectHandler.get().handle(null));
+
+            assertDoesNotThrow(() -> callback.get(5, TimeUnit.SECONDS),
+                    "the disconnect callback returned while the subscriber's monitor is held");
+        } finally {
+            subscriberMonitor.unlock();
+            departingEventLoop.shutdown();
+        }
+        verify(subscriber, timeout(10_000))
+                .publish(eq("$aws/events/presence/disconnected/departing"), any(), any(), anyBoolean(), anyBoolean());
+    }
+
+    /**
+     * Fleet indexing connectivity is per account and region: a plaintext session counts in the
+     * default account, so switching that default stands in for a second account. Account A's
+     * recorded disconnect survives a session of the same client id in account B, while B's session
+     * is live and after it ends.
+     */
+    @Test
+    void connectivityHistoryOfAClientIdIsKeptPerAccountAndRegion() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> disconnectInA = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("device-1", disconnectInA, new AtomicReference<>()), false);
+        disconnectInA.get().handle(null);
+
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        AtomicReference<Handler<Void>> closeInB = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("device-1", new AtomicReference<>(), closeInB), false);
+
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().connected());
+        closeInB.get().handle(null);
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertEquals("CONNECTION_LOST",
+                broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("111111111111", "eu-west-1", "device-1").isEmpty());
+    }
+
+    private static MqttEndpoint endpointCapturing(String clientId, AtomicReference<Handler<Void>> disconnect,
+                                                  AtomicReference<Handler<Void>> close) {
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn(clientId);
+        when(endpoint.isConnected()).thenReturn(true);
+        when(endpoint.disconnectHandler(any())).thenAnswer(invocation -> {
+            disconnect.set(invocation.getArgument(0));
+            return endpoint;
+        });
+        when(endpoint.closeHandler(any())).thenAnswer(invocation -> {
+            close.set(invocation.getArgument(0));
+            return endpoint;
+        });
+        return endpoint;
+    }
+
     /**
      * Two publishes from two connections, the first one's rule action held on a latch: the second
      * publish is fanned out, so its rules were handed over, yet they start only once the first
@@ -689,6 +1115,42 @@ class IotMqttBrokerServiceTest {
     }
 
     /**
+     * A lifecycle event is published once the callback that ended its session returns. Here that
+     * callback runs a whole reset first, so the event, queued behind it on the same context, is
+     * still recorded but skips the rules it was admitted to before the reset.
+     */
+    @Test
+    void aLifecycleEventQueuedBeforeAResetSkipsItsRules() throws Exception {
+        String topic = "$aws/events/presence/disconnected/reset-race";
+        IotService service = mock(IotService.class);
+        when(iotService.get()).thenReturn(service);
+        AtomicBoolean rulesRan = new AtomicBoolean();
+        doAnswer(invocation -> {
+            invocation.<Executor>getArgument(6).execute(() -> rulesRan.set(true));
+            return null;
+        }).when(service).publish(eq(topic), any(), anyBoolean(), anyInt(), any(), any(), any());
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("reset-race");
+        broker.handleEndpoint(endpoint, false);
+        Context context = vertx.getOrCreateContext();
+        AtomicBoolean disconnected = new AtomicBoolean();
+        CountDownLatch eventHandled = new CountDownLatch(1);
+
+        context.runOnContext(ignored -> {
+            disconnected.set(broker.disconnectClient("reset-race", false));
+            broker.beforeReset();
+            broker.afterReset();
+            context.runOnContext(queued -> eventHandled.countDown());
+        });
+
+        assertTrue(eventHandled.await(10, TimeUnit.SECONDS), "the queued lifecycle event was handled");
+        broker.ruleWorker.executeBlocking(() -> null, false).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+        assertTrue(disconnected.get(), "DeleteConnection ended the session");
+        verify(service).publish(eq(topic), any(), anyBoolean(), anyInt(), any(), any(), any());
+        assertFalse(rulesRan.get(), "the event's rules, admitted before the reset, were skipped");
+    }
+
+    /**
      * A restart whose TLS listener cannot bind fails and leaves rules off; a later successful start
      * turns them on again.
      */
@@ -770,7 +1232,7 @@ class IotMqttBrokerServiceTest {
         when(serviceConfig.services().iot().ruleSqlStrict()).thenReturn(false);
         ObjectMapper mapper = new ObjectMapper();
         IotService service = new IotService(storageFactory, serviceConfig, new RegionResolver("eu-west-1", "111122223333"),
-                mapper, new IotPublishEventRecorder(), broker, mock(SqsService.class), mock(SnsService.class),
+                mapper, recorder, broker, mock(SqsService.class), mock(SnsService.class),
                 mock(S3Service.class), mock(KinesisService.class),
                 new DynamoDbFacade(items, mock(DynamoDbTableAccess.class), new RegionResolver("us-east-1", "000000000000")),
                 mock(LambdaService.class), mock(FirehoseService.class), mock(CloudWatchLogsService.class), ca,
@@ -781,6 +1243,159 @@ class IotMqttBrokerServiceTest {
                  "actions": [{"dynamoDBv2": {"putItem": {"tableName": "metrics"}, "roleArn": "r"}}]}
                 """), "eu-west-1");
         broker.startIfEnabled();
+    }
+
+    /** Starts the broker over a real {@link IotService} whose recorder sees every publish the broker hands it. */
+    private void startBrokerRecordingPublishes() throws Exception {
+        startBrokerWithRuleWriting(mock(DynamoDbItemAccess.class));
+    }
+
+    /** The recorded presence events of one type for one client id, in publish order. */
+    private List<JsonNode> presence(String eventType, String clientId) {
+        String topic = "$aws/events/presence/" + eventType + "/" + clientId;
+        return recorder.recentEvents().stream()
+                .filter(event -> event.topic().equals(topic))
+                .map(event -> json(event.payload()))
+                .toList();
+    }
+
+    /** Every recorded presence event for one client id, in publish order. */
+    private List<JsonNode> presenceOf(String clientId) {
+        return recorder.recentEvents().stream()
+                .filter(event -> event.topic().equals("$aws/events/presence/connected/" + clientId)
+                        || event.topic().equals("$aws/events/presence/disconnected/" + clientId))
+                .map(event -> json(event.payload()))
+                .toList();
+    }
+
+    private List<JsonNode> awaitPresence(String eventType, String clientId, int count) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 10_000;
+        List<JsonNode> events = presence(eventType, clientId);
+        while (events.size() < count) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new AssertionError("expected " + count + " " + eventType + " events for " + clientId + ", got " + events);
+            }
+            Thread.sleep(10);
+            events = presence(eventType, clientId);
+        }
+        return events;
+    }
+
+    /**
+     * Connects and cleanly disconnects one more client and waits for its disconnected event. The
+     * plaintext listener handles every connection on one event loop, so by then it has also handled
+     * whatever the earlier connections sent and their closes.
+     */
+    private void barrier() throws Exception {
+        String clientId = "barrier-" + System.nanoTime();
+        disconnect(connectPlain(clientId));
+        awaitPresence("disconnected", clientId, 1);
+    }
+
+    private static void awaitDisconnected(MqttClient client) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (client.isConnected()) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new AssertionError("client " + client.getClientId() + " is still connected");
+            }
+            Thread.sleep(10);
+        }
+    }
+
+    private static List<String> eventTypes(List<JsonNode> events) {
+        return events.stream().map(event -> event.get("eventType").asText()).toList();
+    }
+
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
+    private static void assertDashedUuid(String value) {
+        assertEquals(UUID.fromString(value).toString(), value, "a dashed lowercase UUID");
+    }
+
+    private static JsonNode json(byte[] payload) {
+        try {
+            return MAPPER.readTree(payload);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /** An MQTT 3.1.1 CONNECT over a plain socket, so the test decides exactly which packets the broker sees. */
+    private Socket rawConnect(String clientId) throws IOException {
+        Socket socket = new Socket();
+        socket.connect(new InetSocketAddress("127.0.0.1", plainPort), 5_000);
+        socket.setSoTimeout(5_000);
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        writeUtf8(body, "MQTT");
+        body.write(0x04);
+        body.write(0x02);
+        body.write(0x00);
+        body.write(0x3c);
+        writeUtf8(body, clientId);
+        socket.getOutputStream().write(packet(0x10, body.toByteArray()));
+        assertArrayEquals(new byte[] {0x20, 0x02, 0x00, 0x00}, socket.getInputStream().readNBytes(4), "CONNACK accepted");
+        return socket;
+    }
+
+    private static void rawPublish(Socket socket, int qos, String topic, byte[] payload) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        writeUtf8(body, topic);
+        if (qos > 0) {
+            body.write(0x00);
+            body.write(0x01);
+        }
+        body.writeBytes(payload);
+        socket.getOutputStream().write(packet(0x30 | (qos << 1), body.toByteArray()));
+    }
+
+    private static byte[] packet(int type, byte[] body) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(type);
+        int remaining = body.length;
+        do {
+            int encoded = remaining % 128;
+            remaining /= 128;
+            if (remaining > 0) {
+                encoded |= 128;
+            }
+            out.write(encoded);
+        } while (remaining > 0);
+        out.writeBytes(body);
+        return out.toByteArray();
+    }
+
+    private static void writeUtf8(ByteArrayOutputStream out, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        out.write(bytes.length >>> 8);
+        out.write(bytes.length & 0xff);
+        out.writeBytes(bytes);
+    }
+
+    /** A client subscribed to one filter whose callback records the topic of every message the broker sends it. */
+    private MqttClient subscribedPlain(String clientId, String topicFilter, BlockingQueue<String> topics) throws MqttException {
+        MqttClient client = connectPlain(clientId);
+        client.setCallback(new MqttCallback() {
+            @Override
+            public void connectionLost(Throwable cause) {
+                // The test disconnects the client itself.
+            }
+
+            @Override
+            public void messageArrived(String topic, MqttMessage message) {
+                topics.add(topic);
+            }
+
+            @Override
+            public void deliveryComplete(IMqttDeliveryToken token) {
+                // Subscribers do not publish.
+            }
+        });
+        client.subscribe(topicFilter, 0);
+        return client;
     }
 
     private MqttClient connectPlain(String clientId) throws MqttException {

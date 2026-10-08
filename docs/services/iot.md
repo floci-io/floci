@@ -45,7 +45,7 @@ Current MVP 2 limitations:
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` and `ListSubscriptions` report live in-memory broker state only; offline persistent session subscription reporting is not modeled yet.
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
-- Dynamic thing groups, fleet indexing, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled.
+- Dynamic thing groups, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled. Fleet indexing has its configuration and a bounded `SearchIndex` subset, see [Fleet Indexing](#fleet-indexing).
 
 ## Domain Configurations
 
@@ -101,6 +101,69 @@ Current limitations:
 - The MQTT over TLS listener (8883) authenticates by device certificate only.
 - On a connection, the authorizer is looked up in Floci's default account and region.
 - The MQTT password reaches the function as the broker decodes it, as UTF-8 text, so password bytes that are not valid UTF-8 arrive altered. The broker library, Vert.x MQTT, exposes the password only as a string.
+
+## Fleet Indexing
+
+Status: configuration and a bounded SearchIndex subset.
+
+`UpdateIndexingConfiguration` and `GetIndexingConfiguration` (`/indexing/config`) and `DescribeIndex` (`/indices/{indexName}`) are served on the REST-JSON paths the AWS SDKs use, with the AWS shapes, error codes and validation messages:
+
+- There is one configuration per account and region. Before the first update both indexes are `OFF`.
+- An update may carry the thing configuration, the thing group configuration, or both; the one it leaves out keeps its value. Turning `thingIndexingMode` to `OFF` clears the whole thing configuration, as on AWS.
+- `managedFields` in `GetIndexingConfiguration` are derived from the modes, as AWS derives them. Managed fields sent in an update are only checked: every entry must be a field AWS manages, with its type, or the update fails with `InvalidRequestException`. A custom shadow path such as `shadow.name.<shadow>.reported.<field>` is rejected this way on AWS too.
+- The thing configuration's `customFields` and `filter` (named shadow names, geolocations, socket information) are stored and returned as sent.
+- `DescribeIndex` reports `AWS_Things` and `AWS_ThingGroups` with the schema the modes select. The index is `ACTIVE` as soon as it is enabled: Floci has no `BUILDING` or `REBUILDING` window. A disabled index is `ResourceNotFoundException`, any other index name `InvalidRequestException`.
+
+### SearchIndex
+
+`SearchIndex` (`POST /indices/search`) searches the things of the caller's account and region in the `AWS_Things` index, the default index name. Floci evaluates this part of the query language:
+
+- `field:value`. Values match case-insensitively, field names exactly: `attributes.Site:north` matches nothing when the attribute is named `site`.
+- `*` (any run of characters) and `?` (one character) inside a value, and `\` to escape one character. A quoted value such as `thingName:"x"` matches literally.
+- `field:*` matches the things that have the field. A bare `*` matches every thing.
+- `AND`, `OR` and `NOT` in upper case, their forms `&&`, `||` and `!`, a leading `-` for negation, and parentheses.
+- Precedence as measured on AWS: `NOT` binds tightest, then `AND`, then `OR`. Whitespace is an `AND` that binds looser than `OR`, so `a OR b c` means `(a OR b) AND c`.
+
+The fields are `thingName`, `thingId`, `thingTypeName`, `thingGroupNames` (direct memberships), `attributes.<name>`, `connectivity.connected`, `connectivity.clientId` and `connectivity.disconnectReason`.
+
+Errors follow AWS, with AWS's messages. The request members are checked first, then the index, then the query, then `nextToken`:
+
+- `InvalidRequestException` for a missing or empty `queryString`, a `maxResults` below 1, an empty `indexName`, a `queryVersion` other than `2017-09-30`, an unknown index name and an invalid `nextToken`.
+- `ResourceNotFoundException` for an index that is not enabled.
+- `InvalidQueryException` for invalid syntax, an invalid field name, the `+` operator, and fuzzy, regular expression and boost queries.
+- `InvalidRequestException` for a `connectivity.*`, `shadow.*` or `deviceDefender.*` field while that indexing is off.
+
+Syntax AWS accepts but Floci does not evaluate is refused with `InvalidQueryException` and the message `Floci does not support <construct> in fleet index queries, query string: <query>`. It never answers with an empty result. This covers:
+
+- range queries (`field:[a TO b]`, `field:{a TO b}`)
+- comparisons (`>`, `<`, `>=`, `<=`)
+- free text terms without a field, including lower case `and`, `or` and `not`
+- field grouping (`field:(a OR b)`)
+- every `shadow.*` and `deviceDefender.*` field, and the other `connectivity.*` fields (`timestamp`, `keepAliveDuration`, `cleanSession`, `sessionExpiry`, `version`)
+
+Searching `AWS_ThingGroups` is refused with `InvalidRequestException` and `Floci does not support searching AWS_ThingGroups` while that index is enabled. While it is disabled the answer is AWS's `ResourceNotFoundException`.
+
+Results:
+
+- A thing has `thingName` and `thingId`, and `thingTypeName`, `thingGroupNames` and `attributes` only when it has them. `shadow` and `deviceDefender` are never returned: Floci keeps no indexed shadow document.
+- Things come in thing name order. AWS does not specify an order.
+- `maxResults` and `nextToken` page the results. Without `maxResults` every match comes in one page. The token is the offset Floci's other IoT list operations use.
+- An index answers at once: a thing is searchable as soon as it is created, where AWS takes a few seconds.
+
+`connectivity` is returned while `thingConnectivityIndexingMode` is `STATUS`. It reports the embedded MQTT broker session whose client id is the thing name:
+
+- Connected: `connected` `true`, `timestamp` (the connect time in epoch milliseconds), `keepAliveDuration`, `cleanSession` and `clientId`.
+- After the session ended: `connected` `false`, `timestamp` (the disconnect time), `disconnectReason`, `keepAliveDuration`, `cleanSession` and `clientId`. The reason is `CLIENT_INITIATED_DISCONNECT` after an MQTT DISCONNECT packet and `CONNECTION_LOST` for any other end, including `DeleteConnection`.
+- Never connected: `{"clientId": "<thingName>", "connected": false, "timestamp": 0}`.
+- A plaintext session, including MQTT over WebSocket, counts in the default account and region, as the broker's shadow topics do. A session on the TLS listener counts in the account and region of its device certificate.
+- The state is in memory only. A restart loses it, and a state reset forgets how sessions ended; a live session stays connected.
+
+Current limitations:
+
+- `ListIndices` and the statistics and aggregation APIs (`GetStatistics`, `GetCardinality`, `GetPercentiles`, `GetBucketsAggregation`) are not modeled yet.
+- `customFields` types are not applied to search: attribute values are matched as strings.
+- `connectivity.sessionExpiry` and the socket information of `filter.connectivity.includeSocketInformation` are not reported.
+- `managedFields` and `customFields` sent in the thing group configuration are ignored.
 
 ## MQTT Broker
 
@@ -189,6 +252,50 @@ username, the URL query or the `x-amz-customauthorizer-name` upgrade header, see
 [Authorizers](#authorizers); it does not verify a SigV4 signature, and a CONNECT that names no
 authorizer is accepted as is.
 
+### Lifecycle events
+
+The broker publishes AWS IoT's lifecycle events for every MQTT session, on 1883, 8883 and `/mqtt`:
+`$aws/events/presence/connected/<clientId>` once the client is accepted, and
+`$aws/events/presence/disconnected/<clientId>` once its session ends. The payloads carry AWS's fields
+in AWS's order:
+
+```json
+{"clientId":"sensor-1","timestamp":1791399692873,"eventType":"connected","sessionIdentifier":"64b3ed16-3f27-4a75-8dfc-388884c2c216","principalIdentifier":"<certificateId>","versionNumber":0,"ipAddress":"203.0.113.7"}
+{"clientId":"sensor-1","timestamp":1791399695210,"eventType":"disconnected","sessionIdentifier":"64b3ed16-3f27-4a75-8dfc-388884c2c216","principalIdentifier":"<certificateId>","versionNumber":0,"clientInitiatedDisconnect":true,"disconnectReason":"CLIENT_INITIATED_DISCONNECT"}
+```
+
+- `timestamp` is epoch milliseconds.
+- `sessionIdentifier` is a random UUID, the same on the connected and the disconnected event of one session.
+- `principalIdentifier` is the device certificate ID on 8883. It is omitted on 1883, on `/mqtt` (Floci does not verify SigV4) and for a connection admitted by a custom authorizer.
+- `ipAddress`, on the connected event only, is the client's address. A WebSocket client reports its own address, not the bridge's loopback socket; `GetConnection` returns the same address.
+- `versionNumber` counts per client id: `0` for a new client id, `+2` when the client id reconnects after its session ended (`0`, `2`, `4`), and `+1` for a session that takes over the client id from a connected one. AWS starts again from `0` after about an hour without a connection; Floci keeps counting, across state resets, until the process restarts.
+
+`clientInitiatedDisconnect` is `true` only for `CLIENT_INITIATED_DISCONNECT`:
+
+| Cause | `disconnectReason` |
+|---|---|
+| The client sent `DISCONNECT` (MQTT 3.1.1 or 5) | `CLIENT_INITIATED_DISCONNECT` |
+| The connection closed without `DISCONNECT`, or the keep-alive timed out | `CONNECTION_LOST` |
+| A new connection took over the client id; published for the old session, before the new session's connected event | `DUPLICATE_CLIENTID` |
+| IoT Data `DeleteConnection` | `API_INITIATED_DISCONNECT` |
+| A PUBLISH above 128 KB, or a QoS 2 PUBLISH | `CLIENT_ERROR` |
+
+An event goes the way a client publish goes: it is evaluated by the topic rules of every region,
+where `clientid()` returns the client id the event is about and `topic(3)` is `presence`, and
+delivered to matching MQTT subscribers. As MQTT 3.1.1 section 4.7.2 requires and AWS does, a topic
+filter whose first level is `#` or `+` does not match a topic starting with `$`, both for
+subscriptions (including retained messages) and for a rule's `FROM`: `#` and
+`+/events/presence/+/+` receive no lifecycle events, `$aws/events/presence/connected/+` does.
+
+As on AWS, events can arrive out of order across connections; `versionNumber` orders them.
+
+Differences from AWS and limits:
+
+- A keep-alive timeout is reported as `CONNECTION_LOST`; AWS reports `MQTT_KEEP_ALIVE_TIMEOUT`. The broker closes such a connection the way an abrupt close ends, so Floci cannot tell the two apart.
+- A client id containing `#` or `+` gets no lifecycle events, as on AWS.
+- A broker shutdown publishes no disconnected events.
+- `connect_failed`, `subscribed` and `unsubscribed` events are not emitted.
+
 ## Reserved Topics
 
 AWS IoT reserved topics such as `$aws/things/{thingName}/shadow/update` are service control topics, not ordinary application topics. Floci should handle these publishes by invoking IoT shadow behavior and then publishing the AWS-compatible response topics through the broker.
@@ -202,6 +309,21 @@ Required phase 7 reserved-topic behavior:
 
 Reserved request topics are handled by Floci before normal MQTT fan-out. The original `$aws/...` request publish is not routed as an application message; generated accepted, rejected, documents, and delta responses are published back through `IotMqttBrokerService.publish(...)` so matching MQTT subscribers receive broker-native messages.
 
+### Shadow Events
+
+A successful classic or named shadow change reaches MQTT subscribers and the topic rules on the AWS response topics, whether it came from an MQTT request or from the REST `UpdateThingShadow` and `DeleteThingShadow` APIs. A rule such as `SELECT * FROM '$aws/things/+/shadow/name/building/update/accepted'` therefore fires for both. The events are published in the order accepted, documents, delta, and carry one timestamp (epoch seconds) per operation:
+
+- `update/accepted`, which is also the `UpdateThingShadow` response: `state` exactly as sent, null leaves kept, `metadata` mirroring it with `{"timestamp": ...}` per leaf (an array gets one entry per element), the new `version`, `timestamp`, and `clientToken` when the request had one.
+- `update/documents`: `previous` (JSON `null` on the first update) and `current`, each `{state, metadata, version}` as stored, plus `timestamp` and `clientToken`.
+- `update/delta`, only when desired differs from reported: `version`, `timestamp`, `state` with the desired values whose reported value is missing or different, compared key by key through nested objects and whole for arrays, the stored desired `metadata` of exactly those values, and `clientToken`.
+- `get/accepted`, for an MQTT get only (`GetThingShadow` publishes nothing): `state` with `desired`, `reported` and, when non-empty, `delta`, the stored `metadata`, `version`, the current `timestamp`, and `clientToken`.
+- `delete/accepted`: the deleted `version`, `timestamp`, and `clientToken`. `DeleteThingShadow` returns `version` and `timestamp`.
+- `rejected`, for an MQTT request only: `code` (the HTTP status as a number), `message`, and `clientToken` once the request parsed. A version conflict is `409` with `Version conflict`, a payload that is not JSON is `400` with `Invalid JSON`.
+
+Shadow events are evaluated only against the rules of the shadow's region. A REST change belongs to the region of its SigV4 credential, and MQTT shadows live in the default region (`FLOCI_DEFAULT_REGION`). `clientid()` is `N/A` for every shadow event, as on AWS. The MQTT broker itself has no region or account, so its subscribers receive the shadow events of every region and account, as they receive a republish.
+
+Shadow responses are produced only by the shadow service in reaction to a request, and each one is fanned out once, recorded once and rule-evaluated once. Response topics are never parsed as requests. A `republish` action stays record plus fan-out, with no rule re-evaluation and no shadow processing, even when it targets a shadow request topic. Broker publish and fan-out are not recursive.
+
 Implementation notes:
 
 - Vert.x MQTT handles the wire protocol and connection lifecycle.
@@ -209,7 +331,7 @@ Implementation notes:
 - Normal client publishes call `IotService.publish(...)` so retained-message storage, event recording, and rule evaluation remain service-owned.
 - An MQTT publish stores the retained message and records the publish on the event loop, then hands topic rule evaluation to a single-thread worker the broker owns, which runs the rules of MQTT publishes one at a time in the order they arrived. A slow rule action therefore delays the rules of later publishes from every connection, but not their PUBACK or fan-out, and not other services' work.
 - A state reset or a broker shutdown skips the rules of MQTT publishes still waiting, and an MQTT publish received during the reset or while the broker is stopped never runs its rules. An evaluation already running finishes.
-- Internal broker publishes fan out only to MQTT subscribers and do not recursively evaluate IoT topic rules.
+- Shadow responses the broker publishes internally fan out only to MQTT subscribers and do not recursively evaluate IoT topic rules. [Lifecycle events](#lifecycle-events) do evaluate topic rules.
 
 Current accepted limitation:
 
@@ -217,6 +339,10 @@ Current accepted limitation:
 - Persistent offline sessions are not modeled yet.
 - QoS 2 and advanced MQTT 5 property semantics remain follow-up scope.
 - At most 1,000 MQTT publishes are pending rule evaluation, running or waiting. While that many are pending, further publishes are still delivered to subscribers but their topic rules are skipped, with one warning logged until the backlog drains.
+- Shadow state is merged shallowly: a nested object in `desired` or `reported` replaces the stored value of its top-level key instead of being merged into it.
+- REST shadow errors are not published to `rejected`.
+- MQTT shadow request topics are not themselves delivered to rules or subscribers.
+- An IoT Data `Publish` to a shadow request topic does not update the shadow, and a `republish` that targets a shadow request topic is not processed as a shadow request.
 
 ## Implementation Shape
 
@@ -226,6 +352,7 @@ The MQTT integration should keep service behavior separated from broker mechanic
 - The broker publish handler detects AWS IoT reserved topics.
 - IoT reserved-topic handling lives in IoT service code or a focused reserved-topic handler, not in packet parsing code.
 - AWS-generated shadow responses are published back through `IotMqttBrokerService.publish(...)` so regular MQTT subscribers receive broker-native messages.
+- MQTT and REST shadow changes share one `IotService` path that fans each response out once, records it once and hands its rule evaluation to the caller's rule runner: the JAX-RS request thread for REST, so the rules run before the response returns, and the broker's rule worker for MQTT.
 
 ## Phase 7 Completion Criteria
 
@@ -254,6 +381,7 @@ Supported rule behavior:
 - IoT Data `Publish` and MQTT publishes use the same rule dispatch path. An IoT Data `Publish` evaluates its rules before it returns. An MQTT publish evaluates them on the broker's rule worker, so neither its PUBACK nor its fan-out waits for rule actions, and a republished message can reach subscribers before or after the source message's other deliveries; AWS gives no ordering guarantee there either.
 - Rule matching is region-scoped: an IoT Data `Publish` evaluates the rules of the region named by its SigV4 credential, and a rule's actions target the rule's own region.
 - Publishes that carry no region (MQTT, or an IoT Data `Publish` whose `Authorization` header is absent or not SigV4) are evaluated against every region's rules.
+- Device shadow events on the `$aws/things/...` response topics reach rules as well, evaluated only against the rules of the shadow's region; see [Shadow Events](#shadow-events).
 - Actions receive the projected document, which is the payload itself for a statement that selects only `*`.
 - `republish` action republishes to another MQTT topic through `IotMqttBrokerService`.
 - `sqs` action sends to an SQS queue through Floci's SQS service boundary.
@@ -291,8 +419,8 @@ Semantics:
 
 - Keywords and function names are case insensitive, field names are case sensitive.
 - `topic()` is the full MQTT topic, `topic(n)` is its nth segment counting from 1.
-- `clientid()` is the MQTT client that published the message, or `n/a` for an IoT Data `Publish`
-  over HTTP, as on AWS. `accountid()` is the account that owns the rule. `timestamp()` is the
+- `clientid()` is the MQTT client that published the message, or `N/A` for an IoT Data `Publish`
+  over HTTP and for a device shadow event, as on AWS. `accountid()` is the account that owns the rule. `timestamp()` is the
   current time in milliseconds since the epoch. `newuuid()` is a fresh random UUID.
 - `isNull(x)` is true only for a JSON `null`, `isUndefined(x)` only for a missing field or an
   undefined expression. Neither is ever undefined itself.
