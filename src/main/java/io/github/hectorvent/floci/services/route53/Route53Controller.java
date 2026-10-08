@@ -24,13 +24,10 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Response;
 
 import javax.xml.stream.XMLStreamConstants;
-import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import java.net.URI;
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1138,46 +1135,29 @@ public class Route53Controller {
      * which takes neither, so stating the default explicitly is still the same request.
      */
     static String healthCheckSettings(String body) {
-        List<String> entries = new ArrayList<>();
-        try {
-            XMLStreamReader r = XmlParser.newStreamReader(body);
-            Deque<String> path = new ArrayDeque<>();
-            boolean inConfig = false;
-            StringBuilder text = new StringBuilder();
-            while (r.hasNext()) {
-                int event = r.next();
-                if (event == XMLStreamConstants.START_ELEMENT) {
-                    if ("HealthCheckConfig".equals(r.getLocalName())) {
-                        inConfig = true;
-                    } else if (inConfig) {
-                        path.addLast(r.getLocalName());
-                        text.setLength(0);
-                    }
-                } else if (inConfig && (event == XMLStreamConstants.CHARACTERS || event == XMLStreamConstants.CDATA)) {
-                    text.append(r.getText());
-                } else if (event == XMLStreamConstants.END_ELEMENT && inConfig) {
-                    if ("HealthCheckConfig".equals(r.getLocalName())) {
-                        inConfig = false;
-                    } else {
-                        String value = text.toString().trim();
-                        if (!value.isEmpty()) {
-                            entries.add(String.join("/", path) + "=" + value);
-                        }
-                        text.setLength(0);
-                        path.removeLast();
-                    }
-                }
-            }
-            r.close();
-        } catch (XMLStreamException e) {
+        // Null for malformed XML as well as a missing element; HealthCheckConfig is required either way.
+        XmlParser.XmlElement config = XmlParser.extractElementTree(body, "HealthCheckConfig");
+        if (config == null) {
             throw new AwsException("InvalidInput", "Could not parse the request body.", 400);
         }
+        List<String> entries = new ArrayList<>();
+        collectSettings(config, "", entries);
         if (!entries.contains("Type=RECOVERY_CONTROL")) {
             addDefault(entries, "RequestInterval", "30");
             addDefault(entries, "FailureThreshold", "3");
         }
         entries.sort(null);
         return String.join("\n", entries);
+    }
+
+    private static void collectSettings(XmlParser.XmlElement element, String prefix, List<String> entries) {
+        for (XmlParser.XmlElement child : element.children()) {
+            String path = prefix + child.name();
+            if (!child.text().isEmpty()) {
+                entries.add(path + "=" + child.text());
+            }
+            collectSettings(child, path + "/", entries);
+        }
     }
 
     private static void addDefault(List<String> entries, String name, String value) {
