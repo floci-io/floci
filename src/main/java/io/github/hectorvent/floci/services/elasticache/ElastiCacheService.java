@@ -749,6 +749,11 @@ public class ElastiCacheService implements ResourceProvider {
         }
     }
 
+    /** The region in a restored resource's ARN; one recorded without an ARN counts as the default region's. */
+    private String regionOf(String arn) {
+        return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
+    }
+
     /**
      * Restarts the container and auth proxy behind a standalone Redis or Valkey cache cluster,
      * the same pair {@link #provisionCacheCluster} creates. The cache comes back empty, as it
@@ -763,11 +768,6 @@ public class ElastiCacheService implements ResourceProvider {
      * monitor and re-reads the record, because a delete taken while the container started has
      * already removed it.
      */
-    /** The region in a restored resource's ARN; one recorded without an ARN counts as the default region's. */
-    private String regionOf(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
-    }
-
     private void restoreCacheCluster(CacheCluster cluster) {
         String clusterId = cluster.getCacheClusterId();
         String image = config.services().elasticache().defaultImage();
