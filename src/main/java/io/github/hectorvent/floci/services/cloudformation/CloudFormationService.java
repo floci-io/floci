@@ -391,7 +391,7 @@ public class CloudFormationService implements ResourceProvider {
         // was already released, losing an accepted change set or corrupting the map's links. Only
         // persistStack() stays outside: it is storage I/O, and compute()'s contract is that the
         // remapping function does short, non-blocking work.
-        boolean isCreateType = changeSetType == null || "CREATE".equalsIgnoreCase(changeSetType);
+        boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
         // An update names its stack by name or stack ID; the map is keyed by name. One that names no
         // live stack is keyed as given, so it lands in the missing-stack branch below.
         Stack live = isCreateType ? null : resolveStack(stackName, region, accountId);
@@ -409,7 +409,6 @@ public class CloudFormationService implements ResourceProvider {
                 // matching stack-level event (as AWS and LocalStack do) so DescribeStackEvents is
                 // non-empty straight after change-set creation — tooling such as the AWS SAM CLI
                 // reads StackEvents[0] there and otherwise fails with an IndexError.
-                // (CreateChangeSet defaults a null type to CREATE.)
                 if (isCreateType) {
                     addEvent(target, target.getStackName(), target.getStackId(),
                             "AWS::CloudFormation::Stack", "REVIEW_IN_PROGRESS", "User Initiated");
@@ -445,7 +444,7 @@ public class CloudFormationService implements ResourceProvider {
             cs.setChangeSetName(changeSetName);
             cs.setStackName(canonicalStackName);
             cs.setStackId(target.getStackId());
-            cs.setChangeSetType(changeSetType != null ? changeSetType : "CREATE");
+            cs.setChangeSetType(changeSetType != null ? changeSetType : "UPDATE");
             cs.setTemplateBody(resolvedTemplate);
             cs.setParameters(parameters);
             cs.setCapabilities(capabilities);

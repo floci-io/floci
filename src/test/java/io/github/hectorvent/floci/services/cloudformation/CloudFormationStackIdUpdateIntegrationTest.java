@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -20,7 +22,8 @@ import static org.hamcrest.Matchers.not;
 /**
  * UpdateStack and CreateChangeSet take "the name or the unique stack ID" as StackName. An UPDATE
  * change set given the stack ID has to land on the stack that ID names, not on a new key spelled
- * like the ARN (floci-io/floci#4842).
+ * like the ARN (floci-io/floci#4842). A CreateChangeSet without a ChangeSetType is an UPDATE, as it
+ * is on AWS.
  */
 @QuarkusTest
 class CloudFormationStackIdUpdateIntegrationTest {
@@ -43,6 +46,12 @@ class CloudFormationStackIdUpdateIntegrationTest {
               }
             }
             """;
+
+    @Inject
+    CloudFormationService cfnService;
+
+    @Inject
+    EmulatorConfig config;
 
     private final Set<String> stacksToDelete = new LinkedHashSet<>();
 
@@ -203,6 +212,63 @@ class CloudFormationStackIdUpdateIntegrationTest {
         .then()
             .statusCode(200)
             .body(not(containsString("update-by-stale-stack-id")));
+    }
+
+    @Test
+    void changeSetWithoutATypeIsAnUpdateOfTheExistingStack() {
+        String stackName = "stack-id-untyped-" + Long.toString(System.nanoTime(), 36);
+        createStack(stackName);
+
+        withParameters(stackName, "second")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "untyped")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "untyped")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Action>Modify</Action>"));
+        assertThat(cfnService.describeChangeSet(stackName, "untyped", config.defaultRegion()).getChangeSetType(),
+                equalTo("UPDATE"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ExecuteChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "untyped")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        assertThat(CfnStackWaits.awaitTerminal(stackName).status(), equalTo("UPDATE_COMPLETE"));
+        assertThat(parameterValue(stackName), equalTo("second"));
+    }
+
+    @Test
+    void changeSetWithoutATypeOnAMissingStackIsAValidationError() {
+        String stackName = "stack-id-untyped-missing-" + Long.toString(System.nanoTime(), 36);
+
+        withParameters(stackName, "first")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "untyped")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>ValidationError</Code>"))
+            .body(containsString("Stack with id " + stackName + " does not exist"));
     }
 
     private String createStack(String stackName) {
