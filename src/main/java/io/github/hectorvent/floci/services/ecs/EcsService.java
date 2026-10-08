@@ -5267,7 +5267,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         TaskDefinition td = taskDefinitions.get(familyKey(region, ref));
         if (td != null) { return td; }
         td = taskDefinitionsIn(region)
-                .filter(d -> d.getTaskDefinitionArn().equals(ref)
+                .filter(d -> ref.equals(d.getTaskDefinitionArn())
                         || (d.getFamily() + ":" + d.getRevision()).equals(ref))
                 .findFirst().orElse(null);
         if (td != null) { return td; }

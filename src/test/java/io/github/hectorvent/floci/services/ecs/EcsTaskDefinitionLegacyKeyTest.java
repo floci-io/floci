@@ -93,6 +93,21 @@ class EcsTaskDefinitionLegacyKeyTest {
         assertEquals(2, register(service, REGION).getRevision());
     }
 
+    @Test
+    void aFamilyLookupSkipsAStoredDefinitionWithoutAnArn() {
+        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        TaskDefinition unreadable = legacyDefinition();
+        unreadable.setFamily(FAMILY + "-other");
+        unreadable.setTaskDefinitionArn(null);
+        storage.taskDefinitions().put(FAMILY + "-other:1", unreadable);
+        EcsService service = newService(storage);
+
+        TaskDefinition registered = register(service, REGION);
+
+        assertEquals(registered.getTaskDefinitionArn(),
+                service.describeTaskDefinition(FAMILY, REGION).getTaskDefinitionArn());
+    }
+
     private static TaskDefinition legacyDefinition() {
         TaskDefinition td = new TaskDefinition();
         td.setFamily(FAMILY);
