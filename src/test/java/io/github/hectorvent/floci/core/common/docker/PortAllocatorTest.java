@@ -95,7 +95,7 @@ class PortAllocatorTest {
 
     @Test
     void allocateAndStartMovesPastPortsDockerReportsInUseAndReleasesThem() {
-        PortAllocator allocator = hostBlindAllocator();
+        PortAllocator allocator = new HostBlindPortAllocator();
         List<Integer> tried = new ArrayList<>();
 
         int started = allocator.allocateAndStart(19900, 19902, port -> {
@@ -116,7 +116,7 @@ class PortAllocatorTest {
 
     @Test
     void allocateAndStartNamesTheRefusedPortsWhenTheRangeRunsOut() {
-        PortAllocator allocator = hostBlindAllocator();
+        PortAllocator allocator = new HostBlindPortAllocator();
 
         RuntimeException e = assertThrows(RuntimeException.class, () -> allocator.allocateAndStart(19900, 19901,
                 port -> {
@@ -132,7 +132,7 @@ class PortAllocatorTest {
 
     @Test
     void allocateAndStartReleasesThePortAndRethrowsAnyOtherFailure() {
-        PortAllocator allocator = hostBlindAllocator();
+        PortAllocator allocator = new HostBlindPortAllocator();
         RuntimeException failure = new RuntimeException("Cannot connect to the Docker daemon");
         List<Integer> tried = new ArrayList<>();
 
@@ -145,14 +145,5 @@ class PortAllocatorTest {
         assertSame(failure, e);
         assertEquals(List.of(19900), tried);
         assertEquals(19900, allocator.allocate(19900, 19901), "the chosen port must be released");
-    }
-
-    private static PortAllocator hostBlindAllocator() {
-        return new PortAllocator() {
-            @Override
-            public boolean isPortFree(int port) {
-                return true;
-            }
-        };
     }
 }

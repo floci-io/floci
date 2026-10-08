@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
+import io.github.hectorvent.floci.core.common.docker.HostBlindPortAllocator;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
@@ -67,9 +68,9 @@ class EcrRegistryPortConflictDockerIntegrationTest {
         EmulatorConfig configA = config(port);
         EmulatorConfig configB = config(port);
         EmulatorConfig configC = config(port);
-        PortAllocator allocatorB = hostBlindAllocator();
-        PortAllocator allocatorC = hostBlindAllocator();
-        EcrRegistryManager a = manager(configA, hostBlindAllocator());
+        PortAllocator allocatorB = new HostBlindPortAllocator();
+        PortAllocator allocatorC = new HostBlindPortAllocator();
+        EcrRegistryManager a = manager(configA, new HostBlindPortAllocator());
         EcrRegistryManager b = manager(configB, allocatorB);
         EcrRegistryManager c = manager(configC, allocatorC);
         try {
@@ -114,15 +115,6 @@ class EcrRegistryPortConflictDockerIntegrationTest {
         when(config.services().ecr().registryMaxPort()).thenReturn(basePort + 1);
         when(config.services().ecr().dockerNetwork()).thenReturn(Optional.empty());
         return config;
-    }
-
-    private static PortAllocator hostBlindAllocator() {
-        return new PortAllocator() {
-            @Override
-            public boolean isPortFree(int port) {
-                return true;
-            }
-        };
     }
 
     private int freePortPair() {

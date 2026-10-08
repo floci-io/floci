@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.HostBlindPortAllocator;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
@@ -51,7 +52,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link EcrRegistryManager} startup behavior. Uses a real
- * {@link PortAllocator} that skips the host probe and a mocked Docker layer so the
+ * {@link PortAllocator} that skips the host probe ({@link HostBlindPortAllocator}) and a mocked Docker layer so the
  * failure path can be exercised without a Docker daemon or free host ports.
  */
 class EcrRegistryManagerTest {
@@ -79,12 +80,7 @@ class EcrRegistryManagerTest {
 
     @BeforeEach
     void setUp() {
-        portAllocator = new PortAllocator() {
-            @Override
-            public boolean isPortFree(int port) {
-                return true;
-            }
-        };
+        portAllocator = new HostBlindPortAllocator();
 
         containerBuilder = Mockito.mock(ContainerBuilder.class);
         builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
