@@ -255,6 +255,13 @@ class S3ChecksumTest {
         assertEquals("InvalidRequest", knownButUnsupported.getErrorCode());
         AwsException unknown = assertThrows(AwsException.class, () -> ChecksumAlgorithm.fromWireValue("MURMUR3"));
         assertEquals("InvalidArgument", unknown.getErrorCode());
+
+        assertEquals(ChecksumAlgorithm.CRC32, ChecksumAlgorithm.fromChecksumHeader("x-amz-checksum-crc32"));
+        assertEquals(ChecksumAlgorithm.SHA256, ChecksumAlgorithm.fromChecksumHeader("X-Amz-Checksum-SHA256"));
+        assertNull(ChecksumAlgorithm.fromChecksumHeader("x-amz-checksum-sha512"));
+        assertNull(ChecksumAlgorithm.fromChecksumHeader("x-amz-checksum-murmur3"));
+        assertNull(ChecksumAlgorithm.fromChecksumHeader("x-amz-trailer-signature"));
+        assertNull(ChecksumAlgorithm.fromChecksumHeader(null));
     }
 
     @Test

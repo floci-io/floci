@@ -143,22 +143,12 @@ final class AwsChunkedInputStream extends InputStream {
         }
         undeclaredChecksum = true;
         if (undeclaredTrailer == null) {
-            undeclaredTrailer = knownChecksum(name);
+            undeclaredTrailer = ChecksumAlgorithm.fromChecksumHeader(name);
         }
     }
 
     private static String checksumHeader(ChecksumAlgorithm algorithm) {
         return CHECKSUM_PREFIX + algorithm.wireValue();
-    }
-
-    private static ChecksumAlgorithm knownChecksum(String headerName) {
-        String wire = headerName.substring(CHECKSUM_PREFIX.length());
-        for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
-            if (algorithm.wireValue().equals(wire)) {
-                return algorithm;
-            }
-        }
-        return null;
     }
 
     private void readLineBreak() throws IOException {

@@ -3176,12 +3176,10 @@ public class S3Controller {
         if (trailer == null || trailer.isBlank()) {
             return null;
         }
-        String prefix = "x-amz-checksum-";
         for (String name : trailer.split(",")) {
-            String headerName = name.trim();
-            if (headerName.length() > prefix.length()
-                    && headerName.regionMatches(true, 0, prefix, 0, prefix.length())) {
-                return ChecksumAlgorithm.fromWireValue(headerName.substring(prefix.length()));
+            ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromChecksumHeader(name.trim());
+            if (algorithm != null) {
+                return algorithm;
             }
         }
         return null;
