@@ -76,6 +76,8 @@ class EcsTaskDefinitionLegacyKeyTest {
         assertEquals(List.of(registered.getTaskDefinitionArn()), arns(service, REGION));
         assertEquals(registered.getTaskDefinitionArn(),
                 service.describeTaskDefinition(FAMILY + ":1", REGION).getTaskDefinitionArn());
+        assertEquals(registered.getTaskDefinitionArn(),
+                service.describeTaskDefinition(FAMILY, REGION).getTaskDefinitionArn());
     }
 
     @Test
@@ -93,21 +95,6 @@ class EcsTaskDefinitionLegacyKeyTest {
                 service.describeTaskDefinition(FAMILY + ":1", OTHER).getTaskDefinitionArn());
         assertEquals(List.of(other.getTaskDefinitionArn()), arns(service, OTHER));
         assertEquals(2, register(service, REGION).getRevision());
-    }
-
-    @Test
-    void aFamilyLookupSkipsAStoredDefinitionWithoutAnArn() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
-        TaskDefinition unreadable = legacyDefinition();
-        unreadable.setFamily(FAMILY + "-other");
-        unreadable.setTaskDefinitionArn(null);
-        storage.taskDefinitions().put(FAMILY + "-other:1", unreadable);
-        EcsService service = newService(storage);
-
-        TaskDefinition registered = register(service, REGION);
-
-        assertEquals(registered.getTaskDefinitionArn(),
-                service.describeTaskDefinition(FAMILY, REGION).getTaskDefinitionArn());
     }
 
     // Catches: a missing reference dereferenced while searching a populated region, a 500
