@@ -5264,6 +5264,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private TaskDefinition resolveTaskDefinitionOrThrow(String ref, String region) {
+        if (ref == null || ref.isBlank()) {
+            throw new AwsException("ClientException", "Unable to describe task definition: " + ref, 400);
+        }
         TaskDefinition td = taskDefinitions.get(familyKey(region, ref));
         if (td != null) { return td; }
         td = taskDefinitionsIn(region)
