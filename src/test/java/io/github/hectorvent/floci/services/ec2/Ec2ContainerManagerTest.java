@@ -1161,9 +1161,44 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         assertEquals(2202, instance.getSshHostPort());
         verify(harness.lifecycleManager).removeIfExists("container-conflict");
-        verify(harness.portAllocator).markReserved(2201);
+        verify(harness.portAllocator).release(2201);
+        verify(harness.portAllocator, never()).markReserved(anyInt());
         verify(harness.builder).withPortBinding(22, 2201);
         verify(harness.builder).withPortBinding(22, 2202);
+    }
+
+    @Test
+    void launchCancelledDuringAPortRetryStaysTerminatedWhenNoPortIsLeft() throws Exception {
+        ExecutorService launchExecutor = Executors.newSingleThreadExecutor();
+        LaunchHarness harness = launchHarness(launchExecutor, Duration.ofSeconds(1));
+        Instance instance = instance("i-cancelled-during-retry");
+        AtomicBoolean dockerGone = new AtomicBoolean();
+        AtomicBoolean cancelled = new AtomicBoolean();
+        PingCmd ping = mock(PingCmd.class);
+        when(harness.dockerClient.pingCmd()).thenReturn(ping);
+        when(ping.exec()).thenAnswer(invocation -> {
+            if (dockerGone.get()) {
+                throw new RuntimeException("No such file or directory");
+            }
+            return null;
+        });
+        when(harness.portAllocator.allocate(anyInt(), anyInt()))
+                .thenReturn(2201)
+                .thenThrow(new RuntimeException("No free port available in range 2200-2299"));
+        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class)))
+                .thenThrow(new RuntimeException("Bind for 0.0.0.0:2201 failed: port is already allocated"));
+        doAnswer(invocation -> {
+            cancelled.set(harness.manager.cancelLaunch(instance));
+            dockerGone.set(true);
+            return null;
+        }).when(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        launchExecutor.shutdown();
+        assertTrue(launchExecutor.awaitTermination(5, TimeUnit.SECONDS), "launch worker should finish");
+
+        assertTrue(cancelled.get(), "the launch should be cancelled while the refused container is removed");
+        assertEquals("terminated", instance.getState().getName());
     }
 
     @Test
@@ -1604,6 +1639,7 @@ class Ec2ContainerManagerTest {
         when(reachableEndpoint.baseUrl()).thenReturn("http://localhost.floci.io:4680");
         PortAllocator portAllocator = mock(PortAllocator.class);
         when(portAllocator.allocate(anyInt(), anyInt())).thenReturn(2201);
+        when(portAllocator.allocateAndStart(anyInt(), anyInt(), any())).thenCallRealMethod();
 
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -2111,6 +2147,7 @@ class Ec2ContainerManagerTest {
         when(reachableEndpoint.baseUrl()).thenReturn("http://localhost.floci.io:4680");
         PortAllocator portAllocator = mock(PortAllocator.class);
         when(portAllocator.allocate(anyInt(), anyInt())).thenReturn(2201);
+        when(portAllocator.allocateAndStart(anyInt(), anyInt(), any())).thenCallRealMethod();
 
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

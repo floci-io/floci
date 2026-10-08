@@ -596,13 +596,13 @@ public class Ec2ContainerManager {
         String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
         String serviceEndpoint = reachableEndpoint.baseUrl();
 
-        while (true) {
+        return portAllocator.allocateAndStart(
+                config.services().ec2().sshPortRangeStart(),
+                config.services().ec2().sshPortRangeEnd(), sshHostPort -> {
             if (isLaunchCancelled(instance)) {
+                portAllocator.release(sshHostPort);
                 return null;
             }
-            int sshHostPort = portAllocator.allocate(
-                    config.services().ec2().sshPortRangeStart(),
-                    config.services().ec2().sshPortRangeEnd());
             SecurityGroupFirewallManager.Namespace namespace = null;
             String eniId = null;
             String containerId = null;
@@ -664,18 +664,9 @@ public class Ec2ContainerManager {
                     }
                     lifecycleManager.removeIfExists(namespace.helperId());
                 }
-                if (PortAllocator.isHostPortCollision(e)) {
-                    // Docker Desktop can own a published port without exposing it to a host-side
-                    // ServerSocket probe. Keep it unavailable for this process and try the next port.
-                    portAllocator.markReserved(sshHostPort);
-                    LOG.warnv("EC2 instance {0} could not use SSH host port {1}; trying another port",
-                            instanceId, String.valueOf(sshHostPort));
-                    continue;
-                }
-                portAllocator.release(sshHostPort);
                 throw e;
             }
-        }
+        });
     }
 
     private ContainerSpec buildContainerSpec(String containerName, ResolvedAmiImage image, String region,
@@ -898,9 +889,10 @@ public class Ec2ContainerManager {
      * reboot already handle a null container id, so the rest of the lifecycle keeps working.
      */
     private void markContainerlessRunning(Instance instance) {
-        LOG.infov("EC2 instance {0} is running without a backing container (no Docker daemon reachable)",
-                instance.getInstanceId());
-        instance.setState(InstanceState.running());
+        if (markRunning(instance)) {
+            LOG.infov("EC2 instance {0} is running without a backing container (no Docker daemon reachable)",
+                    instance.getInstanceId());
+        }
     }
 
     /**
