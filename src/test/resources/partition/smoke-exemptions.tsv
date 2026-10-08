@@ -87,6 +87,7 @@ ses	not yet covered (BL-249 follow-up)
 signin	not yet covered (BL-249 follow-up)
 sqs	not yet covered (BL-249 follow-up)
 ssm	covered by PartitionArnMintingIntegrationTest (aws-cn only)
+ssoadmin	one instance per account, minted in its primary region's partition, so a request signed in another partition sees that ARN (BL-243)
 ssoportal	not yet covered (BL-249 follow-up)
 stepfunctions	covered by StatesIntegrationTest and StepFunctionsPartitionIntegrationTest
 swf	not yet covered (BL-249 follow-up)

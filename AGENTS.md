@@ -309,7 +309,7 @@ When adding functionality:
    value, while strict SDKs (Go, Java) reject the whole response. `javap -c` on the SDK
    model class shows the traits on each `SdkField`
 9. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
-10. If the service mints ARNs or AWS hosts (`buildArn`, `Arn.of`, `dnsSuffixFor`, `AwsEndpoints`),
+10. If the service mints ARNs or AWS hosts (`buildArn`, `Arn.of`, `new AwsArnUtils.Arn`, `dnsSuffixFor`, `AwsEndpoints`),
    add a case to `PartitionCrossServiceSmokeIntegrationTest` and its `COVERED_PACKAGES`, or a row
    with a reason to `src/test/resources/partition/smoke-exemptions.tsv`;
    `PartitionSmokeInventoryTest` fails until one of the two exists

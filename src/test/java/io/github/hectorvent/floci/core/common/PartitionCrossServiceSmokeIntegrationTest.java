@@ -17,6 +17,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -115,6 +116,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
         cleanup.register(() -> signed(region, "apigateway").when().delete("/v2/apis/" + apiId));
         String host = URI.create(created.jsonPath().getString("apiEndpoint")).getHost();
         PartitionMatrix.assertHostIn(partitionCase, host);
+        assertEquals(apiId + ".execute-api." + region + "." + partitionCase.dnsSuffix(), host);
     }
 
     @ParameterizedTest

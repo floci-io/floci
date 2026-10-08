@@ -30,7 +30,8 @@ class PartitionSmokeInventoryTest {
     private static final Path SERVICES = Path.of("src/main/java/io/github/hectorvent/floci/services");
     private static final Path EXEMPTIONS = Path.of("src/test/resources/partition/smoke-exemptions.tsv");
     private static final Pattern MINTS = Pattern.compile(
-            "buildArn\\(|buildGlobalArn\\(|\\bArn\\.of\\(|\\bArn\\.global\\(|dnsSuffixFor\\(|AwsEndpoints\\.\\w+\\(");
+            "buildArn\\(|buildGlobalArn\\(|\\bArn\\.of\\(|\\bArn\\.global\\(|\\bnew (AwsArnUtils\\.)?Arn\\("
+                    + "|dnsSuffixFor\\(|AwsEndpoints\\.\\w+\\(");
 
     @Test
     void everyMintingPackageIsCoveredOrExempted() {
