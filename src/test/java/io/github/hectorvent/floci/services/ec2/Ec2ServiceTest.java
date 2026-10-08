@@ -4498,6 +4498,7 @@ class Ec2ServiceTest {
     private static final class InMemoryStorageFactory extends StorageFactory {
         private final Map<String, AccountAwareStorageBackend<?>> overrides;
         private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
+        private final List<AccountAwareStorageBackend<?>> created = new ArrayList<>();
 
         private InMemoryStorageFactory() {
             this(Map.of(), null);
@@ -4526,11 +4527,18 @@ class Ec2ServiceTest {
             if (override != null) {
                 return (AccountAwareStorageBackend<V>) override;
             }
-            if (requestContextInstance != null) {
-                return new AccountAwareStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
-                        requestContextInstance, "000000000000");
-            }
-            return AccountAwareStorageBackend.inMemory("000000000000");
+            AccountAwareStorageBackend<V> backend = requestContextInstance != null
+                    ? new AccountAwareStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
+                            requestContextInstance, "000000000000")
+                    : AccountAwareStorageBackend.inMemory("000000000000");
+            created.add(backend);
+            return backend;
+        }
+
+        // Same effect as StorageFactory.clearAll() on the backends this factory handed out.
+        @Override
+        public synchronized void clearAll() {
+            created.forEach(AccountAwareStorageBackend::clear);
         }
     }
 
@@ -4978,6 +4986,26 @@ class Ec2ServiceTest {
         assertTrue(released[0], "the hook must have released the host between the two checks");
         assertEquals("InvalidHostID.NotFound", e.getErrorCode());
         assertTrue(service.hostInstances("us-east-1", hostId[0]).isEmpty());
+    }
+
+    @Test
+    void clearSeedsDefaultVpcAndSubnetsAgainAfterStorageWipe() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().enabled()).thenReturn(true);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        InMemoryStorageFactory storageFactory = new InMemoryStorageFactory();
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), storageFactory);
+        service.ensureDefaultResources("us-east-1");
+        // A reset wipes storage before it calls clear().
+        storageFactory.clearAll();
+        assertTrue(service.describeVpcs("us-east-1", List.of(), Map.of()).isEmpty());
+
+        service.clear();
+
+        assertTrue(service.describeVpcs("us-east-1", List.of(), Map.of()).stream().anyMatch(Vpc::isDefault));
+        assertFalse(service.describeSubnets("us-east-1", List.of(), Map.of()).isEmpty());
     }
 
     @Test

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -135,7 +136,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class Ec2Service implements ContainerTeardown, ResourceProvider {
+public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettable {
 
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
 
@@ -973,6 +974,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     // ─── Default resource seeding ──────────────────────────────────────────────
+
+    // Storage is wiped before clear() runs, so the seeded-scope memory must go too or the default
+    // VPC and subnets would never come back.
+    @Override
+    public void clear() {
+        seededAccountRegions.clear();
+        if (config.services().ec2().enabled()) {
+            ensureDefaultResources(config.defaultRegion());
+        }
+    }
 
     public void ensureDefaultResources(String region) {
         String ownerAccountId = callerAccountId();
