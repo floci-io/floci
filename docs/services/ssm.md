@@ -129,6 +129,14 @@ and a refusal fails the whole call with a `ValidationException`, as it does on A
 aws ssm get-parameter --name /aws/reference/secretsmanager/my-app/api-key --with-decryption
 ```
 
+## Parameter ARNs
+
+A parameter's ARN is `arn:<partition>:ssm:<region>:<account>:parameter/<name without leading slash>`
+for both a top-level name such as `db-host` and a path such as `/app/db/host`, as on AWS.
+The CloudFormation `Arn` attribute of an `AWS::SSM::Parameter` is the same ARN, and
+`AddTagsToResource`, `ListTagsForResource` and `RemoveTagsFromResource` accept it as `ResourceId`.
+An ECS container secret's `valueFrom` accepts it too.
+
 ## Parameter Types
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.

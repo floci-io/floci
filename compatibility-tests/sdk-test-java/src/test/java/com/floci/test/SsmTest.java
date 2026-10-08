@@ -33,6 +33,7 @@ import software.amazon.awssdk.services.ssm.model.ParameterType;
 import software.amazon.awssdk.services.ssm.model.PutParameterRequest;
 import software.amazon.awssdk.services.ssm.model.PutParameterResponse;
 import software.amazon.awssdk.services.ssm.model.RemoveTagsFromResourceRequest;
+import software.amazon.awssdk.services.ssm.model.ResourceTypeForTagging;
 import software.amazon.awssdk.services.ssm.model.SendCommandRequest;
 import software.amazon.awssdk.services.ssm.model.SendCommandResponse;
 import software.amazon.awssdk.services.ssm.model.SsmException;
@@ -329,5 +330,38 @@ class SsmTest {
                         .instanceId(COMMAND_INSTANCE_ID)
                         .build());
         assertThat(invocation.status()).isEqualTo(CommandInvocationStatus.CANCELLED);
+    }
+
+    @Test
+    @Order(17)
+    void topLevelParameterArnHasParameterSlashAndAddressesTags() {
+        String name = "sdk-test-arn-" + System.nanoTime();
+        ssm.putParameter(PutParameterRequest.builder()
+                .name(name)
+                .value("v")
+                .type(ParameterType.STRING)
+                .build());
+        try {
+            String arn = ssm.getParameter(GetParameterRequest.builder().name(name).build()).parameter().arn();
+            assertThat(arn).endsWith(":parameter/" + name);
+
+            ssm.addTagsToResource(AddTagsToResourceRequest.builder()
+                    .resourceType(ResourceTypeForTagging.PARAMETER)
+                    .resourceId(arn)
+                    .tags(tag -> tag.key("env").value("dev"))
+                    .build());
+            ListTagsForResourceResponse tags = ssm.listTagsForResource(ListTagsForResourceRequest.builder()
+                    .resourceType(ResourceTypeForTagging.PARAMETER)
+                    .resourceId(arn)
+                    .build());
+            assertThat(tags.tagList())
+                    .singleElement()
+                    .satisfies(tag -> {
+                        assertThat(tag.key()).isEqualTo("env");
+                        assertThat(tag.value()).isEqualTo("dev");
+                    });
+        } finally {
+            ssm.deleteParameter(DeleteParameterRequest.builder().name(name).build());
+        }
     }
 }

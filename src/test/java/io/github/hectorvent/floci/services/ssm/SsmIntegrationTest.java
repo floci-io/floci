@@ -1637,6 +1637,66 @@ class SsmIntegrationTest {
         describeParametersError("{ \"MaxResults\": 51 }", "ValidationException");
     }
 
+    @Test
+    void parameterArn_hasParameterSlashAndAddressesTagOperations() {
+        String suffix = Long.toString(System.nanoTime());
+        String plain = "arn-plain-" + suffix;
+        String nested = "/arn/nested-" + suffix;
+        putFilterFixture(plain, "String", "");
+        putFilterFixture(nested, "String", "");
+
+        String plainArn = parameterArn(plain, ":parameter/" + plain);
+        parameterArn(nested, ":parameter" + nested);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.AddTagsToResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "ResourceType": "Parameter", "ResourceId": "%s", "Tags": [{"Key": "env", "Value": "dev"}] }
+                """.formatted(plainArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListTagsForResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "ResourceType": "Parameter", "ResourceId": "%s" }
+                """.formatted(plainArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TagList", hasSize(1))
+            .body("TagList[0].Key", equalTo("env"))
+            .body("TagList[0].Value", equalTo("dev"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DeleteParameters")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Names\": [\"" + plain + "\", \"" + nested + "\"] }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeletedParameters", hasSize(2));
+    }
+
+    private String parameterArn(String name, String expectedArnSuffix) {
+        return given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.ARN", endsWith(expectedArnSuffix))
+            .extract().path("Parameter.ARN");
+    }
+
     private void putFilterFixture(String name, String type, String extra) {
         given()
             .header("X-Amz-Target", "AmazonSSM.PutParameter")
