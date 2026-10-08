@@ -383,6 +383,23 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void cleanPathAlsoDeletesAnObjectUploadedBetweenPreparationAndOutput() throws Exception {
+        S3Object old1 = new S3Object("wh", "out/old1", new byte[0], "text/plain");
+        S3Object late = new S3Object("wh", "out/late", new byte[0], "text/plain");
+        when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(old1), List.of(), false, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(old1, late), List.of(), false, null));
+
+        try (S3CopySimulator.UnloadCollector collector =
+                     S3CopySimulator.prepareUnload(unloadSpecWithOptions(false, true, false, null), s3, null)) {
+            collector.complete();
+        }
+
+        verify(s3).deleteObject("wh", "out/old1");
+        verify(s3).deleteObject("wh", "out/late");
+    }
+
+    @Test
     void cleanPathKeepsObjectsWhenTheQueryNeverProducesOutput() throws Exception {
         S3Object old1 = new S3Object("wh", "out/old1", new byte[0], "text/plain");
         when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
@@ -1552,18 +1569,18 @@ class S3CopySimulatorTest {
     }
 
     @Test
-    void alignMaxBytes_followsExplicitColumnListAndFoldsUnquotedNames() {
+    void alignMaxChars_followsExplicitColumnListAndFoldsUnquotedNames() {
         List<S3CopySimulator.ColumnInfo> catalog = List.of(
                 new S3CopySimulator.ColumnInfo("id", null),
                 new S3CopySimulator.ColumnInfo("name", 3),
                 new S3CopySimulator.ColumnInfo("Note", 5));
         CopyStatementParser.S3CopyFrom explicit = new CopyStatementParser.S3CopyFrom(
                 "t", List.of("NAME", "\"Note\""), "wh", "k", "|", 0, false, false, null, null);
-        assertEquals(Arrays.asList(3, 5), S3CopySimulator.alignMaxBytes(explicit, catalog));
+        assertEquals(Arrays.asList(3, 5), S3CopySimulator.alignMaxChars(explicit, catalog));
 
         CopyStatementParser.S3CopyFrom all = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "k", "|", 0, false, false, null, null);
-        assertEquals(Arrays.asList(null, 3, 5), S3CopySimulator.alignMaxBytes(all, catalog));
+        assertEquals(Arrays.asList(null, 3, 5), S3CopySimulator.alignMaxChars(all, catalog));
     }
 
     @Test
@@ -1577,6 +1594,29 @@ class S3CopySimulatorTest {
         S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
                 () -> S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream()));
         assertTrue(failure.getMessage().contains("preferQueryMode=simple"), failure.getMessage());
+    }
+
+    @Test
+    void streamCopyInput_withFieldTransformOverTheObjectLimitFailsTheStatementAndReleasesTheBudget() {
+        CopyStatementParser.CopyTransforms transforms =
+                new CopyStatementParser.CopyTransforms(true, false, false, false, null);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
+        when(s3.getObject("wh", "k")).thenReturn(
+                new S3Object("wh", "k", "1||x\n1||x\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+
+        long saved = S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES;
+        int availableBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
+        S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES = 8;
+        try {
+            S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream()));
+            assertTrue(failure.getMessage().contains("8-byte limit"), failure.getMessage());
+            assertEquals(availableBefore, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
+        } finally {
+            S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES = saved;
+        }
     }
 
     @Test

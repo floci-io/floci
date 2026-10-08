@@ -313,15 +313,18 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...'`,
   are accepted but never verified or stored: S3 is read as an unsigned request, the same as with no
   authorization clause. Combining key credentials with `IAM_ROLE`, or giving only one of the pair, is
-  not intercepted.
+  not intercepted, and neither is a blank key, secret, token or role.
 - `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
   level options need a single-byte `DELIMITER`, are not combined with `FORMAT AS JSON`, and normalise
   `CRLF` line endings to `LF`. A nulled field is written as the `NULL AS` string, or `\N` in text
   mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
-  `CHAR`/`VARCHAR` length in bytes, never inside a multi-byte character. Its column lengths come from
+  `CHAR`/`VARCHAR` length in characters (PostgreSQL's meaning of the declared length), never inside a
+  multi-byte character or a backslash escape. Its column lengths come from
   the database catalog, so it works only over the **Simple Query protocol** (`preferQueryMode=simple`);
-  over Extended Query the COPY fails with an error that names this requirement.
+  over Extended Query the COPY fails with an error that names this requirement. A field-level option
+  buffers each decompressed object in memory, so an object over 64 MiB, or a heap budget shared
+  across connections that is used up, fails the COPY instead of exhausting the emulator.
 - Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
   `DATEFORMAT`, `TIMEFORMAT`, `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
   `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL
@@ -378,8 +381,9 @@ the result to S3 as one or more objects under `<prefix>`.
 - `CLEANPATH` deletes every object whose key starts with the target prefix. The objects are listed and
   every delete is authorized up front, like the writes (with `FLOCI_SERVICES_S3_ENFORCE_AUTH` on, the
   role needs list and delete permission, and a denial fails the UNLOAD before anything is removed or
-  written). The deletes themselves run when the first output arrives, so a query that PostgreSQL
-  rejects leaves the previous export in place; objects already deleted are not restored if the UNLOAD
+  written). The deletes themselves run when the first output arrives, on a fresh listing (and
+  authorization) of the prefix, so a query that PostgreSQL rejects leaves the previous export in place,
+  and an object uploaded in the meantime does not survive; objects already deleted are not restored if the UNLOAD
   fails later. The match is a plain string prefix, so `TO 's3://b/sales_' CLEANPATH` also removes
   `sales_archive/...`; end the prefix with `/` to limit it to one folder. It cannot be combined with
   `ALLOWOVERWRITE`, and an empty prefix (the bucket root) is not intercepted so a typo cannot wipe a

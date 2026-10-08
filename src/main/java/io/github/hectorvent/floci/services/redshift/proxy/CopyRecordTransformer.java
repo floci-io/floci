@@ -26,16 +26,16 @@ final class CopyRecordTransformer {
     private final boolean csv;
     private final byte delimiter;
     private final byte[] nullMarker;
-    private final List<Integer> columnMaxBytes;
+    private final List<Integer> columnMaxChars;
 
-    CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes) {
+    CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxChars) {
         this.transforms = spec.transforms();
         this.csv = spec.csv();
         String delimiterText = spec.delimiter() != null ? spec.delimiter() : (spec.csv() ? "," : "|");
         this.delimiter = delimiterText.getBytes(StandardCharsets.UTF_8)[0];
         String marker = spec.nullAs() != null ? spec.nullAs() : (spec.csv() ? "" : "\\N");
         this.nullMarker = marker.getBytes(StandardCharsets.UTF_8);
-        this.columnMaxBytes = columnMaxBytes;
+        this.columnMaxChars = columnMaxChars;
     }
 
     byte[] apply(byte[] input) {
@@ -134,6 +134,11 @@ final class CopyRecordTransformer {
                 && (data[start] == DOUBLE_QUOTE || data[start] == SINGLE_QUOTE)) {
             byte quote = data[start];
             for (int j = start + 1; j < length; j++) {
+                if (!csv && data[j] == BACKSLASH) {
+                    // Text mode: a backslash escapes the next byte, so an escaped quote never closes the field.
+                    j++;
+                    continue;
+                }
                 boolean closes = data[j] == quote
                         && (j + 1 == length || data[j + 1] == delimiter || data[j + 1] == NEWLINE
                                 || isCrlfAt(data, j + 1));
@@ -212,31 +217,101 @@ final class CopyRecordTransformer {
     }
 
     private byte[] truncate(byte[] value, int column) {
-        if (!transforms.truncateColumns() || columnMaxBytes == null || column >= columnMaxBytes.size()) {
+        if (!transforms.truncateColumns() || columnMaxChars == null || column >= columnMaxChars.size()) {
             return value;
         }
-        Integer max = columnMaxBytes.get(column);
-        if (max == null || value.length <= max) {
+        Integer max = columnMaxChars.get(column);
+        if (max == null) {
             return value;
         }
-        int end = max;
-        while (end > 0 && (value[end] & 0xC0) == 0x80) {
-            end--;
+        // PostgreSQL counts varchar(n) in characters, so measure and cut decoded characters. Text mode
+        // decodes its escapes first so one is never split or counted as more than its character.
+        byte[] decoded = csv ? value : decodeTextEscapes(value);
+        int end = charBoundary(decoded, max);
+        if (end == decoded.length) {
+            return value;
         }
-        // Text mode keeps PostgreSQL escapes raw; an odd run of trailing backslashes would escape
-        // the delimiter or newline written right after the field.
-        while (!csv && end > 0 && trailingBackslashes(value, end) % 2 == 1) {
-            end--;
-        }
-        return Arrays.copyOf(value, end);
+        byte[] kept = Arrays.copyOf(decoded, end);
+        return csv ? kept : encodeTextEscapes(kept);
     }
 
-    private static int trailingBackslashes(byte[] value, int end) {
-        int count = 0;
-        for (int i = end - 1; i >= 0 && value[i] == BACKSLASH; i--) {
-            count++;
+    /** Offset of the byte after the first {@code maxChars} characters, or the length if there are fewer. */
+    private static int charBoundary(byte[] bytes, int maxChars) {
+        int chars = 0;
+        for (int i = 0; i < bytes.length; i++) {
+            if ((bytes[i] & 0xC0) != 0x80) {
+                if (chars == maxChars) {
+                    return i;
+                }
+                chars++;
+            }
         }
-        return count;
+        return bytes.length;
+    }
+
+    /** Decodes COPY text escapes: backslash b f n r t v, octal NNN, hex xHH, and backslash c for any other c. */
+    private static byte[] decodeTextEscapes(byte[] value) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(value.length);
+        int i = 0;
+        while (i < value.length) {
+            byte b = value[i];
+            if (b != BACKSLASH || i + 1 >= value.length) {
+                out.write(b);
+                i++;
+                continue;
+            }
+            byte next = value[i + 1];
+            if (next >= '0' && next <= '7') {
+                int octal = 0;
+                int digits = 0;
+                i++;
+                while (i < value.length && digits < 3 && value[i] >= '0' && value[i] <= '7') {
+                    octal = octal * 8 + (value[i] - '0');
+                    i++;
+                    digits++;
+                }
+                out.write(octal);
+            } else if (next == 'x' && i + 2 < value.length && Character.digit(value[i + 2], 16) >= 0) {
+                int hex = Character.digit(value[i + 2], 16);
+                i += 3;
+                if (i < value.length && Character.digit(value[i], 16) >= 0) {
+                    hex = hex * 16 + Character.digit(value[i], 16);
+                    i++;
+                }
+                out.write(hex);
+            } else {
+                out.write(switch (next) {
+                    case 'b' -> '\b';
+                    case 'f' -> '\f';
+                    case 'n' -> '\n';
+                    case 'r' -> '\r';
+                    case 't' -> '\t';
+                    case 'v' -> 0x0B;
+                    default -> next;
+                });
+                i += 2;
+            }
+        }
+        return out.toByteArray();
+    }
+
+    private byte[] encodeTextEscapes(byte[] value) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(value.length + 4);
+        for (byte b : value) {
+            if (b == BACKSLASH || b == delimiter) {
+                out.write(BACKSLASH);
+                out.write(b);
+            } else if (b == NEWLINE) {
+                out.write(BACKSLASH);
+                out.write('n');
+            } else if (b == CARRIAGE_RETURN) {
+                out.write(BACKSLASH);
+                out.write('r');
+            } else {
+                out.write(b);
+            }
+        }
+        return out.toByteArray();
     }
 
     private byte[] escapeTextField(byte[] value) {

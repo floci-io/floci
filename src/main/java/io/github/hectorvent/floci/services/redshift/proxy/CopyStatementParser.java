@@ -781,7 +781,7 @@ public final class CopyStatementParser {
                 }
                 seenIamRole = true;
                 iamRoleArn = extractNullValue(iamRole);
-                return iamRole.end();
+                return isBlank(iamRoleArn) ? REJECT : iamRole.end();
             }
             if (matchClause(credentials, offset, end)) {
                 if (seenCredentials) {
@@ -796,21 +796,21 @@ public final class CopyStatementParser {
                     return REJECT;
                 }
                 seenAccessKeyId = true;
-                return accessKeyId.end();
+                return isBlank(extractNullValue(accessKeyId)) ? REJECT : accessKeyId.end();
             }
             if (matchClause(secretAccessKey, offset, end)) {
                 if (seenSecretAccessKey) {
                     return REJECT;
                 }
                 seenSecretAccessKey = true;
-                return secretAccessKey.end();
+                return isBlank(extractNullValue(secretAccessKey)) ? REJECT : secretAccessKey.end();
             }
             if (matchClause(sessionToken, offset, end)) {
                 if (seenSessionToken) {
                     return REJECT;
                 }
                 seenSessionToken = true;
-                return sessionToken.end();
+                return isBlank(extractNullValue(sessionToken)) ? REJECT : sessionToken.end();
             }
             if (matchClause(region, offset, end)) {
                 if (seenRegion) {
@@ -876,6 +876,10 @@ public final class CopyStatementParser {
             value = unescape(value);
         }
         return "\\t".equals(value) || "\t".equals(value) ? "\t" : value;
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private static String extractNullValue(Matcher matcher) {

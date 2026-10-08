@@ -367,6 +367,13 @@ class CopyStatementParserTest {
                 "COPY t FROM 's3://b/k' IAM_ROLE 'arn:aws:iam::000000000000:role/r' "
                         + "ACCESS_KEY_ID 'test' SECRET_ACCESS_KEY 'test'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' ACCESS_KEY_ID 'test'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' ACCESS_KEY_ID '' SECRET_ACCESS_KEY ''"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' ACCESS_KEY_ID 'test' SECRET_ACCESS_KEY ' '"));
+        assertNull(CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' ACCESS_KEY_ID 'test' SECRET_ACCESS_KEY 'test' SESSION_TOKEN ''"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' IAM_ROLE ''"));
+        assertNull(CopyStatementParser.parse(
+                "UNLOAD ('select 1') TO 's3://b/out/' ACCESS_KEY_ID '' SECRET_ACCESS_KEY ''"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' SESSION_TOKEN 'test'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' REGION 'a' REGION 'b'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' CREDENTIALS 'aws_access_key_id=test'"));
