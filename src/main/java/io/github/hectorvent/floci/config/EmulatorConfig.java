@@ -1462,6 +1462,20 @@ public interface EmulatorConfig {
 
         @WithDefault("9399")
         int kafkaHostPortMax();
+
+        /**
+         * Only applies when Floci runs in a container. Each broker then has a second Kafka
+         * listener, published to a host port from the kafka-host-port range so clients on the
+         * Docker host can reach it, and advertised as {@code <this hostname>:<port>}
+         * ({@code localhost} when unset).
+         *
+         * <p>When set, GetBootstrapBrokers returns both listeners,
+         * {@code <container-name>:9092,<this hostname>:<port>}, so clients on the Docker host
+         * and in sibling containers can each discover the broker. When unset or blank, it
+         * returns the broker's Docker-network address, which sibling containers use.
+         * Env: FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME
+         */
+        Optional<String> bootstrapHostname();
     }
 
     interface AmazonMqServiceConfig {

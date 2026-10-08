@@ -1,9 +1,5 @@
 package io.github.hectorvent.floci.services.msk;
 
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.ExposedPort;
-import com.github.dockerjava.api.model.Ports;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -29,6 +25,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
@@ -36,6 +33,9 @@ public class RedpandaManager {
 
     private static final Logger LOG = Logger.getLogger(RedpandaManager.class);
     private static final int KAFKA_PORT = 9092;
+    // Second Kafka listener, only used when Floci runs in a container: published to a host port
+    // and advertised with a host-reachable address, for clients outside the Docker network.
+    static final int KAFKA_HOST_LISTENER_PORT = 9093;
     static final int ADMIN_PORT = 9644;
 
     // Redpanda's Admin API exposes readiness at /v1/status/ready. /ready always returns 404
@@ -49,6 +49,9 @@ public class RedpandaManager {
     private final RegionResolver regionResolver;
     private final PortAllocator portAllocator;
     private final Map<String, Closeable> logStreams = new ConcurrentHashMap<>();
+    // Container mode only, keyed like logStreams: the host port the host listener is published
+    // on (not recoverable from the bootstrap string, which may be the Docker-network address).
+    private final Map<String, Integer> hostListenerPorts = new ConcurrentHashMap<>();
     private volatile boolean dockerUnavailableLogged;
 
     @Inject
@@ -128,67 +131,80 @@ public class RedpandaManager {
         // reachable address up front. The host port has to be known before the
         // container starts (the flag is a startup arg), so in native mode we
         // pre-allocate it ourselves instead of letting Docker assign one dynamically.
-        String kafkaAdvertiseAddr;
-        int kafkaHostPort = 0;
-        if (!containerDetector.isRunningInContainer()) {
-            kafkaHostPort = portAllocator.allocate(
-                    config.services().msk().kafkaHostPortBase(),
-                    config.services().msk().kafkaHostPortMax());
-            kafkaAdvertiseAddr = "localhost:" + kafkaHostPort;
-        } else {
-            // Sibling containers on the docker network resolve the broker via its
-            // container name through Docker's embedded DNS.
-            kafkaAdvertiseAddr = containerName + ":" + KAFKA_PORT;
-        }
+        //
+        // When Floci itself runs in a container, one advertised address cannot serve both
+        // sibling containers and the host, so Redpanda gets two listeners. A Kafka client is
+        // always handed the address of the listener it connected through:
+        //   internal (9092): <containerName>:9092, resolved by sibling containers through
+        //                    Docker's embedded DNS
+        //   host     (9093): published to a pre-allocated host port and advertised as
+        //                    <bootstrap-hostname or localhost>:<port>, for clients on the Docker host
+        boolean inContainer = containerDetector.isRunningInContainer();
+        int kafkaHostPort = portAllocator.allocate(
+                config.services().msk().kafkaHostPortBase(),
+                config.services().msk().kafkaHostPortMax());
+        String hostListenerAddr = hostListenerHostname() + ":" + kafkaHostPort;
 
-        // Build command
-        List<String> cmd = new ArrayList<>(List.of(
-                "redpanda", "start", "--overprovisioned", "--smp", "1",
-                "--memory", "512M", "--reserve-memory", "0M",
-                "--advertise-kafka-addr", kafkaAdvertiseAddr));
-
-        // Build container spec. Publish Kafka/admin ports to the host only in
-        // native mode; in Docker mode producers/consumers reach the broker via
-        // the docker network IP resolved from container inspect.
-        ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
-                .withName(containerName)
-                .withDockerNetwork(config.services().dockerNetwork())
-                .withLogRotation()
-                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "msk", cluster.getClusterName(),
-                        AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getAccountId()),
-                        AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion())));
-
-        if (!containerDetector.isRunningInContainer()) {
-            specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);
-        } else {
-            specBuilder.withExposedPort(KAFKA_PORT).withExposedPort(ADMIN_PORT);
-        }
-
-        // Handle persistence mounting
-        if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager,
-                    resolveVolumeName(cluster), "/var/lib/redpanda/data");
-        } else {
-            // Legacy host-path mode: host-persistent-path is an absolute path
-            String hostDataPath = legacyCompatibleHostPath(cluster).toAbsolutePath().toString();
-            if (!containerDetector.isRunningInContainer()) {
-                ContainerStorageHelper.ensureHostDir(hostDataPath);
-            }
-            specBuilder.withBind(hostDataPath, "/var/lib/redpanda/data");
-        }
-
-        specBuilder.withCmd(cmd);
-        ContainerSpec spec = specBuilder.build();
-
-        // Create and start container
+        // Everything from here to createAndStart can fail (ensureVolume calls Docker, and
+        // tryStartContainer swallows the failure when Docker is unreachable), so the port is
+        // released on any of it. The try must end at createAndStart: once the container is
+        // running it holds the port, and releasing it would let another cluster be given it.
         ContainerInfo info;
         try {
+            // Build command
+            List<String> cmd = new ArrayList<>(List.of(
+                    "redpanda", "start", "--overprovisioned", "--smp", "1",
+                    "--memory", "512M", "--reserve-memory", "0M"));
+            if (inContainer) {
+                cmd.addAll(List.of(
+                        "--kafka-addr",
+                        "internal://0.0.0.0:" + KAFKA_PORT + ",host://0.0.0.0:" + KAFKA_HOST_LISTENER_PORT,
+                        "--advertise-kafka-addr",
+                        "internal://" + containerName + ":" + KAFKA_PORT + ",host://" + hostListenerAddr));
+            } else {
+                cmd.addAll(List.of("--advertise-kafka-addr", "localhost:" + kafkaHostPort));
+            }
+
+            // Build container spec. In native mode the Kafka port itself is published. In
+            // container mode the internal listener stays on the Docker network and only the
+            // host listener is published.
+            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
+                    .withName(containerName)
+                    .withDockerNetwork(config.services().dockerNetwork())
+                    .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "msk", cluster.getClusterName(),
+                            AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getAccountId()),
+                            AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion())));
+
+            if (!inContainer) {
+                specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);
+            } else {
+                specBuilder.withExposedPort(KAFKA_PORT)
+                        .withPortBinding(KAFKA_HOST_LISTENER_PORT, kafkaHostPort)
+                        .withExposedPort(ADMIN_PORT);
+            }
+
+            // Handle persistence mounting
+            if (ContainerStorageHelper.isNamedVolumeMode(config)) {
+                ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager,
+                        resolveVolumeName(cluster), "/var/lib/redpanda/data");
+            } else {
+                // Legacy host-path mode: host-persistent-path is an absolute path
+                String hostDataPath = legacyCompatibleHostPath(cluster).toAbsolutePath().toString();
+                if (!containerDetector.isRunningInContainer()) {
+                    ContainerStorageHelper.ensureHostDir(hostDataPath);
+                }
+                specBuilder.withBind(hostDataPath, "/var/lib/redpanda/data");
+            }
+
+            specBuilder.withCmd(cmd);
+            ContainerSpec spec = specBuilder.build();
+
+            // Create and start container
             info = lifecycleManager.createAndStart(spec);
         } catch (RuntimeException e) {
-            if (!containerDetector.isRunningInContainer()) {
-                portAllocator.release(kafkaHostPort);
-            }
+            portAllocator.release(kafkaHostPort);
             throw e;
         }
         cluster.setContainerId(info.containerId());
@@ -196,7 +212,23 @@ public class RedpandaManager {
         // Resolve endpoints
         EndpointInfo kafkaEndpoint = info.getEndpoint(KAFKA_PORT);
 
-        cluster.setBootstrapBrokers(kafkaEndpoint.host() + ":" + kafkaEndpoint.port());
+        if (inContainer) {
+            hostListenerPorts.put(clusterIdentityKey(cluster), kafkaHostPort);
+            // GetBootstrapBrokers reports the Docker-network address unless the host listener
+            // was asked for explicitly, which keeps sibling containers working by default. When
+            // it was, both listeners are listed: a client connects through whichever entry it can
+            // reach, and the broker then advertises that listener's address. The container name
+            // (not its IP) fails fast on the host, where it does not resolve, while an unroutable
+            // IP would wait for a connect timeout. It goes first for callers that read only the
+            // first entry.
+            cluster.setBootstrapBrokers(explicitBootstrapHostname().isPresent()
+                    ? containerName + ":" + KAFKA_PORT + "," + hostListenerAddr
+                    : kafkaEndpoint.host() + ":" + kafkaEndpoint.port());
+            LOG.infov("Redpanda host listener for MSK cluster {0} published at {1}",
+                    cluster.getClusterName(), hostListenerAddr);
+        } else {
+            cluster.setBootstrapBrokers(kafkaEndpoint.host() + ":" + kafkaEndpoint.port());
+        }
         LOG.infov("Redpanda container {0} started. Bootstrap: {1}", info.containerId(), cluster.getBootstrapBrokers());
 
         // Attach log streaming (new feature)
@@ -216,29 +248,12 @@ public class RedpandaManager {
     }
 
     public boolean isReady(MskCluster cluster) {
-        String bootstrap = cluster.getBootstrapBrokers();
-        if (bootstrap == null) {
+        if (cluster.getBootstrapBrokers() == null) {
             return false;
         }
 
-        // Derive admin URL from the container
-        String adminUrl;
-        if (!containerDetector.isRunningInContainer()) {
-            DockerClient dockerClient = lifecycleManager.getDockerClient();
-            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(cluster.getContainerId()).exec();
-            Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
-            Ports.Binding[] binding = bindings.get(ExposedPort.tcp(ADMIN_PORT));
-            if (binding != null && binding.length > 0) {
-                adminUrl = "http://localhost:" + binding[0].getHostPortSpec() + ADMIN_READY_PATH;
-            } else {
-                return false;
-            }
-        } else {
-            String containerIp = bootstrap.split(":")[0];
-            adminUrl = "http://" + containerIp + ":" + ADMIN_PORT + ADMIN_READY_PATH;
-        }
-
         try {
+            String adminUrl = adminReadyUrl(cluster);
             HttpURLConnection conn = (HttpURLConnection) URI.create(adminUrl).toURL().openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(1000);
@@ -263,8 +278,29 @@ public class RedpandaManager {
         releaseKafkaHostPort(cluster);
     }
 
+    /**
+     * The broker's admin readiness URL, resolved from the persisted container id the same way
+     * container start resolves endpoints: the bound host port in native mode, the container's
+     * reachable address in container mode. Nothing is kept in memory, so it still works for a
+     * cluster left in CREATING by a Floci process that was killed and restarted, and an IP is
+     * used rather than the container name, which Docker's default bridge network does not resolve.
+     *
+     * <p>The network startContainer put the broker on is preferred, as it was when createAndStart
+     * resolved the Kafka endpoint: in container mode the broker publishes the host listener, so
+     * it is on the default bridge as well, and the bridge address is not one Floci can reach.
+     */
+    String adminReadyUrl(MskCluster cluster) {
+        String network = containerBuilder.resolveDockerNetwork(config.services().dockerNetwork()).orElse(null);
+        EndpointInfo admin = lifecycleManager.resolveEndpoint(cluster.getContainerId(), ADMIN_PORT, network);
+        return "http://" + admin.host() + ":" + admin.port() + ADMIN_READY_PATH;
+    }
+
     private void releaseKafkaHostPort(MskCluster cluster) {
         if (containerDetector.isRunningInContainer()) {
+            Integer hostPort = hostListenerPorts.remove(clusterIdentityKey(cluster));
+            if (hostPort != null) {
+                portAllocator.release(hostPort);
+            }
             return;
         }
         String bootstrap = cluster.getBootstrapBrokers();
@@ -284,6 +320,19 @@ public class RedpandaManager {
 
     public void removeClusterStorage(MskCluster cluster) {
         ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, resolveVolumeName(cluster));
+    }
+
+    /**
+     * The hostname the host listener advertises: the configured bootstrap hostname, else
+     * {@code localhost}, which is where the published port lands on the Docker host.
+     */
+    private String hostListenerHostname() {
+        return explicitBootstrapHostname().orElse("localhost");
+    }
+
+    /** The configured bootstrap hostname, treating a blank value as unset. */
+    private Optional<String> explicitBootstrapHostname() {
+        return config.services().msk().bootstrapHostname().filter(h -> !h.isBlank());
     }
 
     private String clusterIdentityKey(MskCluster cluster) {

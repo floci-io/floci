@@ -1,10 +1,6 @@
 package io.github.hectorvent.floci.services.msk;
 
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.command.InspectContainerCmd;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.ExposedPort;
-import com.github.dockerjava.api.model.Ports;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -36,11 +32,12 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -183,18 +180,8 @@ class RedpandaManagerTest {
     void isReadyPollsTheCorrectAdminReadinessPathInNativeMode() throws Exception {
         int adminHostPort = startFakeAdminServer();
 
-        when(containerDetector.isRunningInContainer()).thenReturn(false);
-
-        DockerClient dockerClient = mock(DockerClient.class);
-        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
-        InspectContainerResponse inspect = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
-
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
-        when(dockerClient.inspectContainerCmd("container-id")).thenReturn(inspectCmd);
-        when(inspectCmd.exec()).thenReturn(inspect);
-        when(inspect.getNetworkSettings().getPorts().getBindings()).thenReturn(Map.of(
-                ExposedPort.tcp(RedpandaManager.ADMIN_PORT),
-                new Ports.Binding[] { new Ports.Binding("0.0.0.0", String.valueOf(adminHostPort)) }));
+        when(lifecycleManager.resolveEndpoint("container-id", RedpandaManager.ADMIN_PORT, null))
+                .thenReturn(new EndpointInfo("localhost", adminHostPort));
 
         MskCluster cluster = newCluster();
         cluster.setContainerId("container-id");
@@ -203,6 +190,36 @@ class RedpandaManagerTest {
         assertTrue(manager.isReady(cluster),
                 "isReady() should report ready once /v1/status/ready answers 200; "
                         + "if it regresses to polling /ready (which always 404s), this assertion fails");
+    }
+
+    @Test
+    void adminReadyUrlResolvesFromThePersistedContainerIdOnTheBrokersNetworkAfterRestart() {
+        when(config.services().dockerNetwork()).thenReturn(Optional.of("floci-net"));
+        when(lifecycleManager.resolveEndpoint("container-460", RedpandaManager.ADMIN_PORT, "floci-net"))
+                .thenReturn(new EndpointInfo("172.18.0.9", RedpandaManager.ADMIN_PORT));
+
+        // A cluster record as a killed Floci left it: still CREATING, with a host-form bootstrap
+        // string, and nothing in this freshly constructed manager's memory about its container.
+        MskCluster cluster = newCluster();
+        cluster.setContainerId("container-460");
+        cluster.setBootstrapBrokers("localhost:9300");
+
+        assertEquals("http://172.18.0.9:9644/v1/status/ready", manager.adminReadyUrl(cluster),
+                "readiness must not depend on in-memory state or on the bootstrap string's format");
+    }
+
+    @Test
+    void isReadyReportsNotReadyWhenTheContainerIsGone() {
+        when(lifecycleManager.resolveEndpoint("container-461", RedpandaManager.ADMIN_PORT, null))
+                .thenThrow(new NotFoundException("No such container: container-461"));
+
+        MskCluster cluster = newCluster();
+        cluster.setContainerId("container-461");
+        cluster.setBootstrapBrokers("172.18.0.10:9092");
+
+        assertFalse(manager.isReady(cluster),
+                "a failed endpoint lookup must not escape into the readiness poller, "
+                        + "which would abandon its pass over the remaining clusters");
     }
 
     @Test
@@ -229,8 +246,9 @@ class RedpandaManagerTest {
     }
 
     @Test
-    void containerModeAdvertisesContainerNameAddress() {
+    void containerModeAdvertisesContainerNameOnInternalListenerAndHostPortOnHostListener() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9301);
 
         ContainerInfo info = new ContainerInfo("container-456",
                 Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.5", KAFKA_PORT)));
@@ -238,22 +256,117 @@ class RedpandaManagerTest {
 
         ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
 
-        manager.startContainer(newCluster());
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
 
         verify(lifecycleManager).createAndStart(specCaptor.capture());
         ContainerSpec spec = specCaptor.getValue();
 
+        int listenIndex = spec.cmd().indexOf("--kafka-addr");
+        assertTrue(listenIndex >= 0, "cmd should contain --kafka-addr");
+        assertEquals("internal://0.0.0.0:9092,host://0.0.0.0:9093", spec.cmd().get(listenIndex + 1));
         int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
         assertTrue(flagIndex >= 0, "cmd should contain --advertise-kafka-addr");
-        assertEquals("floci-aws-msk-abc123:9092", spec.cmd().get(flagIndex + 1));
+        assertEquals("internal://floci-aws-msk-abc123:9092,host://localhost:9301",
+                spec.cmd().get(flagIndex + 1));
 
-        assertFalse(spec.portBindings().containsKey(KAFKA_PORT), "container mode should not publish ports to host");
+        assertFalse(spec.portBindings().containsKey(KAFKA_PORT),
+                "the internal listener stays on the Docker network");
+        assertEquals(Integer.valueOf(9301), spec.portBindings().get(RedpandaManager.KAFKA_HOST_LISTENER_PORT),
+                "the host listener is published so clients on the Docker host can reach the broker");
         assertTrue(spec.exposedPorts().contains(KAFKA_PORT));
         assertTrue(spec.exposedPorts().contains(RedpandaManager.ADMIN_PORT));
         assertFalse(Files.exists(tempDir.resolve("msk").resolve("test-cluster")),
                 "container mode must not create host directories from inside the emulator container");
 
-        verifyNoInteractions(portAllocator);
+        assertEquals("172.18.0.5:9092", cluster.getBootstrapBrokers(),
+                "without a bootstrap hostname, GetBootstrapBrokers keeps the Docker-network address");
+    }
+
+    @Test
+    void containerModeListsBothListenersWhenBootstrapHostnameIsSet() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.services().msk().bootstrapHostname()).thenReturn(Optional.of("kafka.local"));
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9302);
+
+        ContainerInfo info = new ContainerInfo("container-457",
+                Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.6", KAFKA_PORT)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        ContainerSpec spec = specCaptor.getValue();
+        int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
+        assertEquals("internal://floci-aws-msk-abc123:9092,host://kafka.local:9302",
+                spec.cmd().get(flagIndex + 1));
+        assertEquals("floci-aws-msk-abc123:9092,kafka.local:9302", cluster.getBootstrapBrokers(),
+                "both listeners are listed, the internal one first, so host and sibling-container "
+                        + "clients can each discover the broker");
+    }
+
+    @Test
+    void containerModeTreatsBlankBootstrapHostnameAsUnset() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.services().msk().bootstrapHostname()).thenReturn(Optional.of("  "));
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9305);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-459",
+                Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.8", KAFKA_PORT))));
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        ContainerSpec spec = specCaptor.getValue();
+        int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
+        assertEquals("internal://floci-aws-msk-abc123:9092,host://localhost:9305",
+                spec.cmd().get(flagIndex + 1));
+        assertEquals("172.18.0.8:9092", cluster.getBootstrapBrokers());
+    }
+
+    @Test
+    void containerModeReleasesHostListenerPortWhenStartFails() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9303);
+        when(lifecycleManager.createAndStart(any())).thenThrow(new RuntimeException("boom"));
+
+        assertThrows(RuntimeException.class, () -> manager.startContainer(newCluster()));
+
+        verify(portAllocator).release(9303);
+    }
+
+    @Test
+    void releasesHostPortWhenVolumeSetupFailsBeforeStart() {
+        when(config.storage().hostPersistentPath()).thenReturn("");
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9306);
+        doThrow(new RuntimeException("Docker unreachable"))
+                .when(lifecycleManager).ensureVolume("floci-aws-msk-abc123");
+
+        assertThrows(RuntimeException.class, () -> manager.startContainer(newCluster()));
+
+        verify(portAllocator).release(9306);
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void stopContainerInContainerModeReleasesHostListenerPort() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9304);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-458",
+                Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.7", KAFKA_PORT))));
+
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
+        manager.stopContainer(cluster);
+
+        verify(lifecycleManager).stopAndRemove("container-458", null);
+        verify(portAllocator).release(9304);
     }
 
     @Test

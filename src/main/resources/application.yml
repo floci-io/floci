@@ -422,6 +422,13 @@ floci:
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
+      # bootstrap-hostname: unset by default, so GetBootstrapBrokers returns the broker's
+      # Docker-network address. Only applies when Floci runs in a container: each broker then
+      # also has a host listener, published on a port from the kafka-host-port range and
+      # advertised as <this hostname, else localhost>:<port>. When set, GetBootstrapBrokers
+      # returns both listeners, <container-name>:9092,<hostname>:<port>, so clients on the
+      # Docker host and in sibling containers can each discover the broker.
+      # Env var: FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME=localhost
     amazonmq:
       enabled: true
       mock: false

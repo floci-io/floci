@@ -996,6 +996,18 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Like {@link #resolveEndpoint(String, int)}, but prefers the container's address on
+     * {@code preferredNetwork}, as {@link #createAndStart} does with the spec's network. A
+     * container that publishes ports is created on the default bridge and connected to its
+     * service network after start, so without a preference the bridge address, which Floci
+     * usually cannot reach, can be returned instead.
+     */
+    public EndpointInfo resolveEndpoint(String containerId, int containerPort, String preferredNetwork) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        return resolveEndpoint(inspect, containerPort, preferredNetwork);
+    }
+
+    /**
      * Resolves the container's IP on its Docker network, independent of whether Floci runs
      * natively or in a container. Used for addresses that sibling containers (not Floci itself)
      * must dial — e.g. ElastiCache cluster-bus peering between Valkey nodes.
