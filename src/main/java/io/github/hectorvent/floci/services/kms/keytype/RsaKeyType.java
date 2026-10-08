@@ -24,6 +24,7 @@ import org.jboss.logging.Logger;
 import javax.crypto.Cipher;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.KeyPairGenerator;
@@ -160,10 +161,12 @@ final class RsaKeyType implements KmsKeyType {
             OAEPParameterSpec params = new OAEPParameterSpec(digest, "MGF1", new MGF1ParameterSpec(digest),
                     PSource.PSpecified.DEFAULT);
             if (mode == Cipher.ENCRYPT_MODE) {
-                cipher.init(mode, AsymmetricKeys.publicKey(key, "RSA"), params);
-            } else {
-                cipher.init(mode, AsymmetricKeys.privateKey(key, "RSA"), params);
+                // Wrapping the plaintext gives the same RSAES-OAEP ciphertext. Some providers, such as
+                // BC-FIPS, offer RSA-OAEP encryption only as a key wrap.
+                cipher.init(Cipher.WRAP_MODE, AsymmetricKeys.publicKey(key, "RSA"), params);
+                return cipher.wrap(new SecretKeySpec(input, "GENERIC"));
             }
+            cipher.init(mode, AsymmetricKeys.privateKey(key, "RSA"), params);
             return cipher.doFinal(input);
         } catch (Exception e) {
             if (mode == Cipher.DECRYPT_MODE) {
