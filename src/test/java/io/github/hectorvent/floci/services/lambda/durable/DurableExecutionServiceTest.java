@@ -820,6 +820,22 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void aTargetThatCannotBeInvokedStartsInBatchOrderAndFailsBeforeTheInvocationEnds() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(step("s1", DurableOperationAction.START, null, null),
+                    chainedStart("i1", "missing-fn", null), step("s2", DurableOperationAction.START, null, null),
+                    executionSucceed("\"closed\"")));
+            return succeeded("");
+        });
+
+        DurableExecution execution = service.get(start("exec-1", "{}", false).getExecutionArn());
+
+        assertEquals(List.of("ExecutionStarted", "StepStarted", "ChainedInvokeStarted", "StepStarted",
+                "ChainedInvokeFailed", "InvocationCompleted", "ExecutionSucceeded"), eventTypes(execution));
+        assertEquals(DurableOperationStatus.FAILED, execution.getOperations().get("i1").getStatus());
+    }
+
+    @Test
     void stoppingTheParentLeavesADurableChildRunning() {
         invoker.childScript("child-fn", event -> {
             checkpoint(event, token(event), List.of(waitStart("w1", 600)));

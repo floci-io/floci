@@ -35,6 +35,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -250,7 +251,13 @@ public class DurableExecutionService implements Resettable {
             }
             DurableExecution execution = loadWithCurrentToken(arn, checkpointToken);
             long now = clock.millis();
-            DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution, updates, now);
+            Map<String, ResolvedDurableTarget> targets = new HashMap<>();
+            DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution, updates, now,
+                    functionName -> unreachableTarget(execution, functionName, targets));
+            for (Map.Entry<String, AwsException> unreachable : outcome.unreachableChainedInvokes().entrySet()) {
+                completeChainedInvoke(execution, execution.getOperations().get(unreachable.getKey()),
+                        ChainedOutcome.failed(unreachable.getValue()), now, effects);
+            }
             if (outcome.closed()) {
                 // AWS ends the invocation here and ignores what the handler returns after it.
                 DurableHistory.invocationCompleted(execution, execution.getCurrentInvocationStartedAt(), now,
@@ -260,7 +267,9 @@ public class DurableExecutionService implements Resettable {
             // AWS runs a target started in the batch that closes the execution, and ignores its result.
             List<DurableExecution> children = new ArrayList<>();
             for (String operationId : outcome.chainedInvokes()) {
-                startChainedInvoke(execution, execution.getOperations().get(operationId), now, children, effects);
+                DurableOperation operation = execution.getOperations().get(operationId);
+                startChainedInvoke(execution, operation, targets.get(operation.getChainedFunctionName()), now,
+                        children, effects);
             }
             if (!outcome.closed()) {
                 DurableCheckpointApplier.fireDueTimers(execution, now);
@@ -268,8 +277,8 @@ public class DurableExecutionService implements Resettable {
             List<DurableOperation> changed = unseenOperations(execution);
             String nextToken = null;
             if (outcome.closed()) {
-                closeEvent(execution, now);
-                closeBookkeeping(execution, now, effects);
+                close(execution, outcome.closingStatus(), outcome.closingResult(), outcome.closingError(), now,
+                        effects);
             } else {
                 execution.setCheckpointSequence(execution.getCheckpointSequence() + 1);
                 nextToken = DurableTokens.checkpointToken(execution.getExecutionArn(),
@@ -780,24 +789,24 @@ public class DurableExecutionService implements Resettable {
         effects.add(() -> finishChainedInvoke(parent.accountId(), parent.storeKey(), operationId, childArn, outcome));
     }
 
-    /**
-     * Resolves the target of a CHAINED_INVOKE this checkpoint started. A target that cannot be
-     * invoked fails the operation at once, and ChainedInvokeStarted then names only the function.
-     */
-    private void startChainedInvoke(DurableExecution execution, DurableOperation operation, long now,
-                                    List<DurableExecution> children, List<Runnable> effects) {
+    /** Null when the target can be invoked. The resolved target is kept in {@code targets} for the start. */
+    private AwsException unreachableTarget(DurableExecution execution, String functionName,
+                                           Map<String, ResolvedDurableTarget> targets) {
+        try {
+            targets.put(functionName, resolveChainedTarget(execution, functionName));
+            return null;
+        } catch (AwsException e) {
+            return e;
+        }
+    }
+
+    private void startChainedInvoke(DurableExecution execution, DurableOperation operation,
+                                    ResolvedDurableTarget target, long now, List<DurableExecution> children,
+                                    List<Runnable> effects) {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("FunctionName", operation.getChainedFunctionName());
         if (operation.getChainedTenantId() != null) {
             details.put("TenantId", operation.getChainedTenantId());
-        }
-        ResolvedDurableTarget target;
-        try {
-            target = resolveChainedTarget(execution, operation.getChainedFunctionName());
-        } catch (AwsException e) {
-            DurableHistory.operationEvent(execution, operation, "ChainedInvokeStarted", now, details);
-            completeChainedInvoke(execution, operation, ChainedOutcome.failed(e), now, effects);
-            return;
         }
         details.put("Input", DurableHistory.payloadWrapper(operation.getInputPayload()));
         details.put("ExecutedVersion", target.version());
