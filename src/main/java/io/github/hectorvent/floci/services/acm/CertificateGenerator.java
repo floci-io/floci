@@ -4,9 +4,14 @@ import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import jakarta.enterprise.context.ApplicationScoped;
-import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.DERNull;
 import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.nist.NISTObjectIdentifiers;
 import org.bouncycastle.asn1.pkcs.EncryptedPrivateKeyInfo;
+import org.bouncycastle.asn1.pkcs.EncryptionScheme;
+import org.bouncycastle.asn1.pkcs.KeyDerivationFunc;
+import org.bouncycastle.asn1.pkcs.PBES2Parameters;
+import org.bouncycastle.asn1.pkcs.PBKDF2Params;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
@@ -59,19 +64,20 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
 import javax.crypto.Cipher;
-import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.PBEParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 
 @ApplicationScoped
 public class CertificateGenerator {
 
     private static final Logger LOG = Logger.getLogger(CertificateGenerator.class);
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
-    private static final String PBE_ALGORITHM = "PBEWithHmacSHA256AndAES_256";
     private static final int PBE_SALT_BYTES = 16;
     private static final int PBE_ITERATIONS = 4096;
+    private static final int PBE_KEY_BYTES = 32;
+    private static final int PBE_IV_BYTES = 16;
 
     /**
      * A dotted quad with every octet in range. Deliberately strict: a loose pattern lets a
@@ -454,22 +460,27 @@ public class CertificateGenerator {
         try {
             PrivateKey privateKey = Pem.parsePrivateKey(privateKeyPem);
 
-            // PBES2 with AES-256-CBC, run through the JDK so no JCE provider has to be
-            // registered. The algorithm name fixes the PBKDF2 PRF to HMAC-SHA256, and the
-            // salt and iteration count are passed explicitly so the output does not depend
-            // on provider defaults. The ASN.1 below only wraps the result, so it needs no
-            // provider either.
-            SecretKey secretKey = SecretKeyFactory.getInstance(PBE_ALGORITHM)
-                .generateSecret(new PBEKeySpec(passphrase.toCharArray()));
+            // PBES2 with a PBKDF2-HMAC-SHA256 key and AES-256-CBC, run through the JDK so no JCE
+            // provider has to be registered. The two steps give the same bytes as the combined
+            // PBEWithHmacSHA256AndAES_256 name, which not every provider offers. The salt, IV and
+            // iteration count are explicit so the output does not depend on provider defaults, and
+            // the ASN.1 below only describes the result.
             byte[] salt = new byte[PBE_SALT_BYTES];
+            byte[] iv = new byte[PBE_IV_BYTES];
             SECURE_RANDOM.nextBytes(salt);
-            Cipher cipher = Cipher.getInstance(PBE_ALGORITHM);
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey, new PBEParameterSpec(salt, PBE_ITERATIONS));
+            SECURE_RANDOM.nextBytes(iv);
+            byte[] key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                .generateSecret(new PBEKeySpec(passphrase.toCharArray(), salt, PBE_ITERATIONS, PBE_KEY_BYTES * 8))
+                .getEncoded();
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
             byte[] ciphertext = cipher.doFinal(privateKey.getEncoded());
 
-            AlgorithmIdentifier scheme = new AlgorithmIdentifier(
-                PKCSObjectIdentifiers.id_PBES2,
-                ASN1Primitive.fromByteArray(cipher.getParameters().getEncoded()));
+            PBKDF2Params keyDerivation = new PBKDF2Params(salt, PBE_ITERATIONS, PBE_KEY_BYTES,
+                new AlgorithmIdentifier(PKCSObjectIdentifiers.id_hmacWithSHA256, DERNull.INSTANCE));
+            AlgorithmIdentifier scheme = new AlgorithmIdentifier(PKCSObjectIdentifiers.id_PBES2, new PBES2Parameters(
+                new KeyDerivationFunc(PKCSObjectIdentifiers.id_PBKDF2, keyDerivation),
+                new EncryptionScheme(NISTObjectIdentifiers.id_aes256_CBC, new DEROctetString(iv))));
             PKCS8EncryptedPrivateKeyInfo encryptedInfo =
                 new PKCS8EncryptedPrivateKeyInfo(new EncryptedPrivateKeyInfo(scheme, ciphertext));
 
