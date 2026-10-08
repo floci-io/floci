@@ -11,12 +11,25 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import javax.crypto.Cipher;
+import javax.crypto.EncryptedPrivateKeyInfo;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.PBEParameterSpec;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.KeyFactory;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.interfaces.RSAPrivateCrtKey;
+import java.security.interfaces.RSAPublicKey;
 import java.util.Base64;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -291,7 +304,7 @@ class AcmImportExportTest {
 
     @Test
     @Order(14)
-    void exportImportedCertificate() {
+    void exportImportedCertificate() throws Exception {
         // Imported certificates should be exportable (they have a private key)
         String certJson = validTestCertificate.replace("\n", "\\n");
         String keyJson = validTestPrivateKey.replace("\n", "\\n");
@@ -313,7 +326,7 @@ class AcmImportExportTest {
 
         String passphrase = Base64.getEncoder().encodeToString("testpassphrase".getBytes());
 
-        given()
+        String exportedKey = given()
             .header("X-Amz-Target", "CertificateManager.ExportCertificate")
             .contentType(ACM_CONTENT_TYPE)
             .body("""
@@ -327,7 +340,24 @@ class AcmImportExportTest {
         .then()
             .statusCode(200)
             .body("Certificate", startsWith("-----BEGIN CERTIFICATE-----"))
-            .body("PrivateKey", startsWith("-----BEGIN ENCRYPTED PRIVATE KEY-----"));
+            .body("PrivateKey", startsWith("-----BEGIN ENCRYPTED PRIVATE KEY-----"))
+            .extract().jsonPath().getString("PrivateKey");
+
+        // The JDK's own PBES2 code, not the one that wrote it, decrypts the export, and the key inside is the
+        // private key of the imported certificate
+        EncryptedPrivateKeyInfo info = new EncryptedPrivateKeyInfo(Base64.getMimeDecoder().decode(exportedKey
+            .replace("-----BEGIN ENCRYPTED PRIVATE KEY-----", "")
+            .replace("-----END ENCRYPTED PRIVATE KEY-----", "")));
+        assertEquals("PBEWithHmacSHA256AndAES_256", info.getAlgName());
+        assertEquals(4096, info.getAlgParameters().getParameterSpec(PBEParameterSpec.class).getIterationCount());
+        Cipher cipher = Cipher.getInstance(info.getAlgName());
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeyFactory.getInstance(info.getAlgName())
+            .generateSecret(new PBEKeySpec("testpassphrase".toCharArray())), info.getAlgParameters());
+        RSAPrivateCrtKey exported = (RSAPrivateCrtKey) KeyFactory.getInstance("RSA")
+            .generatePrivate(info.getKeySpec(cipher));
+        X509Certificate certificate = (X509Certificate) CertificateFactory.getInstance("X.509")
+            .generateCertificate(new ByteArrayInputStream(validTestCertificate.getBytes(StandardCharsets.US_ASCII)));
+        assertEquals(((RSAPublicKey) certificate.getPublicKey()).getModulus(), exported.getModulus());
     }
 
     @Test

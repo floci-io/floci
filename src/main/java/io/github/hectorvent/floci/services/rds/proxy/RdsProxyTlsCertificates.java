@@ -176,7 +176,7 @@ public class RdsProxyTlsCertificates {
 
     private SSLContext buildSslContext(X509Certificate certificate, PrivateKey privateKey) throws Exception {
         char[] password = new char[0];
-        KeyStore keyStore = KeyStore.getInstance("PKCS12");
+        KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
         keyStore.load(null, password);
         keyStore.setKeyEntry("floci-rds-proxy", privateKey, password,
                 new java.security.cert.Certificate[]{certificate});
