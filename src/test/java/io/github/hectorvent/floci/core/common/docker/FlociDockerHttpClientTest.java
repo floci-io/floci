@@ -24,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -124,8 +125,8 @@ class FlociDockerHttpClientTest {
                         return response.getStatusCode();
                     }
                 });
-                Thread.sleep(2_500);
-                assertFalse(wait.isDone(), "a container wait must outlive the response timeout");
+                assertThrows(TimeoutException.class, () -> wait.get(2_500, TimeUnit.MILLISECONDS),
+                        "a container wait must outlive the response timeout");
 
                 SocketChannel waitConnection = accepted.get(accepted.size() - 1);
                 waitConnection.write(ByteBuffer.wrap(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"

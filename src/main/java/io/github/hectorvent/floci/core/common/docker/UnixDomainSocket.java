@@ -10,6 +10,8 @@ import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.UnixDomainSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedByInterruptException;
+import java.nio.channels.ClosedSelectorException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
@@ -25,6 +27,12 @@ import java.util.concurrent.TimeUnit;
  * timeout passes without data, and a timeout of zero waits indefinitely, as {@code SO_TIMEOUT} does.
  * Reads and writes have their own selector and lock, so a hijacked exec can write stdin on one thread
  * while another reads its output.
+ *
+ * <p>Failures keep the blocking channel's shape, so callers that expect an {@link IOException} still get
+ * one: closing the socket while another thread waits in a read or write ends that wait with a
+ * {@link SocketException} rather than the selector's unchecked {@link ClosedSelectorException}, and an
+ * interrupted thread closes the socket and fails with {@link ClosedByInterruptException} instead of
+ * spinning, since a selector returns at once while the interrupt flag is set.
  */
 final class UnixDomainSocket extends Socket {
 
@@ -189,35 +197,52 @@ final class UnixDomainSocket extends Socket {
         synchronized (readLock) {
             int timeout = soTimeoutMillis;
             long deadline = timeout > 0 ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout) : 0L;
-            while (true) {
-                ensureOpen();
-                int read = channel.read(buffer);
-                if (read != 0) {
-                    return read;
-                }
-                if (timeout > 0) {
-                    long remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
-                    if (remaining <= 0) {
-                        throw new SocketTimeoutException("Read timed out");
+            try {
+                while (true) {
+                    ensureOpen();
+                    int read = channel.read(buffer);
+                    if (read != 0) {
+                        return read;
                     }
-                    readSelector.select(remaining);
-                } else {
-                    readSelector.select();
+                    if (timeout > 0) {
+                        long remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                        if (remaining <= 0) {
+                            throw new SocketTimeoutException("Read timed out");
+                        }
+                        readSelector.select(remaining);
+                    } else {
+                        readSelector.select();
+                    }
+                    failIfInterrupted();
+                    readSelector.selectedKeys().clear();
                 }
-                readSelector.selectedKeys().clear();
+            } catch (ClosedSelectorException e) {
+                throw new SocketException("Socket is closed");
             }
         }
     }
 
     private void write(ByteBuffer buffer) throws IOException {
         synchronized (writeLock) {
-            while (buffer.hasRemaining()) {
-                ensureOpen();
-                if (channel.write(buffer) == 0) {
-                    writeSelector.select();
-                    writeSelector.selectedKeys().clear();
+            try {
+                while (buffer.hasRemaining()) {
+                    ensureOpen();
+                    if (channel.write(buffer) == 0) {
+                        writeSelector.select();
+                        failIfInterrupted();
+                        writeSelector.selectedKeys().clear();
+                    }
                 }
+            } catch (ClosedSelectorException e) {
+                throw new SocketException("Socket is closed");
             }
+        }
+    }
+
+    private void failIfInterrupted() throws IOException {
+        if (Thread.currentThread().isInterrupted()) {
+            close();
+            throw new ClosedByInterruptException();
         }
     }
 
