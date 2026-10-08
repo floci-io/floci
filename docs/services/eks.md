@@ -544,6 +544,31 @@ Callers requiring dynamic volume provisioning can install a driver (such as the 
 
 For local testing workflows that rely on automatic volume binding without a CSI driver, set `floci.services.eks.default-storage-class: true` (or `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS=true`) to retain k3s's bundled `local-path` provisioner and default StorageClass.
 
+## Joining EC2 instances as cluster nodes
+
+Floci allows EC2 instances to join an EKS cluster as Kubernetes worker nodes. Launching an instance via `RunInstances` with user data targeting a cluster automatically registers a matching Kubernetes node.
+
+### Join mechanisms
+
+Supported user data formats include:
+- Amazon Linux 2 `/etc/eks/bootstrap.sh <cluster-name>` commands (plain text, base64, or gzipped base64).
+- Amazon Linux 2023 `nodeadm` YAML documents or MIME multipart payloads (`NodeConfig` containing `spec.cluster.name`).
+
+On AWS, EC2 does not fail instance launches if a target cluster is missing. Floci mirrors this: if the target cluster does not exist or node registration fails, Floci logs a warning and allows the launch to proceed.
+
+### Node metadata and AWS outcome alignment
+
+When an instance joins a cluster, Floci registers a Kubernetes `Node` matching AWS conventions:
+- **Node name**: Uses the instance's private DNS name (`privateDnsName`), matching AWS EKS conventions.
+- **Provider ID**: Set to `spec.providerID: aws:///<availability-zone>/<instance-id>`.
+- **Labels & Status**: Includes topology and instance-type labels, ready status, internal IP, and catalog capacity.
+- **EC2 persistence**: The instance remains an authentic EC2 instance reported by `DescribeInstances`.
+
+### Differences and limitations
+
+- Floci registers the `Node` directly in the control plane with matching provider ID, labels, and ready status.
+- Node cleanup on termination is handled in part two; an instance can belong to at most one cluster at a time.
+
 ## Configuration
 
 | Variable | Default | Description |

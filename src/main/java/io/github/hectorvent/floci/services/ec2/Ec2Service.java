@@ -287,6 +287,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final Ec2VolumeBlockDeviceManager volumeBlockDeviceManager;
     private jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance;
     private final List<VpcRouteTableListener> routeTableListeners = new CopyOnWriteArrayList<>();
+    private jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance;
+    private final List<Ec2InstanceLaunchListener> instanceLaunchListeners = new CopyOnWriteArrayList<>();
 
     public void addRouteTableListener(VpcRouteTableListener listener) {
         if (listener != null && !this.routeTableListeners.contains(listener)) {
@@ -298,6 +300,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         this.routeTableListeners.clear();
         if (listener != null) {
             this.routeTableListeners.add(listener);
+        }
+    }
+
+    public void addInstanceLaunchListener(Ec2InstanceLaunchListener listener) {
+        if (listener != null && !this.instanceLaunchListeners.contains(listener)) {
+            this.instanceLaunchListeners.add(listener);
+        }
+    }
+
+    private void notifyInstanceLaunched(String accountId, String region, Instance instance) {
+        Set<Ec2InstanceLaunchListener> listeners = new LinkedHashSet<>(instanceLaunchListeners);
+        if (instanceLaunchListenersInstance != null && !instanceLaunchListenersInstance.isUnsatisfied()) {
+            instanceLaunchListenersInstance.forEach(listeners::add);
+        }
+        for (Ec2InstanceLaunchListener listener : listeners) {
+            try {
+                listener.onInstanceLaunched(accountId, region, instance);
+            } catch (Exception e) {
+                LOG.warnv("Error notifying launch listener for instance {0}: {1}",
+                        instance.getInstanceId(), e.getMessage());
+            }
         }
     }
 
@@ -395,12 +418,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       VpcNetworkManager vpcNetworkManager, IamService iamService,
                       jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders,
                       Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
-                      jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance) {
+                      jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance,
+                      jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
         this.vpcNetworkManager = vpcNetworkManager;
         this.clusterNodeInstanceProviders = clusterNodeInstanceProviders;
         this.routeTableListenersInstance = routeTableListenersInstance;
+        this.instanceLaunchListenersInstance = instanceLaunchListenersInstance;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -3243,6 +3268,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
         }
 
+        for (Instance inst : launched) {
+            notifyInstanceLaunched(callerAccountId(), region, inst);
+        }
+
         return reservation;
     }
 
@@ -3496,10 +3525,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 return allocated.get();
             }
         }
-        if (subnetId == null) {
-            return "172.31.0." + (10 + new Random().nextInt(200));
-        }
-        Cidr4 cidr = subnets.get(key(region, subnetId))
+        Cidr4 cidr = (subnetId != null ? subnets.get(key(region, subnetId)) : Optional.<Subnet>empty())
                 .flatMap(subnet -> Cidr4.parse(subnet.getCidrBlock()))
                 .or(() -> Cidr4.parse(SYNTHETIC_FALLBACK_CIDR))
                 .orElseThrow();
@@ -3509,7 +3535,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (last < first) {
             throw insufficientFreeAddresses(subnetId);
         }
-        String cursorKey = key(region, subnetId);
+        String cursorKey = key(region, subnetId != null ? subnetId : "subnetless");
         synchronized (privateIpAllocationLock) {
             // The addresses persisted resources already hold, so a restart, which forgets the
             // cursor, never hands out an address that is still in use.
@@ -3540,7 +3566,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String regionPrefix = region + "::";
         Set<String> inUse = new HashSet<>();
         for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(regionPrefix))) {
-            if (!subnetId.equals(ni.getSubnetId())) {
+            if (!Objects.equals(subnetId, ni.getSubnetId())) {
                 continue;
             }
             addIfSet(inUse, ni.getPrivateIpAddress());
@@ -3553,17 +3579,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if ("terminated".equals(state)) {
                 continue;
             }
-            if (subnetId.equals(instance.getSubnetId())) {
+            if (Objects.equals(subnetId, instance.getSubnetId())) {
                 addIfSet(inUse, instance.getPrivateIpAddress());
             }
             for (InstanceNetworkInterface ni : nullToEmpty(instance.getNetworkInterfaces())) {
-                if (subnetId.equals(ni.getSubnetId())) {
+                if (Objects.equals(subnetId, ni.getSubnetId())) {
                     addIfSet(inUse, ni.getPrivateIpAddress());
                 }
             }
         }
         for (NatGateway natGateway : natGateways.scan(k -> k.startsWith(regionPrefix))) {
-            if (!subnetId.equals(natGateway.getSubnetId()) || "deleted".equals(natGateway.getState())) {
+            if (!Objects.equals(subnetId, natGateway.getSubnetId()) || "deleted".equals(natGateway.getState())) {
                 continue;
             }
             for (NatGatewayAddress address : nullToEmpty(natGateway.getNatGatewayAddresses())) {
@@ -5820,6 +5846,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return found;
         }
         return findExternalInstance(accountId, region, instanceId);
+    }
+
+    public Optional<Instance> getInstance(String region, String instanceId) {
+        return instances.get(key(region, instanceId));
     }
 
     public Instance findInstanceById(String instanceId) {
