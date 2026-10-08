@@ -17,11 +17,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
+import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -353,6 +356,63 @@ class CodeArtifactAssetPersistenceTest {
                 "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", sha256Hex(different), "true", different));
         assertEquals("ConflictException", e.getErrorCode());
         assertEquals("a.txt", e.getExtendedData().get("resourceId"));
+    }
+
+    /**
+     * {@code deletePackage} removes a version's metadata record before it attempts to clean up
+     * that version's asset bytes, specifically so a cleanup failure on one asset never leaves the
+     * record in place pointing at bytes that may now be missing. A {@link DirectoryNotEmptyException}
+     * forced on one asset's path stands in for the failure here, since it is deterministic and
+     * platform-independent (unlike a permission trick, which a root-run CI container would ignore).
+     * The other asset in the same version must still get cleaned up, and the failure must be logged
+     * rather than silently swallowed, the same way {@code republishingWithMatchingContentRepairsAnUnreadableBackingFileAndLogsAWarning}
+     * above asserts on the real log record rather than trusting that the behavior exists.
+     */
+    @Test
+    void deletingAnAssetsBytesFailingStillRemovesTheVersionRecordAndCleansUpTheOtherAsset(@TempDir Path dir)
+            throws IOException {
+        CodeArtifactService service = newService(dir);
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] contentA = "content of a".getBytes(StandardCharsets.UTF_8);
+        byte[] contentB = "content of b".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(contentA), "true", contentA);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "b.txt",
+                sha256Hex(contentB), "true", contentB);
+
+        Path assetFileA;
+        Path assetFileB;
+        try (Stream<Path> paths = Files.walk(dir.resolve("codeartifact-assets"))) {
+            List<Path> files = paths.filter(Files::isRegularFile).toList();
+            assetFileA = files.stream().filter(p -> matchesContent(p, contentA)).findFirst().orElseThrow();
+            assetFileB = files.stream().filter(p -> matchesContent(p, contentB)).findFirst().orElseThrow();
+        }
+        Files.delete(assetFileB);
+        Files.createDirectory(assetFileB);
+        Files.createFile(assetFileB.resolve("not-empty"));
+
+        List<LogRecord> records = LogCapture.capture(CodeArtifactService.class, () ->
+                service.deletePackage(REGION, "dom", null, "repo", "generic", "ns", "my-pkg"));
+
+        assertTrue(records.stream().anyMatch(r -> r.getMessage() != null
+                        && r.getMessage().contains("Could not delete CodeArtifact asset file")
+                        && r.getThrown() instanceof UncheckedIOException
+                        && r.getThrown().getCause() instanceof DirectoryNotEmptyException),
+                "expected a warning logging the failed asset cleanup, got: " + records);
+        assertFalse(Files.exists(assetFileA), "the other asset's bytes must still be cleaned up");
+
+        AwsException gone = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", null));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    private static boolean matchesContent(Path file, byte[] expected) {
+        try {
+            return Arrays.equals(Files.readAllBytes(file), expected);
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     @Test

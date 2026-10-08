@@ -64,4 +64,16 @@ public interface RepositorySidecarManager {
      */
     boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
             String packageName);
+
+    /**
+     * Deletes every version of the named package from this sidecar's own backing storage. Every
+     * sidecar Floci currently backs (Reposilite, Verdaccio, pypiserver) can do this; the default
+     * throws {@link UnsupportedOperationException} rather than silently leaving the package in place
+     * or claiming a success it cannot back up, for a future format whose sidecar genuinely cannot. An
+     * implementation that can delete overrides this.
+     */
+    default void deletePackage(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        throw new UnsupportedOperationException(format() + " packages cannot be deleted through this sidecar");
+    }
 }

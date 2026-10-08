@@ -100,6 +100,36 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         return fetchPackageDocument(baseUrl, namespace, packageName).isPresent();
     }
 
+    /**
+     * Removes a whole package, every version at once, the same way the real npm CLI's final
+     * unpublish step does: fetch the packument for its current {@code _rev}, then {@code DELETE} the
+     * package path with that revision appended as {@code /-rev/<rev>}. Confirmed against a live
+     * Verdaccio container: a bare {@code DELETE} with no revision is not a route at all (404
+     * "Cannot DELETE"), and the revisioned form removes every version and tarball in one call.
+     */
+    @Override
+    public void deletePackage(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        String revision = fetchPackageDocument(baseUrl, namespace, packageName)
+                .orElseThrow(() -> new IllegalStateException(packageName + " no longer exists on the Verdaccio "
+                        + "sidecar"))
+                .path("_rev").asText("");
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + packagePath(namespace, packageName)
+                + "/-rev/" + SidecarUriUtils.encodeSegment(revision));
+        HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).DELETE().build();
+        HttpResponse<Void> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.discarding());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the Verdaccio sidecar to delete " + packageName, e);
+        }
+        if (response.statusCode() != 200 && response.statusCode() != 201) {
+            throw new IllegalStateException("Could not delete " + packageName
+                    + " from the Verdaccio sidecar: upstream returned " + response.statusCode());
+        }
+    }
+
     /** One tarball by its filename, from a backend already made ready by {@link #ensureReady}. */
     public Optional<byte[]> fetchTarball(String baseUrl, String namespace, String packageName, String assetName) {
         HttpRequest request = tarballRequest(baseUrl, namespace, packageName, assetName);
