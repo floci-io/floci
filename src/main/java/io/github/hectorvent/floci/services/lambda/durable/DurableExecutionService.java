@@ -122,7 +122,10 @@ public class DurableExecutionService implements Resettable {
                               Long startedBefore, boolean reverseOrder, Integer maxItems, String marker) {
     }
 
-    /** The token is null when the batch closed the execution. The SDK reads that as "completed". */
+    /**
+     * The token is null and the operations are empty when the batch closed the execution. The SDK
+     * reads that as "completed".
+     */
     public record CheckpointResult(String checkpointToken, List<DurableOperation> newExecutionState) {
     }
 
@@ -281,7 +284,7 @@ public class DurableExecutionService implements Resettable {
             for (DurableExecution child : children) {
                 save(child);
             }
-            result = new CheckpointResult(nextToken, changed);
+            result = new CheckpointResult(nextToken, outcome.closed() ? List.of() : changed);
         }
         runEffects(effects);
         return result;

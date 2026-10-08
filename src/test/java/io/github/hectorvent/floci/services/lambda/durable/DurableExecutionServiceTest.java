@@ -209,9 +209,10 @@ class DurableExecutionServiceTest {
 
     @Test
     void aClosingCheckpointEndsTheInvocationAndTheHandlerReturnIsIgnored() {
+        List<CheckpointResult> closing = new ArrayList<>();
         invoker.script(event -> {
-            checkpoint(event, token(event), List.of(step("s1", DurableOperationAction.START, null, null),
-                    executionSucceed("\"closed\"")));
+            closing.add(checkpoint(event, token(event), List.of(step("s1", DurableOperationAction.START, null, null),
+                    executionSucceed("\"closed\""))));
             return functionError("{\"errorMessage\":\"after close\"}");
         });
 
@@ -223,6 +224,7 @@ class DurableExecutionServiceTest {
                 eventTypes(execution));
         Map<?, ?> completed = (Map<?, ?>) execution.getHistory().get(2).getDetails().get("InvocationCompletedDetails");
         assertEquals(invoker.requestIds.get(0), completed.get("RequestId"));
+        assertTrue(closing.get(0).newExecutionState().isEmpty());
     }
 
     @Test
