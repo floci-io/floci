@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CookieHeaders;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
@@ -3551,7 +3552,7 @@ public class ApiGatewayExecuteController {
     private static void putV2CookiesHeadersAndQuery(ObjectNode event,
                                                     MultivaluedMap<String, String> requestHeaders,
                                                     MultivaluedMap<String, String> queryParams) {
-        List<String> cookies = v2Cookies(requestHeaders);
+        List<String> cookies = CookieHeaders.cookiePairs(requestHeaders);
         if (!cookies.isEmpty()) {
             ArrayNode cookiesNode = event.putArray("cookies");
             cookies.forEach(cookiesNode::add);
@@ -3572,25 +3573,6 @@ public class ApiGatewayExecuteController {
                 }
             }
         }
-    }
-
-    /** Every cookie-pair from every {@code Cookie} header, in request order. */
-    private static List<String> v2Cookies(MultivaluedMap<String, String> requestHeaders) {
-        List<String> cookies = new ArrayList<>();
-        for (Map.Entry<String, List<String>> e : requestHeaders.entrySet()) {
-            if (!HttpHeaders.COOKIE.equalsIgnoreCase(e.getKey())) {
-                continue;
-            }
-            for (String header : e.getValue()) {
-                for (String cookie : header.split(";")) {
-                    String trimmed = cookie.trim();
-                    if (!trimmed.isEmpty()) {
-                        cookies.add(trimmed);
-                    }
-                }
-            }
-        }
-        return cookies;
     }
 
     private static boolean isV2TextContentType(String contentType) {
