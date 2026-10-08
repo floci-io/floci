@@ -52,8 +52,9 @@ an SDK, set the region and the endpoint override on the client. The override rep
 partition's real host (`amazonaws.com.cn` here) for transport only: the SDK still signs for the
 region you gave it, and that signing region is what places each request in its partition (see
 below). If clients reach Floci on another host or port than `http://localhost:4566`, set
-`FLOCI_BASE_URL` (or `FLOCI_HOSTNAME`) to match, or URLs Floci returns, such as SQS queue URLs
-and pre-signed URLs, keep pointing at the default.
+`FLOCI_BASE_URL` to match, or URLs Floci returns, such as SQS queue URLs and pre-signed URLs,
+keep pointing at the default. `FLOCI_HOSTNAME` is enough when only the host differs: it replaces
+the host and keeps the port.
 
 ## Which partition a request belongs to
 
