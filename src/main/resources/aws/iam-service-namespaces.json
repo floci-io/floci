@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_service_namespaces.py",
     "index": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-09-27",
+    "retrieved": "2026-10-10",
     "note": "make iam-namespaces-verify checks every entry still exists upstream."
   },
   "serviceNamespaces": [
@@ -171,11 +171,11 @@
     "elemental-support-content",
     "emr-containers",
     "emr-serverless",
+    "end-user-messaging",
     "entityresolution",
     "es",
     "events",
     "eventsbilltoaws",
-    "evidently",
     "evs",
     "execute-api",
     "finops-agent",
@@ -224,7 +224,6 @@
     "iot-device-tester",
     "iotanalytics",
     "iotdeviceadvisor",
-    "iotevents",
     "iotfleethub",
     "iotfleetwise",
     "iotjobsdata",
@@ -412,6 +411,7 @@
     "sso",
     "sso-directory",
     "sso-oauth",
+    "startups",
     "states",
     "storagegateway",
     "sts",

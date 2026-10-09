@@ -161,7 +161,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** CSPRNG for long-term secret access keys; ordinary resource IDs keep using {@link ThreadLocalRandom}. */
     private final SecureRandom secureRandom = new SecureRandom();
 
-    private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
@@ -910,6 +909,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "The group with name " + groupName + " cannot be found.", 404));
     }
 
+    /**
+     * Looks up a group by name in a specific account's namespace, without throwing when absent.
+     * Mirrors {@link #findUser(String, String)}, and exists for the same reason: a caller
+     * resolving a group's ARN has only the name, and the path that completes that ARN is held by
+     * the stored group.
+     */
+    public Optional<IamGroup> findGroup(String accountId, String groupName) {
+        if (groups instanceof AccountAwareStorageBackend<IamGroup> aware) {
+            return aware.getForAccount(accountId, groupName);
+        }
+        return groups.get(groupName);
+    }
+
     public void updateGroup(String groupName, String newGroupName, String newPath) {
         validateIamResourceName(groupName, "GroupName");
         if (newGroupName != null) {
@@ -1097,7 +1109,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** The linked service, recovered from the {@code /aws-service-role/<principal>/} path. */
     private static String linkedServicePrincipal(IamRole role) {
         String path = role.getPath();
-        return path.substring(SERVICE_LINKED_ROLE_PATH.length(), path.length() - 1);
+        return path.substring(ServiceLinkedRoles.PATH.length(), path.length() - 1);
     }
 
     public void deleteRole(String roleName) {
@@ -1173,7 +1185,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String principal = ServicePrincipals.canonical(awsServiceName);
             String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                     + "\"Principal\":{\"Service\":\"" + principal + "\"},\"Action\":\"sts:AssumeRole\"}]}";
-            IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + principal + "/",
+            IamRole role = createRole(roleName, ServiceLinkedRoles.PATH + principal + "/",
                     trustPolicy, description, 0, Map.of());
             role.setServiceLinkedRole(true);
             roles.put(roleName, role);
@@ -1203,7 +1215,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         roles.delete(roleName);
         LOG.infov("Deleted service-linked IAM role: {0}", roleName);
 
-        String deletionTaskId = "task" + SERVICE_LINKED_ROLE_PATH + servicePrincipal + "/"
+        String deletionTaskId = "task" + ServiceLinkedRoles.PATH + servicePrincipal + "/"
                 + roleName + "/" + UUID.randomUUID();
         serviceLinkedRoleDeletions.put(deletionTaskId, roleName);
         return deletionTaskId;

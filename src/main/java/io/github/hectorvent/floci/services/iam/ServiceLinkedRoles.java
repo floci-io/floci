@@ -34,6 +34,12 @@ import java.util.Optional;
  */
 public final class ServiceLinkedRoles {
 
+    /**
+     * The path every service-linked role sits under, with the canonical service principal and a
+     * trailing slash after it. Part of the role's ARN, so a policy naming one carries it.
+     */
+    public static final String PATH = "/aws-service-role/";
+
     /** Whether AWS accepts a {@code CustomSuffix} for a service, as far as anything records it. */
     public enum CustomSuffixSupport {
         /** A recorded create accepted a suffix. */

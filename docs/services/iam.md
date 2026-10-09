@@ -714,9 +714,11 @@ because listing goes through the user.
 marks it optional and it resolves from the access key that signed the request. That is the opposite
 of the signing-certificate operations, where it is optional throughout.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, along with every other IAM action except the server-certificate operations, which
-is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979).
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN, which is the resource type the Service Authorization Reference gives them, so a statement
+naming one user binds to that user. `ListSSHPublicKeys` with `UserName` omitted is the exception:
+the resource is then the calling user, whose identity the request does not carry, so it resolves to
+`*`.
 
 ### Signing Certificates
 
@@ -759,10 +761,9 @@ date, and `N/A` when the certificate is not `Active`, which is how the User Guid
 `GetAccountSummary`'s `AccountSigningCertificatesPresent` is unaffected: it reports the account root
 user's certificates, and Floci does not model root credentials.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, along with every other IAM action except the server-certificate operations. That
-is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979), not something
-specific to signing certificates.
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN. `UserName` is optional throughout, and a request that omits it names the calling user, which
+the request does not carry, so those resolve to `*`.
 
 ### Service-Specific Credentials
 
@@ -881,9 +882,8 @@ was minted rather than re-derived from the new name, because it is what the call
 with and rewriting it would break a working credential; AWS does not document which way it goes, so
 this is a choice rather than a sourced behaviour.
 
-Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
-owning user's ARN, as the general gap in
-[#4979](https://github.com/floci-io/floci/issues/4979) describes.
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against the owning user's
+ARN, and against `*` when `UserName` is omitted and the credential's own user is the target.
 
 ## AWS Managed Policies
 
@@ -1037,30 +1037,62 @@ These identities always bypass enforcement (backward-compatible defaults):
 | No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
-**IAM's own resources are mostly not named.** When enforcement evaluates a request, the target
-resource comes from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB,
-Kinesis, Secrets Manager, SSM, KMS, and, within IAM, only the server-certificate operations. Every
-other IAM action is evaluated against `*`, so a statement naming a specific user, role, policy,
-instance profile, MFA device or identity provider does not constrain it: a `Deny` on
-`arn:aws:iam::123456789012:user/bob` does not stop `DeleteUser` from running, and an `Allow`
-scoped to one role does not limit `DeleteRole` to it. Action-level matching works normally, so
-denying `iam:DeleteUser` outright does take effect; it is only the resource half that is missing.
+**IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
+from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
+Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
+the Service Authorization Reference gives it, so a statement naming a specific user, role, group,
+instance profile, managed policy, MFA device, identity provider or server certificate constrains
+it: a `Deny` on `arn:aws:iam::123456789012:user/bob` stops `DeleteUser` for Bob and leaves other
+users alone, and an `Allow` scoped to one role limits `DeleteRole` to it.
 
-This is the behaviour IAM has always had here rather than a recent change, and it errs toward
-permissive, which is the direction worth knowing about. Closing it means mapping the resource of
-every dispatched IAM action, which is tracked in
-[#4979](https://github.com/floci-io/floci/issues/4979) rather than bundled into the
-server-certificate work that mapped the first few.
+The resource type is not the parameter the action happens to take. `AddUserToGroup` and
+`RemoveUserFromGroup` are evaluated against the group, `AddRoleToInstanceProfile` and
+`RemoveRoleFromInstanceProfile` against the instance profile, and `EnableMFADevice`,
+`DeactivateMFADevice` and `ResyncMFADevice` against the user rather than the device. An action
+acting on something that already exists is checked against that resource's stored ARN, path and
+partition included; a create is checked against an ARN minted from the request's own `Path`, since
+reading a stored path would authorize a create into a path the policy does not name.
 
-**A certificate rename names two resources.** `UpdateServerCertificate` is evaluated against both
-the certificate's current ARN and the ARN that `NewServerCertificateName` or `NewPath` would
-produce, because AWS requires the principal to hold permission on the old name and the new one: a
-principal allowed to update `ProductionCert` but not `ProdCert` cannot rename the first into the
-second. A request naming several resources is authorized once per resource, so a `Deny` on either
-name refuses the rename, and the certificate keeps its original name and path. An update that
-changes neither the name nor the path names a single resource. The destination ARN is built beside
-the stored one, keeping the certificate's own partition and account, since a rename moves a
-certificate within an account rather than between partitions.
+Which type each action takes is vendored, not written out in Java:
+`src/main/resources/aws/iam-action-resources.json` is generated by
+`tools/aws/regen_iam_action_resources.py` from AWS's Service Reference Information for IAM, and
+carries every published action with the resource types it is authorized against, plus the ARN
+format of each type. `make iam-action-resources-check` gates its shape offline on every pull
+request and `make iam-action-resources-verify` checks every claim in it against AWS weekly, so a
+type that drifts from what AWS publishes fails in CI rather than authorizing against the wrong
+resource. What stays in Java is the half that is Floci's: the request parameter each type's name
+arrives in, the creates, the actions whose request carries an ARN, and the resource types that
+belong only to actions Floci does not dispatch. `IamActionResourcesTest` checks the one against
+the other, so a regeneration that introduces a resource type nothing resolves fails a test naming
+it rather than quietly putting that action back on `*`.
+
+The nineteen user actions whose `UserName` the model marks optional, `GetUser`, `ListAccessKeys` and
+`CreateAccessKey` among them, resolve to the user who signed the request when it is omitted, which
+is the user AWS acts on. The access key id in the credential names that identity, the same lookup
+`GetAccessKeyLastUsed` makes on a key passed as a parameter, and the user's stored ARN is then the
+resource. The wildcard still stands when the signer is not an IAM user: an account's root stand-in
+and a session credential have no user record to name.
+
+What resolves to `*` is what the reference gives no resource type, such as `ListUsers`,
+`GetAccountSummary` and `SimulateCustomPolicy`. Every other mapped action takes its parameter as a
+required member, so it always resolves.
+
+A resource of `*` is matched as that literal string, because the evaluator globs the statement's
+pattern against the request's resource and not the other way round. So a statement whose `Resource`
+names an ARN applies to such a request in neither direction: a `Deny` on one of those actions does
+not refuse it, and an `Allow` does not permit it either.
+
+**A rename names two resources.** `UpdateUser`, `UpdateGroup` and `UpdateServerCertificate` are
+evaluated against both the resource's current ARN and the ARN the new name or `NewPath` would
+produce, because AWS requires the principal to hold permission on the old name and the new one.
+`UpdateUser`'s reference says the requester "must have appropriate permissions on both the source
+object and the target object", and `UpdateGroup`'s that a principal allowed to update the old group
+but not the new one has the update fail. So a principal allowed to update `ProductionCert` but not
+`ProdCert` cannot rename the first into the second. A request naming several resources is
+authorized once per resource, so a `Deny` on either name refuses the rename and the resource keeps
+its original name and path. An update that changes neither the name nor the path names a single
+resource. The destination ARN is built beside the stored one, keeping the resource's own partition
+and account, since a rename moves a resource within an account rather than between partitions.
 
 **Exception:** a bare 12-digit account-id key that equals its own account and sits under
 an effective SCP ceiling is **not** treated as an unknown key — it is evaluated against
