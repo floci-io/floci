@@ -1092,10 +1092,10 @@ public class SqsService implements Resettable, ResourceProvider {
      * both checks to {@code SendMessageBatch}, {@code DeleteMessageBatch} and
      * {@code ChangeMessageVisibilityBatch} alike, fails the whole request and processes no entry.
      */
-    public void validateBatchEntryCount(int entryCount) {
+    public void validateBatchEntryCount(String entryTypeName, int entryCount) {
         if (entryCount == 0) {
             throw new AwsException("AWS.SimpleQueueService.EmptyBatchRequest",
-                    "There should be at least one entry in the request.", 400);
+                    "There should be at least one " + entryTypeName + " in the request.", 400);
         }
         if (entryCount > MAX_BATCH_ENTRIES) {
             throw new AwsException("AWS.SimpleQueueService.TooManyEntriesInBatchRequest",

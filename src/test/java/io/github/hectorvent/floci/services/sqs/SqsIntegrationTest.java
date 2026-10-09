@@ -1094,37 +1094,29 @@ class SqsIntegrationTest {
             assertEquals("2", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessagesNotVisible"));
 
             // 3. ChangeMessageVisibilityBatch with 11 entries rejects and does not change visibility
-            RequestSpecification visRequest = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "ChangeMessageVisibilityBatch")
-                .formParam("QueueUrl", batchQueueUrl);
-            for (int i = 1; i <= 11; i++) {
-                String rh = i <= receiptHandles.size() ? receiptHandles.get(i - 1) : "dummy-rh";
-                visRequest = visRequest
-                    .formParam("ChangeMessageVisibilityBatchRequestEntry." + i + ".Id", "v" + i)
-                    .formParam("ChangeMessageVisibilityBatchRequestEntry." + i + ".ReceiptHandle", rh)
-                    .formParam("ChangeMessageVisibilityBatchRequestEntry." + i + ".VisibilityTimeout", "0");
-            }
-            visRequest.when().post("/")
-                .then().statusCode(400)
+            addReceiptHandleEntries(
+                    given()
+                        .contentType("application/x-www-form-urlencoded")
+                        .formParam("Action", "ChangeMessageVisibilityBatch")
+                        .formParam("QueueUrl", batchQueueUrl),
+                    "ChangeMessageVisibilityBatchRequestEntry", "v", receiptHandles,
+                    Map.of("VisibilityTimeout", "0"))
+            .when().post("/")
+            .then().statusCode(400)
                 .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
 
             assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
             assertEquals("2", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessagesNotVisible"));
 
             // 4. DeleteMessageBatch with 11 entries rejects and preserves seeded messages
-            RequestSpecification delRequest = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DeleteMessageBatch")
-                .formParam("QueueUrl", batchQueueUrl);
-            for (int i = 1; i <= 11; i++) {
-                String rh = i <= receiptHandles.size() ? receiptHandles.get(i - 1) : "dummy-rh";
-                delRequest = delRequest
-                    .formParam("DeleteMessageBatchRequestEntry." + i + ".Id", "d" + i)
-                    .formParam("DeleteMessageBatchRequestEntry." + i + ".ReceiptHandle", rh);
-            }
-            delRequest.when().post("/")
-                .then().statusCode(400)
+            addReceiptHandleEntries(
+                    given()
+                        .contentType("application/x-www-form-urlencoded")
+                        .formParam("Action", "DeleteMessageBatch")
+                        .formParam("QueueUrl", batchQueueUrl),
+                    "DeleteMessageBatchRequestEntry", "d", receiptHandles, Map.of())
+            .when().post("/")
+            .then().statusCode(400)
                 .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
 
             assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
@@ -1222,14 +1214,20 @@ class SqsIntegrationTest {
         .then().statusCode(200)
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
         try {
-            for (String action : List.of("SendMessageBatch", "DeleteMessageBatch", "ChangeMessageVisibilityBatch")) {
+            Map<String, String> expectedMessages = Map.of(
+                    "SendMessageBatch", "There should be at least one SendMessageBatchRequestEntry in the request.",
+                    "DeleteMessageBatch", "There should be at least one DeleteMessageBatchRequestEntry in the request.",
+                    "ChangeMessageVisibilityBatch", "There should be at least one ChangeMessageVisibilityBatchRequestEntry in the request."
+            );
+            for (Map.Entry<String, String> testCase : expectedMessages.entrySet()) {
                 given()
                     .contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", action)
+                    .formParam("Action", testCase.getKey())
                     .formParam("QueueUrl", batchQueueUrl)
                 .when().post("/")
                 .then().statusCode(400)
-                    .body(containsString("AWS.SimpleQueueService.EmptyBatchRequest"));
+                    .body(containsString("AWS.SimpleQueueService.EmptyBatchRequest"))
+                    .body(containsString(testCase.getValue()));
             }
         } finally {
             given()
@@ -1238,5 +1236,21 @@ class SqsIntegrationTest {
                 .formParam("QueueUrl", batchQueueUrl)
             .when().post("/");
         }
+    }
+
+    // Eleven entries: the real handles first, "dummy-rh" for the rest. extraParams are appended to each entry.
+    private static RequestSpecification addReceiptHandleEntries(
+            RequestSpecification request, String entryPrefix, String idPrefix,
+            List<String> receiptHandles, Map<String, String> extraParams) {
+        for (int i = 1; i <= 11; i++) {
+            String rh = i <= receiptHandles.size() ? receiptHandles.get(i - 1) : "dummy-rh";
+            request = request
+                .formParam(entryPrefix + "." + i + ".Id", idPrefix + i)
+                .formParam(entryPrefix + "." + i + ".ReceiptHandle", rh);
+            for (Map.Entry<String, String> extra : extraParams.entrySet()) {
+                request = request.formParam(entryPrefix + "." + i + "." + extra.getKey(), extra.getValue());
+            }
+        }
+        return request;
     }
 }

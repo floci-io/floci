@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -903,15 +904,21 @@ class SqsJsonProtocolTest {
         .then().statusCode(200)
             .extract().jsonPath().getString("QueueUrl");
         try {
-            for (String target : List.of("SendMessageBatch", "DeleteMessageBatch", "ChangeMessageVisibilityBatch")) {
+            Map<String, String> expectedMessages = Map.of(
+                    "SendMessageBatch", "There should be at least one SendMessageBatchRequestEntry in the request.",
+                    "DeleteMessageBatch", "There should be at least one DeleteMessageBatchRequestEntry in the request.",
+                    "ChangeMessageVisibilityBatch", "There should be at least one ChangeMessageVisibilityBatchRequestEntry in the request."
+            );
+            for (Map.Entry<String, String> testCase : expectedMessages.entrySet()) {
                 given()
                     .contentType(CONTENT_TYPE)
-                    .header("X-Amz-Target", "AmazonSQS." + target)
+                    .header("X-Amz-Target", "AmazonSQS." + testCase.getKey())
                     .body(batchBody(batchQueueUrl, 0))
                 .when().post("/")
                 .then()
                     .statusCode(400)
-                    .body("__type", equalTo("EmptyBatchRequest"));
+                    .body("__type", equalTo("EmptyBatchRequest"))
+                    .body("message", equalTo(testCase.getValue()));
             }
         } finally {
             given()
