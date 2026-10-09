@@ -184,8 +184,8 @@ public final class S3CopySimulator {
     }
 
     static void streamCopyInput(CopyInput input, List<String> discoveredColumns,
-                                List<Integer> columnMaxChars, OutputStream backendOut) throws IOException {
-        streamObjects(input.spec(), discoveredColumns, columnMaxChars, input.s3(), input.iamService(),
+                                List<Integer> columnMaxBytes, OutputStream backendOut) throws IOException {
+        streamObjects(input.spec(), discoveredColumns, columnMaxBytes, input.s3(), input.iamService(),
                 input.roleSession(), input.keys(), backendOut);
     }
 
@@ -317,7 +317,7 @@ public final class S3CopySimulator {
             boolean discoverForJson = spec.jsonAuto() && noColumnList;
             boolean truncate = spec.transforms().truncateColumns();
             List<String> discoveredColumns = null;
-            List<Integer> columnMaxChars = null;
+            List<Integer> columnMaxBytes = null;
             if (discoverForJson || truncate) {
                 List<ColumnInfo> catalog = discoverColumnInfo(client, backend, spec, txStatus, onStatusChange);
                 if (catalog == null) {
@@ -327,7 +327,7 @@ public final class S3CopySimulator {
                     discoveredColumns = catalog.stream().map(ColumnInfo::name).toList();
                 }
                 if (truncate) {
-                    columnMaxChars = alignMaxChars(spec, catalog);
+                    columnMaxBytes = alignMaxBytes(spec, catalog);
                 }
             }
 
@@ -365,7 +365,7 @@ public final class S3CopySimulator {
             // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
             // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
             try {
-                streamCopyInput(input, discoveredColumns, columnMaxChars, backendOut);
+                streamCopyInput(input, discoveredColumns, columnMaxBytes, backendOut);
                 writeCopyDone(backendOut);
                 drainToReadyForQuery(backendDecoder, client, onStatusChange);
             } catch (RuntimeException | IOException e) {
@@ -460,9 +460,9 @@ public final class S3CopySimulator {
     }
 
     private static void streamObjects(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns,
-                                      List<Integer> columnMaxChars, S3Service s3, IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
+                                      List<Integer> columnMaxBytes, S3Service s3, IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
                                       List<String> keys, OutputStream backendOut) throws IOException {
-        if (spec.transforms().truncateColumns() && columnMaxChars == null) {
+        if (spec.transforms().truncateColumns() && columnMaxBytes == null) {
             // Extended Query fixes the statement at Parse time, so there is no catalog round trip to
             // learn column lengths; same limitation and remedy as FORMAT AS JSON 'auto'.
             throw new S3TransferException(SQLSTATE_INTERNAL,
@@ -497,7 +497,7 @@ public final class S3CopySimulator {
                     }
                     InputStream source = in;
                     if (spec.transforms().any()) {
-                        source = new ByteArrayInputStream(transformObject(spec, columnMaxChars, in));
+                        source = new ByteArrayInputStream(transformObject(spec, columnMaxBytes, in));
                     }
                     int read;
                     boolean endsWithNewline = false;
@@ -523,7 +523,7 @@ public final class S3CopySimulator {
      * ceiling and by a budget shared across connections, so a large or highly compressed object fails
      * its own statement instead of exhausting the emulator heap.
      */
-    private static byte[] transformObject(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxChars,
+    private static byte[] transformObject(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
                                           InputStream in) throws IOException {
         int heldMib = 0;
         try {
@@ -549,23 +549,23 @@ public final class S3CopySimulator {
                 }
                 buffered.write(chunk, 0, read);
             }
-            return new CopyRecordTransformer(spec, columnMaxChars).apply(buffered.toByteArray());
+            return new CopyRecordTransformer(spec, columnMaxBytes).apply(buffered.toByteArray());
         } finally {
             COPY_TRANSFORM_HEAP_MIB.release(heldMib);
         }
     }
 
-    record ColumnInfo(String name, Integer maxChars) {
+    record ColumnInfo(String name, Integer maxBytes) {
     }
 
     /** Positional max character length per COPY column; null entries mean no limit. */
-    static List<Integer> alignMaxChars(CopyStatementParser.S3CopyFrom spec, List<ColumnInfo> catalog) {
+    static List<Integer> alignMaxBytes(CopyStatementParser.S3CopyFrom spec, List<ColumnInfo> catalog) {
         if (spec.columns() == null || spec.columns().isEmpty()) {
-            return catalog.stream().map(ColumnInfo::maxChars).toList();
+            return catalog.stream().map(ColumnInfo::maxBytes).toList();
         }
         Map<String, Integer> byName = new HashMap<>();
         for (ColumnInfo info : catalog) {
-            byName.put(info.name(), info.maxChars());
+            byName.put(info.name(), info.maxBytes());
         }
         List<Integer> aligned = new ArrayList<>();
         for (String column : spec.columns()) {
@@ -615,10 +615,10 @@ public final class S3CopySimulator {
             if (type == 'D') {
                 List<String> values = parseDataRow(msg.body());
                 if (!values.isEmpty() && values.get(0) != null) {
-                    Integer maxChars = values.size() >= 2 && values.get(1) != null
+                    Integer maxBytes = values.size() >= 2 && values.get(1) != null
                             ? Integer.valueOf(values.get(1))
                             : null;
-                    cols.add(new ColumnInfo(values.get(0), maxChars));
+                    cols.add(new ColumnInfo(values.get(0), maxBytes));
                 }
             } else if (type == 'E') {
                 forward(client, msg);

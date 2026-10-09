@@ -319,9 +319,9 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   level options need a single-byte `DELIMITER`, are not combined with `FORMAT AS JSON`, and normalise
   `CRLF` line endings to `LF`. A nulled field is written as the `NULL AS` string, or `\N` in text
   mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
-  `CHAR`/`VARCHAR` length in characters (PostgreSQL's meaning of the declared length), never inside a
-  multi-byte character or a backslash escape. Its column lengths come from
-  the database catalog, so it works only over the **Simple Query protocol** (`preferQueryMode=simple`);
+  `CHAR`/`VARCHAR` length in bytes (Redshift's meaning of the declared length, so `éééé` into
+  `VARCHAR(3)` loads `é`), never inside a multi-byte character or a backslash escape. Its column
+  lengths come from the database catalog, so it works only over the **Simple Query protocol** (`preferQueryMode=simple`);
   over Extended Query the COPY fails with an error that names this requirement. A field-level option
   buffers each decompressed object in memory, so an object over 64 MiB, or a heap budget shared
   across connections that is used up, fails the COPY instead of exhausting the emulator.
@@ -390,8 +390,9 @@ the result to S3 as one or more objects under `<prefix>`.
   bucket.
 - `ENCRYPTED AUTO` is accepted and writes objects as usual. `ENCRYPTED KMS_KEY_ID '<key>'` stores the
   data and manifest objects with `aws:kms` server-side encryption and that key id; Floci does not
-  encrypt the data beyond what its S3 service does for those headers. `ENCRYPTED` without `AUTO` or
-  `KMS_KEY_ID` (client-side encryption) and `MASTER_SYMMETRIC_KEY` are not intercepted.
+  encrypt the data beyond what its S3 service does for those headers. Bare `ENCRYPTED` (server-side
+  encryption with the default S3 key) and the client-side `MASTER_SYMMETRIC_KEY` form are not
+  intercepted.
 - `MANIFEST` writes `<prefix>manifest` listing every object with its
   `content_length`.
 - Without `ALLOWOVERWRITE`, a non-empty target prefix fails with SQL error XX000 and the select

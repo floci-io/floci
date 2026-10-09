@@ -1568,18 +1568,18 @@ class S3CopySimulatorTest {
     }
 
     @Test
-    void alignMaxChars_followsExplicitColumnListAndFoldsUnquotedNames() {
+    void alignMaxBytes_followsExplicitColumnListAndFoldsUnquotedNames() {
         List<S3CopySimulator.ColumnInfo> catalog = List.of(
                 new S3CopySimulator.ColumnInfo("id", null),
                 new S3CopySimulator.ColumnInfo("name", 3),
                 new S3CopySimulator.ColumnInfo("Note", 5));
         CopyStatementParser.S3CopyFrom explicit = new CopyStatementParser.S3CopyFrom(
                 "t", List.of("NAME", "\"Note\""), "wh", "k", "|", 0, false, false, null, null);
-        assertEquals(Arrays.asList(3, 5), S3CopySimulator.alignMaxChars(explicit, catalog));
+        assertEquals(Arrays.asList(3, 5), S3CopySimulator.alignMaxBytes(explicit, catalog));
 
         CopyStatementParser.S3CopyFrom all = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "k", "|", 0, false, false, null, null);
-        assertEquals(Arrays.asList(null, 3, 5), S3CopySimulator.alignMaxChars(all, catalog));
+        assertEquals(Arrays.asList(null, 3, 5), S3CopySimulator.alignMaxBytes(all, catalog));
     }
 
     @Test

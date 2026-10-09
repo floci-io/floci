@@ -500,7 +500,7 @@ public final class CopyStatementParser {
         if (cleanPath && (allowOverwrite || prefix.isEmpty())) {
             return null;
         }
-        // Only server-side encryption is emulated: client-side ENCRYPTED needs MASTER_SYMMETRIC_KEY.
+        // Only ENCRYPTED AUTO and ENCRYPTED KMS_KEY_ID are emulated. Bare ENCRYPTED and MASTER_SYMMETRIC_KEY are not.
         if (kmsKeyId != null && (kmsKeyId.isBlank() || !encrypted || encryptedAuto)) {
             return null;
         }

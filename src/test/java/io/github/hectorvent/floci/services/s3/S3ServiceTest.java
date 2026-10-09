@@ -36,8 +36,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -1596,9 +1596,16 @@ class S3ServiceTest {
                 }));
         assertTrue(authorizing.await(10, TimeUnit.SECONDS));
 
-        CompletableFuture<S3Object> put = CompletableFuture.supplyAsync(() ->
+        FutureTask<S3Object> put = new FutureTask<>(() ->
                 s3Service.putObject("prefix-lock", "out/late", new byte[]{2}, "text/plain", Map.of()));
-        assertThrows(TimeoutException.class, () -> put.get(300, TimeUnit.MILLISECONDS));
+        Thread putThread = new Thread(put);
+        putThread.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (putThread.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertEquals(Thread.State.BLOCKED, putThread.getState());
+        assertFalse(put.isDone());
 
         release.countDown();
         assertEquals(1, delete.get(10, TimeUnit.SECONDS));

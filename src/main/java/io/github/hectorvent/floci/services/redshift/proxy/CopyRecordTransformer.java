@@ -26,16 +26,16 @@ final class CopyRecordTransformer {
     private final boolean csv;
     private final byte delimiter;
     private final byte[] nullMarker;
-    private final List<Integer> columnMaxChars;
+    private final List<Integer> columnMaxBytes;
 
-    CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxChars) {
+    CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes) {
         this.transforms = spec.transforms();
         this.csv = spec.csv();
         String delimiterText = spec.delimiter() != null ? spec.delimiter() : (spec.csv() ? "," : "|");
         this.delimiter = delimiterText.getBytes(StandardCharsets.UTF_8)[0];
         String marker = spec.nullAs() != null ? spec.nullAs() : (spec.csv() ? "" : "\\N");
         this.nullMarker = marker.getBytes(StandardCharsets.UTF_8);
-        this.columnMaxChars = columnMaxChars;
+        this.columnMaxBytes = columnMaxBytes;
     }
 
     byte[] apply(byte[] input) {
@@ -217,17 +217,17 @@ final class CopyRecordTransformer {
     }
 
     private byte[] truncate(byte[] value, int column) {
-        if (!transforms.truncateColumns() || columnMaxChars == null || column >= columnMaxChars.size()) {
+        if (!transforms.truncateColumns() || columnMaxBytes == null || column >= columnMaxBytes.size()) {
             return value;
         }
-        Integer max = columnMaxChars.get(column);
+        Integer max = columnMaxBytes.get(column);
         if (max == null) {
             return value;
         }
-        // PostgreSQL counts varchar(n) in characters, so measure and cut decoded characters. Text mode
-        // decodes its escapes first so one is never split or counted as more than its character.
+        // Redshift counts CHAR(n) and VARCHAR(n) in bytes, so measure the decoded bytes and cut at a
+        // character boundary. Text mode decodes its escapes first so one is never split.
         byte[] decoded = csv ? value : decodeTextEscapes(value);
-        int end = charBoundary(decoded, max);
+        int end = byteLimitBoundary(decoded, max);
         if (end == decoded.length) {
             return value;
         }
@@ -235,18 +235,16 @@ final class CopyRecordTransformer {
         return csv ? kept : encodeTextEscapes(kept);
     }
 
-    /** Offset of the byte after the first {@code maxChars} characters, or the length if there are fewer. */
-    private static int charBoundary(byte[] bytes, int maxChars) {
-        int chars = 0;
-        for (int i = 0; i < bytes.length; i++) {
-            if ((bytes[i] & 0xC0) != 0x80) {
-                if (chars == maxChars) {
-                    return i;
-                }
-                chars++;
-            }
+    /** Largest offset not above {@code maxBytes} that does not fall inside a multi-byte character. */
+    private static int byteLimitBoundary(byte[] bytes, int maxBytes) {
+        if (bytes.length <= maxBytes) {
+            return bytes.length;
         }
-        return bytes.length;
+        int end = maxBytes;
+        while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
+            end--;
+        }
+        return end;
     }
 
     /** Decodes COPY text escapes: backslash b f n r t v, octal NNN, hex xHH, and backslash c for any other c. */

@@ -109,14 +109,15 @@ class CopyRecordTransformerTest {
 
     @Test
     void truncateColumnsNeverSplitsAMultiByteCharacter() {
-        // The limit counts characters, so the 2-byte e-acute is one character and survives.
-        assertEquals("aé\n", applyWithLimits("|", false, List.of(2), "aébc\n"));
-        assertEquals("ééé\n", applyWithLimits("|", false, List.of(3), "éééé\n"));
+        // The limit counts bytes, so the 2-byte e-acute does not fit twice into 3 bytes.
+        assertEquals("a\n", applyWithLimits("|", false, List.of(2), "aébc\n"));
+        assertEquals("é\n", applyWithLimits("|", false, List.of(3), "éééé\n"));
+        assertEquals("éé\n", applyWithLimits("|", false, List.of(4), "ééé\n"));
     }
 
     @Test
-    void truncateColumnsLeavesAValueThatFitsItsCharacterLimit() {
-        assertEquals("ééé\n", applyWithLimits("|", false, List.of(3), "ééé\n"));
+    void truncateColumnsLeavesAValueThatFitsItsByteLimit() {
+        assertEquals("éé\n", applyWithLimits("|", false, List.of(4), "éé\n"));
     }
 
     @Test
@@ -132,13 +133,13 @@ class CopyRecordTransformerTest {
 
     @Test
     void truncateColumnsKeepsAnEscapedBackslashWhole() {
-        // Decoded value is ab, backslash, c. The 3-character cut keeps the backslash, re-escaped.
+        // Decoded value is ab, backslash, c. The 3-byte cut keeps the backslash, re-escaped.
         assertEquals("ab\\\\|hello\n",
                 applyWithLimits("|", false, Arrays.asList(3, null), "ab\\\\c|hello\n"));
     }
 
     @Test
-    void truncateColumnsCountsAnEscapedDelimiterAsOneCharacter() {
+    void truncateColumnsCountsAnEscapedDelimiterAsOneByte() {
         assertEquals("a\\|b|x\n", applyWithLimits("|", false, Arrays.asList(3, null), "a\\|b|x\n"));
     }
 
