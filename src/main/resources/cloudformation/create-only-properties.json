@@ -434,6 +434,7 @@
   "AWS::Events::Rule": [
     "Name"
   ],
+  "AWS::GuardDuty::MalwareProtectionPlan": [],
   "AWS::IAM::AccessKey": [
     "UserName",
     "Serial"

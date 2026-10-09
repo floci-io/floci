@@ -7,12 +7,14 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.guardduty.model.AdminAccount;
 import io.github.hectorvent.floci.services.guardduty.model.Detector;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
+import io.github.hectorvent.floci.services.guardduty.model.MalwareProtectionPlan;
 import io.github.hectorvent.floci.services.guardduty.model.MemberAccount;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationConfiguration;
@@ -63,6 +65,12 @@ public class GuardDutyService {
     private static final Set<String> FINDING_PUBLISHING_FREQUENCIES =
             Set.of("FIFTEEN_MINUTES", "ONE_HOUR", "SIX_HOURS");
     private static final Set<String> FEATURE_STATUSES = Set.of("ENABLED", "DISABLED");
+    private static final int MAX_PLAN_OBJECT_PREFIXES = 5;
+    private static final int MAX_PLAN_OBJECT_PREFIX_LENGTH = 1024;
+    private static final int MAX_PLAN_TAGS = 200;
+    private static final String PLAN_ARN_RESOURCE_PREFIX = "malware-protection-plan/";
+    static final String PLAN_NOT_FOUND_MESSAGE =
+            "The request is rejected because the input malwareProtectionPlanId is not owned by the current account.";
     private static final Set<String> ORG_AUTO_ENABLE_VALUES = Set.of("NEW", "NONE", "ALL");
     private static final Set<String> DETECTOR_FEATURE_NAMES = Set.of(
             "S3_DATA_EVENTS", "EKS_AUDIT_LOGS", "EBS_MALWARE_PROTECTION", "RDS_LOGIN_EVENTS",
@@ -77,6 +85,7 @@ public class GuardDutyService {
     private final StorageBackend<String, Detector> detectorStore;
     private final StorageBackend<String, AdminAccount> adminAccountStore;
     private final StorageBackend<String, MemberAccount> memberStore;
+    private final StorageBackend<String, MalwareProtectionPlan> malwareProtectionPlanStore;
 
     @Inject
     public GuardDutyService(StorageFactory storageFactory) {
@@ -94,16 +103,31 @@ public class GuardDutyService {
                         "guardduty",
                         "guardduty-members.json",
                         new TypeReference<Map<String, MemberAccount>>() {
+                        }),
+                storageFactory.create(
+                        "guardduty",
+                        "guardduty-malware-protection-plans.json",
+                        new TypeReference<Map<String, MalwareProtectionPlan>>() {
                         }));
+    }
+
+    // Keeps the three-store arity existing fixtures construct this service with.
+    GuardDutyService(
+            StorageBackend<String, Detector> detectorStore,
+            StorageBackend<String, AdminAccount> adminAccountStore,
+            StorageBackend<String, MemberAccount> memberStore) {
+        this(detectorStore, adminAccountStore, memberStore, new InMemoryStorage<>());
     }
 
     GuardDutyService(
             StorageBackend<String, Detector> detectorStore,
             StorageBackend<String, AdminAccount> adminAccountStore,
-            StorageBackend<String, MemberAccount> memberStore) {
+            StorageBackend<String, MemberAccount> memberStore,
+            StorageBackend<String, MalwareProtectionPlan> malwareProtectionPlanStore) {
         this.detectorStore = detectorStore;
         this.adminAccountStore = adminAccountStore;
         this.memberStore = memberStore;
+        this.malwareProtectionPlanStore = malwareProtectionPlanStore;
     }
 
     public synchronized Detector createDetector(String region, String accountId, JsonNode request) {
@@ -326,12 +350,222 @@ public class GuardDutyService {
         }
         return true;
     }
+    // ── Malware Protection plans ─────────────────────────────────────────────────
+
+    public synchronized MalwareProtectionPlan createMalwareProtectionPlan(
+            String region, String accountId, JsonNode request) {
+        JsonNode resource = request.get("protectedResource");
+        requireObject(resource, "protectedResource");
+        JsonNode bucket = resource.get("s3Bucket");
+        requireObject(bucket, "protectedResource.s3Bucket");
+        String bucketName = requireText(bucket, "bucketName");
+        if (bucketName.length() < 3 || bucketName.length() > 63) {
+            throw badRequest("bucketName must be between 3 and 63 characters.");
+        }
+        String role = requireText(request, "role");
+        if (!AwsArnUtils.isArn(role)) {
+            throw badRequest("role must be the ARN of an IAM role.");
+        }
+        List<String> prefixes = readObjectPrefixes(bucket);
+        String taggingStatus = readTaggingStatus(request);
+        Map<String, String> tags = readPlanTags(request);
+        String clientToken = request.hasNonNull("clientToken") ? requireText(request, "clientToken") : null;
+        if (clientToken != null && clientToken.length() > 64) {
+            throw badRequest("clientToken must be at most 64 characters.");
+        }
+
+        String prefix = region + "::";
+        List<MalwareProtectionPlan> existing = malwareProtectionPlanStore.scan(key -> key.startsWith(prefix));
+        if (clientToken != null) {
+            for (MalwareProtectionPlan plan : existing) {
+                if (clientToken.equals(plan.getClientToken())) {
+                    return plan;
+                }
+            }
+        }
+        for (MalwareProtectionPlan plan : existing) {
+            if (bucketName.equals(plan.getBucketName())) {
+                throw new AwsException("ConflictException",
+                        "A Malware Protection plan already exists for the bucket " + bucketName + ".", 409);
+            }
+        }
+
+        MalwareProtectionPlan plan = new MalwareProtectionPlan();
+        plan.setId(UUID.randomUUID().toString().replace("-", ""));
+        plan.setArn(AwsArnUtils.Arn.of("guardduty", region, accountId, PLAN_ARN_RESOURCE_PREFIX + plan.getId())
+                .toString());
+        plan.setRole(role);
+        plan.setBucketName(bucketName);
+        plan.setObjectPrefixes(prefixes);
+        plan.setTaggingStatus(taggingStatus);
+        plan.setStatus("ACTIVE");
+        plan.setCreatedAt(isoTimestamp());
+        plan.setClientToken(clientToken);
+        plan.setTags(tags);
+        malwareProtectionPlanStore.put(storageKey(region, plan.getId()), plan);
+        return plan;
+    }
+
+    public MalwareProtectionPlan getMalwareProtectionPlan(String region, String planId) {
+        return malwareProtectionPlanStore.get(storageKey(region, planId))
+                .orElseThrow(GuardDutyService::planNotFound);
+    }
+
+    /** Only role, object prefixes and the tagging action can change; the bucket is fixed at creation. */
+    public synchronized void updateMalwareProtectionPlan(String region, String planId, JsonNode request) {
+        String key = storageKey(region, planId);
+        MalwareProtectionPlan plan = malwareProtectionPlanStore.get(key).orElseThrow(GuardDutyService::planNotFound);
+
+        if (request.has("role")) {
+            String role = requireText(request, "role");
+            if (!AwsArnUtils.isArn(role)) {
+                throw badRequest("role must be the ARN of an IAM role.");
+            }
+            plan.setRole(role);
+        }
+        JsonNode resource = request.get("protectedResource");
+        if (resource != null && resource.has("s3Bucket")) {
+            JsonNode bucket = resource.get("s3Bucket");
+            requireObject(bucket, "protectedResource.s3Bucket");
+            if (bucket.has("objectPrefixes")) {
+                plan.setObjectPrefixes(readObjectPrefixes(bucket));
+            }
+        }
+        if (request.has("actions")) {
+            plan.setTaggingStatus(readTaggingStatus(request));
+        }
+        malwareProtectionPlanStore.put(key, plan);
+    }
+
+    public synchronized void deleteMalwareProtectionPlan(String region, String planId) {
+        String key = storageKey(region, planId);
+        if (malwareProtectionPlanStore.get(key).isEmpty()) {
+            throw planNotFound();
+        }
+        malwareProtectionPlanStore.delete(key);
+    }
+
+    public Page<MalwareProtectionPlan> listMalwareProtectionPlans(String region, String nextToken) {
+        String prefix = region + "::";
+        List<MalwareProtectionPlan> plans = malwareProtectionPlanStore.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(MalwareProtectionPlan::getId))
+                .toList();
+        int offset = decodeOffset(nextToken, plans.size());
+        int end = Math.min(offset + DEFAULT_MAX_RESULTS, plans.size());
+        return new Page<>(plans.subList(offset, end), end < plans.size() ? encodeOffset(end) : null);
+    }
+
+    private static List<String> readObjectPrefixes(JsonNode bucket) {
+        if (!bucket.has("objectPrefixes")) {
+            return null;
+        }
+        JsonNode node = bucket.get("objectPrefixes");
+        if (!node.isArray() || node.size() > MAX_PLAN_OBJECT_PREFIXES) {
+            throw badRequest("objectPrefixes must be an array of at most " + MAX_PLAN_OBJECT_PREFIXES + " strings.");
+        }
+        List<String> prefixes = new ArrayList<>(node.size());
+        for (JsonNode item : node) {
+            if (!item.isTextual() || item.textValue().length() > MAX_PLAN_OBJECT_PREFIX_LENGTH) {
+                throw badRequest("objectPrefixes must contain strings of at most "
+                        + MAX_PLAN_OBJECT_PREFIX_LENGTH + " characters.");
+            }
+            prefixes.add(item.textValue());
+        }
+        return prefixes;
+    }
+
+    private static String readTaggingStatus(JsonNode request) {
+        JsonNode actions = request.get("actions");
+        if (actions == null || actions.isNull()) {
+            return null;
+        }
+        requireObject(actions, "actions");
+        JsonNode tagging = actions.get("tagging");
+        if (tagging == null || tagging.isNull()) {
+            return null;
+        }
+        requireObject(tagging, "actions.tagging");
+        String status = requireText(tagging, "status");
+        if (!FEATURE_STATUSES.contains(status)) {
+            throw badRequest("actions.tagging.status must be ENABLED or DISABLED.");
+        }
+        return status;
+    }
+
+    private static Map<String, String> readPlanTags(JsonNode request) {
+        if (!request.has("tags")) {
+            return null;
+        }
+        JsonNode tagsNode = request.get("tags");
+        if (!tagsNode.isObject() || tagsNode.size() > MAX_PLAN_TAGS) {
+            throw badRequest("tags must be an object with at most " + MAX_PLAN_TAGS + " entries.");
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        tagsNode.fields().forEachRemaining(entry -> {
+            String tagKey = entry.getKey();
+            if (tagKey.isEmpty() || tagKey.length() > 128 || tagKey.startsWith("aws:")) {
+                throw badRequest("tags contains an invalid key: " + tagKey);
+            }
+            JsonNode valueNode = entry.getValue();
+            if (!valueNode.isTextual() || valueNode.textValue().length() > 256) {
+                throw badRequest("tags contains a non-string value or one longer than 256 characters.");
+            }
+            tags.put(tagKey, valueNode.textValue());
+        });
+        return tags;
+    }
+
+    private static boolean isMalwareProtectionPlanArn(String arn) {
+        try {
+            return AwsArnUtils.parse(arn).resource().startsWith(PLAN_ARN_RESOURCE_PREFIX);
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private MalwareProtectionPlan planFromArn(String arn) {
+        return malwareProtectionPlanStore.get(parsePlanArn(arn).key()).orElseThrow(GuardDutyService::planNotFound);
+    }
+
+    private static DetectorRef parsePlanArn(String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String id = parsed.resource().substring(PLAN_ARN_RESOURCE_PREFIX.length());
+        if (id.isEmpty()) {
+            throw badRequest("The request is rejected because an invalid resource ARN is specified: " + arn);
+        }
+        return new DetectorRef(parsed.region(), id);
+    }
+
+    private static AwsException planNotFound() {
+        return new AwsException("ResourceNotFoundException", PLAN_NOT_FOUND_MESSAGE, 404);
+    }
+
     public Map<String, String> listTags(String arn) {
+        if (isMalwareProtectionPlanArn(arn)) {
+            MalwareProtectionPlan plan = planFromArn(arn);
+            return plan.getTags() == null ? Map.of() : plan.getTags();
+        }
         Detector detector = detectorFromArn(arn);
         return detector.getTags() == null ? Map.of() : detector.getTags();
     }
 
     public synchronized void tagResource(String arn, Map<String, String> tags) {
+        if (isMalwareProtectionPlanArn(arn)) {
+            DetectorRef ref = parsePlanArn(arn);
+            MalwareProtectionPlan plan = malwareProtectionPlanStore.get(ref.key())
+                    .orElseThrow(GuardDutyService::planNotFound);
+            Map<String, String> merged = new LinkedHashMap<>();
+            if (plan.getTags() != null) {
+                merged.putAll(plan.getTags());
+            }
+            merged.putAll(tags);
+            if (merged.size() > MAX_PLAN_TAGS) {
+                throw badRequest("A Malware Protection plan can have at most " + MAX_PLAN_TAGS + " tags.");
+            }
+            plan.setTags(merged);
+            malwareProtectionPlanStore.put(ref.key(), plan);
+            return;
+        }
         DetectorRef ref = parseDetectorArn(arn);
         Detector detector = detectorStore.get(ref.key()).orElseThrow(GuardDutyService::detectorNotFound);
         Map<String, String> merged = new LinkedHashMap<>();
@@ -344,6 +578,19 @@ public class GuardDutyService {
     }
 
     public synchronized void untagResource(String arn, List<String> tagKeys) {
+        if (isMalwareProtectionPlanArn(arn)) {
+            DetectorRef ref = parsePlanArn(arn);
+            MalwareProtectionPlan plan = malwareProtectionPlanStore.get(ref.key())
+                    .orElseThrow(GuardDutyService::planNotFound);
+            if (plan.getTags() == null) {
+                return;
+            }
+            Map<String, String> remaining = new LinkedHashMap<>(plan.getTags());
+            tagKeys.forEach(remaining::remove);
+            plan.setTags(remaining);
+            malwareProtectionPlanStore.put(ref.key(), plan);
+            return;
+        }
         DetectorRef ref = parseDetectorArn(arn);
         Detector detector = detectorStore.get(ref.key()).orElseThrow(GuardDutyService::detectorNotFound);
         if (detector.getTags() == null) {
