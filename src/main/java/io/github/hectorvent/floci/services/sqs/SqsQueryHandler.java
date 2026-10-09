@@ -17,6 +17,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -577,11 +578,21 @@ public class SqsQueryHandler {
     // --- Helpers ---
 
     private int countBatchEntries(MultivaluedMap<String, String> params, String entryPrefix) {
-        int count = 0;
-        while (getParam(params, entryPrefix + "." + (count + 1) + ".Id") != null) {
-            count++;
+        if (params == null) {
+            return 0;
         }
-        return count;
+        String prefix = entryPrefix + ".";
+        Set<String> indices = new HashSet<>();
+        for (String key : params.keySet()) {
+            if (key != null && key.startsWith(prefix)) {
+                int dotIndex = key.indexOf('.', prefix.length());
+                String index = dotIndex > 0 ? key.substring(prefix.length(), dotIndex) : key.substring(prefix.length());
+                if (!index.isEmpty()) {
+                    indices.add(index);
+                }
+            }
+        }
+        return indices.size();
     }
 
     private String getParam(MultivaluedMap<String, String> params, String name) {

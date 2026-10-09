@@ -12,6 +12,7 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -774,15 +775,150 @@ class SqsJsonProtocolTest {
         .then().statusCode(200)
             .extract().jsonPath().getString("QueueUrl");
         try {
+            // 1. SendMessageBatch with 11 entries rejects and stores nothing
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+                .body(batchBody(batchQueueUrl, 11))
+            .when().post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("TooManyEntriesInBatchRequest"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
+            .when().post("/")
+            .then().statusCode(200)
+                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"))
+                .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo("0"));
+
+            // 2. Seed 2 messages and receive them to get valid receipt handles
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"MessageBody\":\"seed-1\"}")
+            .when().post("/")
+            .then().statusCode(200);
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"MessageBody\":\"seed-2\"}")
+            .when().post("/")
+            .then().statusCode(200);
+
+            List<String> receiptHandles = given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"MaxNumberOfMessages\":10,\"VisibilityTimeout\":300}")
+            .when().post("/")
+            .then().statusCode(200)
+                .extract().jsonPath().getList("Messages.ReceiptHandle");
+            assertEquals(2, receiptHandles.size());
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
+            .when().post("/")
+            .then().statusCode(200)
+                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"))
+                .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo("2"));
+
+            // 3. ChangeMessageVisibilityBatch with 11 entries rejects and does not change visibility
+            StringBuilder visEntries = new StringBuilder();
+            for (int i = 0; i < 11; i++) {
+                if (i > 0) {
+                    visEntries.append(',');
+                }
+                String rh = i < receiptHandles.size() ? receiptHandles.get(i) : "dummy-rh";
+                visEntries.append("{\"Id\":\"v").append(i).append("\",\"ReceiptHandle\":\"")
+                        .append(rh).append("\",\"VisibilityTimeout\":0}");
+            }
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ChangeMessageVisibilityBatch")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"Entries\":[" + visEntries + "]}")
+            .when().post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("TooManyEntriesInBatchRequest"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
+            .when().post("/")
+            .then().statusCode(200)
+                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"))
+                .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo("2"));
+
+            // 4. DeleteMessageBatch with 11 entries rejects and preserves seeded messages
+            StringBuilder delEntries = new StringBuilder();
+            for (int i = 0; i < 11; i++) {
+                if (i > 0) {
+                    delEntries.append(',');
+                }
+                String rh = i < receiptHandles.size() ? receiptHandles.get(i) : "dummy-rh";
+                delEntries.append("{\"Id\":\"d").append(i).append("\",\"ReceiptHandle\":\"")
+                        .append(rh).append("\"}");
+            }
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteMessageBatch")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"Entries\":[" + delEntries + "]}")
+            .when().post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("TooManyEntriesInBatchRequest"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
+            .when().post("/")
+            .then().statusCode(200)
+                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"))
+                .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo("2"));
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void batchRequestsWithMissingOrNonArrayEntriesAreRejected() {
+        String batchQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-batch-invalid-entries-queue\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+        try {
             for (String target : List.of("SendMessageBatch", "DeleteMessageBatch", "ChangeMessageVisibilityBatch")) {
                 given()
                     .contentType(CONTENT_TYPE)
                     .header("X-Amz-Target", "AmazonSQS." + target)
-                    .body(batchBody(batchQueueUrl, 11))
+                    .body("{\"QueueUrl\":\"" + batchQueueUrl + "\"}")
                 .when().post("/")
                 .then()
                     .statusCode(400)
-                    .body("__type", equalTo("TooManyEntriesInBatchRequest"));
+                    .body("__type", equalTo("MissingParameter"));
+
+                given()
+                    .contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "AmazonSQS." + target)
+                    .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"Entries\":\"not-an-array\"}")
+                .when().post("/")
+                .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidParameterValue"));
             }
 
             given()

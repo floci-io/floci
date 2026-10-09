@@ -1043,27 +1043,164 @@ class SqsIntegrationTest {
         .then().statusCode(200)
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
         try {
-            Map<String, String> entryPrefixes = new LinkedHashMap<>();
-            entryPrefixes.put("SendMessageBatch", "SendMessageBatchRequestEntry");
-            entryPrefixes.put("DeleteMessageBatch", "DeleteMessageBatchRequestEntry");
-            entryPrefixes.put("ChangeMessageVisibilityBatch", "ChangeMessageVisibilityBatchRequestEntry");
-            for (Map.Entry<String, String> action : entryPrefixes.entrySet()) {
-                RequestSpecification request = given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", action.getKey())
-                    .formParam("QueueUrl", batchQueueUrl);
-                for (int i = 1; i <= 11; i++) {
-                    request = request
-                        .formParam(action.getValue() + "." + i + ".Id", "e" + i)
-                        .formParam(action.getValue() + "." + i + ".MessageBody", "m" + i)
-                        .formParam(action.getValue() + "." + i + ".ReceiptHandle", "rh")
-                        .formParam(action.getValue() + "." + i + ".VisibilityTimeout", "0");
-                }
-                request.when().post("/")
-                    .then()
-                    .statusCode(400)
-                    .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
+            // 1. SendMessageBatch with 11 entries rejects and stores nothing
+            RequestSpecification sendRequest = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", batchQueueUrl);
+            for (int i = 1; i <= 11; i++) {
+                sendRequest = sendRequest
+                    .formParam("SendMessageBatchRequestEntry." + i + ".Id", "e" + i)
+                    .formParam("SendMessageBatchRequestEntry." + i + ".MessageBody", "m" + i);
             }
+            sendRequest.when().post("/")
+                .then().statusCode(400)
+                .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
+
+            assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
+            assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessagesNotVisible"));
+
+            // 2. Seed 2 messages and receive them to get valid receipt handles
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", batchQueueUrl)
+                .formParam("MessageBody", "seed-1")
+            .when().post("/")
+            .then().statusCode(200);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", batchQueueUrl)
+                .formParam("MessageBody", "seed-2")
+            .when().post("/")
+            .then().statusCode(200);
+
+            XmlPath receiveXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", batchQueueUrl)
+                .formParam("MaxNumberOfMessages", "10")
+                .formParam("VisibilityTimeout", "300")
+            .when().post("/")
+            .then().statusCode(200)
+                .extract().xmlPath();
+            List<String> receiptHandles = receiveXml.getList(
+                    "ReceiveMessageResponse.ReceiveMessageResult.Message.ReceiptHandle", String.class);
+            assertEquals(2, receiptHandles.size());
+
+            assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
+            assertEquals("2", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessagesNotVisible"));
+
+            // 3. ChangeMessageVisibilityBatch with 11 entries rejects and does not change visibility
+            RequestSpecification visRequest = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ChangeMessageVisibilityBatch")
+                .formParam("QueueUrl", batchQueueUrl);
+            for (int i = 1; i <= 11; i++) {
+                String rh = i <= receiptHandles.size() ? receiptHandles.get(i - 1) : "dummy-rh";
+                visRequest = visRequest
+                    .formParam("ChangeMessageVisibilityBatchRequestEntry." + i + ".Id", "v" + i)
+                    .formParam("ChangeMessageVisibilityBatchRequestEntry." + i + ".ReceiptHandle", rh)
+                    .formParam("ChangeMessageVisibilityBatchRequestEntry." + i + ".VisibilityTimeout", "0");
+            }
+            visRequest.when().post("/")
+                .then().statusCode(400)
+                .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
+
+            assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
+            assertEquals("2", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessagesNotVisible"));
+
+            // 4. DeleteMessageBatch with 11 entries rejects and preserves seeded messages
+            RequestSpecification delRequest = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteMessageBatch")
+                .formParam("QueueUrl", batchQueueUrl);
+            for (int i = 1; i <= 11; i++) {
+                String rh = i <= receiptHandles.size() ? receiptHandles.get(i - 1) : "dummy-rh";
+                delRequest = delRequest
+                    .formParam("DeleteMessageBatchRequestEntry." + i + ".Id", "d" + i)
+                    .formParam("DeleteMessageBatchRequestEntry." + i + ".ReceiptHandle", rh);
+            }
+            delRequest.when().post("/")
+                .then().statusCode(400)
+                .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
+
+            assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
+            assertEquals("2", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessagesNotVisible"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", batchQueueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void batchRequestsWithNumberingGapAreRejectedWhenTotalEntriesExceedTen() {
+        String batchQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-batch-gap-queue")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+        try {
+            // Indices 1..4 and 6..12: gap at 5, total 11 entries
+            RequestSpecification request = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", batchQueueUrl);
+            int[] indices = {1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12};
+            for (int idx : indices) {
+                request = request
+                    .formParam("SendMessageBatchRequestEntry." + idx + ".Id", "e" + idx)
+                    .formParam("SendMessageBatchRequestEntry." + idx + ".MessageBody", "m" + idx);
+            }
+            request.when().post("/")
+                .then()
+                .statusCode(400)
+                .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
+
+            assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", batchQueueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void batchRequestsWithEleventhEntryMissingIdAreRejectedWhenTotalEntriesExceedTen() {
+        String batchQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-batch-no-id-queue")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+        try {
+            // Entries 1..10 have Id and MessageBody; entry 11 has MessageBody but no Id
+            RequestSpecification request = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", batchQueueUrl);
+            for (int i = 1; i <= 10; i++) {
+                request = request
+                    .formParam("SendMessageBatchRequestEntry." + i + ".Id", "e" + i)
+                    .formParam("SendMessageBatchRequestEntry." + i + ".MessageBody", "m" + i);
+            }
+            request = request
+                .formParam("SendMessageBatchRequestEntry.11.MessageBody", "m11");
+
+            request.when().post("/")
+                .then()
+                .statusCode(400)
+                .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
 
             assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
         } finally {
