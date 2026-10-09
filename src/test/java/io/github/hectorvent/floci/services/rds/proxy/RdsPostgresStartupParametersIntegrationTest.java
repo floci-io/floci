@@ -148,7 +148,10 @@ class RdsPostgresStartupParametersIntegrationTest {
                     "ALTER ROLE app_user SET statement_timeout = '7s'",
                     // Superuser-only: applies at login although app_user could not set it itself.
                     "ALTER ROLE app_user SET log_min_duration_statement = '1s'",
-                    "ALTER ROLE app_user SET role = 'reader'");
+                    "ALTER ROLE app_user SET role = 'reader'",
+                    // Read on a session whose encoding the master's default would otherwise set.
+                    "ALTER ROLE app_user SET floci.note = 'café'",
+                    "ALTER ROLE " + MASTER_USER + " SET client_encoding = 'LATIN1'");
 
             Properties iam = iamLogin(port, "app_user");
             iam.setProperty("options", "-c statement_timeout=9s");
@@ -159,6 +162,16 @@ class RdsPostgresStartupParametersIntegrationTest {
                 assertThat(show(connection, "log_min_duration_statement"), equalTo("1s"));
                 assertThat(show(connection, "role"), equalTo("reader"));
                 assertThat(show(connection, "session_authorization"), equalTo("app_user"));
+                assertThat(show(connection, "floci.note"), equalTo("café"));
+
+                // As at login, the role's defaults are what RESET returns to, so the role cannot
+                // shed a superuser-only one its administrator set.
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("RESET ALL");
+                }
+                assertThat(show(connection, "work_mem"), equalTo("48MB"));
+                assertThat(show(connection, "log_min_duration_statement"), equalTo("1s"));
+                assertThat(show(connection, "statement_timeout"), equalTo("7s"));
             }
         } finally {
             deleteInstance(dbId);

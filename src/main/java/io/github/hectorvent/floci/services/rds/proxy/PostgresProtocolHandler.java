@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -205,29 +206,22 @@ public class PostgresProtocolHandler {
             // An IAM login for any role but the master runs on a session opened as the master and
             // handed over below, so PostgreSQL would apply the client's parameters with the
             // master's privileges: a "-c role=<master>" would outlive the handover and RESET ROLE
-            // would regain the master. Those logins open with only user and database, and their
-            // parameters are applied once the session belongs to the role (Phase 5c).
-            Map<String, String> clientParameters = forwardStartupParameters && !(isIam && !isMaster)
-                    ? startup.parameters() : Map.of();
-            sendStartupToBackend(backendOut, backendUser, effectiveDbName, clientParameters);
-            backendOut.flush();
-
-            boolean backendAuthenticated = false;
-            byte[] backendRejection = null;
-            try {
-                backendAuthenticated = authenticateWithBackend(backendIn, backendOut, backendUser, backendPass);
-            } catch (BackendRejectedException e) {
-                backendRejection = e.errorResponse();
+            // would regain the master. Those logins open without them, and their parameters are
+            // applied once the session belongs to the role (Phase 5c). The proxy reads that
+            // session's results and sends it SQL of its own, so it fixes the encoding to UTF-8.
+            boolean iamHandover = isIam && !isMaster;
+            Map<String, String> backendParameters;
+            if (!forwardStartupParameters) {
+                backendParameters = Map.of();
+            } else if (iamHandover) {
+                backendParameters = Map.of("client_encoding", "UTF8");
+            } else {
+                backendParameters = startup.parameters();
             }
-            if (!backendAuthenticated) {
-                // PostgreSQL's own refusal, such as a missing pg_hba.conf entry for a forwarded
-                // replication=true, says far more than the proxy's generic error.
-                if (backendRejection != null) {
-                    clientOut.write(backendRejection);
-                } else {
-                    sendErrorResponse(clientOut, "FATAL", "08006",
-                            "Backend database authentication failed");
-                }
+            byte[] backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
+                    effectiveDbName, backendParameters);
+            if (backendRejection != null) {
+                clientOut.write(backendRejection);
                 clientOut.flush();
                 closeQuietly(client);
                 closeQuietly(backend);
@@ -238,45 +232,66 @@ public class PostgresProtocolHandler {
             List<byte[]> bufferedMessages = readUntilReadyForQuery(backendIn);
 
             String iamRole = null;
+            List<SessionSetting> roleDefaultsAfterHandover = List.of();
+            List<byte[]> notices = new ArrayList<>();
+
+            // Phase 5a: A login as the role would load the role's own ALTER ROLE ... SET defaults,
+            // which SET SESSION AUTHORIZATION does not. PostgreSQL makes them the values RESET
+            // returns to and applies them with the authority of whoever stored them, so a
+            // superuser-only default set by an administrator binds a role that could not set it
+            // itself. Only startup parameters get both properties, so when the role has defaults
+            // the proxy opens the backend session again with them as -c options. Each is tried
+            // first, so one PostgreSQL refuses is skipped with a WARNING, as at login, instead of
+            // failing the startup. "role" and client_encoding wait for the handover (Phase 5b).
+            if (iamHandover && forwardStartupParameters && !endsWithErrorResponse(bufferedMessages)) {
+                RoleDefaults defaults = readRoleDefaults(backendIn, backendOut, clientUsername);
+                if (defaults.failure() != null) {
+                    sendErrorResponse(clientOut, "FATAL", errorField(defaults.failure(), 'C', "XX000"),
+                            errorField(defaults.failure(), 'M', "could not load the role's defaults"));
+                    clientOut.flush();
+                    closeQuietly(client);
+                    closeQuietly(backend);
+                    return null;
+                }
+                notices.addAll(defaults.warnings());
+                roleDefaultsAfterHandover = defaults.afterHandover();
+                if (!defaults.atStartup().isEmpty()) {
+                    sendMessage(backendOut, 'X');
+                    backendOut.flush();
+                    closeQuietly(backend);
+                    try {
+                        backend = backendConnector.connect();
+                    } catch (IOException e) {
+                        sendErrorResponse(clientOut, "FATAL", "08006", "could not connect to backend database");
+                        clientOut.flush();
+                        closeQuietly(client);
+                        return null;
+                    }
+                    backend.setSoTimeout(handshakeTimeoutMillis);
+                    backendIn = backend.getInputStream();
+                    backendOut = backend.getOutputStream();
+                    Map<String, String> withDefaults = new LinkedHashMap<>();
+                    withDefaults.put("options", startupOptions(defaults.atStartup()));
+                    withDefaults.put("client_encoding", "UTF8");
+                    backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
+                            effectiveDbName, withDefaults);
+                    if (backendRejection != null) {
+                        clientOut.write(backendRejection);
+                        clientOut.flush();
+                        closeQuietly(client);
+                        closeQuietly(backend);
+                        return null;
+                    }
+                    bufferedMessages = readUntilReadyForQuery(backendIn);
+                }
+            }
 
             // Phase 5b: An IAM token is issued for one specific database role, so the session must
             // run as that role even though the backend connection was opened as master. Handing it
             // over gives the session the role's own privileges and object ownership, and refuses a
             // token naming a role the database does not have instead of silently granting a master
             // session.
-            if (isIam && !isMaster && !endsWithErrorResponse(bufferedMessages)) {
-                // Phase 5a: A login as the role would load the role's own ALTER ROLE ... SET
-                // defaults, which SET SESSION AUTHORIZATION does not. They are applied while the
-                // session is still the master's because PostgreSQL applies them with the authority
-                // of whoever stored them, not the role's: a superuser-only default set by an
-                // administrator still takes effect for a role that could not set it itself. As at
-                // login, a default PostgreSQL cannot apply is skipped rather than failing the
-                // login. A role default for "role" is a membership claim, so it waits for the
-                // handover and is checked against the role.
-                SessionSetting roleDefaultRole = null;
-                if (forwardStartupParameters) {
-                    List<byte[]> lookup = runQuery(backendIn, backendOut, roleDefaultsQuery(clientUsername));
-                    if (endsWithErrorResponse(lookup)) {
-                        byte[] refusal = lookup.get(lookup.size() - 1);
-                        sendErrorResponse(clientOut, "FATAL", errorField(refusal, 'C', "XX000"),
-                                errorField(refusal, 'M', "could not read the role's defaults"));
-                        clientOut.flush();
-                        closeQuietly(client);
-                        closeQuietly(backend);
-                        return null;
-                    }
-                    List<SessionSetting> roleDefaults = new ArrayList<>();
-                    for (SessionSetting setting : settingsFromDataRows(lookup)) {
-                        if ("role".equalsIgnoreCase(setting.name())) {
-                            roleDefaultRole = setting;
-                        } else if (!"session_authorization".equalsIgnoreCase(setting.name())) {
-                            roleDefaults.add(setting);
-                        }
-                    }
-                    bufferedMessages = applyParameterStatusUpdates(bufferedMessages,
-                            applyRoleDefaults(backendIn, backendOut, roleDefaults, clientUsername));
-                }
-
+            if (iamHandover && !endsWithErrorResponse(bufferedMessages)) {
                 List<byte[]> roleSwitch = assumeSessionRole(backendIn, backendOut, clientUsername);
                 if (endsWithErrorResponse(roleSwitch)) {
                     sendErrorResponse(clientOut, "FATAL", "28000",
@@ -289,9 +304,25 @@ public class PostgresProtocolHandler {
                 }
                 bufferedMessages = applyParameterStatusUpdates(bufferedMessages, roleSwitch);
                 iamRole = clientUsername;
-                if (roleDefaultRole != null) {
-                    bufferedMessages = applyParameterStatusUpdates(bufferedMessages,
-                            applyRoleDefaults(backendIn, backendOut, List.of(roleDefaultRole), clientUsername));
+
+                // A "role" default is a membership claim, checked against the role as at login.
+                SessionSetting roleEncoding = null;
+                for (SessionSetting setting : roleDefaultsAfterHandover) {
+                    if ("client_encoding".equalsIgnoreCase(setting.name())) {
+                        roleEncoding = setting;
+                        continue;
+                    }
+                    DefaultOutcome outcome = applyDefault(backendIn, backendOut, setting, clientUsername);
+                    if (outcome.failure() != null) {
+                        sendErrorResponse(clientOut, "FATAL", errorField(outcome.failure(), 'C', "XX000"),
+                                errorField(outcome.failure(), 'M', "could not apply the role's defaults"));
+                        clientOut.flush();
+                        closeQuietly(client);
+                        closeQuietly(backend);
+                        return null;
+                    }
+                    notices.addAll(outcome.warnings());
+                    bufferedMessages = applyParameterStatusUpdates(bufferedMessages, outcome.statuses());
                 }
 
                 // Phase 5c: Apply the client's startup parameters now that the session belongs to
@@ -337,6 +368,26 @@ public class PostgresProtocolHandler {
                         bufferedMessages = applyParameterStatusUpdates(bufferedMessages, applied);
                     }
                 }
+
+                // The role's client_encoding goes last, once the proxy sends no more SQL, and only
+                // if the client did not choose an encoding itself.
+                if (roleEncoding != null && !clientChoseEncoding(startup.parameters())) {
+                    DefaultOutcome outcome = applyDefault(backendIn, backendOut, roleEncoding, clientUsername);
+                    if (outcome.failure() != null) {
+                        sendErrorResponse(clientOut, "FATAL", errorField(outcome.failure(), 'C', "XX000"),
+                                errorField(outcome.failure(), 'M', "could not apply the role's defaults"));
+                        clientOut.flush();
+                        closeQuietly(client);
+                        closeQuietly(backend);
+                        return null;
+                    }
+                    notices.addAll(outcome.warnings());
+                    bufferedMessages = applyParameterStatusUpdates(bufferedMessages, outcome.statuses());
+                }
+            }
+
+            if (!notices.isEmpty() && !endsWithErrorResponse(bufferedMessages)) {
+                bufferedMessages = insertBeforeStartupTrailer(bufferedMessages, notices);
             }
 
             // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
@@ -511,6 +562,26 @@ public class PostgresProtocolHandler {
     }
 
     // ── Backend auth phase ────────────────────────────────────────────────────
+
+    /**
+     * Sends the backend StartupMessage and authenticates. Returns {@code null} once logged in, or
+     * the ErrorResponse to give the client: PostgreSQL's own refusal where it gave one.
+     */
+    private static byte[] loginToBackend(InputStream in, OutputStream out, String user, String password,
+                                         String database, Map<String, String> parameters) throws IOException {
+        sendStartupToBackend(out, user, database, parameters);
+        out.flush();
+        try {
+            if (authenticateWithBackend(in, out, user, password)) {
+                return null;
+            }
+        } catch (BackendRejectedException e) {
+            // PostgreSQL's own refusal, such as a missing pg_hba.conf entry for a forwarded
+            // replication=true, says far more than the proxy's generic error.
+            return e.errorResponse();
+        }
+        return responseMessage('E', "FATAL", "08006", "Backend database authentication failed");
+    }
 
     private static boolean authenticateWithBackend(InputStream in, OutputStream out,
                                                    String username, String password) throws IOException {
@@ -868,31 +939,145 @@ public class PostgresProtocolHandler {
     }
 
     /**
-     * Applies role defaults one statement each, so that, as at login, one PostgreSQL cannot apply
-     * is skipped with a log line instead of failing the login or the defaults after it.
-     *
-     * @return the ParameterStatus messages the applied defaults produced
+     * The SQLSTATEs PostgreSQL raises when it refuses to set a parameter: unknown, an invalid
+     * value, or not permitted. At login these are WARNINGs and the default is skipped; anything
+     * else is a real failure.
      */
-    private static List<byte[]> applyRoleDefaults(InputStream in, OutputStream out,
-                                                  List<SessionSetting> defaults, String role)
-            throws IOException {
-        List<byte[]> statuses = new ArrayList<>();
-        for (SessionSetting setting : defaults) {
-            List<byte[]> result = runQuery(in, out, setConfigStatement(List.of(setting)));
-            byte[] refusal = null;
-            for (byte[] message : result) {
-                if (message[0] == 'E') {
-                    refusal = message;
-                } else if (message[0] == 'S') {
-                    statuses.add(message);
-                }
+    private static final Set<String> REFUSED_SETTING_STATES = Set.of("42704", "22023", "22P02", "42501");
+
+    /** A parameter that can be set only at connection start. */
+    private static final String STARTUP_ONLY_STATE = "55P02";
+
+    /**
+     * The token role's defaults, sorted: those for the backend StartupMessage, those that must
+     * wait for the handover, the WARNINGs for any PostgreSQL refused, or the ErrorResponse that
+     * stopped the lookup.
+     */
+    record RoleDefaults(List<SessionSetting> atStartup, List<SessionSetting> afterHandover,
+                        List<byte[]> warnings, byte[] failure) {}
+
+    /** What applying one default produced: ParameterStatus messages, WARNINGs, or a failure. */
+    record DefaultOutcome(List<byte[]> statuses, List<byte[]> warnings, byte[] failure) {}
+
+    /**
+     * Reads the token role's defaults on the master session and tries each one there, so that
+     * only those PostgreSQL accepts go into the backend StartupMessage. The session is replaced
+     * whenever any was accepted, so trying them leaves nothing behind that is used.
+     */
+    private static RoleDefaults readRoleDefaults(InputStream in, OutputStream out, String role) throws IOException {
+        List<byte[]> lookup = runQuery(in, out, roleDefaultsQuery(role));
+        if (endsWithErrorResponse(lookup)) {
+            return new RoleDefaults(List.of(), List.of(), List.of(), lookup.get(lookup.size() - 1));
+        }
+        List<SessionSetting> atStartup = new ArrayList<>();
+        List<SessionSetting> afterHandover = new ArrayList<>();
+        List<byte[]> warnings = new ArrayList<>();
+        for (SessionSetting setting : settingsFromDataRows(lookup)) {
+            if ("session_authorization".equalsIgnoreCase(setting.name())) {
+                continue;
             }
-            if (refusal != null) {
-                LOG.infov("Skipping role {0}''s default {1}: {2}", role, setting.name(),
-                        errorMessage(refusal, "refused"));
+            if ("role".equalsIgnoreCase(setting.name()) || "client_encoding".equalsIgnoreCase(setting.name())) {
+                afterHandover.add(setting);
+                continue;
+            }
+            byte[] refusal = firstErrorResponse(runQuery(in, out, setConfigStatement(List.of(setting))));
+            if (refusal == null || STARTUP_ONLY_STATE.equals(errorField(refusal, 'C', ""))) {
+                atStartup.add(setting);
+            } else if (REFUSED_SETTING_STATES.contains(errorField(refusal, 'C', ""))) {
+                warnings.add(skippedDefaultWarning(refusal, role, setting));
+            } else {
+                return new RoleDefaults(List.of(), List.of(), List.of(), refusal);
             }
         }
-        return statuses;
+        return new RoleDefaults(atStartup, afterHandover, warnings, null);
+    }
+
+    /** Applies one default to the session as it stands, skipping it with a WARNING if refused. */
+    private static DefaultOutcome applyDefault(InputStream in, OutputStream out, SessionSetting setting,
+                                               String role) throws IOException {
+        List<byte[]> result = runQuery(in, out, setConfigStatement(List.of(setting)));
+        byte[] refusal = firstErrorResponse(result);
+        if (refusal == null) {
+            return new DefaultOutcome(result, List.of(), null);
+        }
+        if (REFUSED_SETTING_STATES.contains(errorField(refusal, 'C', ""))) {
+            return new DefaultOutcome(List.of(), List.of(skippedDefaultWarning(refusal, role, setting)), null);
+        }
+        return new DefaultOutcome(List.of(), List.of(), refusal);
+    }
+
+    /** The NoticeResponse a login sends for a default PostgreSQL refused, logged here too. */
+    private static byte[] skippedDefaultWarning(byte[] refusal, String role, SessionSetting setting) {
+        String message = errorField(refusal, 'M', "invalid value for parameter \"" + setting.name() + "\"");
+        LOG.warnv("Skipping role {0}''s default {1}: {2}", role, setting.name(), message);
+        return responseMessage('N', "WARNING", errorField(refusal, 'C', "22023"), message);
+    }
+
+    private static byte[] firstErrorResponse(List<byte[]> messages) {
+        for (byte[] message : messages) {
+            if (message[0] == 'E') {
+                return message;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * An {@code options} value carrying {@code settings} as {@code -c name=value} switches,
+     * escaped for {@code pg_split_opts}: a backslash before every backslash and whitespace.
+     */
+    static String startupOptions(List<SessionSetting> settings) {
+        StringBuilder options = new StringBuilder();
+        for (SessionSetting setting : settings) {
+            if (options.length() > 0) {
+                options.append(' ');
+            }
+            options.append("-c ").append(escapeOption(setting.name())).append('=')
+                    .append(escapeOption(setting.value()));
+        }
+        return options.toString();
+    }
+
+    private static String escapeOption(String text) {
+        StringBuilder escaped = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\\' || isAsciiSpace(c)) {
+                escaped.append('\\');
+            }
+            escaped.append(c);
+        }
+        return escaped.toString();
+    }
+
+    /** Whether the client's StartupMessage chose a client_encoding, directly or in options. */
+    static boolean clientChoseEncoding(Map<String, String> startupParameters) {
+        for (String name : startupParameters.keySet()) {
+            if ("client_encoding".equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        String options = startupParameters.get("options");
+        if (options == null) {
+            return false;
+        }
+        try {
+            for (SessionSetting setting : parseOptions(options)) {
+                if ("client_encoding".equalsIgnoreCase(setting.name())) {
+                    return true;
+                }
+            }
+        } catch (StartupParameterException ignored) {
+            // Phase 5c refuses the same options with PostgreSQL's error before this is asked.
+        }
+        return false;
+    }
+
+    /** Inserts {@code messages} where ParameterStatus messages end, ahead of BackendKeyData. */
+    static List<byte[]> insertBeforeStartupTrailer(List<byte[]> buffered, List<byte[]> messages) {
+        List<byte[]> merged = new ArrayList<>(buffered);
+        merged.addAll(startupTrailerIndex(merged), messages);
+        return merged;
     }
 
     /** Runs {@code sql} as a simple query and returns every message up to ReadyForQuery. */
@@ -1381,18 +1566,29 @@ public class PostgresProtocolHandler {
 
     private static void sendErrorResponse(OutputStream out, String severity, String sqlState,
                                           String message) throws IOException {
+        out.write(responseMessage('E', severity, sqlState, message));
+    }
+
+    /** An ErrorResponse ('E') or NoticeResponse ('N') carrying severity, SQLSTATE and message. */
+    static byte[] responseMessage(char type, String severity, String sqlState, String message) {
         byte[] sevBytes = severity.getBytes(StandardCharsets.UTF_8);
         byte[] stateBytes = sqlState.getBytes(StandardCharsets.UTF_8);
         byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
 
         // Fields: S=severity, C=sqlstate, M=message, then final null byte
         ByteArrayOutputStream fields = new ByteArrayOutputStream();
-        fields.write('S'); fields.write(sevBytes); fields.write(0);
-        fields.write('C'); fields.write(stateBytes); fields.write(0);
-        fields.write('M'); fields.write(msgBytes); fields.write(0);
+        fields.write('S'); fields.writeBytes(sevBytes); fields.write(0);
+        fields.write('C'); fields.writeBytes(stateBytes); fields.write(0);
+        fields.write('M'); fields.writeBytes(msgBytes); fields.write(0);
         fields.write(0); // final null
 
-        sendMessage(out, 'E', fields.toByteArray());
+        ByteArrayOutputStream framed = new ByteArrayOutputStream();
+        try {
+            sendMessage(framed, type, fields.toByteArray());
+        } catch (IOException e) {
+            throw new IllegalStateException("writing to memory cannot fail", e);
+        }
+        return framed.toByteArray();
     }
 
     // ── Wire helpers ──────────────────────────────────────────────────────────

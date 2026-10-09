@@ -713,8 +713,9 @@ class PostgresProtocolHandlerTest {
                 assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
             }
 
-            assertEquals(List.of("user", "database"), List.copyOf(backendStartup.get().keySet()),
+            assertEquals(List.of("user", "database", "client_encoding"), List.copyOf(backendStartup.get().keySet()),
                     "client startup parameters are not applied to the master session");
+            assertEquals("UTF8", backendStartup.get().get("client_encoding"));
             assertEquals("SELECT pg_catalog.set_config(E'search_path', E'app', false), "
                     + "pg_catalog.set_config(E'statement_timeout', E'5s', false), "
                     + "pg_catalog.set_config(E'application_name', E'svc', false)",
@@ -882,33 +883,38 @@ class PostgresProtocolHandlerTest {
     }
 
     @Test
-    void iamSessionLoadsTheRoleDefaultsAsTheMasterBeforeTheHandover() throws Exception {
+    void iamSessionReopensTheBackendWithTheRoleDefaultsAsStartupOptions() throws Exception {
+        List<String> tried = new ArrayList<>();
+        AtomicReference<Map<String, String>> reopenedStartup = new AtomicReference<>();
         AtomicReference<String> handover = new AtomicReference<>();
-        List<String> beforeHandover = new ArrayList<>();
         List<String> afterHandover = new ArrayList<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0);
+        try (ServerSocket lookupServer = new ServerSocket(0);
+             ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
 
-            int backendPort = backendServer.getLocalPort();
+            Thread lookupThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleDefaultsLookup(lookupServer, List.of(
+                            new String[] {"temp_file_limit", "1GB"},
+                            new String[] {"no_such_parameter", "on"},
+                            new String[] {"role", "reader"},
+                            new String[] {"session_authorization", "dbadmin"},
+                            new String[] {"client_encoding", "LATIN1"},
+                            new String[] {"search_path", "app, public"}), tried);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
             Thread backendThread = Thread.ofVirtual().start(() -> {
                 try {
-                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(), handover,
-                            "approle", true, (in, out) -> {
-                                afterHandover.add(readSimpleQuery(in));
-                                writeCommandComplete(out, "SELECT 1");
-                                writeReadyForQuery(out);
-                                afterHandover.add(readSimpleQuery(in));
-                                writeParameterStatus(out, "application_name", "svc");
-                                writeCommandComplete(out, "SELECT 1");
-                                writeReadyForQuery(out);
-                            },
-                            List.of(new String[] {"temp_file_limit", "1GB"},
-                                    new String[] {"no_such_parameter", "on"},
-                                    new String[] {"role", "reader"},
-                                    new String[] {"session_authorization", "dbadmin"},
-                                    new String[] {"search_path", "app"}),
-                            beforeHandover);
+                    mockBackendRoleSwitch(backendServer, reopenedStartup, handover, "approle", true, (in, out) -> {
+                        for (int i = 0; i < 3; i++) {
+                            afterHandover.add(readSimpleQuery(in));
+                            writeCommandComplete(out, "SELECT 1");
+                            writeReadyForQuery(out);
+                        }
+                    });
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -918,9 +924,11 @@ class PostgresProtocolHandlerTest {
             try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
                 proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                List<Socket> backends = new ArrayList<>(List.of(
+                        new Socket("localhost", lookupServer.getLocalPort()),
+                        new Socket("localhost", backendServer.getLocalPort())));
 
-                Thread authThread = startIamAuth(proxyClient, backend);
+                Thread authThread = startIamAuth(proxyClient, () -> backends.remove(0));
 
                 DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
                 DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
@@ -934,15 +942,21 @@ class PostgresProtocolHandlerTest {
                 writePassword(clientOut, rdsToken("approle"));
                 readAuthenticationOk(clientIn);
 
-                Map<String, String> params = readParametersUntilReadyForQuery(clientIn);
+                List<Map<Character, String>> notices = new ArrayList<>();
+                Map<String, String> params = readParametersAndNoticesUntilReadyForQuery(clientIn, notices);
                 assertEquals("approle", params.get("session_authorization"));
-                assertEquals("svc", params.get("application_name"));
+                assertEquals(1, notices.size(), notices.toString());
+                assertEquals("WARNING", notices.get(0).get('S'));
+                assertEquals("42704", notices.get(0).get('C'));
+                assertEquals("unrecognized configuration parameter \"no_such_parameter\"", notices.get(0).get('M'));
 
                 ourClient.close();
                 proxyClient.close();
                 authThread.join(5_000);
+                lookupThread.join(5_000);
                 backendThread.join(5_000);
                 assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, lookupThread.isAlive(), "lookupThread did not terminate");
                 assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
             }
         }
@@ -950,13 +964,86 @@ class PostgresProtocolHandlerTest {
         assertEquals(List.of(
                         "SELECT pg_catalog.set_config(E'temp_file_limit', E'1GB', false)",
                         "SELECT pg_catalog.set_config(E'no_such_parameter', E'on', false)",
-                        "SELECT pg_catalog.set_config(E'search_path', E'app', false)"),
-                beforeHandover, "each default on its own, a refused one skipped, role and session_authorization held back");
+                        "SELECT pg_catalog.set_config(E'search_path', E'app, public', false)"),
+                tried, "each default is tried on the lookup session; role, client_encoding and session_authorization are not");
+        assertEquals("dbadmin", reopenedStartup.get().get("user"));
+        assertEquals("-c temp_file_limit=1GB -c search_path=app,\\ public", reopenedStartup.get().get("options"),
+                "the accepted defaults become startup options, the refused one is left out");
+        assertEquals("UTF8", reopenedStartup.get().get("client_encoding"));
         assertEquals("SET SESSION AUTHORIZATION \"approle\"", handover.get());
         assertEquals(List.of(
                         "SELECT pg_catalog.set_config(E'role', E'reader', false)",
-                        "SELECT pg_catalog.set_config(E'application_name', E'svc', false)"),
-                afterHandover, "the role default is checked against the role, before the client's settings");
+                        "SELECT pg_catalog.set_config(E'application_name', E'svc', false)",
+                        "SELECT pg_catalog.set_config(E'client_encoding', E'LATIN1', false)"),
+                afterHandover, "role as the role, then the client's settings, then the role's encoding once no proxy SQL follows");
+    }
+
+    @Test
+    void iamSessionFailsWhenARoleDefaultHitsAnErrorOtherThanARefusal() throws Exception {
+        try (ServerSocket lookupServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            Thread lookupThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleDefaultsLookup(lookupServer,
+                            List.<String[]>of(new String[] {"broken_default", "on"}), new ArrayList<>());
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", lookupServer.getLocalPort());
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "approle", "postgres");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+
+                Map<Character, String> error = readErrorResponse(clientIn);
+                assertEquals("FATAL", error.get('S'));
+                assertEquals("XX000", error.get('C'));
+                assertEquals("could not read block 0", error.get('M'));
+                assertEquals(-1, clientIn.read(), "the login must fail");
+
+                authThread.join(5_000);
+                lookupThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, lookupThread.isAlive(), "lookupThread did not terminate");
+            }
+        }
+    }
+
+    @Test
+    void startupOptionsEscapeWhatPgSplitOptsSplitsOn() throws Exception {
+        String options = PostgresProtocolHandler.startupOptions(List.of(
+                new PostgresProtocolHandler.SessionSetting("search_path", "app, public"),
+                new PostgresProtocolHandler.SessionSetting("application_name", "a\\b\tc")));
+        assertEquals("-c search_path=app,\\ public -c application_name=a\\\\b\\\tc", options);
+        assertEquals(List.of(
+                        new PostgresProtocolHandler.SessionSetting("search_path", "app, public"),
+                        new PostgresProtocolHandler.SessionSetting("application_name", "a\\b\tc")),
+                PostgresProtocolHandler.parseOptions(options), "PostgreSQL reads back what was escaped");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "client_encoding|UTF8|true",
+            "CLIENT_ENCODING|UTF8|true",
+            "options|-c client_encoding=LATIN1|true",
+            "options|--client-encoding=LATIN1|true",
+            "options|-c search_path=app|false",
+            "application_name|svc|false"
+    })
+    void clientChoseEncodingSeesEveryWayAClientCanAskForOne(String name, String value, boolean expected) {
+        assertEquals(expected, PostgresProtocolHandler.clientChoseEncoding(Map.of("user", "approle", name, value)));
     }
 
     @Test
@@ -1441,6 +1528,24 @@ class PostgresProtocolHandlerTest {
         return startIamAuth(proxyClient, backend, true, true);
     }
 
+    private Thread startIamAuth(Socket proxyClient, PostgresProtocolHandler.BackendConnector connector) {
+        return Thread.ofVirtual().start(() -> {
+            try {
+                PostgresProtocolHandler.AuthenticatedSession session =
+                        PostgresProtocolHandler.authenticate(
+                        proxyClient, connector,
+                        "dbadmin", "adminpass", "postgres",
+                        true, testSigV4Validator(), testBinding(), testTlsCertificates(),
+                        (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000, true);
+                if (session != null) {
+                    PostgresProtocolHandler.bridge(session);
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
     private Thread startIamAuth(Socket proxyClient, Socket backend,
                                 boolean iamEnabled, boolean forwardStartupParameters) {
         return Thread.ofVirtual().start(() -> {
@@ -1531,22 +1636,6 @@ class PostgresProtocolHandlerTest {
                                               AtomicReference<String> backendQuery,
                                               String role, boolean roleExists,
                                               BackendScript afterHandover) throws IOException {
-        mockBackendRoleSwitch(server, backendStartup, backendQuery, role, roleExists, afterHandover,
-                List.of(), new ArrayList<>());
-    }
-
-    /**
-     * Also answers the proxy's lookup of the role's own defaults with {@code roleDefaults}
-     * ({@code name}/{@code value} rows), recording each statement run before the handover in
-     * {@code beforeHandover}.
-     */
-    private static void mockBackendRoleSwitch(ServerSocket server,
-                                              AtomicReference<Map<String, String>> backendStartup,
-                                              AtomicReference<String> backendQuery,
-                                              String role, boolean roleExists,
-                                              BackendScript afterHandover,
-                                              List<String[]> roleDefaults,
-                                              List<String> beforeHandover) throws IOException {
         try (Socket socket = server.accept()) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
@@ -1574,23 +1663,10 @@ class PostgresProtocolHandlerTest {
 
             String query = readSimpleQuery(in);
             if (query.contains("pg_db_role_setting")) {
-                for (String[] setting : roleDefaults) {
-                    writeDataRow(out, setting[0], setting[1]);
-                }
-                writeCommandComplete(out, "SELECT " + roleDefaults.size());
+                // A role with no defaults: the proxy carries on with this session.
+                writeCommandComplete(out, "SELECT 0");
                 writeReadyForQuery(out);
                 query = readSimpleQuery(in);
-                while (query.startsWith("SELECT pg_catalog.set_config")) {
-                    beforeHandover.add(query);
-                    if (query.contains("no_such_parameter")) {
-                        writeErrorResponse(out, "ERROR", "42704",
-                                "unrecognized configuration parameter \"no_such_parameter\"");
-                    } else {
-                        writeCommandComplete(out, "SELECT 1");
-                    }
-                    writeReadyForQuery(out);
-                    query = readSimpleQuery(in);
-                }
             }
             backendQuery.set(query);
 
@@ -1607,6 +1683,101 @@ class PostgresProtocolHandlerTest {
 
             if (afterHandover != null) {
                 afterHandover.run(in, out);
+            }
+        }
+    }
+
+    /**
+     * The master session the proxy reads the role's defaults on: answers the lookup with
+     * {@code roleDefaults}, then each default the proxy tries, recording them in {@code tried},
+     * until the proxy terminates the session. {@code no_such_parameter} is refused as PostgreSQL
+     * refuses an unknown parameter; {@code broken_default} fails with an internal error.
+     */
+    private static void mockBackendRoleDefaultsLookup(ServerSocket server, List<String[]> roleDefaults,
+                                                      List<String> tried) throws IOException {
+        try (Socket socket = server.accept()) {
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+            int length = in.readInt();
+            assertEquals(STARTUP_PROTOCOL_VERSION, in.readInt());
+            in.readNBytes(length - 8);
+            out.writeByte('R');
+            out.writeInt(8);
+            out.writeInt(3);
+            out.flush();
+            assertEquals('p', in.readByte());
+            in.readNBytes(in.readInt() - 4);
+            out.writeByte('R');
+            out.writeInt(8);
+            out.writeInt(0);
+            writeParameterStatus(out, "session_authorization", "dbadmin");
+            writeBackendKeyData(out);
+            writeReadyForQuery(out);
+
+            assertEquals(true, readSimpleQuery(in).contains("pg_db_role_setting"));
+            for (String[] setting : roleDefaults) {
+                writeDataRow(out, setting[0], setting[1]);
+            }
+            writeCommandComplete(out, "SELECT " + roleDefaults.size());
+            writeReadyForQuery(out);
+
+            while (true) {
+                int type = in.read();
+                if (type < 0 || type == 'X') {
+                    return;
+                }
+                assertEquals('Q', type);
+                byte[] body = in.readNBytes(in.readInt() - 4);
+                String query = new String(body, 0, body.length - 1, StandardCharsets.UTF_8);
+                tried.add(query);
+                if (query.contains("no_such_parameter")) {
+                    writeErrorResponse(out, "ERROR", "42704",
+                            "unrecognized configuration parameter \"no_such_parameter\"");
+                } else if (query.contains("broken_default")) {
+                    writeErrorResponse(out, "ERROR", "XX000", "could not read block 0");
+                } else {
+                    writeCommandComplete(out, "SELECT 1");
+                }
+                writeReadyForQuery(out);
+            }
+        }
+    }
+
+    private static Map<String, String> readParametersAndNoticesUntilReadyForQuery(
+            DataInputStream in, List<Map<Character, String>> notices) throws IOException {
+        Map<String, String> params = new HashMap<>();
+        while (true) {
+            int type = in.readByte();
+            byte[] payload = in.readNBytes(in.readInt() - 4);
+            if (type == 'Z') {
+                return params;
+            }
+            if (type == 'N') {
+                Map<Character, String> fields = new HashMap<>();
+                int i = 0;
+                while (i < payload.length && payload[i] != 0) {
+                    char field = (char) payload[i++];
+                    int start = i;
+                    while (payload[i] != 0) {
+                        i++;
+                    }
+                    fields.put(field, new String(payload, start, i - start, StandardCharsets.UTF_8));
+                    i++;
+                }
+                notices.add(fields);
+            }
+            if (type == 'S') {
+                int nameEnd = 0;
+                while (payload[nameEnd] != 0) {
+                    nameEnd++;
+                }
+                int valueEnd = nameEnd + 1;
+                while (payload[valueEnd] != 0) {
+                    valueEnd++;
+                }
+                params.put(new String(payload, 0, nameEnd, StandardCharsets.UTF_8),
+                        new String(payload, nameEnd + 1, valueEnd - nameEnd - 1, StandardCharsets.UTF_8));
             }
         }
     }
