@@ -96,8 +96,8 @@ class EcsServiceContainerInsightsTest {
         service.updateService("insights", "web", null, 1, null, REGION);
         service.reconcile();
 
-        assertEquals(1.0, only("RunningTaskCount").maximum());
-        assertEquals(1.0, only("DesiredTaskCount").maximum());
+        assertEquals(1.0, statistics("RunningTaskCount").getLast().maximum());
+        assertEquals(1.0, statistics("DesiredTaskCount").getLast().maximum());
     }
 
     @Test

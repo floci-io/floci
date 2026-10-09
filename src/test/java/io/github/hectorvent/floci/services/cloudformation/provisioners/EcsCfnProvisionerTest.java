@@ -18,6 +18,9 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -418,10 +421,13 @@ class EcsCfnProvisionerTest {
         assertEquals(Set.of("Arn"), r.getAttributes().keySet());
     }
 
-    @Test
-    void aFailedStackUpdateRestoresThePriorClusterSettings() {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = "disabled")
+    void aFailedStackUpdateRestoresThePriorClusterSettings(String priorValue) {
+        List<ClusterSetting> priorSettings = priorValue == null ? null : List.of(new ClusterSetting("containerInsights", priorValue));
         EcsCluster prior = cluster("web");
-        prior.setSettings(List.of(new ClusterSetting("containerInsights", "disabled")));
+        prior.setSettings(priorSettings);
         when(ecs.createCluster("web", REGION)).thenReturn(prior);
         StackResource r = resource("AWS::ECS::Cluster", "Cluster");
 
@@ -429,7 +435,7 @@ class EcsCfnProvisionerTest {
         verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enhanced")), REGION);
 
         assertTrue(provisioner.rollbackUpdate(r));
-        verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "disabled")), REGION);
+        verify(ecs).updateClusterSettings("web", priorSettings, REGION);
         assertFalse(r.getAttributes().containsKey(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR));
     }
 
