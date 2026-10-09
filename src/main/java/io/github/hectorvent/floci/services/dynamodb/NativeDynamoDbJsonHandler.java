@@ -1757,9 +1757,11 @@ public class NativeDynamoDbJsonHandler {
 
         if (gsiCreates.size() + gsiDeletes.size() > 1) {
             throw new AwsException("LimitExceededException",
-                    "Only 1 online index can be created or deleted simultaneously per table", 400);
+                    "Subscriber limit exceeded: Only 1 online index can be created or deleted "
+                    + "simultaneously per table", 400);
         }
-        if ((gsiCreates.size() + gsiDeletes.size() > 0) && (request.has("BillingMode") || request.has("ProvisionedThroughput"))) {
+        if ((gsiCreates.size() + gsiDeletes.size() > 0) && (request.has("BillingMode")
+                || request.has("ProvisionedThroughput") || request.has("OnDemandThroughput"))) {
             throw new AwsException("ValidationException",
                     "You cannot create or delete index while updating table IOPS", 400);
         }
