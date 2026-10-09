@@ -239,6 +239,29 @@ class StepFunctionsRedshiftDataIntegrationTest {
         verify(redshiftDataService, never()).executeStatement(any(JsonNode.class), anyString());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"[1, 2]", "\"scalar\"", "123"})
+    void nonObjectInputFailsWithValidationException(String input) {
+        String definition = """
+                {
+                  "StartAt": "Run",
+                  "States": {
+                    "Run": {
+                      "Type": "Task",
+                      "Resource": "RESOURCE",
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("RESOURCE", EXECUTE);
+
+        Response describe = terminalExecution(definition, input);
+        assertEquals("FAILED", describe.jsonPath().getString("status"));
+        assertEquals("RedshiftData.ValidationException", describe.jsonPath().getString("error"));
+        assertEquals("The task input must be a JSON object.", describe.jsonPath().getString("cause"));
+        verifyNoInteractions(redshiftDataService);
+    }
+
     private static String succeedingOutput(String definition, String input) {
         Response describe = terminalExecution(definition, input);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),

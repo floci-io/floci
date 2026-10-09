@@ -86,7 +86,9 @@ class SchedulerRedshiftDataDockerIntegrationTest {
             try {
                 schedulerService.deleteSchedule(scheduleName, null, REGION);
             } catch (AwsException expected) {
-                // A one-time schedule may already be gone after it fired.
+                if (!"ResourceNotFoundException".equals(expected.getErrorCode())) {
+                    throw expected;
+                }
             }
         }
         for (ScheduleDispatcher dispatcher : testDispatchers) {

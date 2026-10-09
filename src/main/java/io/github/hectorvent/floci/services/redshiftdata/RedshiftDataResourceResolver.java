@@ -18,7 +18,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 @ApplicationScoped
-class RedshiftDataResourceResolver {
+public class RedshiftDataResourceResolver {
 
     private static final Logger LOG = Logger.getLogger(RedshiftDataResourceResolver.class);
 
@@ -30,12 +30,12 @@ class RedshiftDataResourceResolver {
     private final RedshiftServerlessService serverlessService;
 
     @Inject
-    RedshiftDataResourceResolver(RedshiftService redshiftService,
-                                 SecretsManagerService secretsManagerService,
-                                 ObjectMapper objectMapper,
-                                 RedshiftCredentialBroker credentialBroker,
-                                 RegionResolver regionResolver,
-                                 RedshiftServerlessService serverlessService) {
+    public RedshiftDataResourceResolver(RedshiftService redshiftService,
+                                  SecretsManagerService secretsManagerService,
+                                  ObjectMapper objectMapper,
+                                  RedshiftCredentialBroker credentialBroker,
+                                  RegionResolver regionResolver,
+                                  RedshiftServerlessService serverlessService) {
         this.redshiftService = redshiftService;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
@@ -44,7 +44,7 @@ class RedshiftDataResourceResolver {
         this.serverlessService = serverlessService;
     }
 
-    DatabaseTarget resolve(JsonNode request, String region) {
+    public DatabaseTarget resolve(JsonNode request, String region) {
         String database = requiredText(request, "Database");
         if (hasText(request, "WorkgroupName")) {
             return resolveWorkgroup(request, region, database);
@@ -180,7 +180,7 @@ class RedshiftDataResourceResolver {
 
     private String clusterArn(String clusterId, String region) {
         String r = (region == null || region.isBlank()) ? regionResolver.getDefaultRegion() : region;
-        return AwsArnUtils.Arn.of("redshift", r, "000000000000", "cluster:" + clusterId).toString();
+        return AwsArnUtils.Arn.of("redshift", r, regionResolver.getAccountId(), "cluster:" + clusterId).toString();
     }
 
     private static AwsException validation(String message) {
@@ -205,9 +205,9 @@ class RedshiftDataResourceResolver {
         return value == null || value.isNull() ? null : value.asText();
     }
 
-    record DatabaseTarget(String arn, String host, int port, String database, String user, String password,
-                          SpectrumSession spectrum) {
-        DatabaseTarget(String arn, String host, int port, String database, String user, String password) {
+    public record DatabaseTarget(String arn, String host, int port, String database, String user, String password,
+                                  SpectrumSession spectrum) {
+        public DatabaseTarget(String arn, String host, int port, String database, String user, String password) {
             this(arn, host, port, database, user, password, null);
         }
     }

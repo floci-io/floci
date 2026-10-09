@@ -2,22 +2,27 @@ package io.github.hectorvent.floci.services.scheduler;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataConnectionFactory;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataResourceResolver;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
-import io.quarkus.arc.Arc;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.sql.SQLException;
 import java.time.Instant;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 /**
@@ -32,37 +37,73 @@ class SchedulerRedshiftDataAccountIntegrationTest {
     @Inject
     ScheduleInvoker scheduleInvoker;
 
-    @InjectMock
+    @Inject
     RedshiftDataService redshiftDataService;
+
+    @InjectMock
+    RedshiftDataResourceResolver resolver;
+
+    @InjectMock
+    RedshiftDataConnectionFactory connectionFactory;
+
+    @BeforeEach
+    void setUp() throws SQLException {
+        redshiftDataService.clear();
+        when(resolver.resolve(any(), any())).thenReturn(new RedshiftDataResourceResolver.DatabaseTarget(
+                "arn:aws:redshift:us-east-1:" + SCHEDULE_ACCOUNT + ":cluster:analytics",
+                "127.0.0.1", 5439, "dev", "admin", "x",
+                new SpectrumSession(SCHEDULE_ACCOUNT, SCHEDULE_ACCOUNT + ":analytics", "dev", List.of(), false)));
+        when(connectionFactory.open(any())).thenThrow(new SQLException("connection refused"));
+    }
 
     @Test
     void executeStatementRunsAsTheSchedulesAccount() {
-        AtomicReference<String> seenAccount = new AtomicReference<>();
-        when(redshiftDataService.executeStatement(any(JsonNode.class), anyString())).thenAnswer(invocation -> {
-            seenAccount.set(Arc.container().instance(RequestContext.class).get().getAccountId());
-            return JsonNodeFactory.instance.objectNode();
-        });
-
         scheduleInvoker.invoke(scheduleFor("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement",
                 "{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\",\"Sql\":\"select 1\"}"),
                 Instant.parse("2026-04-21T09:17:54Z"));
 
-        assertEquals(SCHEDULE_ACCOUNT, seenAccount.get());
+        // Statement was stored under SCHEDULE_ACCOUNT
+        JsonNode scheduledStatements = RequestScopes.callAs(SCHEDULE_ACCOUNT,
+                () -> redshiftDataService.listStatements(JsonNodeFactory.instance.objectNode()));
+        assertEquals(1, scheduledStatements.path("Statements").size());
+        String statementId = scheduledStatements.path("Statements").path(0).path("Id").asText();
+
+        JsonNode described = RequestScopes.callAs(SCHEDULE_ACCOUNT,
+                () -> redshiftDataService.describeStatement(JsonNodeFactory.instance.objectNode().put("Id", statementId)));
+        assertEquals(statementId, described.path("Id").asText());
+
+        // Statement is not visible under default account
+        JsonNode defaultStatements = redshiftDataService.listStatements(JsonNodeFactory.instance.objectNode());
+        assertEquals(0, defaultStatements.path("Statements").size());
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> redshiftDataService.describeStatement(JsonNodeFactory.instance.objectNode().put("Id", statementId)));
+        assertEquals("ResourceNotFoundException", exception.getErrorCode());
     }
 
     @Test
     void batchExecuteStatementRunsAsTheSchedulesAccount() {
-        AtomicReference<String> seenAccount = new AtomicReference<>();
-        when(redshiftDataService.batchExecuteStatement(any(JsonNode.class), anyString())).thenAnswer(invocation -> {
-            seenAccount.set(Arc.container().instance(RequestContext.class).get().getAccountId());
-            return JsonNodeFactory.instance.objectNode();
-        });
-
         scheduleInvoker.invoke(scheduleFor("arn:aws:scheduler:::aws-sdk:redshiftdata:batchExecuteStatement",
                 "{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\",\"Sqls\":[\"select 1\"]}"),
                 Instant.parse("2026-04-21T09:17:54Z"));
 
-        assertEquals(SCHEDULE_ACCOUNT, seenAccount.get());
+        // Statement was stored under SCHEDULE_ACCOUNT
+        JsonNode scheduledStatements = RequestScopes.callAs(SCHEDULE_ACCOUNT,
+                () -> redshiftDataService.listStatements(JsonNodeFactory.instance.objectNode()));
+        assertEquals(1, scheduledStatements.path("Statements").size());
+        String statementId = scheduledStatements.path("Statements").path(0).path("Id").asText();
+
+        JsonNode described = RequestScopes.callAs(SCHEDULE_ACCOUNT,
+                () -> redshiftDataService.describeStatement(JsonNodeFactory.instance.objectNode().put("Id", statementId)));
+        assertEquals(statementId, described.path("Id").asText());
+
+        // Statement is not visible under default account
+        JsonNode defaultStatements = redshiftDataService.listStatements(JsonNodeFactory.instance.objectNode());
+        assertEquals(0, defaultStatements.path("Statements").size());
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> redshiftDataService.describeStatement(JsonNodeFactory.instance.objectNode().put("Id", statementId)));
+        assertEquals("ResourceNotFoundException", exception.getErrorCode());
     }
 
     private static Schedule scheduleFor(String targetArn, String input) {

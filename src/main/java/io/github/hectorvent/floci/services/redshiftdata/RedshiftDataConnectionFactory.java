@@ -8,9 +8,9 @@ import java.sql.SQLException;
 import java.util.Properties;
 
 @ApplicationScoped
-class RedshiftDataConnectionFactory {
+public class RedshiftDataConnectionFactory {
 
-    Connection open(RedshiftDataResourceResolver.DatabaseTarget target) throws SQLException {
+    public Connection open(RedshiftDataResourceResolver.DatabaseTarget target) throws SQLException {
         // stringtype=unspecified: Redshift Data API parameter values are always strings on the
         // wire, so every bind goes through PreparedStatement.setString. With the default
         // (varchar) the driver stamps an explicit type OID and the server refuses

@@ -2346,7 +2346,11 @@ public class AslExecutor {
             throw new FailStateException(sdkExceptionName("RedshiftData", "ServiceNotAvailableException"),
                     "Service redshift-data is not enabled.");
         }
-        JsonNode request = input != null && input.isObject() ? input : objectMapper.createObjectNode();
+        if (input != null && !input.isObject()) {
+            throw new FailStateException(sdkExceptionName("RedshiftData", "ValidationException"),
+                    "The task input must be a JSON object.");
+        }
+        JsonNode request = input != null ? input : objectMapper.createObjectNode();
         Response response;
         try {
             response = redshiftDataHandler.handle(capitalizeFirst(integration.api()), request, region);
