@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -26,6 +27,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -115,9 +117,10 @@ class SchedulerRedshiftDataDockerIntegrationTest {
         String statementId = RestAssuredJsonUtils.awsAction("RedshiftData", "ListStatements",
                         "{\"StatementName\":\"" + statementName + "\"}")
                 .then().statusCode(200).extract().path("Statements[0].Id");
-        assertEquals("FINISHED", RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
-                        "{\"Id\":\"" + statementId + "\"}")
-                .then().statusCode(200).extract().path("Status"));
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertEquals("FINISHED", RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
+                                "{\"Id\":\"" + statementId + "\"}")
+                        .then().statusCode(200).extract().path("Status")));
     }
 
     private void createSchedule(String name, String expression, String input) {
