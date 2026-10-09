@@ -214,8 +214,10 @@ services:
       - { path: src/main/java/io/github/hectorvent/floci/services/organizations/OrganizationsJsonHandler.java, mode: switch }
   - service: elasticache
     doc: docs/services/elasticache.md
+    exclude_actions: [SubnetIds, SecurityGroupIds, SnapshotArnsToRestore]
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/elasticache/ElastiCacheQueryHandler.java, mode: switch }
+      - { path: src/main/java/io/github/hectorvent/floci/services/elasticache/ElastiCacheServerlessQueryHandler.java, mode: switch }
   - service: emr
     doc: docs/services/emr.md
     sources:

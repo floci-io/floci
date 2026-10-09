@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
@@ -37,7 +38,7 @@ public class ElastiCacheMemcachedService {
     private static final String DEFAULT_CACHE_NODE_TYPE = "cache.t4g.micro";
     private static final int MAX_CACHE_NODES = 40;
 
-    private final StorageBackend<String, CacheCluster> clusters;
+    private final AccountAwareStorageBackend<CacheCluster> clusters;
     /**
      * The two stores {@link ElastiCacheService} writes, read here for the id check alone.
      * {@link StorageFactory#create} keys backends by file path and hands back the instance that
@@ -79,6 +80,16 @@ public class ElastiCacheMemcachedService {
      * the members a Memcached cluster has are read; the rest are redis-only and ignored.
      */
     public CacheCluster createCacheCluster(ElastiCacheService.CreateCacheClusterRequest request) {
+        return createCacheCluster(request, null, null);
+    }
+
+    CacheCluster createServerlessBacking(ElastiCacheService.CreateCacheClusterRequest request,
+                                        String cacheName, String accountId) {
+        return createCacheCluster(request, cacheName, accountId);
+    }
+
+    private CacheCluster createCacheCluster(ElastiCacheService.CreateCacheClusterRequest request,
+                                           String cacheName, String accountId) {
         String clusterId = request.cacheClusterId();
         if (request.numCacheNodes() != null && request.numCacheNodes() < 1) {
             throw new AwsException("InvalidParameterValue",
@@ -102,13 +113,14 @@ public class ElastiCacheMemcachedService {
                     "Cache cluster " + clusterId + " is already being created.", 400);
         }
         try {
-            return provisionCacheCluster(request);
+            return provisionCacheCluster(request, cacheName, accountId);
         } finally {
             provisioningIds.release(clusterId);
         }
     }
 
-    private CacheCluster provisionCacheCluster(ElastiCacheService.CreateCacheClusterRequest request) {
+    private CacheCluster provisionCacheCluster(ElastiCacheService.CreateCacheClusterRequest request,
+                                              String cacheName, String accountId) {
         String clusterId = request.cacheClusterId();
         // Every store that answers DescribeCacheClusters, not just this one: two records sharing
         // an id would have one describe report it twice, each with a different engine.
@@ -160,6 +172,8 @@ public class ElastiCacheMemcachedService {
                     + "until a daemon appears.", clusterId);
         }
         cluster.setRegion(request.region());
+        cluster.setServerlessCacheName(cacheName);
+        cluster.setOwnerAccountId(accountId);
 
         clusters.put(clusterId, cluster);
         LOG.infov("Memcached cluster {0} created, endpoint={1}:{2}", clusterId, endpointHost, endpointPort);
@@ -181,12 +195,15 @@ public class ElastiCacheMemcachedService {
      */
     public CompletableFuture<Void> restorePersistedRuntime() {
         List<CacheCluster> toRestore = new ArrayList<>();
-        for (CacheCluster cluster : clusters.scan(k -> true)) {
+        List<CacheCluster> records = new ArrayList<>(listCacheClusters(null));
+        records.addAll(clusters.scanAllAccounts().stream()
+                .filter(cluster -> cluster.getServerlessCacheName() != null).toList());
+        for (CacheCluster cluster : records) {
             if (cluster.getCacheClusterStatus() == CacheClusterStatus.DELETING) {
                 continue;
             }
             cluster.setCacheClusterStatus(CacheClusterStatus.CREATING);
-            clusters.put(cluster.getCacheClusterId(), cluster);
+            putRuntimeCluster(cluster);
             toRestore.add(cluster);
         }
         if (toRestore.isEmpty()) {
@@ -215,7 +232,7 @@ public class ElastiCacheMemcachedService {
             // to the default region.
             ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, cluster.getRegion());
             synchronized (lockFor(clusterId)) {
-                if (restoreTargetLost(clusterId)) {
+                if (restoreTargetLost(cluster)) {
                     abandonRestoredContainer(clusterId, handle);
                     return;
                 }
@@ -236,7 +253,7 @@ public class ElastiCacheMemcachedService {
                             + "do not until a daemon appears.", clusterId);
                 }
                 cluster.setCacheClusterStatus(CacheClusterStatus.AVAILABLE);
-                clusters.put(clusterId, cluster);
+                putRuntimeCluster(cluster);
                 LOG.infov("Restored Memcached cluster {0}, endpoint={1}:{2}", clusterId,
                         cluster.getConfigurationEndpoint().address(),
                         String.valueOf(cluster.getConfigurationEndpoint().port()));
@@ -255,7 +272,7 @@ public class ElastiCacheMemcachedService {
     private void failRestore(CacheCluster cluster, RuntimeException cause) {
         String clusterId = cluster.getCacheClusterId();
         synchronized (lockFor(clusterId)) {
-            if (restoreTargetLost(clusterId)) {
+            if (restoreTargetLost(cluster)) {
                 LOG.warnv(cause, "Failed to restore Memcached cluster {0}, which was deleted while "
                         + "it was being restored", clusterId);
                 return;
@@ -266,7 +283,7 @@ public class ElastiCacheMemcachedService {
             cluster.setCacheClusterStatus(CacheClusterStatus.RESTORE_FAILED);
             cluster.setConfigurationEndpoint(null);
             try {
-                clusters.put(clusterId, cluster);
+                putRuntimeCluster(cluster);
             } catch (RuntimeException persistFailure) {
                 cause.addSuppressed(persistFailure);
             }
@@ -280,8 +297,9 @@ public class ElastiCacheMemcachedService {
      * under that same monitor, and putting the cluster back afterwards would resurrect one the
      * caller was told had been deleted.
      */
-    private boolean restoreTargetLost(String clusterId) {
-        return clusters.get(clusterId)
+    private boolean restoreTargetLost(CacheCluster cluster) {
+        return (cluster.getOwnerAccountId() == null ? clusters.get(cluster.getCacheClusterId())
+                : clusters.getForAccount(cluster.getOwnerAccountId(), cluster.getCacheClusterId()))
                 .map(current -> current.getCacheClusterStatus() == CacheClusterStatus.DELETING)
                 .orElse(true);
     }
@@ -310,26 +328,36 @@ public class ElastiCacheMemcachedService {
     }
 
     public CacheCluster getCacheCluster(String clusterId) {
-        return clusters.get(clusterId).orElseThrow(() ->
+        return clusters.get(clusterId).filter(cluster -> cluster.getServerlessCacheName() == null).orElseThrow(() ->
                 new AwsException("CacheClusterNotFound",
                         "Cache cluster " + clusterId + " not found.", 404));
     }
 
     public Collection<CacheCluster> listCacheClusters(String filterClusterId) {
         if (filterClusterId != null && !filterClusterId.isBlank()) {
-            return clusters.get(filterClusterId)
+            return clusters.get(filterClusterId).filter(cluster -> cluster.getServerlessCacheName() == null)
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("CacheClusterNotFound",
                             "Cache cluster " + filterClusterId + " not found.", 404));
         }
-        return clusters.scan(k -> true);
+        return clusters.scan(k -> true).stream().filter(cluster -> cluster.getServerlessCacheName() == null).toList();
     }
 
     public CacheCluster deleteCacheCluster(String clusterId) {
+        return deleteCacheCluster(clusterId, false);
+    }
+
+    CacheCluster deleteServerlessBacking(String clusterId) {
+        return deleteCacheCluster(clusterId, true);
+    }
+
+    private CacheCluster deleteCacheCluster(String clusterId, boolean internal) {
         // one monitor per cluster for delete and restore: a restore's read-modify-write could
         // otherwise write the cluster back after this removed it
         synchronized (lockFor(clusterId)) {
-            CacheCluster cluster = getCacheCluster(clusterId);
+            CacheCluster cluster = clusters.get(clusterId)
+                    .filter(record -> internal || record.getServerlessCacheName() == null).orElseThrow(() ->
+                            new AwsException("CacheClusterNotFound", "Cache cluster not found.", 404));
 
             cluster.setCacheClusterStatus(CacheClusterStatus.DELETING);
             clusters.put(clusterId, cluster);
@@ -348,5 +376,18 @@ public class ElastiCacheMemcachedService {
 
     private String resolveEndpointHost(ElastiCacheContainerHandle handle) {
         return config.hostname().orElse(handle != null ? handle.getHost() : "localhost");
+    }
+
+    CacheCluster getServerlessBacking(String id, String accountId) {
+        return clusters.getForAccount(accountId, id).filter(cluster -> cluster.getServerlessCacheName() != null)
+                .orElseThrow(() -> new AwsException("CacheClusterNotFound", "Serverless backing cache not found.", 404));
+    }
+
+    private void putRuntimeCluster(CacheCluster cluster) {
+        if (cluster.getOwnerAccountId() == null) {
+            clusters.put(cluster.getCacheClusterId(), cluster);
+        } else {
+            clusters.putForAccount(cluster.getOwnerAccountId(), cluster.getCacheClusterId(), cluster);
+        }
     }
 }
