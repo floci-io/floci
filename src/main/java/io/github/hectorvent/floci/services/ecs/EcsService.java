@@ -4971,11 +4971,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     void reconcileServices() {
         for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
-            // Taken before the reconcile counts the tasks, since stopping some may then take seconds.
-            long minute = Instant.now().truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
             try {
                 reconcileService(entry.getKey(), entry.getValue());
-                publishContainerInsights(entry.getKey(), entry.getValue(), minute);
+                publishContainerInsights(entry.getKey(), entry.getValue());
             } catch (Exception e) {
                 LOG.debugv("Error reconciling ECS service {0}: {1}", entry.getKey(), e.getMessage());
             }
@@ -4984,11 +4982,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Container Insights task counts for a service on a cluster whose own {@code containerInsights}
-     * setting is enabled or enhanced, one sample per minute. As in AWS, nothing is published while
-     * the service has no RUNNING task, so an alarm sees missing data rather than a zero.
+     * setting is enabled or enhanced, one sample per minute, counted from the service's tasks once
+     * the tick has started and stopped them. As in AWS, nothing is published while the service has
+     * no RUNNING task, so an alarm sees missing data rather than a zero.
      */
-    private void publishContainerInsights(String key, EcsServiceModel svc, long minute) {
-        if (cloudWatchMetricsService == null || !STATUS_ACTIVE.equals(svc.getStatus()) || svc.getRunningCount() < 1) {
+    private void publishContainerInsights(String key, EcsServiceModel svc) {
+        if (cloudWatchMetricsService == null || !STATUS_ACTIVE.equals(svc.getStatus())) {
             return;
         }
         String region = extractRegionFromServiceKey(key);
@@ -4999,8 +4998,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         && ("enabled".equals(s.value()) || "enhanced".equals(s.value())))) {
             return;
         }
-        Map<String, Integer> counts = Map.of("RunningTaskCount", svc.getRunningCount(),
-                "PendingTaskCount", svc.getPendingCount(), "DesiredTaskCount", svc.getDesiredCount());
+        List<String> statuses = tasks.values().stream()
+                .filter(t -> ownedBy(t, svc, cluster))
+                .map(EcsTask::getLastStatus)
+                .toList();
+        int running = Collections.frequency(statuses, TaskStatus.RUNNING.name());
+        if (running < 1) {
+            return;
+        }
+        long minute = Instant.now().truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
+        Map<String, Integer> counts = Map.of("RunningTaskCount", running,
+                "PendingTaskCount", Collections.frequency(statuses, TaskStatus.PENDING.name()),
+                "DesiredTaskCount", svc.getDesiredCount());
         for (Map.Entry<String, Integer> count : counts.entrySet()) {
             MetricDatum datum = new MetricDatum();
             datum.setMetricName(count.getKey());

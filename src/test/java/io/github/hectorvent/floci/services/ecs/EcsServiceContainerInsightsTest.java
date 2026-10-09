@@ -67,7 +67,7 @@ class EcsServiceContainerInsightsTest {
     void anInsightsClusterPublishesItsServiceTaskCounts(String mode) {
         startService(List.of(new ClusterSetting("containerInsights", mode)), 1);
 
-        settle();
+        service.reconcile();
 
         Datapoint running = only("RunningTaskCount");
         assertEquals(1.0, running.maximum());
@@ -80,7 +80,7 @@ class EcsServiceContainerInsightsTest {
     void repeatedTicksKeepOneSamplePerMinute() {
         startService(List.of(new ClusterSetting("containerInsights", "enabled")), 1);
 
-        settle();
+        service.reconcile();
         service.reconcile();
 
         List<Datapoint> points = statistics("RunningTaskCount");
@@ -89,12 +89,24 @@ class EcsServiceContainerInsightsTest {
     }
 
     @Test
+    void aScaleInIsCountedInTheTickThatStopsTheTask() {
+        startService(List.of(new ClusterSetting("containerInsights", "enabled")), 2);
+        service.reconcile();
+
+        service.updateService("insights", "web", null, 1, null, REGION);
+        service.reconcile();
+
+        assertEquals(1.0, only("RunningTaskCount").maximum());
+        assertEquals(1.0, only("DesiredTaskCount").maximum());
+    }
+
+    @Test
     void aClusterWithoutInsightsPublishesNothing() {
         startService(List.of(new ClusterSetting("containerInsights", "disabled")), 1);
         service.createCluster("plain", REGION);
         service.createService("plain", "web", "ci-fam", 1, LaunchType.FARGATE, List.of(), null, REGION);
 
-        settle();
+        service.reconcile();
 
         assertTrue(metrics.listMetrics(NAMESPACE, null, null, REGION).isEmpty());
     }
@@ -103,7 +115,7 @@ class EcsServiceContainerInsightsTest {
     void aServiceWithoutARunningTaskPublishesNothing() {
         startService(List.of(new ClusterSetting("containerInsights", "enabled")), 0);
 
-        settle();
+        service.reconcile();
 
         assertTrue(metrics.listMetrics(NAMESPACE, null, null, REGION).isEmpty());
     }
@@ -111,12 +123,6 @@ class EcsServiceContainerInsightsTest {
     private void startService(List<ClusterSetting> settings, int desiredCount) {
         service.createCluster("insights", null, settings, REGION);
         service.createService("insights", "web", "ci-fam", desiredCount, LaunchType.FARGATE, List.of(), null, REGION);
-    }
-
-    // The first tick launches the service's task, the next one counts it as running.
-    private void settle() {
-        service.reconcile();
-        service.reconcile();
     }
 
     private Datapoint only(String metricName) {

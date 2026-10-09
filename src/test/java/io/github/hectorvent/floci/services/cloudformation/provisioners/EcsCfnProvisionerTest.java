@@ -434,6 +434,19 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
+    void aCommittedSettingsUpdateDropsItsSnapshot() {
+        EcsCluster prior = cluster("web");
+        prior.setSettings(List.of(new ClusterSetting("containerInsights", "disabled")));
+        when(ecs.createCluster("web", REGION)).thenReturn(prior);
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+        provisioner.provision(r, clusterWithInsights("enabled"), ctx("web"));
+
+        assertEquals(UpdateCleanupResult.notApplicable(), provisioner.completeUpdate(r));
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR));
+    }
+
+    @Test
     void anUnchangedSettingIsNotReappliedAndDropsAnEarlierSnapshot() {
         EcsCluster current = cluster("web");
         current.setSettings(List.of(new ClusterSetting("containerInsights", "enabled")));
