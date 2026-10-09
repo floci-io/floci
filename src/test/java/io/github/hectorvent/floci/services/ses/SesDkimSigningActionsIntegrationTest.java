@@ -12,6 +12,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -96,6 +97,7 @@ class SesDkimSigningActionsIntegrationTest {
         given().header("Authorization", V2_AUTH)
         .when().get("/v2/email/identities/" + domain).then().statusCode(200)
                 .body("DkimAttributes.CurrentSigningKeyLength", equalTo("RSA_1024_BIT"))
+                .body("DkimAttributes.SigningHostedZone", equalTo("dkim.amazonses.com"))
                 .body("DkimAttributes.Tokens", equalTo(after));
     }
 
@@ -197,6 +199,7 @@ class SesDkimSigningActionsIntegrationTest {
         .when().get("/v2/email/identities/" + domain).then().statusCode(200)
                 .body("DkimAttributes.Status", equalTo("PENDING"))
                 .body("DkimAttributes.SigningAttributesOrigin", equalTo("EXTERNAL"))
+                .body("DkimAttributes.SigningHostedZone", nullValue())
                 .body("DkimAttributes.Tokens", hasSize(0));
     }
 
@@ -248,6 +251,7 @@ class SesDkimSigningActionsIntegrationTest {
         .when().get("/v2/email/identities/bob@" + domain).then().statusCode(200)
                 .body("DkimAttributes.SigningEnabled", equalTo(true))
                 .body("DkimAttributes.Status", equalTo("PENDING"))
+                .body("DkimAttributes.SigningHostedZone", equalTo("dkim.amazonses.com"))
                 .body("DkimAttributes.Tokens", equalTo(domainTokens))
                 .body("DkimAttributes.Tokens", not(hasSize(0)));
     }

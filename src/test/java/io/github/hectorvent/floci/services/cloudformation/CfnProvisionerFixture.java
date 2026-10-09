@@ -90,6 +90,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProv
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SesCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SnsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SqsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnProvisioner;
@@ -135,6 +136,8 @@ import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.ses.SesIdentityService;
+import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
@@ -173,6 +176,8 @@ final class CfnProvisionerFixture {
 
         private S3Service s3Service;
         private SnsService snsService;
+        private SesService sesService;
+        private SesIdentityService sesIdentityService;
         private DynamoDbService dynamoDbService;
         private LambdaService lambdaService;
         private AppSyncService appSyncService;
@@ -281,6 +286,9 @@ final class CfnProvisionerFixture {
             }
             if (snsService != null) {
                 discovered.add(new SnsCfnProvisioner(snsService));
+            }
+            if (sesService != null && sesIdentityService != null) {
+                discovered.add(new SesCfnProvisioner(sesService, sesIdentityService));
             }
             if (dynamoDbService != null) {
                 NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDbService, null, null, objectMapper);
@@ -460,6 +468,16 @@ final class CfnProvisionerFixture {
 
         public Builder sns(SnsService v) {
             this.snsService = v;
+            return this;
+        }
+
+        public Builder ses(SesService v) {
+            this.sesService = v;
+            return this;
+        }
+
+        public Builder sesIdentity(SesIdentityService v) {
+            this.sesIdentityService = v;
             return this;
         }
 

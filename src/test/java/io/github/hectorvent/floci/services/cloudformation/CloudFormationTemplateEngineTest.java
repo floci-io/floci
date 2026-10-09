@@ -38,6 +38,25 @@ class CloudFormationTemplateEngineTest {
     }
 
     @Test
+    void optionalNodeResolutionPreservesTheLegacyNoValueContract() {
+        JsonNode noValue = json("{\"Ref\":\"AWS::NoValue\"}");
+        assertEquals("", engine().resolveNode(noValue).asText());
+        assertTrue(engine().resolveNodeOmittingNoValue(noValue).isMissingNode());
+        assertEquals(json("\"\""), engine().resolveNodeOmittingNoValue(json("\"\"")));
+    }
+
+    @Test
+    void optionalNodeResolutionDoesNotRewriteOtherIntrinsicArguments() {
+        JsonNode joined = json("""
+                {"Fn::Join": ["-", ["read", {"Ref": "AWS::NoValue"}, "all"]]}
+                """);
+        assertEquals("read--all", engine().resolveNodeOmittingNoValue(joined).asText());
+        JsonNode malformedConditional = json("{\"Fn::If\":[\"IncludeScopes\"]}");
+        assertEquals(engine().resolveNode(malformedConditional),
+                engine().resolveNodeOmittingNoValue(malformedConditional));
+    }
+
+    @Test
     void joinAcceptsSplitAsItsListOfValues() {
         assertEquals("x|y|z", engine().resolve(json("""
                 {"Fn::Join": ["|", {"Fn::Split": [",", "x,y,z"]}]}

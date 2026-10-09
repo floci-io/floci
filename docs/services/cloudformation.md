@@ -127,6 +127,7 @@ cross-resource references.
 | S3 | `Bucket`, `BucketPolicy` (document stored on the bucket; S3 does not evaluate it) |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
+| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the identity's `SigningHostedZone`, whose emulator default is `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment) |
 | DynamoDB | `Table`, `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig`, `MicrovmImage`, `NetworkConnector`, `Url`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
@@ -186,6 +187,21 @@ Set `floci.services.cloudformation.allow-stub-unsupported-resource-types` to `fa
 (`FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES=false`) to fail such a
 resource instead: it reaches `CREATE_FAILED` and the stack rolls back. Use it in a pipeline that
 must not pass over a resource it never got.
+
+## SES Email Identities
+
+`AWS::SES::EmailIdentity` provisions an SES identity and supports in-place option updates and
+replacement when `EmailIdentity` changes. Change-set previews also mark the replacement and its
+`Ref` dependents.
+
+If a failed update cannot restore the identity snapshot, a subsequent update that provisions the
+identity retries that restoration before changing or replacing it. An update that skips the
+identity cannot discard the pending snapshot: it stays in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`
+and rejects further updates. `DeleteStack` can delete the current managed identity without first
+restoring its snapshot. Cleanup keeps displaced-identity records while deletion attempts remain.
+After three cleanup attempts, an exhausted entry is removed from stack management and a later
+`DeleteStack` does not retry it. Committed update cleanup uses the same three-attempt limit.
+This does not implement `ContinueUpdateRollback`.
 
 ## EventBridge Event Buses
 
