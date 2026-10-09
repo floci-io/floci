@@ -52,7 +52,7 @@ jobs:
         with:
           ref: main
 
-      - uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276 # v1
+      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
         with:
           java-version: '25'
           distribution: 'mandrel'
@@ -109,7 +109,7 @@ jobs:
         with:
           ref: main
 
-      - uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276 # v1
+      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
         with:
           java-version: '25'
           distribution: 'mandrel'

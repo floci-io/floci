@@ -52,6 +52,17 @@ an asynchronous execution with that payload as its input. Scheduler delivery
 succeeds when `StartExecution` is accepted; a later workflow failure does not
 trigger Scheduler retries.
 
+When `Input` is present, Floci replaces the Scheduler context attributes in it
+on every invocation, for templated and universal (`aws-sdk`) targets alike:
+`<aws.scheduler.schedule-arn>` with the schedule ARN,
+`<aws.scheduler.scheduled-time>` with the occurrence's scheduled time in UTC
+to the second (for example `2026-04-21T09:17:54Z`), `<aws.scheduler.execution-id>`
+with a 16-character hex id, and `<aws.scheduler.attempt-number>` with the
+1-based attempt number. Each attempted invocation, retries included, gets its
+own execution id and increments the attempt number; a dead-letter message
+reports the last attempt's id as `EXECUTION_ID`. The dead-letter body carries
+the last attempt's request, with matching context attributes.
+
 `CreateSchedule` and `UpdateSchedule` reject a non-JSON `Input` for Lambda,
 Step Functions, and EventBridge targets with a `ValidationException`, as AWS
 does. A blank `Input`, or one with text after the JSON value such as

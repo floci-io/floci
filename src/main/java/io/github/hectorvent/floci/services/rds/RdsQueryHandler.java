@@ -199,22 +199,25 @@ public class RdsQueryHandler {
         String dbInstanceClass = params.getFirst("DBInstanceClass");
         String allocatedStorageStr = params.getFirst("AllocatedStorage");
         int allocatedStorage = allocatedStorageStr != null ? parseIntSafe(allocatedStorageStr, 20) : 20;
-        boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
+        boolean iamEnabled;
         String paramGroupName = params.getFirst("DBParameterGroupName");
         String optionGroupName = params.getFirst("OptionGroupName");
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String dbClusterIdentifier = params.getFirst("DBClusterIdentifier");
-        boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
+        boolean manageMasterUserPassword;
         String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
         Map<String, String> tags = parseTags(params);
         String availabilityZone = params.getFirst("AvailabilityZone");
-        boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
+        boolean multiAz;
         // AWS defaults this to true when the request omits it - unlike most boolean flags here,
         // which default to false.
         boolean autoMinorVersionUpgrade;
         Boolean publiclyAccessible;
         Boolean deletionProtection;
         try {
+            iamEnabled = Boolean.TRUE.equals(parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"));
+            manageMasterUserPassword = Boolean.TRUE.equals(parseOptionalBoolean(params, "ManageMasterUserPassword"));
+            multiAz = Boolean.TRUE.equals(parseOptionalBoolean(params, "MultiAZ"));
             Boolean requestedAutoMinorVersionUpgrade = parseOptionalBoolean(params, "AutoMinorVersionUpgrade");
             autoMinorVersionUpgrade = requestedAutoMinorVersionUpgrade == null || requestedAutoMinorVersionUpgrade;
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");
@@ -597,14 +600,17 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
         }
         String newPassword = params.getFirst("MasterUserPassword");
-        String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
-        Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
+        Boolean iamEnabled;
         String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String optionGroupName = params.getFirst("OptionGroupName");
         Boolean autoMinorVersionUpgrade;
         Boolean publiclyAccessible;
         Boolean deletionProtection;
         try {
+            // These request members are accepted, but their modify behavior is not yet emulated.
+            parseOptionalBoolean(params, "MultiAZ");
+            parseOptionalBoolean(params, "ManageMasterUserPassword");
+            iamEnabled = parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication");
             autoMinorVersionUpgrade = parseOptionalBoolean(params, "AutoMinorVersionUpgrade");
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");
             deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
@@ -649,15 +655,15 @@ public class RdsQueryHandler {
     private static DbInstanceSettings instanceSettings(MultivaluedMap<String, String> params,
                                                        boolean includeEncryption) {
         return new DbInstanceSettings(
-                includeEncryption ? optionalBoolean(params.getFirst("StorageEncrypted")) : null,
+                includeEncryption ? parseOptionalBoolean(params, "StorageEncrypted") : null,
                 includeEncryption ? params.getFirst("KmsKeyId") : null,
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                parseOptionalBoolean(params, "CopyTagsToSnapshot"),
                 optionalInt(params.getFirst("MonitoringInterval")),
                 params.getFirst("MonitoringRoleArn"),
-                optionalBoolean(params.getFirst("EnablePerformanceInsights")),
+                parseOptionalBoolean(params, "EnablePerformanceInsights"),
                 optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
                 params.getFirst("EngineLifecycleSupport"),
                 includeEncryption ? cloudwatchLogsExports(params) : null,

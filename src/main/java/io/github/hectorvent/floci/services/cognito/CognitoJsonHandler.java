@@ -983,10 +983,13 @@ public class CognitoJsonHandler {
     }
 
     private Response handleConfirmSignUp(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.confirmSignUp(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
-                request.path("ConfirmationCode").asText()
+                request.path("ConfirmationCode").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -1005,9 +1008,12 @@ public class CognitoJsonHandler {
     }
 
     private Response handleAdminConfirmSignUp(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.adminConfirmSignUp(
                 request.path("UserPoolId").asText(),
-                request.path("Username").asText()
+                request.path("Username").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -1035,11 +1041,14 @@ public class CognitoJsonHandler {
     }
 
     private Response handleConfirmForgotPassword(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.confirmForgotPassword(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
                 request.path("ConfirmationCode").asText(),
-                request.path("Password").asText()
+                request.path("Password").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
