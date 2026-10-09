@@ -52,6 +52,9 @@ the same bucket fails with `ConflictException`, unless it repeats the earlier re
 `clientToken`, which returns the existing plan. The bucket cannot be changed on an existing plan;
 `UpdateMalwareProtectionPlan` changes the role, object prefixes (at most 5), and the tagging action.
 
+The role must be an IAM role ARN. An update is applied all-or-nothing: if any supplied field is invalid, none of them are stored.
+`ListMalwareProtectionPlans` returns up to 100 ids per page, and its `nextToken` survives plans being created or deleted between pages. In a CloudFormation stack, dropping `ObjectPrefixes` or `Actions` from the template clears them on the plan, and a failed stack update restores the plan's previous role, prefixes, tagging action and tags.
+
 ## Configuration
 
 | Variable | Default | Description |

@@ -68,6 +68,9 @@ public class GuardDutyService {
     private static final int MAX_PLAN_OBJECT_PREFIXES = 5;
     private static final int MAX_PLAN_OBJECT_PREFIX_LENGTH = 1024;
     private static final int MAX_PLAN_TAGS = 200;
+    /** The documented default page size of ListMalwareProtectionPlans. */
+    private static final int PLAN_PAGE_SIZE = 100;
+    private static final String PLAN_TOKEN_PREFIX = "guardduty:v1:plan:";
     private static final String PLAN_ARN_RESOURCE_PREFIX = "malware-protection-plan/";
     static final String PLAN_NOT_FOUND_MESSAGE =
             "The request is rejected because the input malwareProtectionPlanId is not owned by the current account.";
@@ -362,10 +365,7 @@ public class GuardDutyService {
         if (bucketName.length() < 3 || bucketName.length() > 63) {
             throw badRequest("bucketName must be between 3 and 63 characters.");
         }
-        String role = requireText(request, "role");
-        if (!AwsArnUtils.isArn(role)) {
-            throw badRequest("role must be the ARN of an IAM role.");
-        }
+        String role = readRole(request);
         List<String> prefixes = readObjectPrefixes(bucket);
         String taggingStatus = readTaggingStatus(request);
         Map<String, String> tags = readPlanTags(request);
@@ -416,24 +416,47 @@ public class GuardDutyService {
         String key = storageKey(region, planId);
         MalwareProtectionPlan plan = malwareProtectionPlanStore.get(key).orElseThrow(GuardDutyService::planNotFound);
 
-        if (request.has("role")) {
-            String role = requireText(request, "role");
-            if (!AwsArnUtils.isArn(role)) {
-                throw badRequest("role must be the ARN of an IAM role.");
-            }
-            plan.setRole(role);
-        }
+        // Every supplied field is validated before any of them is applied: the store hands back the
+        // live object, so a change made before a later field is rejected would outlive the 400.
+        boolean roleSupplied = request.has("role");
+        String role = roleSupplied ? readRole(request) : null;
         JsonNode resource = request.get("protectedResource");
+        boolean prefixesSupplied = false;
+        List<String> prefixes = null;
         if (resource != null && resource.has("s3Bucket")) {
             JsonNode bucket = resource.get("s3Bucket");
             requireObject(bucket, "protectedResource.s3Bucket");
-            if (bucket.has("objectPrefixes")) {
-                plan.setObjectPrefixes(readObjectPrefixes(bucket));
-            }
+            prefixesSupplied = bucket.has("objectPrefixes");
+            prefixes = prefixesSupplied ? readObjectPrefixes(bucket) : null;
         }
-        if (request.has("actions")) {
-            plan.setTaggingStatus(readTaggingStatus(request));
+        boolean actionsSupplied = request.has("actions");
+        String taggingStatus = actionsSupplied ? readTaggingStatus(request) : null;
+
+        if (roleSupplied) {
+            plan.setRole(role);
         }
+        if (prefixesSupplied) {
+            plan.setObjectPrefixes(prefixes);
+        }
+        if (actionsSupplied) {
+            plan.setTaggingStatus(taggingStatus);
+        }
+        malwareProtectionPlanStore.put(key, plan);
+    }
+
+    /**
+     * Puts a plan's mutable settings back exactly as given, nulls included. Not an AWS operation:
+     * it is how a failed CloudFormation stack update undoes an in-place change, which the partial
+     * update above cannot express because it treats an absent field as "leave alone".
+     */
+    public synchronized void restoreMalwareProtectionPlan(String region, String planId, String role,
+            List<String> objectPrefixes, String taggingStatus, Map<String, String> tags) {
+        String key = storageKey(region, planId);
+        MalwareProtectionPlan plan = malwareProtectionPlanStore.get(key).orElseThrow(GuardDutyService::planNotFound);
+        plan.setRole(role);
+        plan.setObjectPrefixes(objectPrefixes);
+        plan.setTaggingStatus(taggingStatus);
+        plan.setTags(tags);
         malwareProtectionPlanStore.put(key, plan);
     }
 
@@ -445,14 +468,60 @@ public class GuardDutyService {
         malwareProtectionPlanStore.delete(key);
     }
 
+    /**
+     * Pages by plan id rather than position: the token names the last id returned and the next page
+     * starts at the first id after it, so a plan created or deleted between pages (the token's own
+     * plan included) neither fails the request nor skips or repeats a plan.
+     */
     public Page<MalwareProtectionPlan> listMalwareProtectionPlans(String region, String nextToken) {
         String prefix = region + "::";
-        List<MalwareProtectionPlan> plans = malwareProtectionPlanStore.scan(key -> key.startsWith(prefix)).stream()
+        String after = decodePlanToken(nextToken);
+        List<MalwareProtectionPlan> remaining = malwareProtectionPlanStore.scan(key -> key.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(MalwareProtectionPlan::getId))
+                .filter(plan -> after == null || plan.getId().compareTo(after) > 0)
                 .toList();
-        int offset = decodeOffset(nextToken, plans.size());
-        int end = Math.min(offset + DEFAULT_MAX_RESULTS, plans.size());
-        return new Page<>(plans.subList(offset, end), end < plans.size() ? encodeOffset(end) : null);
+        if (remaining.size() <= PLAN_PAGE_SIZE) {
+            return new Page<>(remaining, null);
+        }
+        List<MalwareProtectionPlan> page = remaining.subList(0, PLAN_PAGE_SIZE);
+        return new Page<>(page, encodePlanToken(page.get(page.size() - 1).getId()));
+    }
+
+    private static String encodePlanToken(String lastId) {
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString((PLAN_TOKEN_PREFIX + lastId).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String decodePlanToken(String token) {
+        if (token == null) {
+            return null;
+        }
+        try {
+            String decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            if (decoded.startsWith(PLAN_TOKEN_PREFIX) && decoded.length() > PLAN_TOKEN_PREFIX.length()) {
+                return decoded.substring(PLAN_TOKEN_PREFIX.length());
+            }
+        } catch (IllegalArgumentException e) {
+            // falls through to the rejection below
+        }
+        throw badRequest("nextToken is invalid.");
+    }
+
+    /** The role must be an IAM role ARN; any other well-formed ARN is rejected. */
+    private static String readRole(JsonNode request) {
+        String role = requireText(request, "role");
+        boolean iamRole;
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(role);
+            iamRole = "iam".equals(arn.service()) && arn.resource().startsWith("role/")
+                    && arn.resource().length() > "role/".length();
+        } catch (IllegalArgumentException e) {
+            iamRole = false;
+        }
+        if (!iamRole) {
+            throw badRequest("role must be the ARN of an IAM role.");
+        }
+        return role;
     }
 
     private static List<String> readObjectPrefixes(JsonNode bucket) {
@@ -471,7 +540,9 @@ public class GuardDutyService {
             }
             prefixes.add(item.textValue());
         }
-        return prefixes;
+        // An empty list means "the whole bucket", the same as none, so it is stored as none and a
+        // plan created without prefixes and one updated to have none read back identically.
+        return prefixes.isEmpty() ? null : prefixes;
     }
 
     private static String readTaggingStatus(JsonNode request) {
@@ -502,17 +573,24 @@ public class GuardDutyService {
         }
         Map<String, String> tags = new LinkedHashMap<>();
         tagsNode.fields().forEachRemaining(entry -> {
-            String tagKey = entry.getKey();
-            if (tagKey.isEmpty() || tagKey.length() > 128 || tagKey.startsWith("aws:")) {
-                throw badRequest("tags contains an invalid key: " + tagKey);
-            }
             JsonNode valueNode = entry.getValue();
-            if (!valueNode.isTextual() || valueNode.textValue().length() > 256) {
-                throw badRequest("tags contains a non-string value or one longer than 256 characters.");
+            if (!valueNode.isTextual()) {
+                throw badRequest("tags contains a non-string value.");
             }
-            tags.put(tagKey, valueNode.textValue());
+            requireValidPlanTag(entry.getKey(), valueNode.textValue());
+            tags.put(entry.getKey(), valueNode.textValue());
         });
         return tags;
+    }
+
+    /** The tag rules of a Malware Protection plan, shared by creation and the tag routes. */
+    private static void requireValidPlanTag(String key, String value) {
+        if (key.isEmpty() || key.length() > 128 || key.startsWith("aws:")) {
+            throw badRequest("tags contains an invalid key: " + key);
+        }
+        if (value.length() > 256) {
+            throw badRequest("tags contains a value longer than 256 characters.");
+        }
     }
 
     private static boolean isMalwareProtectionPlanArn(String arn) {
@@ -554,6 +632,7 @@ public class GuardDutyService {
             DetectorRef ref = parsePlanArn(arn);
             MalwareProtectionPlan plan = malwareProtectionPlanStore.get(ref.key())
                     .orElseThrow(GuardDutyService::planNotFound);
+            tags.forEach(GuardDutyService::requireValidPlanTag);
             Map<String, String> merged = new LinkedHashMap<>();
             if (plan.getTags() != null) {
                 merged.putAll(plan.getTags());
