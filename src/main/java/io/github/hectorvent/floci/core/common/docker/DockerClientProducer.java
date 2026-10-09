@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.core.common.docker;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
@@ -10,6 +9,7 @@ import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.core.SSLConfig;
 import com.github.dockerjava.core.util.CertificateUtils;
 import com.github.dockerjava.transport.DockerHttpClient;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
@@ -401,21 +401,29 @@ public class DockerClientProducer {
      * connection pool to reject it with a generic error.
      */
     static int validateMaxConnections(int maxConnections) {
-        if (maxConnections < 1) {
-            throw new IllegalArgumentException("floci.docker.max-connections (FLOCI_DOCKER_MAX_CONNECTIONS) "
-                    + "must be at least 1, got: " + maxConnections);
-        }
-        return maxConnections;
+        return requireAtLeastOne(maxConnections, "floci.docker.max-connections", "FLOCI_DOCKER_MAX_CONNECTIONS");
     }
 
     /** Same check as {@link #validateMaxConnections(int)}, for the streaming pool's setting. */
     static int validateStreamingMaxConnections(int streamingMaxConnections) {
-        if (streamingMaxConnections < 1) {
-            throw new IllegalArgumentException("floci.docker.streaming-max-connections "
-                    + "(FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS) must be at least 1, got: "
-                    + streamingMaxConnections);
+        return requireAtLeastOne(streamingMaxConnections, "floci.docker.streaming-max-connections",
+                "FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS");
+    }
+
+    /**
+     * Rejects a lease timeout below 1 second: httpclient5 reads zero as no timeout at all, so a
+     * call would wait forever on a full pool, and a negative value fails deep inside the client.
+     */
+    static int validateConnectionRequestTimeoutSeconds(int seconds) {
+        return requireAtLeastOne(seconds, "floci.docker.connection-request-timeout-seconds",
+                "FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS");
+    }
+
+    private static int requireAtLeastOne(int value, String setting, String envVar) {
+        if (value < 1) {
+            throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);
         }
-        return streamingMaxConnections;
+        return value;
     }
 
     /**
@@ -488,17 +496,20 @@ public class DockerClientProducer {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
 
-        return DockerClientImpl.getInstance(clientConfig,
-                wrapForRole(newHttpClient(clientConfig, maxConnections), role));
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(newHttpClient(clientConfig, maxConnections,
+                Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
+                        config.docker().connectionRequestTimeoutSeconds()))), role));
     }
 
-    static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections) {
+    static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
+                                               Duration connectionRequestTimeout) {
         return new FlociDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())
                 .sslConfig(clientConfig.getSSLConfig())
                 .maxConnections(maxConnections)
                 .connectionTimeout(Duration.ofSeconds(30))
                 .responseTimeout(Duration.ofMinutes(5))
+                .connectionRequestTimeout(connectionRequestTimeout)
                 .build();
     }
 

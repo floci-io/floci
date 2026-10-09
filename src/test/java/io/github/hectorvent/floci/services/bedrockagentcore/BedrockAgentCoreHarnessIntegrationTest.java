@@ -5,7 +5,6 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.regex.Matcher;
-
 import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;

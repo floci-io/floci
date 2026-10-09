@@ -52,6 +52,17 @@ public class SentEmail {
     @JsonProperty("Headers")
     private List<MessageHeader> headers;
 
+    /** The attachments of a Simple send; absent for one without attachments and for raw sends. */
+    @JsonProperty("Attachments")
+    private List<SentAttachment> attachments;
+
+    /**
+     * The assembled MIME message of a Simple send with attachments, base64-encoded. Kept apart from
+     * {@code rawData} so the record still reads as a Simple send.
+     */
+    @JsonProperty("MimeData")
+    private String mimeData;
+
     @JsonProperty("SentAt")
     private Instant sentAt;
 
@@ -158,6 +169,12 @@ public class SentEmail {
 
     public boolean isRaw() { return rawData != null; }
 
+    public List<SentAttachment> getAttachments() { return attachments; }
+    public void setAttachments(List<SentAttachment> attachments) { this.attachments = attachments; }
+
+    public String getMimeData() { return mimeData; }
+    public void setMimeData(String mimeData) { this.mimeData = mimeData; }
+
     public Instant getSentAt() { return sentAt; }
     public void setSentAt(Instant sentAt) { this.sentAt = sentAt; }
 
@@ -176,6 +193,8 @@ public class SentEmail {
         this.bodyText = null;
         this.bodyHtml = null;
         this.rawData = null;
+        this.attachments = null;
+        this.mimeData = null;
     }
 
     public List<MessageTag> getEmailTags() { return emailTags; }

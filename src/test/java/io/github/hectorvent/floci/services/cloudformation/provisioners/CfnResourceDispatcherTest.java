@@ -136,7 +136,7 @@ class CfnResourceDispatcherTest {
 
         dispatcher.delete(resource, "us-east-1");
 
-        verify(owner).delete(resource, "us-east-1", CfnResourceContext.EMPTY);
+        verify(owner).delete(resource, "us-east-1");
         verify(owner, never()).delete(anyString(), anyString(), anyString());
     }
 
@@ -147,9 +147,9 @@ class CfnResourceDispatcherTest {
 
         dispatcher.deleteStandalone(TYPE, "thing-1", "us-east-1", Map.of("Role", "r"));
 
-        verify(owner).delete(any(StackResource.class), anyString(), any());
+        verify(owner).delete(any(StackResource.class), anyString());
         verify(owner).delete(org.mockito.ArgumentMatchers.argThat((StackResource r) ->
-                "thing-1".equals(r.getPhysicalId()) && "r".equals(r.getAttributes().get("Role"))), any(), any());
+                "thing-1".equals(r.getPhysicalId()) && "r".equals(r.getAttributes().get("Role"))), any());
     }
 
     private static CfnResourceProvisioner provisioner(Provision body) {

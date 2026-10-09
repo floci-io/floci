@@ -324,6 +324,180 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
+    void aCreatedServiceIsAwaitedUntilStableBeforeTheResourceCompletes() {
+        EcsServiceModel created = service("front");
+        when(ecs.createService(eq("web"), eq("front"), eq(TASK_DEF_ARN), eq(1), isNull(), anyList(), isNull(),
+                eq(REGION))).thenReturn(created);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN), ctx());
+
+        InOrder order = inOrder(ecs);
+        order.verify(ecs).createService(eq("web"), eq("front"), eq(TASK_DEF_ARN), eq(1), isNull(), anyList(),
+                isNull(), eq(REGION));
+        order.verify(ecs).awaitServiceStable(created);
+        assertEquals(Set.of("Name", "ServiceArn"), r.getAttributes().keySet(),
+                "a stable service is no longer marked for the create rollback");
+    }
+
+    @Test
+    void anInPlaceUpdateIsAwaitedUntilStableBeforeTheResourceCompletes() {
+        EcsServiceModel updated = service("front");
+        when(ecs.updateService(eq("web"), eq("front"), eq(TASK_DEF_ARN), eq(3), isNull(), eq(REGION)))
+                .thenReturn(updated);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN)
+                .put("DesiredCount", "3"), ctx(SERVICE_ARN));
+
+        InOrder order = inOrder(ecs);
+        order.verify(ecs).updateService("web", "front", TASK_DEF_ARN, 3, null, REGION);
+        order.verify(ecs).awaitServiceStable(updated);
+    }
+
+    @Test
+    void aCreatedServiceThatDoesNotStabilizeFailsAndStaysOwnedForTheCreateRollback() {
+        EcsServiceModel created = service("front");
+        when(ecs.createService(eq("web"), eq("front"), eq(TASK_DEF_ARN), eq(1), isNull(), anyList(), isNull(),
+                eq(REGION))).thenReturn(created);
+        doThrow(new AwsException("NotStabilized", "Service " + SERVICE_ARN + " did not stabilize.", 500))
+                .when(ecs).awaitServiceStable(created);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN), ctx()));
+
+        assertEquals("Service " + SERVICE_ARN + " did not stabilize.", e.getMessage());
+        // The stack's create rollback deletes a CREATE_FAILED resource only when it is marked owned.
+        assertEquals(SERVICE_ARN, r.getPhysicalId());
+        assertEquals("true", r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+        verify(ecs, never()).deleteService(anyString(), anyString(), eq(true), anyString());
+    }
+
+    @Test
+    void aReplacementThatDoesNotStabilizeIsDeletedBeforeTheUpdateFails() {
+        EcsServiceModel replacement = service("front-v2");
+        when(ecs.createService(eq("web"), eq("front-v2"), eq(TASK_DEF_ARN), eq(1), isNull(), anyList(), isNull(),
+                eq(REGION))).thenReturn(replacement);
+        doThrow(new AwsException("NotStabilized", "did not stabilize", 500))
+                .when(ecs).awaitServiceStable(replacement);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front-v2").put("TaskDefinition", TASK_DEF_ARN),
+                ctx(SERVICE_ARN)));
+
+        // The engine restores the prior resource on a failed update and never learns the new ARN,
+        // so the replacement is removed here; the prior service is left alone.
+        verify(ecs).deleteService("web", "front-v2", true, REGION);
+        verify(ecs, never()).deleteService("web", "front", true, REGION);
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+        assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void aReplacementThatCannotBeDeletedEitherReportsTheRollbackFailure() {
+        EcsServiceModel replacement = service("front-v2");
+        when(ecs.createService(eq("web"), eq("front-v2"), eq(TASK_DEF_ARN), eq(1), isNull(), anyList(), isNull(),
+                eq(REGION))).thenReturn(replacement);
+        AwsException notStable = new AwsException("NotStabilized", "did not stabilize", 500);
+        doThrow(notStable).when(ecs).awaitServiceStable(replacement);
+        doThrow(new AwsException("ServerException", "busy", 500))
+                .when(ecs).deleteService("web", "front-v2", true, REGION);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front-v2").put("TaskDefinition", TASK_DEF_ARN),
+                ctx(SERVICE_ARN)));
+
+        assertEquals(notStable, e, "the stabilization failure is what fails the update");
+        assertEquals("busy", e.getSuppressed()[0].getMessage());
+        assertTrue(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)
+                .contains(replacement.getServiceArn()));
+    }
+
+    @Test
+    void anInPlaceUpdateWhoseRestoreFailsReportsTheRollbackFailure() {
+        EcsServiceModel prior = service("front");
+        prior.setTaskDefinition(TASK_DEF_ARN);
+        prior.setDesiredCount(1);
+        when(ecs.serviceByArn(SERVICE_ARN)).thenReturn(prior);
+        EcsServiceModel updated = service("front");
+        when(ecs.updateService(eq("web"), eq("front"), eq(TASK_DEF_ARN), eq(3), isNull(), eq(REGION)))
+                .thenReturn(updated);
+        AwsException notStable = new AwsException("NotStabilized", "did not stabilize", 500);
+        doThrow(notStable).when(ecs).awaitServiceStable(updated);
+        when(ecs.updateService("web", "front", TASK_DEF_ARN, 1, null, REGION))
+                .thenThrow(new AwsException("ServerException", "busy", 500));
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN)
+                .put("DesiredCount", "3"), ctx(SERVICE_ARN)));
+
+        assertEquals(notStable, e, "the stabilization failure is what fails the update");
+        assertEquals("busy", e.getSuppressed()[0].getMessage());
+        verify(ecs).updateService("web", "front", TASK_DEF_ARN, 1, null, REGION);
+        assertTrue(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR).contains(SERVICE_ARN));
+    }
+
+    @Test
+    void anInPlaceUpdateThatDoesNotStabilizeAwaitsTheRestoredConfiguration() {
+        EcsServiceModel prior = service("front");
+        prior.setTaskDefinition(TASK_DEF_ARN);
+        prior.setDesiredCount(1);
+        when(ecs.serviceByArn(SERVICE_ARN)).thenReturn(prior);
+        EcsServiceModel updated = service("front");
+        when(ecs.updateService("web", "front", TASK_DEF_ARN, 3, null, REGION)).thenReturn(updated);
+        doThrow(new AwsException("NotStabilized", "did not stabilize", 500)).when(ecs).awaitServiceStable(updated);
+        EcsServiceModel restored = service("front");
+        when(ecs.updateService("web", "front", TASK_DEF_ARN, 1, null, REGION)).thenReturn(restored);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN)
+                .put("DesiredCount", "3"), ctx(SERVICE_ARN)));
+
+        InOrder order = inOrder(ecs);
+        order.verify(ecs).updateService("web", "front", TASK_DEF_ARN, 1, null, REGION);
+        order.verify(ecs).awaitServiceStable(restored);
+        assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void anInPlaceUpdateWhoseRestoreDoesNotStabilizeReportsTheRollbackFailure() {
+        EcsServiceModel prior = service("front");
+        prior.setTaskDefinition(TASK_DEF_ARN);
+        prior.setDesiredCount(1);
+        when(ecs.serviceByArn(SERVICE_ARN)).thenReturn(prior);
+        EcsServiceModel updated = service("front");
+        when(ecs.updateService("web", "front", TASK_DEF_ARN, 3, null, REGION)).thenReturn(updated);
+        AwsException notStable = new AwsException("NotStabilized", "did not stabilize", 500);
+        doThrow(notStable).when(ecs).awaitServiceStable(updated);
+        EcsServiceModel restored = service("front");
+        when(ecs.updateService("web", "front", TASK_DEF_ARN, 1, null, REGION)).thenReturn(restored);
+        doThrow(new AwsException("NotStabilized", "restore did not stabilize", 500))
+                .when(ecs).awaitServiceStable(restored);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN)
+                .put("DesiredCount", "3"), ctx(SERVICE_ARN)));
+
+        assertEquals(notStable, e, "the stabilization failure is what fails the update");
+        assertEquals("restore did not stabilize", e.getSuppressed()[0].getMessage());
+        assertTrue(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR).contains(SERVICE_ARN));
+    }
+
+    @Test
     void aTaskDefinitionUpdateDeregistersTheDisplacedRevisionAfterCommit() {
         TaskDefinition next = new TaskDefinition();
         next.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":4"));

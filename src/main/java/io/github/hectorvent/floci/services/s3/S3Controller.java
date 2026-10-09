@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
-import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
-
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -10,34 +10,34 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.MultipartFormParser;
-import io.github.hectorvent.floci.core.common.XmlBuilder;
-import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
 import io.github.hectorvent.floci.services.s3.model.ChecksumType;
-import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
-import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
-import io.github.hectorvent.floci.services.s3.model.ObjectAnnotation;
-import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
-import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
-import io.github.hectorvent.floci.services.s3.model.FilterRule;
-import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
-import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.CopyObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.CopySourceConditions;
-import io.github.hectorvent.floci.services.s3.model.QueueNotification;
+import io.github.hectorvent.floci.services.s3.model.FilterRule;
+import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
+import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
+import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
+import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
+import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
+import io.github.hectorvent.floci.services.s3.model.ObjectAnnotation;
+import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.ObjectLockRetention;
 import io.github.hectorvent.floci.services.s3.model.Part;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
+import io.github.hectorvent.floci.services.s3.model.QueueNotification;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.s3.model.TopicNotification;
 import io.github.hectorvent.floci.services.s3.model.WebsiteConfiguration;
+import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -47,6 +47,12 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
+import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
+
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -78,14 +84,8 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
-import javax.xml.stream.XMLStreamConstants;
-import javax.xml.stream.XMLStreamException;
-import javax.xml.stream.XMLStreamReader;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.jboss.logging.Logger;
-import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
+import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
 
 /**
  * S3 controller handling REST-style S3 API requests.
@@ -850,7 +850,8 @@ public class S3Controller {
                             copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
                 }
                 Part part = s3Service.storePart(bucket, key, uploadId, partNumber,
-                        decodedBody(body, contentEncoding, contentSha256), uploadChecksums(httpHeaders, uriInfo),
+                        decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
+                        uploadChecksums(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -891,7 +892,8 @@ public class S3Controller {
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
             s3Service.authorizePutObject(bucket, key, authorization);
-            S3Object obj = s3Service.putObject(bucket, key, decodedBody(body, contentEncoding, contentSha256),
+            S3Object obj = s3Service.putObject(bucket, key,
+                    decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                     uploadChecksums(httpHeaders, uriInfo), contentType, extractUserMetadata(httpHeaders, uriInfo),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
@@ -2105,20 +2107,27 @@ public class S3Controller {
     // --- AWS Chunked Decoding ---
 
     /**
-     * The object data of an upload body, read as it arrives. A streaming payload is decoded from its
-     * aws-chunked framing on the way through. A Content-Encoding naming aws-chunked without that
-     * declaration does not guarantee framing, so that body is read whole and kept as sent when it
-     * does not decode.
+     * The object data of an upload body, read as it arrives. A streaming payload, and any aws-chunked
+     * body that declares {@code x-amz-trailer}, is decoded from its framing on the way through so the
+     * trailing checksum can be checked. A Content-Encoding naming aws-chunked without either of those
+     * does not guarantee framing, so that body is read whole and kept as sent when it does not decode.
      */
-    private InputStream decodedBody(InputStream body, String contentEncoding, String contentSha256) {
+    private InputStream decodedBody(InputStream body, String contentEncoding, String contentSha256,
+                                    String trailer) {
         InputStream raw = body != null ? body : InputStream.nullInputStream();
-        if (declaresStreamingPayload(contentSha256)) {
-            return new AwsChunkedInputStream(raw);
+        boolean awsChunked = contentEncoding != null
+                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked");
+        if (declaresStreamingPayload(contentSha256) || (awsChunked && trailer != null && !trailer.isBlank())) {
+            return new AwsChunkedInputStream(raw, trailerChecksumAlgorithm(trailer));
         }
-        if (contentEncoding != null && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked")) {
+        if (awsChunked) {
             return new ByteArrayInputStream(decodeAwsChunked(readWholeBody(raw), contentEncoding, contentSha256));
         }
         return raw;
+    }
+
+    private static String trailerHeader(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        return resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer");
     }
 
     /** The whole of a body that is small by nature, such as a subresource's XML, or must be read whole to be decoded. */
@@ -3161,7 +3170,22 @@ public class S3Controller {
                 claimed.put(algorithm, value);
             }
         }
-        return new UploadChecksums(httpHeaders.getHeaderString("Content-MD5"), claimed);
+        return new UploadChecksums(httpHeaders.getHeaderString("Content-MD5"), claimed,
+                trailerChecksumAlgorithm(resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer")));
+    }
+
+    /** The checksum algorithm an {@code x-amz-trailer} value names, as {@code x-amz-checksum-crc32}. */
+    private static ChecksumAlgorithm trailerChecksumAlgorithm(String trailer) {
+        if (trailer == null || trailer.isBlank()) {
+            return null;
+        }
+        for (String name : trailer.split(",")) {
+            ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromChecksumHeader(name.trim());
+            if (algorithm != null) {
+                return algorithm;
+            }
+        }
+        return null;
     }
 
     static boolean isWebsiteRequest(HttpHeaders httpHeaders, UriInfo uriInfo) {
@@ -3544,7 +3568,7 @@ public class S3Controller {
         rejectUnknownPostRegion(credential);
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizeAdditionalResource(
-                    "Credential=" + credential, "s3:PutObject",
+                    AccountResolver.SIGV4_SCHEME + " Credential=" + credential, "s3:PutObject",
                     S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
         }
 

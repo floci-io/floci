@@ -4,9 +4,13 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
+import jakarta.ws.rs.container.ResourceInfo;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -27,11 +31,16 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 @Provider
+@Priority(Priorities.AUTHENTICATION)
 public class PreSignedUrlFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(PreSignedUrlFilter.class);
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String LEGACY_SECRET_KEY = "test";
+    private static final Set<String> PRESIGNED_AUTH_SIGNALS = Set.of(
+            "X-Amz-Algorithm",
+            "X-Amz-Credential",
+            "X-Amz-Signature");
     private static final Set<String> CHECKSUM_HEADERS_REQUIRING_SIGNATURE =
             Set.of(
                     "x-amz-checksum-algorithm",
@@ -46,20 +55,34 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private final S3Service s3Service;
     private final IamService iamService;
     private final CurrentVertxRequest currentVertxRequest;
+    private final ResourceInfo resourceInfo;
 
     @Inject
     public PreSignedUrlFilter(PreSignedUrlGenerator presignGenerator,
                               S3Service s3Service,
                               IamService iamService,
-                              CurrentVertxRequest currentVertxRequest) {
+                              CurrentVertxRequest currentVertxRequest,
+                              @Context ResourceInfo resourceInfo) {
         this.presignGenerator = presignGenerator;
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.currentVertxRequest = currentVertxRequest;
+        this.resourceInfo = resourceInfo;
+    }
+
+    PreSignedUrlFilter(PreSignedUrlGenerator presignGenerator,
+                       S3Service s3Service,
+                       IamService iamService,
+                       CurrentVertxRequest currentVertxRequest) {
+        this(presignGenerator, s3Service, iamService, currentVertxRequest, null);
     }
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
+        if (!S3SignatureFilterScope.routedToS3(resourceInfo)) {
+            return;
+        }
+
         // A browser preflight reuses the target request's presigned URL, so its OPTIONS method
         // must not be verified against a signature created for the follow-up PUT/GET request.
         // The dedicated S3 OPTIONS resource performs the bucket CORS evaluation instead.
@@ -69,9 +92,29 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
         MultivaluedMap<String, String> queryParams = requestContext.getUriInfo().getQueryParameters();
 
+        boolean hasPresignedAuthSignal = false;
+        for (String param : PRESIGNED_AUTH_SIGNALS) {
+            if (queryParams.containsKey(param)) {
+                hasPresignedAuthSignal = true;
+                break;
+            }
+        }
+        if (!hasPresignedAuthSignal) {
+            return;
+        }
+
         // Only process if this is a pre-signed URL request
         String algorithm = queryParams.getFirst("X-Amz-Algorithm");
         if (algorithm == null) {
+            if (S3SignatureFilterScope.verifiesSignatures(s3Service, presignGenerator)) {
+                requestContext.abortWith(
+                    errorResponse(
+                        S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_STATUS,
+                        S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_CODE,
+                        S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE
+                    )
+                );
+            }
             return;
         }
 

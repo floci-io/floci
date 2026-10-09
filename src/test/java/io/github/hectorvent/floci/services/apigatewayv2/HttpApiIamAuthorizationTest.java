@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
-import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;

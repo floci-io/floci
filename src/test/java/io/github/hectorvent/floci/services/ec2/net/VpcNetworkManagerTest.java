@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.services.ec2.net;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.CreateNetworkCmd;
@@ -12,6 +10,8 @@ import com.github.dockerjava.api.command.ListNetworksCmd;
 import com.github.dockerjava.api.command.RemoveNetworkCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Network;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -22,6 +22,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,6 +41,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class VpcNetworkManagerTest {
@@ -104,6 +110,99 @@ class VpcNetworkManagerTest {
 
     private void existingNetwork(String name, String subnet, Map<String, String> labels) {
         existingNetwork(name, subnet, labels, Map.of());
+    }
+
+    @Test
+    void declaringAndDeletingUnusedNetworksDoesNotContactDocker() {
+        manager.declareVpc(REGION, "vpc-private", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-private", "subnet-a", "10.0.1.0/24");
+        manager.declareVpc(REGION, "vpc-public", "42.0.0.0/16");
+        manager.forgetSubnet(REGION, "subnet-a");
+        manager.deleteVpcNetwork(REGION, "vpc-private");
+        manager.deleteVpcNetwork(REGION, "vpc-public");
+
+        verifyNoInteractions(docker);
+        assertTrue(manager.allocatePrivateIp(REGION, "subnet-a").isEmpty());
+        assertTrue(manager.effectiveVpcCidr(REGION, "vpc-public").isEmpty());
+    }
+
+    @Test
+    void collisionChecksSeeNetworksAddedAfterDeclaration() {
+        manager.declareVpc(REGION, "vpc-late", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-late", "subnet-late", "10.0.1.0/24");
+        existingNetwork("external", "10.0.0.0/16", Map.of());
+
+        String address = manager.allocatePrivateIp(REGION, "subnet-late").orElseThrow();
+
+        assertTrue(manager.isSubstituted(REGION, "vpc-late"));
+        assertFalse(address.startsWith("10.0."));
+    }
+
+    @Test
+    void addingASubnetAfterPlanningKeepsExistingLeases() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        assertTrue(manager.reservePrivateIp(REGION, "subnet-a", "10.0.1.10"));
+        manager.declareSubnet(REGION, "vpc-1", "subnet-b", "10.0.2.0/24");
+
+        assertEquals("10.0.1.11", manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow());
+        assertEquals("10.0.2.10", manager.allocatePrivateIp(REGION, "subnet-b").orElseThrow());
+    }
+
+    @Test
+    void declaringAnotherVpcDoesNotWaitForBlockedDockerPlanning() throws Exception {
+        manager.declareVpc(REGION, "vpc-planning", "10.0.0.0/16");
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(docker.listNetworksCmd().exec()).thenAnswer(invocation -> {
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return List.of();
+        });
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<Optional<String>> planning = executor.submit(() ->
+                    manager.effectiveVpcCidr(REGION, "vpc-planning"));
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                Future<?> declaration = executor.submit(() ->
+                        manager.declareVpc(REGION, "vpc-new", "10.1.0.0/16"));
+                declaration.get(1, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
+            assertEquals("10.0.0.0/16", planning.get(2, TimeUnit.SECONDS).orElseThrow());
+        }
+    }
+
+    @Test
+    void declaringASubnetDoesNotWaitForDockerMaterialization() throws Exception {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        InspectNetworkCmd inspect = mock(InspectNetworkCmd.class, RETURNS_SELF);
+        when(docker.inspectNetworkCmd()).thenReturn(inspect);
+        when(inspect.exec()).thenAnswer(invocation -> {
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            throw new NotFoundException("network not created yet");
+        });
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<Optional<String>> attaching = executor.submit(() ->
+                    manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address));
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                Future<?> declaration = executor.submit(() ->
+                        manager.declareSubnet(REGION, "vpc-1", "subnet-b", "10.0.2.0/24"));
+                declaration.get(1, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
+            assertTrue(attaching.get(2, TimeUnit.SECONDS).isPresent());
+        }
+        assertEquals("10.0.2.10", manager.allocatePrivateIp(REGION, "subnet-b").orElseThrow());
     }
 
     private void existingNetwork(String name, String subnet, Map<String, String> labels,

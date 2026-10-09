@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -15,11 +16,12 @@ import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.RouteTableAssociation;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
-import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -30,8 +32,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
-import io.github.hectorvent.floci.core.common.AwsException;
-import java.util.Map;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -294,6 +294,38 @@ class Ec2NetworkCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r), "the prior MapPublicIpOnLaunch is restored from the snapshot");
         verify(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "false");
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void anUnchangedSubnetWhoseTemplateCidrHasHostBitsIsKept() {
+        Subnet current = subnet();
+        current.setCidrBlock("10.0.1.0/24");
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(current));
+        StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID));
+        ObjectNode props = mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.9/24");
+
+        provisioner.provision(r, props, ctx(SUBNET_ID));
+
+        verify(ec2, never()).createSubnet(any(), any(), any(), any());
+        assertEquals(SUBNET_ID, r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void aSubnetSavedWithHostBitsBeforeCanonicalizationIsKept() {
+        // State persisted by an older build can still hold the template's spelling, host bits and all.
+        Subnet current = subnet();
+        current.setCidrBlock("10.0.1.9/24");
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(current));
+        StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID));
+        ObjectNode props = mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.9/24")
+                .put("MapPublicIpOnLaunch", true);
+
+        provisioner.provision(r, props, ctx(SUBNET_ID));
+
+        verify(ec2, never()).createSubnet(any(), any(), any(), any());
+        assertEquals(SUBNET_ID, r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
     }
 
     @Test

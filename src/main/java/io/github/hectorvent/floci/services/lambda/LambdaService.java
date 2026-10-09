@@ -10,11 +10,11 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
-import io.github.hectorvent.floci.core.storage.StorageBackedMap;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
@@ -740,6 +740,8 @@ public class LambdaService implements ResourceProvider {
         String s3Bucket = (String) request.get("S3Bucket");
         String s3Key = (String) request.get("S3Key");
 
+        requireMatchingRevisionId(fn, request);
+
         if (zipFileBase64 != null) {
             fn.setS3Bucket(null);
             fn.setS3Key(null);
@@ -772,6 +774,22 @@ public class LambdaService implements ResourceProvider {
             return publishVersion(region, functionName, null);
         }
         return fn;
+    }
+
+    /**
+     * RevisionId optimistic locking: rejects the request with 412 when it carries a RevisionId that
+     * is not the function's current one. Callers hold the per-function lock and call this before
+     * mutating {@code fn}.
+     */
+    private static void requireMatchingRevisionId(LambdaFunction fn, Map<String, Object> request) {
+        if (request.containsKey("RevisionId")) {
+            String incomingRevision = (String) request.get("RevisionId");
+            if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
+                throw new AwsException("PreconditionFailedException",
+                        "The Revision Id provided does not match the latest Revision Id. "
+                        + "Call the GetFunction/GetAlias API to retrieve the latest Revision Id", 412);
+            }
+        }
     }
 
     public LambdaFunction updateFunctionConfiguration(String region, String functionName, Map<String, Object> request) {
@@ -863,16 +881,8 @@ public class LambdaService implements ResourceProvider {
             validateFileSystemVpcConfig(requestedFileSystemConfigs, requestedVpcConfig);
         }
 
-        // RevisionId optimistic locking runs after request validation, like AWS, and before any field mutation
-        if (request.containsKey("RevisionId")) {
-            String incomingRevision = (String) request.get("RevisionId");
-            if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
-                throw new AwsException("PreconditionFailedException",
-                        "The Revision Id provided does not match the latest Revision Id. "
-                        + "Call the GetFunction or the GetFunctionConfiguration API to retrieve "
-                        + "the latest Revision Id for your resource.", 412);
-            }
-        }
+        // Runs after request validation, like AWS, and before any field mutation
+        requireMatchingRevisionId(fn, request);
 
         if (request.containsKey("Description")) {
             fn.setDescription((String) request.get("Description"));

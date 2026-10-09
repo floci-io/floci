@@ -412,7 +412,8 @@ class ElastiCacheQueryHandlerTest {
 
     @Test
     void modifyReplicationGroup_passesSnapshotSettingsOnly() {
-        when(service.modifyReplicationGroup(eq("g1"), isNull(), isNull(), any())).thenReturn(group("g1"));
+        when(service.modifyReplicationGroup(eq("g1"), isNull(), isNull(), eq(false), eq(false), any()))
+                .thenReturn(group("g1"));
         MultivaluedMap<String, String> p = params();
         p.add("ReplicationGroupId", "g1");
         p.add("SnapshotRetentionLimit", "3");
@@ -421,7 +422,39 @@ class ElastiCacheQueryHandlerTest {
         p.add("KmsKeyId", "alias/other");
 
         assertEquals(200, handler.handle("ModifyReplicationGroup", p, "us-east-1").getStatus());
-        verify(service).modifyReplicationGroup("g1", null, null, new ReplicationGroupSettings(null, null, 3, "01:00-02:00"));
+        verify(service).modifyReplicationGroup("g1", null, null, false, false,
+                new ReplicationGroupSettings(null, null, 3, "01:00-02:00"));
+    }
+
+    @Test
+    void modifyReplicationGroup_passesRemoveUserGroupsAndAuthTokenDelete() {
+        when(service.modifyReplicationGroup(eq("g1"), any(), isNull(), eq(true), eq(true), any()))
+                .thenReturn(group("g1"));
+        MultivaluedMap<String, String> p = params();
+        p.add("ReplicationGroupId", "g1");
+        p.add("UserGroupIdsToAdd.member.1", "new-users");
+        p.add("RemoveUserGroups", "true");
+        p.add("AuthTokenUpdateStrategy", "DELETE");
+
+        assertEquals(200, handler.handle("ModifyReplicationGroup", p, "us-east-1").getStatus());
+        verify(service).modifyReplicationGroup("g1", List.of("new-users"), null, true, true,
+                new ReplicationGroupSettings(null, null, null, null));
+    }
+
+    @Test
+    void describeReplicationGroups_reportsNoAuthTokenOnceAUserGroupIsAttached() {
+        ReplicationGroup g = new ReplicationGroup("g1", "d", ReplicationGroupStatus.AVAILABLE,
+                AuthMode.PASSWORD, new Endpoint("localhost", 6379), Instant.now(), 6379);
+        g.setAuthToken("group-token");
+        g.getUserGroupIds().add("app-users");
+        when(service.listReplicationGroups("g1")).thenReturn(List.of(g));
+        MultivaluedMap<String, String> p = params();
+        p.add("ReplicationGroupId", "g1");
+
+        String body = (String) handler.handle("DescribeReplicationGroups", p, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<AuthTokenEnabled>false</AuthTokenEnabled>"), body);
+        assertTrue(body.contains("<TransitEncryptionEnabled>true</TransitEncryptionEnabled>"), body);
     }
 
     // ── CreateCacheCluster / DescribeCacheClusters: single-node redis ─────────

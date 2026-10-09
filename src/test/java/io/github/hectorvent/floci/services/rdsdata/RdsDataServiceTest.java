@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import org.h2.Driver;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -25,13 +26,12 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.h2.Driver;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -74,21 +74,53 @@ class RdsDataServiceTest {
         assertEquals(10, response.get("records").size());
     }
 
-    /** Records serialize as [[{"stringValue":"..."}]]: 22 bytes around a single string. */
+    /** Records serialize as [[{"stringValue":"..."}]]: 20 bytes around a single string per row. */
     @Test
     void executeStatementCountsTheWholeRecordsArrayAtTheBoundary() throws Exception {
-        int overhead = 22;
-        int limit = 1024 * 1024;
+        int rows = 25;
+        int exactLength = 41922;
         TestHarness harness = new TestHarness();
         ObjectNode exact = harness.service.executeStatement(harness.request(
-                "select repeat('x', " + (limit - overhead) + ") as c"), REGION);
-        assertEquals(1, exact.get("records").size());
+                "select repeat('x', " + exactLength + ") as c from system_range(1, " + rows + ")"), REGION);
+        assertEquals(rows, exact.get("records").size());
 
-        ObjectNode over = harness.request("select repeat('x', " + (limit - overhead + 1) + ") as c");
+        ObjectNode over = harness.request(
+                "select repeat('x', " + (exactLength + 1) + ") as c from system_range(1, " + rows + ")");
         AwsException error = assertThrows(AwsException.class,
                 () -> harness.service.executeStatement(over, REGION));
         assertEquals("UnsupportedResultException", error.getErrorCode());
         assertEquals("Database response exceeded size limit", error.getMessage());
+    }
+
+    @Test
+    void executeStatementRejectsARowOverSixtyFourKilobytes() throws Exception {
+        int limit = 64 * 1024;
+        TestHarness harness = new TestHarness();
+        ObjectNode exact = harness.service.executeStatement(harness.request(
+                "select repeat('x', " + (limit - 1) + ") as a, 'y' as b"), REGION);
+        assertEquals(1, exact.get("records").size());
+
+        ObjectNode over = harness.request("select repeat('x', " + limit + ") as a, 'y' as b");
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(over, REGION));
+        assertEquals("UnsupportedResultException", error.getErrorCode());
+        assertEquals("Packet for query is too large", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    /** The limit applies to the row the database returns, not to its JSON escaping or base64 encoding. */
+    @Test
+    void executeStatementMeasuresARowBeforeItIsSerialized() throws Exception {
+        int size = 60 * 1024;
+        TestHarness harness = new TestHarness();
+        ObjectNode quotes = harness.service.executeStatement(harness.request(
+                "select repeat('\"', " + size + ") as c"), REGION);
+        assertEquals(size, quotes.get("records").get(0).get(0).get("stringValue").asText().length());
+
+        ObjectNode binary = harness.service.executeStatement(harness.request(
+                "select cast(repeat('x', " + size + ") as varbinary) as c"), REGION);
+        assertEquals(1, binary.get("records").size());
+        assertTrue(binary.get("records").get(0).get(0).has("blobValue"));
     }
 
     /**

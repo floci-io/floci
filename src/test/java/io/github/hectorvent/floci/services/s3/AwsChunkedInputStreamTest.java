@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -25,6 +26,48 @@ class AwsChunkedInputStreamTest {
     void skipsTrailerLinesAfterTheFinalChunk() throws IOException {
         assertEquals("hello", decode("5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n"
                 + "x-amz-trailer-signature:ghi\r\n\r\n"));
+    }
+
+    @Test
+    void retainsOnlyTheDeclaredChecksumTrailer() throws IOException {
+        StringBuilder framed = new StringBuilder("5\r\nhello\r\n0\r\n");
+        for (int i = 0; i < 1000; i++) {
+            framed.append("x-amz-trailer-signature:").append(i).append("\r\n");
+        }
+        framed.append("x-amz-checksum-crc32:NhCmhg==\r\n\r\n");
+
+        try (AwsChunkedInputStream in = new AwsChunkedInputStream(
+                new ByteArrayInputStream(framed.toString().getBytes(StandardCharsets.US_ASCII)),
+                ChecksumAlgorithm.CRC32)) {
+            assertEquals("hello", new String(in.readAllBytes(), StandardCharsets.US_ASCII));
+            assertEquals("NhCmhg==", in.trailerChecksum());
+            assertNull(in.undeclaredTrailer());
+            assertFalse(in.hasUndeclaredChecksum());
+        }
+    }
+
+    @Test
+    void recordsAChecksumTrailerOtherThanTheDeclaredOne() throws IOException {
+        try (AwsChunkedInputStream in = new AwsChunkedInputStream(new ByteArrayInputStream(
+                ("5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n"
+                        + "x-amz-checksum-sha256:abc\r\n\r\n").getBytes(StandardCharsets.US_ASCII)),
+                ChecksumAlgorithm.CRC32)) {
+            assertEquals("hello", new String(in.readAllBytes(), StandardCharsets.US_ASCII));
+            assertEquals("NhCmhg==", in.trailerChecksum());
+            assertEquals(ChecksumAlgorithm.SHA256, in.undeclaredTrailer());
+            assertTrue(in.hasUndeclaredChecksum());
+        }
+    }
+
+    @Test
+    void aChecksumTrailerWithNoDeclaredAlgorithmIsUndeclared() throws IOException {
+        try (AwsChunkedInputStream in = new AwsChunkedInputStream(new ByteArrayInputStream(
+                "5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n\r\n".getBytes(StandardCharsets.US_ASCII)))) {
+            assertEquals("hello", new String(in.readAllBytes(), StandardCharsets.US_ASCII));
+            assertNull(in.trailerChecksum());
+            assertEquals(ChecksumAlgorithm.CRC32, in.undeclaredTrailer());
+            assertTrue(in.hasUndeclaredChecksum());
+        }
     }
 
     @Test

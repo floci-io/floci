@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.InspectImageCmd;
 import com.github.dockerjava.api.command.InspectImageResponse;
-import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.PullImageCmd;
 import com.github.dockerjava.api.command.PullImageResultCallback;
 import com.github.dockerjava.api.exception.DockerClientException;

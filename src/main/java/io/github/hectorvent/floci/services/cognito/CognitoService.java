@@ -5,18 +5,17 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
-import io.github.hectorvent.floci.services.cognito.model.EmailMfaSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.AcmService;
@@ -24,7 +23,9 @@ import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
+import io.github.hectorvent.floci.services.cognito.model.EmailMfaSettings;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
+import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.RevokedTokenInfo;
@@ -33,7 +34,6 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
-import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
@@ -75,8 +75,8 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Objects;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -3073,21 +3073,26 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void confirmSignUp(String clientId, String username) {
-        confirmSignUp(clientId, username, null);
+        confirmSignUp(clientId, username, null, Map.of());
     }
 
     public void confirmSignUp(String clientId, String username, String confirmationCode) {
+        confirmSignUp(clientId, username, confirmationCode, Map.of());
+    }
+
+    public void confirmSignUp(String clientId, String username, String confirmationCode,
+                              Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
         String userPoolId = client.getUserPoolId();
         synchronized (userLock(userPoolId, username)) {
-            confirmSignUpUnderUserLock(client, userPoolId, username, confirmationCode);
+            confirmSignUpUnderUserLock(client, userPoolId, username, confirmationCode, clientMetadata);
         }
     }
 
     private void confirmSignUpUnderUserLock(UserPoolClient client, String userPoolId, String username,
-            String confirmationCode) {
+            String confirmationCode, Map<String, String> clientMetadata) {
         UserPool pool = poolStore.get(userPoolId)
                 .orElseThrow(() -> userPoolNotFound(userPoolId));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
@@ -3113,7 +3118,7 @@ public class CognitoService implements ResourceProvider {
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(client.getUserPoolId(), user.getUsername()), user);
-        authFlowHandler.firePostConfirmation(pool, client, user, Map.of(), "PostConfirmation_ConfirmSignUp");
+        authFlowHandler.firePostConfirmation(pool, client, user, clientMetadata, "PostConfirmation_ConfirmSignUp");
     }
 
     Map<String, String> signUpCodeDeliveryDetails(CognitoUser user) {
@@ -3177,18 +3182,26 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminConfirmSignUp(String userPoolId, String username) {
-        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
-        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
-            adminConfirmSignUpUnderUserLock(userPoolId, resolvedUser.getUsername());
-        }
+        adminConfirmSignUp(userPoolId, username, Map.of());
     }
 
-    private void adminConfirmSignUpUnderUserLock(String userPoolId, String username) {
+    public void adminConfirmSignUp(String userPoolId, String username, Map<String, String> clientMetadata) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        CognitoUser user;
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            user = adminConfirmSignUpUnderUserLock(userPoolId, resolvedUser.getUsername());
+        }
+        authFlowHandler.firePostConfirmation(describeUserPool(userPoolId), null, user,
+                clientMetadata, "PostConfirmation_ConfirmSignUp");
+    }
+
+    private CognitoUser adminConfirmSignUpUnderUserLock(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
         LOG.infov("Admin confirmed sign up for user {0} in pool {1}", username, userPoolId);
+        return user;
     }
 
     // ──────────────────────────── Auth ────────────────────────────
@@ -3362,6 +3375,11 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void confirmForgotPassword(String clientId, String username, String confirmationCode, String newPassword) {
+        confirmForgotPassword(clientId, username, confirmationCode, newPassword, Map.of());
+    }
+
+    public void confirmForgotPassword(String clientId, String username, String confirmationCode, String newPassword,
+                                      Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
@@ -3373,6 +3391,9 @@ public class CognitoService implements ResourceProvider {
             throw mapVerificationCodeException(e);
         }
         adminSetUserPassword(client.getUserPoolId(), user.getUsername(), newPassword, true);
+        authFlowHandler.firePostConfirmation(describeUserPool(client.getUserPoolId()), client,
+                adminGetUser(client.getUserPoolId(), user.getUsername()), clientMetadata,
+                "PostConfirmation_ConfirmForgotPassword");
     }
 
     public Map<String, Object> getUser(String accessToken) {

@@ -79,15 +79,6 @@ public class CfnResourceDispatcher {
                                    CloudFormationTemplateEngine engine, String region, String accountId,
                                    String stackName, String existingPhysicalId,
                                    Map<String, String> existingAttributes, Consumer<StackEvent> progress) {
-        return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
-                existingPhysicalId, existingAttributes, progress, CfnResourceContext.EMPTY);
-    }
-
-    public StackResource provision(String logicalId, String resourceType, JsonNode properties,
-                                   CloudFormationTemplateEngine engine, String region, String accountId,
-                                   String stackName, String existingPhysicalId,
-                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress,
-                                   CfnResourceContext context) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
@@ -98,7 +89,7 @@ public class CfnResourceDispatcher {
             CfnResourceProvisioner owner = registry.forType(resourceType).orElse(null);
             if (owner != null) {
                 owner.provision(resource, properties,
-                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress, context));
+                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
                 // A provisioner that migrated a stub without writing its own Arn would leave the
                 // stub's, and the real resource would read as a stub on its next update.
                 String arn = resource.getAttributes().get("Arn");
@@ -203,31 +194,15 @@ public class CfnResourceDispatcher {
     }
 
     /**
-     * Deletes the managed entity after the stack engine has processed historical cleanup.
-     */
-    public void deleteAfterCleanup(StackResource resource, String region) {
-        CfnResourceProvisioner owner = registry.forType(resource.getResourceType()).orElse(null);
-        if (owner != null) {
-            owner.deleteAfterCleanup(resource, region);
-            return;
-        }
-        delete(resource, region);
-    }
-
-    /**
      * Deletes a provisioned resource. The owning provisioner gets the whole resource, so an
      * attribute-aware delete can read its create-time attributes, and an exact type match always
      * beats the {@code Custom::} fallback the registry applies.
      */
     public void delete(StackResource resource, String region) {
-        delete(resource, region, CfnResourceContext.EMPTY);
-    }
-
-    public void delete(StackResource resource, String region, CfnResourceContext context) {
         String resourceType = resource.getResourceType();
         CfnResourceProvisioner owner = registry.forType(resourceType).orElse(null);
         if (owner != null) {
-            owner.delete(resource, region, context);
+            owner.delete(resource, region);
             return;
         }
         delete(resourceType, resource.getPhysicalId(), region);
@@ -257,24 +232,16 @@ public class CfnResourceDispatcher {
      * provisioner that owns the type.
      */
     public UpdateCleanupResult completeUpdate(StackResource resource) {
-        return completeUpdate(resource, CfnResourceContext.EMPTY);
-    }
-
-    public UpdateCleanupResult completeUpdate(StackResource resource, CfnResourceContext context) {
         return registry.forType(resource.getResourceType())
-                .map(owner -> owner.completeUpdate(resource, context))
+                .map(owner -> owner.completeUpdate(resource))
                 .filter(UpdateCleanupResult::applicable)
                 .orElseGet(UpdateCleanupResult::notApplicable);
     }
 
     /** Cleanup owed by an unfinished update while deleting the enclosing stack. */
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
-        return completeDeleteCleanup(resource, CfnResourceContext.EMPTY);
-    }
-
-    public UpdateCleanupResult completeDeleteCleanup(StackResource resource, CfnResourceContext context) {
         return registry.forType(resource.getResourceType())
-                .map(owner -> owner.completeDeleteCleanup(resource, context))
+                .map(owner -> owner.completeDeleteCleanup(resource))
                 .filter(UpdateCleanupResult::applicable)
                 .orElseGet(UpdateCleanupResult::notApplicable);
     }
@@ -326,12 +293,8 @@ public class CfnResourceDispatcher {
     }
 
     public boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
-        return rollbackUpdate(resource, progress, CfnResourceContext.EMPTY);
-    }
-
-    public boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress, CfnResourceContext context) {
         return registry.forType(resource.getResourceType())
-                .map(owner -> owner.rollbackUpdate(resource, progress, context))
+                .map(owner -> owner.rollbackUpdate(resource, progress))
                 .orElse(false);
     }
 

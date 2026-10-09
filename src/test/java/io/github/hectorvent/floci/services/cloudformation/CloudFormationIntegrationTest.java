@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -10,12 +12,6 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -29,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -41,6 +38,8 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -7439,6 +7438,11 @@ class CloudFormationIntegrationTest {
 
     private static final String ECS_TARGET_PREFIX = "AmazonEC2ContainerServiceV20141113.";
     private static final String ECS_CONTENT_TYPE = "application/x-amz-json-1.1";
+    // The service's tasks must be able to start, since CloudFormation waits for them: an awsvpc
+    // task gets its ENI in a subnet and security group that exist, here the default VPC's.
+    private static final String ECS_SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a");
+    private static final String ECS_SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b");
+    private static final String ECS_SECURITY_GROUP = Ec2Service.defaultSecurityGroupId("us-east-1");
 
     private static String outputValue(String describeXml, String key) {
         return describeXml.split("<OutputKey>" + key + "</OutputKey>")[1]
@@ -7486,8 +7490,8 @@ class CloudFormationIntegrationTest {
                     "LaunchType": "FARGATE",
                     "NetworkConfiguration": {
                       "AwsvpcConfiguration": {
-                        "Subnets": ["subnet-aaa", "subnet-bbb"],
-                        "SecurityGroups": ["sg-123"],
+                        "Subnets": ["%1$s", "%2$s"],
+                        "SecurityGroups": ["%3$s"],
                         "AssignPublicIp": "ENABLED"
                       }
                     }
@@ -7503,7 +7507,7 @@ class CloudFormationIntegrationTest {
                 "ServiceArn": { "Value": { "Fn::GetAtt": ["EcsService", "ServiceArn"] } }
               }
             }
-            """;
+            """.formatted(ECS_SUBNET_A, ECS_SUBNET_B, ECS_SECURITY_GROUP);
 
         String stackName = "cfn-ecs-stack";
 
@@ -7573,8 +7577,8 @@ class CloudFormationIntegrationTest {
             .body("services[0].serviceName", equalTo("cfn-ecs-service"))
             .body("services[0].desiredCount", equalTo(2))
             .body("services[0].launchType", equalTo("FARGATE"))
-            .body("services[0].networkConfiguration.awsvpcConfiguration.subnets", hasItem("subnet-aaa"))
-            .body("services[0].networkConfiguration.awsvpcConfiguration.securityGroups", hasItem("sg-123"))
+            .body("services[0].networkConfiguration.awsvpcConfiguration.subnets", hasItem(ECS_SUBNET_A))
+            .body("services[0].networkConfiguration.awsvpcConfiguration.securityGroups", hasItem(ECS_SECURITY_GROUP))
             .body("services[0].networkConfiguration.awsvpcConfiguration.assignPublicIp", equalTo("ENABLED"));
     }
 

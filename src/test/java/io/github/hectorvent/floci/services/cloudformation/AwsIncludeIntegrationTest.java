@@ -598,7 +598,7 @@ class AwsIncludeIntegrationTest {
 
     @Test
     void conditionsFromTheIncludedSnippetReachProvisioningInsteadOfBeingRejected() {
-        // validateConditionDependencies used to preflight the RAW, unmerged body: a Conditions
+        // validateResourceDependencies used to preflight the RAW, unmerged body: a Conditions
         // section spliced in from a snippet was invisible there, so a resource conditioned on it
         // defaulted to excluded and a dependent resource failed CreateStack synchronously with a
         // spurious "Unresolved resource dependencies" error, even though the merge that runs later

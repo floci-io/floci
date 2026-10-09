@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.s3;
 
-import static org.junit.jupiter.api.Assertions.*;
-
 import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Tests for S3 tagging: service-layer behavior and {@link S3RequestParser} utility methods.

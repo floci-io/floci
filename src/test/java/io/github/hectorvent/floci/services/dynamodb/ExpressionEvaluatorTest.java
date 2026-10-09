@@ -3,12 +3,11 @@ package io.github.hectorvent.floci.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-
-import io.github.hectorvent.floci.core.common.AwsException;
 
 import static org.junit.jupiter.api.Assertions.*;
 

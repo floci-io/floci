@@ -10,7 +10,6 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.transport.DockerHttpClient;
 import com.github.dockerjava.transport.NamedPipeSocket;
 import com.github.dockerjava.transport.SSLConfig;
-import com.github.dockerjava.transport.UnixSocket;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.apache.hc.client5.http.classic.methods.HttpUriRequestBase;
 import org.apache.hc.client5.http.config.ConnectionConfig;
@@ -59,22 +58,37 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * Floci's own Docker HTTP transport over httpclient5: the same transport docker-java's
+ * Floci's own Docker HTTP transport over httpclient5: the transport docker-java's
  * {@code ApacheDockerHttpClient} builds, owned here so Floci can set what that builder does not
- * expose (idle-connection validation and eviction, the connection-lease timeout). It currently
- * applies exactly docker-java's settings: unix, npipe and tcp hosts, TLS from the SSL config, a pool
- * of {@code maxConnections} for one route, no socket read timeout on the pool ({@code SO_TIMEOUT} 0),
- * the request's response timeout, no stale-connection validation, and hijacked exec/attach upgrades
- * through {@link HijackingHttpRequestExecutor}.
+ * expose (idle-connection validation and eviction, the connection-lease timeout). It applies
+ * docker-java's settings (npipe and tcp hosts, TLS from the SSL config, a pool of
+ * {@code maxConnections} for one route, no socket read timeout on the pool, hijacked exec/attach
+ * upgrades through {@link HijackingHttpRequestExecutor}), validates a pooled connection idle over a
+ * second before reusing it and evicts idle ones, where docker-java disabled both, and differs in two
+ * more ways: a {@code unix://} host connects through {@link UnixDomainSocket}, which honours read
+ * timeouts where docker-java's socket ignored them, and requests that hold a stream open get no
+ * response timeout ({@link #isLongLivedStream}), while every other call keeps it.
  */
 public final class FlociDockerHttpClient implements DockerHttpClient {
+
+    /**
+     * A pooled connection idle this long is checked before it is leased again, so a socket the daemon
+     * (or Podman) already closed is replaced instead of failing on its next write. The check reads with
+     * a 1 ms timeout, which {@link UnixDomainSocket} honours.
+     */
+    static final TimeValue VALIDATE_AFTER_INACTIVITY = TimeValue.ofSeconds(1);
+    /** Idle pooled connections are closed in the background after this long. */
+    static final TimeValue EVICT_IDLE_AFTER = TimeValue.ofSeconds(30);
 
     private final CloseableHttpClient httpClient;
     private final HttpHost host;
     private final String pathPrefix;
+    /** The same settings with no response timeout, for requests that hold a stream open (see isLongLivedStream). */
+    private final RequestConfig streamRequestConfig;
 
     private FlociDockerHttpClient(URI dockerHost, SSLConfig sslConfig, int maxConnections,
-                                  Duration connectionTimeout, Duration responseTimeout) {
+                                  Duration connectionTimeout, Duration responseTimeout,
+                                  Duration connectionRequestTimeout) {
         SSLContext sslContext;
         try {
             sslContext = sslConfig != null ? sslConfig.getSSLContext() : null;
@@ -104,18 +118,23 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         connectionManager.setMaxTotal(maxConnections);
         connectionManager.setDefaultMaxPerRoute(maxConnections);
         connectionManager.setDefaultConnectionConfig(ConnectionConfig.custom()
-                .setValidateAfterInactivity(TimeValue.NEG_ONE_SECOND)
+                .setValidateAfterInactivity(VALIDATE_AFTER_INACTIVITY)
                 .setConnectTimeout(connectionTimeout != null
                         ? Timeout.of(connectionTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
                 .build());
 
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setResponseTimeout(responseTimeout != null
+                        ? Timeout.of(responseTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
+                .setConnectionRequestTimeout(connectionRequestTimeout != null
+                        ? Timeout.of(connectionRequestTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
+                .build();
+        streamRequestConfig = RequestConfig.copy(requestConfig).setResponseTimeout(Timeout.DISABLED).build();
         httpClient = HttpClients.custom()
                 .setRequestExecutor(new HijackingHttpRequestExecutor(null))
                 .setConnectionManager(connectionManager)
-                .setDefaultRequestConfig(RequestConfig.custom()
-                        .setResponseTimeout(responseTimeout != null
-                                ? Timeout.of(responseTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
-                        .build())
+                .setDefaultRequestConfig(requestConfig)
+                .evictIdleConnections(EVICT_IDLE_AFTER)
                 .disableConnectionState()
                 .build();
     }
@@ -137,7 +156,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         return new DefaultHttpClientConnectionOperator(
                 socksProxy -> {
                     if ("unix".equalsIgnoreCase(scheme)) {
-                        return UnixSocket.get(path);
+                        return UnixDomainSocket.connect(path);
                     }
                     if ("npipe".equalsIgnoreCase(scheme)) {
                         return new NamedPipeSocket(path);
@@ -166,6 +185,10 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
             httpRequest.setEntity(new InputStreamEntity(request.body(), null));
         }
 
+        if (isLongLivedStream(request)) {
+            httpRequest.setConfig(streamRequestConfig);
+        }
+
         if (request.hijackedInput() != null) {
             context.setAttribute(HijackingHttpRequestExecutor.HIJACKED_INPUT_ATTRIBUTE, request.hijackedInput());
             httpRequest.setHeader("Upgrade", "tcp");
@@ -185,6 +208,43 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         httpClient.close();
     }
 
+    /**
+     * Requests whose response is a stream that stays open, and may stay silent, for as long as what it
+     * follows: a container wait, exec and attach output, followed logs, streamed stats, daemon events,
+     * and the progress of an image pull or build. The response timeout bounds how long a silent
+     * daemon is waited for, so applied to these it would cut off a quiet but healthy stream; they get
+     * none. Every other call keeps the response timeout.
+     */
+    static boolean isLongLivedStream(Request request) {
+        if (request.hijackedInput() != null) {
+            return true;
+        }
+        String path = request.path();
+        int queryStart = path.indexOf('?');
+        String route = queryStart < 0 ? path : path.substring(0, queryStart);
+        String query = queryStart < 0 ? "" : path.substring(queryStart + 1);
+        return switch (request.method()) {
+            case "POST" -> route.endsWith("/wait") || route.endsWith("/attach") || route.endsWith("/build")
+                    || route.endsWith("/images/create")
+                    || (route.contains("/exec/") && route.endsWith("/start"));
+            case "GET" -> route.endsWith("/events")
+                    || (route.endsWith("/logs") && queryFlag(query, "follow", false))
+                    || (route.endsWith("/stats") && queryFlag(query, "stream", true));
+            default -> false;
+        };
+    }
+
+    /** A boolean query parameter as Docker reads it ({@code 1} or {@code true}), or its default when absent. */
+    private static boolean queryFlag(String query, String name, boolean defaultValue) {
+        for (String param : query.split("&")) {
+            if (param.startsWith(name + "=")) {
+                String value = param.substring(name.length() + 1);
+                return "1".equals(value) || "true".equalsIgnoreCase(value);
+            }
+        }
+        return defaultValue;
+    }
+
     /** Builds a client; mirrors docker-java's {@code ApacheDockerHttpClient.Builder}. */
     public static final class Builder {
 
@@ -193,6 +253,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         private int maxConnections = Integer.MAX_VALUE;
         private Duration connectionTimeout;
         private Duration responseTimeout;
+        private Duration connectionRequestTimeout;
 
         public Builder dockerHost(URI value) {
             this.dockerHost = Objects.requireNonNull(value, "dockerHost");
@@ -219,9 +280,19 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
             return this;
         }
 
+        /**
+         * How long a call waits to lease a pooled connection before failing with
+         * {@code ConnectionRequestTimeoutException}; unset keeps httpclient5's own default (3 minutes).
+         */
+        public Builder connectionRequestTimeout(Duration value) {
+            this.connectionRequestTimeout = value;
+            return this;
+        }
+
         public FlociDockerHttpClient build() {
             Objects.requireNonNull(dockerHost, "dockerHost");
-            return new FlociDockerHttpClient(dockerHost, sslConfig, maxConnections, connectionTimeout, responseTimeout);
+            return new FlociDockerHttpClient(dockerHost, sslConfig, maxConnections, connectionTimeout, responseTimeout,
+                    connectionRequestTimeout);
         }
     }
 

@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
-import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.glue.GlueService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 

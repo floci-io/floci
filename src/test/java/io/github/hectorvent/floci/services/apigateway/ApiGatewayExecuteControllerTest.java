@@ -495,6 +495,108 @@ class ApiGatewayExecuteControllerTest {
         }
     }
 
+    // ── HTTP API (v2) payload format 2.0 response inference ──────
+    //
+    // https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
+    // "Lambda function response for format 2.0": valid JSON without a statusCode is answered with
+    // statusCode 200, content-type application/json, and the function's response as the body.
+
+    private static InvokeResult functionError(String payloadJson) {
+        return new InvokeResult(200, "Unhandled", payloadJson.getBytes(StandardCharsets.UTF_8), null, "req-1");
+    }
+
+    private static String bodyOf(Response response) {
+        Object entity = response.getEntity();
+        return entity instanceof byte[] bytes ? new String(bytes, StandardCharsets.UTF_8) : (String) entity;
+    }
+
+    @Test
+    void httpApiV2ObjectWithoutStatusCodeIsTheBody() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(
+                proxyPayload("{\"message\":\"Hello from Lambda!\"}"), true)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("application/json", String.valueOf(response.getMediaType()));
+            assertEquals("{\"message\":\"Hello from Lambda!\"}", bodyOf(response));
+        }
+    }
+
+    @Test
+    void httpApiV2StringResultIsTheBody() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(
+                proxyPayload("\"Hello from Lambda!\""), true)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("application/json", String.valueOf(response.getMediaType()));
+            assertEquals("Hello from Lambda!", bodyOf(response));
+        }
+    }
+
+    @Test
+    void httpApiV2ResponseFieldsWithoutStatusCodeAreReturnedAsTheBody() {
+        // Without a statusCode nothing is interpreted: headers and body are part of the JSON body.
+        String payload = "{\"headers\":{\"X-Trace\":\"inferred\"},\"body\":\"inner\"}";
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(proxyPayload(payload), true)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("application/json", String.valueOf(response.getMediaType()));
+            assertEquals(payload, bodyOf(response));
+            assertNull(response.getHeaderString("X-Trace"));
+        }
+    }
+
+    @Test
+    void httpApiV2FunctionErrorAnswersInternalServerErrorMessage() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(functionError(
+                "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), true)) {
+            assertEquals(502, response.getStatus());
+            assertEquals("application/json", String.valueOf(response.getMediaType()));
+            assertEquals("{\"message\":\"Internal Server Error\"}", bodyOf(response));
+        }
+    }
+
+    @Test
+    void httpApiPayloadV1ResponseWithoutStatusCodeIsNotInferred() {
+        // An HTTP API integration configured with payloadFormatVersion 1.0 keeps the 1.0 response rules.
+        String payload = "{\"headers\":{\"X-Trace\":\"value\"},\"body\":\"inner\"}";
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(proxyPayload(payload), true, false)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("inner", bodyOf(response));
+            assertEquals("value", response.getHeaderString("X-Trace"));
+        }
+    }
+
+    @Test
+    void httpApiPayloadV1FunctionErrorAnswersInternalServerErrorMessage() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(functionError(
+                "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), true, false)) {
+            assertEquals(502, response.getStatus());
+            assertEquals("{\"message\":\"Internal Server Error\"}", bodyOf(response));
+        }
+    }
+
+    @Test
+    void restApiV1ResponseWithoutStatusCodeIsNotInferred() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(proxyPayload("{\"body\":\"inner\"}"), false)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("inner", bodyOf(response));
+        }
+    }
+
+    @Test
+    void restApiV1FunctionErrorKeepsEmptyBody() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(functionError(
+                "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), false)) {
+            assertEquals(502, response.getStatus());
+            assertNull(response.getEntity());
+        }
+    }
+
     @Test
     void requestTimeUsesEnglishMonthUnderNonEnglishDefaultLocale() {
         // The formatter is built at class initialisation, so switching the default locale here

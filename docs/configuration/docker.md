@@ -72,6 +72,18 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
 
+When a pool is full, a Docker call waits for a free connection, then fails. The wait defaults to 30 seconds for both pools and must be at least 1 (httpclient5 reads 0 as no limit, so a call would wait forever); a failed wait is not retried, because a full pool means Floci is saturated:
+
+```yaml
+floci:
+  docker:
+    connection-request-timeout-seconds: 30
+```
+
+Environment variable: `FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS`
+
+A Docker call that gets no response within 5 minutes fails, on Unix-socket and TCP hosts alike. Requests that follow a container for as long as it runs (container waits, exec and attach output, followed logs, streamed stats, daemon events, image pulls and builds) have no such limit, since they can stay silent while healthy.
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.

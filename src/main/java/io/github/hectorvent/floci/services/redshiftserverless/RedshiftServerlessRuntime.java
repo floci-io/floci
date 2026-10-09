@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
@@ -11,6 +12,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.List;
 import java.util.Optional;
@@ -78,6 +82,58 @@ public class RedshiftServerlessRuntime {
         } catch (RuntimeException e) {
             rollback(accountId, backendId);
             throw e;
+        }
+    }
+
+    /** Dumps the workgroup's database to {@code outputFile} with pg_dump. */
+    public void takeSnapshot(String accountId, String region, String workgroupName, String masterUsername,
+                             String dbName, Path outputFile) {
+        containerManager.takeSnapshot(accountId, backendId(region, workgroupName), masterUsername, dbName, outputFile,
+                true);
+    }
+
+    /**
+     * Replaces the workgroup's database contents with the dump in {@code dumpFile}. The current
+     * contents are dumped first, and when the replay fails they are put back, so a bad dump never
+     * leaves the workgroup empty or half restored.
+     */
+    public void restoreSnapshot(String accountId, String region, String workgroupName, String masterUsername,
+                                String dbName, Path dumpFile) {
+        String backendId = backendId(region, workgroupName);
+        Path safety;
+        try {
+            safety = Files.createTempFile("redshift-serverless-restore-" + workgroupName + "-", ".sql");
+        } catch (IOException e) {
+            throw new AwsException("InternalServerException",
+                    "Failed to prepare the restore of workgroup " + workgroupName + ": " + e.getMessage(), 500);
+        }
+        try {
+            containerManager.takeSnapshot(accountId, backendId, masterUsername, dbName, safety, true);
+            try {
+                containerManager.resetUserSchemas(accountId, backendId, masterUsername, dbName);
+                containerManager.restoreSnapshot(accountId, backendId, masterUsername, dbName, dumpFile, true);
+            } catch (RuntimeException e) {
+                rollBackRestore(accountId, backendId, masterUsername, dbName, safety, e);
+                throw e;
+            }
+        } finally {
+            try {
+                Files.deleteIfExists(safety);
+            } catch (IOException e) {
+                LOG.warnv(e, "Could not delete the pre-restore dump {0}", safety);
+            }
+        }
+    }
+
+    private void rollBackRestore(String accountId, String backendId, String masterUsername, String dbName,
+                                 Path safety, RuntimeException failure) {
+        try {
+            containerManager.resetUserSchemas(accountId, backendId, masterUsername, dbName);
+            containerManager.restoreSnapshot(accountId, backendId, masterUsername, dbName, safety, true);
+        } catch (RuntimeException rollbackFailure) {
+            LOG.errorv(rollbackFailure, "Could not put back the previous contents of {0} after a failed restore",
+                    backendId);
+            failure.addSuppressed(rollbackFailure);
         }
     }
 

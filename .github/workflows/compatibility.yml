@@ -64,10 +64,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build compat image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile.compat
@@ -181,7 +181,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2 # v1
+      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
         with:
           java-version: '25'
           distribution: 'mandrel'
@@ -256,10 +256,10 @@ jobs:
           # include any sidecar .so the runtime image may need (matches nightly artifact set)
           cp target/*.so native/${{ matrix.arch }}/ 2>/dev/null || true
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build native Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile.native-package
@@ -380,10 +380,10 @@ jobs:
             compatibility-tests
             .github/ci
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build test image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: compatibility-tests/${{ matrix.test }}
           load: true
@@ -488,10 +488,10 @@ jobs:
             compatibility-tests
             .github/ci
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build test image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: compatibility-tests/sdk-test-java
           load: true
@@ -536,7 +536,7 @@ jobs:
             -e FLOCI_EC2_CONTAINERS="$1" \
             -v "$(pwd)/test-results/$1:/results" \
             --entrypoint bash \
-            compat-sdk-test-java -c 'status=0; mvn test -B -Dtest=Ec2ContainerTest -Dorg.slf4j.simpleLogger.defaultLogLevel=warn || status=$?; cp target/surefire-reports/TEST-*.xml /results/ 2>/dev/null || true; exit $status'
+            compat-sdk-test-java -c 'status=0; mvn test -B -Dtest=Ec2ContainerTest,Ec2CreateVpcLatencyTest -Dorg.slf4j.simpleLogger.defaultLogLevel=warn || status=$?; cp target/surefire-reports/TEST-*.xml /results/ 2>/dev/null || true; exit $status'
           SH
 
       - name: Run tests with security group enforcement

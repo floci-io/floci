@@ -67,6 +67,8 @@
 | `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
 | `FLOCI_SERVICES_ECR_TLS_ENABLED` | `false` | Reserved for future ACM-backed TLS |
 
+When Docker reports the chosen registry port as already in use, for example by another emulator on the same daemon, Floci tries the next free port in the range. When no port in the range is free, startup fails and the error names the ports Docker refused. Any other startup error, such as an unreachable Docker daemon or a failed image pull, fails at once.
+
 ### Docker Compose port mapping
 
 ECR uses Floci's existing `4566` listener. The backing registry binds a loopback-only implementation port, so no ECR range belongs in `docker-compose.yml`:
@@ -85,6 +87,8 @@ services:
 ```
 
 `docker login 000000000000.dkr.ecr.us-east-1.localhost:4566` works once Floci starts the registry sidecar.
+
+When Floci runs in a container that publishes its port on another host port (for example `docker run -p 54321:4566`), the `repositoryUri`, the `GetAuthorizationToken` `proxyEndpoint` and the rewritten Lambda and ECS image URIs all name that host port (`000000000000.dkr.ecr.us-east-1.localhost:54321`), because the Docker daemon performs login, push and pull through it. Floci reads the published port from its own container through the mounted Docker socket, and uses `floci.port` (`4566`) when it does not run in a container or the port is not published.
 
 ## Examples
 

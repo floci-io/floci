@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
-import com.github.dockerjava.api.DockerClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;

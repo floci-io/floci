@@ -4,10 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.ram.model.ResourceShare;
-import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
+import io.github.hectorvent.floci.services.ram.model.ResourceShare;
+import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;

@@ -1,5 +1,12 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+// REST and v2 both define Authorizer; the less-used REST type is qualified below.
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jayway.jsonpath.Configuration;
 import com.jayway.jsonpath.InvalidPathException;
 import com.jayway.jsonpath.JsonPath;
@@ -10,6 +17,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CookieHeaders;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
@@ -27,7 +35,6 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
-// REST and v2 both define Authorizer; the less-used REST type is qualified below.
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
@@ -40,11 +47,6 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -1544,11 +1546,32 @@ public class ApiGatewayExecuteController {
     }
 
     Response buildProxyResponse(InvokeResult result, boolean httpApiV2) {
+        return buildProxyResponse(result, httpApiV2, httpApiV2);
+    }
+
+    // httpApi selects the HTTP API error response; payloadV2 selects the integration's format 2.0
+    // response rules (inference and cookies). An HTTP API integration can still use format 1.0.
+    Response buildProxyResponse(InvokeResult result, boolean httpApi, boolean payloadV2) {
+        if (httpApi && result.getFunctionError() != null) {
+            // An HTTP API never relays the error payload: the client gets AWS's generic message.
+            return Response.status(502).entity(jsonMessage("Internal Server Error"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getFunctionError() != null ? 502 : result.getStatusCode()).build();
         }
         try {
             JsonNode node = objectMapper.readTree(result.getPayload());
+            if (payloadV2 && !node.has("statusCode")) {
+                // Format 2.0 infers the response when the function's JSON result carries no
+                // statusCode: 200, application/json, and the result itself as the body. A string
+                // result is the body text; any other result is returned exactly as the function
+                // produced it, response-shaped fields included.
+                byte[] inferredBody = node.isTextual()
+                        ? node.textValue().getBytes(StandardCharsets.UTF_8)
+                        : result.getPayload();
+                return Response.status(200).entity(inferredBody).type(MediaType.APPLICATION_JSON).build();
+            }
             int statusCode = node.path("statusCode").asInt(200);
             if (result.getFunctionError() != null && !node.has("statusCode")) statusCode = 502;
 
@@ -1564,7 +1587,7 @@ public class ApiGatewayExecuteController {
                     if (e.getValue().isArray()) e.getValue().forEach(v -> builder.header(e.getKey(), v.asText()));
                 });
             }
-            if (httpApiV2) {
+            if (payloadV2) {
                 JsonNode cookies = node.get("cookies");
                 if (cookies != null && cookies.isArray()) {
                     cookies.forEach(cookie -> builder.header(HttpHeaders.SET_COOKIE, cookie.asText()));
@@ -2608,7 +2631,7 @@ public class ApiGatewayExecuteController {
         try {
             InvokeResult result = lambdaService.invoke(region, functionName,
                     eventJson.getBytes(), InvocationType.RequestResponse);
-            return buildProxyResponse(result, true);
+            return buildProxyResponse(result, true, !"1.0".equals(integration.getPayloadFormatVersion()));
         } catch (AwsException e) {
             if (e.getHttpStatus() == 404) {
                 return Response.status(404)
@@ -3220,21 +3243,7 @@ public class ApiGatewayExecuteController {
         event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
                 ? uriInfo.getRequestUri().getRawQuery() : "");
 
-        // Headers (lowercase keys for v2)
-        ObjectNode headersNode = event.putObject("headers");
-        MultivaluedMap<String, String> reqHeaders = headers.getRequestHeaders();
-        for (Map.Entry<String, List<String>> e : reqHeaders.entrySet()) {
-            if (!e.getValue().isEmpty()) headersNode.put(e.getKey().toLowerCase(), e.getValue().get(0));
-        }
-
-        // Query string parameters
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
-        if (!queryParams.isEmpty()) {
-            ObjectNode qsp = event.putObject("queryStringParameters");
-            for (Map.Entry<String, List<String>> e : queryParams.entrySet()) {
-                if (!e.getValue().isEmpty()) qsp.put(e.getKey(), e.getValue().get(0));
-            }
-        }
+        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), uriInfo.getQueryParameters());
 
         event.putObject("pathParameters");
         event.putNull("stageVariables");
@@ -3443,21 +3452,10 @@ public class ApiGatewayExecuteController {
         event.put("routeKey", routeKey != null ? routeKey : "$default");
         event.put("rawPath", preservedPath);
 
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
         event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
                 ? uriInfo.getRequestUri().getRawQuery() : "");
 
-        ObjectNode headersNode = event.putObject("headers");
-        for (Map.Entry<String, java.util.List<String>> e : headers.getRequestHeaders().entrySet()) {
-            if (!e.getValue().isEmpty()) headersNode.put(e.getKey().toLowerCase(), e.getValue().get(0));
-        }
-
-        if (!queryParams.isEmpty()) {
-            ObjectNode qsp = event.putObject("queryStringParameters");
-            for (Map.Entry<String, java.util.List<String>> e : queryParams.entrySet()) {
-                if (!e.getValue().isEmpty()) qsp.put(e.getKey(), e.getValue().get(0));
-            }
-        }
+        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), uriInfo.getQueryParameters());
 
         Map<String, String> pathParams = extractV2PathParams(routeKey, path);
         if (!pathParams.isEmpty()) {
@@ -3542,6 +3540,39 @@ public class ApiGatewayExecuteController {
             return objectMapper.writeValueAsString(event);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize v2 proxy event", e);
+        }
+    }
+
+    /**
+     * Writes {@code cookies}, {@code headers} and {@code queryStringParameters} the way payload
+     * format 2.0 carries them, for both the Lambda integration event and the Lambda authorizer
+     * event. Format 2.0 has no multi-value maps: AWS combines duplicate headers and duplicate
+     * query strings with commas, and lists the request's cookies in their own array, which is
+     * left out when the request has none.
+     */
+    private static void putV2CookiesHeadersAndQuery(ObjectNode event,
+                                                    MultivaluedMap<String, String> requestHeaders,
+                                                    MultivaluedMap<String, String> queryParams) {
+        List<String> cookies = CookieHeaders.cookiePairs(requestHeaders);
+        if (!cookies.isEmpty()) {
+            ArrayNode cookiesNode = event.putArray("cookies");
+            cookies.forEach(cookiesNode::add);
+        }
+
+        ObjectNode headersNode = event.putObject("headers");
+        for (Map.Entry<String, List<String>> e : requestHeaders.entrySet()) {
+            if (!e.getValue().isEmpty()) {
+                headersNode.put(e.getKey().toLowerCase(), String.join(",", e.getValue()));
+            }
+        }
+
+        if (!queryParams.isEmpty()) {
+            ObjectNode qsp = event.putObject("queryStringParameters");
+            for (Map.Entry<String, List<String>> e : queryParams.entrySet()) {
+                if (!e.getValue().isEmpty()) {
+                    qsp.put(e.getKey(), String.join(",", e.getValue()));
+                }
+            }
         }
     }
 

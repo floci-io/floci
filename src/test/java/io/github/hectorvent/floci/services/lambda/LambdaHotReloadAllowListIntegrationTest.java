@@ -20,8 +20,7 @@ class LambdaHotReloadAllowListIntegrationTest {
 
     private static int counter;
 
-    private static ValidatableResponse createFunction(String s3Key) {
-        String name = "hot-reload-allow-list-" + (++counter);
+    private static ValidatableResponse createFunction(String name, String s3Key) {
         return given()
                 .contentType("application/json")
                 .body("""
@@ -46,7 +45,7 @@ class LambdaHotReloadAllowListIntegrationTest {
             "/home/ci/code:/etc"
     })
     void createFunctionRejectsPathsOutsideTheAllowedDirectory(String s3Key) {
-        createFunction(s3Key)
+        createFunction("hot-reload-allow-list-" + (++counter), s3Key)
                 .statusCode(400)
                 .body("__type", equalTo("InvalidParameterValueException"));
     }
@@ -54,6 +53,12 @@ class LambdaHotReloadAllowListIntegrationTest {
     @ParameterizedTest
     @ValueSource(strings = {"/home/ci/code", "/home/ci/code/app"})
     void createFunctionAcceptsTheAllowedDirectoryAndItsChildren(String s3Key) {
-        createFunction(s3Key).statusCode(201);
+        String name = "hot-reload-allow-list-" + (++counter);
+        createFunction(name, s3Key).statusCode(201);
+        given()
+                .when()
+                .delete("/2015-03-31/functions/{name}", name)
+                .then()
+                .statusCode(204);
     }
 }

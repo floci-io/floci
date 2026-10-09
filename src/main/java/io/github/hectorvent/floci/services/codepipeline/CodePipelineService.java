@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.DeadlineCharSequence;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -25,8 +26,8 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
-import jakarta.annotation.PreDestroy;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
@@ -52,6 +53,7 @@ import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -115,6 +117,7 @@ public class CodePipelineService {
     private final ScheduledExecutorService sourcePoller = Executors.newSingleThreadScheduledExecutor();
     private final KeyedLockPool pipelineLocks = new KeyedLockPool();
     private final KeyedLockPool sourcePollLocks = new KeyedLockPool();
+    private static final String MANUAL_TRIGGER_DETAIL = "manual";
     // Admission is serialized per pipeline on its own lock. A QUEUED worker holds the pipelineLocks
     // monitor for its whole run, so counting under that monitor would block StartPipelineExecution
     // until the running execution finished.
@@ -128,6 +131,9 @@ public class CodePipelineService {
     // for the gap before the override timeout cleanup.
     private final long runFinishWaitNanos;
     private final Runnable beforeOverrideTimeoutCleanup;
+
+    /** Internal override type: a rollback pins a GitHub source action to the target's commit. */
+    private static final String GITHUB_COMMIT_ID = "GITHUB_COMMIT_ID";
 
     private static final long DEFAULT_RUN_FINISH_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
 
@@ -550,7 +556,7 @@ public class CodePipelineService {
     }
 
     private ObjectNode startPipelineExecution(JsonNode request, String region, String account) {
-        return startPipelineExecution(request, region, account, "StartPipelineExecution", "manual");
+        return startPipelineExecution(request, region, account, "StartPipelineExecution", MANUAL_TRIGGER_DETAIL);
     }
 
     private ObjectNode startPipelineExecution(JsonNode request, String region, String account,
@@ -947,29 +953,148 @@ public class CodePipelineService {
         return latestStatuses;
     }
 
-    private ObjectNode startExecutionFrom(CodePipelineExecution source, String region, String account) {
-        ObjectNode start = mapper.createObjectNode();
-        start.put("name", source.getPipelineName());
-        synchronized (source) {
-            start.set("sourceRevisions", mapper.valueToTree(source.getSourceRevisionOverrides()));
+    private ObjectNode rollbackStage(JsonNode request, String region, String account) {
+        String pipelineName = text(request, "pipelineName");
+        String stageName = text(request, "stageName");
+        CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
+        // CodePipeline User Guide, execution modes: stage rollback is not available on PARALLEL pipelines.
+        if ("PARALLEL".equals(pipeline.getDeclaration().path("executionMode").asText(DEFAULT_EXECUTION_MODE))) {
+            throw new AwsException("ValidationException",
+                    "Stage rollback is not supported on PARALLEL pipelines.", 400);
         }
-        ArrayNode vars = start.putArray("variables");
-        source.getVariables().forEach(v -> vars.addObject()
-                .put("name", v.get("name"))
-                .put("value", v.get("resolvedValue")));
-        return startPipelineExecution(start, region, account);
+        JsonNode stage = stageByName(pipeline, stageName);
+        // CodePipeline User Guide, "Considerations for rollbacks": a source stage cannot be rolled back.
+        for (JsonNode action : stage.path("actions")) {
+            if (isSourceAction(action)) {
+                throw new AwsException("UnableToRollbackStageException",
+                        "A source stage cannot be rolled back.", 400);
+            }
+        }
+        CodePipelineExecution target = requireExecution(
+                account, region, pipelineName, text(request, "targetPipelineExecutionId"));
+        if ("ROLLBACK".equals(target.getExecutionType())) {
+            throw new AwsException("UnableToRollbackStageException",
+                    "The target execution is a rollback execution.", 400);
+        }
+        if (!Objects.equals(target.getPipelineVersion(), pipeline.getVersion())) {
+            throw new AwsException("UnableToRollbackStageException",
+                    "The pipeline structure changed after the target execution ran.", 400);
+        }
+        // The stage status, not the action statuses: a stage whose onSuccess condition failed has
+        // only Succeeded actions but is itself Failed.
+        boolean stageSucceededInTarget = !latestActionStatuses(target, stageName).isEmpty()
+                && "Succeeded".equals(stageExecutionStatus(target, stageName));
+        if (!stageSucceededInTarget) {
+            throw new AwsException("UnableToRollbackStageException",
+                    "The stage did not complete successfully in the target execution.", 400);
+        }
+        // Checked and registered under the start lock so two concurrent rollbacks of one stage cannot both pass.
+        CodePipelineExecution rollback = startLocks.withLock(pipelineLockKey(account, region, pipelineName), () -> {
+            if (stageRunning(account, region, pipelineName, stageName)) {
+                throw new AwsException("UnableToRollbackStageException",
+                        "The stage is currently running.", 400);
+            }
+            return startRollback(pipeline, account, region, stageName, target);
+        });
+        return mapper.createObjectNode().put("pipelineExecutionId", rollback.getPipelineExecutionId());
     }
 
-    private ObjectNode rollbackStage(JsonNode request, String region, String account) {
-        CodePipelineExecution target = requireExecution(
-                account, region, text(request, "pipelineName"), text(request, "targetPipelineExecutionId"));
-        ObjectNode started = startExecutionFrom(target, region, account);
-        CodePipelineExecution rollback = requireExecution(
-                account, region, target.getPipelineName(), started.path("pipelineExecutionId").asText());
+    // A rollback still fetching its sources has no stage status yet, so it is matched by its target stage.
+    private boolean stageRunning(String account, String region, String pipelineName, String stageName) {
+        return executions(account, region, pipelineName).stream()
+                .anyMatch(candidate -> "InProgress".equals(candidate.getStatus())
+                        && ("InProgress".equals(candidate.getStageExecutionStatuses().get(stageName))
+                        || ("ROLLBACK".equals(candidate.getExecutionType())
+                        && stageName.equals(candidate.getRollbackStageName()))));
+    }
+
+    private static boolean isSourceAction(JsonNode action) {
+        return "Source".equals(action.path("actionTypeId").path("category").asText());
+    }
+
+    /**
+     * Starts a ROLLBACK execution for one stage. Source-only stages before the target stage re-run
+     * to seed the input artifacts, pinned to the target execution's source revisions, then only
+     * the target stage itself runs; intermediate build/deploy stages are skipped.
+     */
+    private CodePipelineExecution startRollback(CodePipelinePipeline pipeline, String account,
+                                                String region, String stageName,
+                                                CodePipelineExecution target) {
+        CodePipelineExecution rollback = new CodePipelineExecution();
+        rollback.setAccountId(account);
+        rollback.setRegion(region);
+        rollback.setPipelineExecutionId(UUID.randomUUID().toString());
+        rollback.setPipelineName(pipeline.getName());
+        rollback.setPipelineVersion(pipeline.getVersion());
+        rollback.setExecutionMode(pipeline.getDeclaration().path("executionMode").asText(DEFAULT_EXECUTION_MODE));
+        rollback.setStatus("InProgress");
+        rollback.setStatusSummary("Rolling back stage " + stageName + " to execution "
+                + target.getPipelineExecutionId() + ".");
         rollback.setExecutionType("ROLLBACK");
         rollback.setRollbackTargetPipelineExecutionId(target.getPipelineExecutionId());
-        putExecution(rollback);
-        return started;
+        rollback.setRollbackStageName(stageName);
+        rollback.setStartTime(now());
+        rollback.setLastUpdateTime(rollback.getStartTime());
+        rollback.setSourceRevisions(new ArrayList<>());
+        synchronized (target) {
+            // The target pinned the S3 object version each source action resolved, so re-running
+            // the sources with these overrides reproduces the target's artifacts.
+            rollback.setSourceRevisionOverrides(new ArrayList<>(target.getSourceRevisionOverrides()));
+        }
+        pinGitHubCommits(pipeline, rollback, target);
+        rollback.setVariables(new ArrayList<>(target.getVariables()));
+        Map<String, String> trigger = new LinkedHashMap<>();
+        trigger.put("triggerType", "ManualRollback");
+        trigger.put("triggerDetail", MANUAL_TRIGGER_DETAIL);
+        rollback.setTrigger(trigger);
+        if (!persistExecutionIfSlotAvailable(rollback)) {
+            throw pipelineBusy();
+        }
+        applyExecutionMode(rollback);
+        eventPublisher.pipelineStateChange(rollback, "STARTED");
+        try {
+            executor.submit(() -> runExecution(pipeline, rollback));
+        } catch (RejectedExecutionException exception) {
+            rollback.setStatus("Failed");
+            rollback.setStatusSummary("Pipeline execution could not be scheduled.");
+            rollback.setLastUpdateTime(now());
+            putExecution(rollback);
+            eventPublisher.pipelineStateChange(rollback, "FAILED");
+            throw pipelineBusy();
+        }
+        return rollback;
+    }
+
+    /**
+     * Pins each GitHub source action of a rollback to the commit the target execution resolved, so
+     * the source re-run reproduces the target's artifact instead of the branch head.
+     */
+    private void pinGitHubCommits(CodePipelinePipeline pipeline, CodePipelineExecution rollback,
+                                  CodePipelineExecution target) {
+        Set<String> githubActions = new HashSet<>();
+        for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
+            for (JsonNode action : stage.path("actions")) {
+                JsonNode type = action.path("actionTypeId");
+                if ("Source".equals(type.path("category").asText())
+                        && "GitHub".equals(type.path("provider").asText())) {
+                    githubActions.add(action.path("name").asText());
+                }
+            }
+        }
+        synchronized (target) {
+            for (Map<String, Object> revision : target.getSourceRevisions()) {
+                Object actionName = revision.get("actionName");
+                Object commit = revision.get("revisionId");
+                if (actionName == null || commit == null || !githubActions.contains(actionName.toString())) {
+                    continue;
+                }
+                Map<String, Object> pin = new LinkedHashMap<>();
+                pin.put("actionName", actionName);
+                pin.put("revisionType", GITHUB_COMMIT_ID);
+                pin.put("revisionValue", commit);
+                rollback.getSourceRevisionOverrides().add(pin);
+            }
+        }
     }
 
     private ObjectNode overrideStageCondition(JsonNode request, String region, String account) {
@@ -1358,11 +1483,49 @@ public class CodePipelineService {
         return mapper.createObjectNode().set("tags", tagsNode(pipeline.getTags()));
     }
 
+    /**
+     * The stage names a run may execute, or {@code null} for all stages. A ROLLBACK execution runs
+     * only the source stages before the rolled-back stage plus that stage. Derived from persisted
+     * state so start, restart-resume and retry all agree.
+     */
+    private Set<String> includeStagesFor(CodePipelinePipeline pipeline, CodePipelineExecution execution) {
+        if (!"ROLLBACK".equals(execution.getExecutionType())) {
+            return null;
+        }
+        String stageName = execution.getRollbackStageName();
+        Set<String> include = new LinkedHashSet<>();
+        boolean targetFound = false;
+        for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
+            String name = stage.path("name").asText();
+            if (name.equals(stageName)) {
+                include.add(name);
+                targetFound = true;
+                break;
+            }
+            boolean sourceOnly = stage.path("actions").size() > 0;
+            for (JsonNode action : stage.path("actions")) {
+                if (!isSourceAction(action)) {
+                    sourceOnly = false;
+                    break;
+                }
+            }
+            if (sourceOnly) {
+                include.add(name);
+            }
+        }
+        if (!targetFound) {
+            // Running only the sources would end the rollback Succeeded without rolling anything back.
+            throw new AwsException("StageNotFoundException",
+                    "Rollback target stage " + stageName + " is not in the pipeline.", 400);
+        }
+        return include;
+    }
+
     private void runExecution(CodePipelinePipeline pipeline, CodePipelineExecution execution) {
         activeRuns.add(runKey(execution));
         Runnable work = () -> {
             try {
-                runStagesFrom(pipeline, execution, 0);
+                runStagesFrom(pipeline, execution, 0, includeStagesFor(pipeline, execution));
             } catch (Exception e) {
                 if (execution.getCurrentStage() != null) {
                     execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
@@ -1399,7 +1562,7 @@ public class CodePipelineService {
             if (!runStageInRun(pipeline, execution, stage, retryMode, previousStatuses)) {
                 return;
             }
-            runStagesFrom(pipeline, execution, stageIndex + 1);
+            runStagesFrom(pipeline, execution, stageIndex + 1, includeStagesFor(pipeline, execution));
         } catch (Exception e) {
             if (execution.getCurrentStage() != null) {
                 execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
@@ -1412,12 +1575,15 @@ public class CodePipelineService {
         }
     }
 
-    private void runStagesFrom(CodePipelinePipeline pipeline, CodePipelineExecution execution, int startIndex)
-            throws InterruptedException {
+    private void runStagesFrom(CodePipelinePipeline pipeline, CodePipelineExecution execution, int startIndex,
+                               Set<String> includeStages) throws InterruptedException {
         JsonNode stages = pipeline.getDeclaration().path("stages");
         for (int i = startIndex; i < stages.size(); i++) {
             JsonNode stage = stages.get(i);
             String stageName = stage.path("name").asText();
+            if (includeStages != null && !includeStages.contains(stageName)) {
+                continue;
+            }
             waitForTransition(pipeline, execution, stageName);
             if (finishIfStopped(execution)) {
                 return;
@@ -1593,41 +1759,6 @@ public class CodePipelineService {
 
     private static final long MATCHES_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(1);
 
-    /** A regex subject whose {@code charAt} throws once the deadline passes, so a catastrophically
-     * backtracking pattern aborts instead of holding the run forever. */
-    private static final class DeadlineCharSequence implements CharSequence {
-        private final CharSequence delegate;
-        private final long deadlineNanos;
-
-        DeadlineCharSequence(CharSequence delegate, long deadlineNanos) {
-            this.delegate = delegate;
-            this.deadlineNanos = deadlineNanos;
-        }
-
-        @Override
-        public char charAt(int index) {
-            if (System.nanoTime() - deadlineNanos > 0) {
-                throw new IllegalStateException("MATCHES pattern evaluation timed out");
-            }
-            return delegate.charAt(index);
-        }
-
-        @Override
-        public int length() {
-            return delegate.length();
-        }
-
-        @Override
-        public CharSequence subSequence(int start, int end) {
-            return new DeadlineCharSequence(delegate.subSequence(start, end), deadlineNanos);
-        }
-
-        @Override
-        public String toString() {
-            return delegate.toString();
-        }
-    }
-
     private boolean variableCheckPasses(CodePipelineExecution execution, JsonNode rule) {
         JsonNode config = rule.path("configuration");
         String variable = resolveVariableReference(execution, config.path("Variable").asText(""));
@@ -1644,7 +1775,7 @@ public class CodePipelineService {
                                     + MAX_VARIABLE_CHECK_MATCH_LENGTH + " characters", 400);
                 }
                 yield Pattern.compile(value).matcher(new DeadlineCharSequence(variable,
-                        System.nanoTime() + MATCHES_TIMEOUT_NANOS)).matches();
+                        System.nanoTime() + MATCHES_TIMEOUT_NANOS, "MATCHES pattern evaluation timed out")).matches();
             }
             default -> throw new AwsException("ValidationException",
                     "Unknown VariableCheck operator", 400);
@@ -1919,9 +2050,11 @@ public class CodePipelineService {
                     "GitHub source Owner and Repo must be non-empty and contain no '/' or '..', "
                             + "and Branch must be non-empty with no leading '/', '..' or whitespace", 400);
         }
+        String pinnedCommit = sourceRevisionOverride(execution, state.getActionName(), GITHUB_COMMIT_ID);
+        String archiveRef = pinnedCommit != null
+                ? pinnedCommit : "refs/heads/" + encodeRefPath(branch);
         byte[] archive = fetchGitHubArchive(URI.create(
-                githubArchiveBaseUrl() + "/" + repoOwner + "/" + repo
-                        + "/zip/refs/heads/" + encodeRefPath(branch)));
+                githubArchiveBaseUrl() + "/" + repoOwner + "/" + repo + "/zip/" + archiveRef));
         if (archive.length > maxArchiveBytes()) {
             throw archiveDownloadTooLarge();
         }
@@ -2622,8 +2755,8 @@ public class CodePipelineService {
         }
         node.remove(List.of("accountId", "region", "startTime", "lastUpdateTime",
                 "sourceRevisions", "sourceRevisionOverrides", "actionExecutions", "currentStage",
-                "stopRequested", "abandon", "rollbackTargetPipelineExecutionId", "stageExecutionStatuses",
-                "artifactsReleased", "ruleExecutions", "conditionOverrides"));
+                "stopRequested", "abandon", "rollbackTargetPipelineExecutionId", "rollbackStageName",
+                "stageExecutionStatuses", "artifactsReleased", "ruleExecutions", "conditionOverrides"));
         if (execution.getRollbackTargetPipelineExecutionId() != null) {
             node.putObject("rollbackMetadata").put(
                     "rollbackTargetPipelineExecutionId", execution.getRollbackTargetPipelineExecutionId());

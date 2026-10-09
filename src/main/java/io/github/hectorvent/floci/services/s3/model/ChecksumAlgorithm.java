@@ -79,9 +79,35 @@ public enum ChecksumAlgorithm {
     }
 
     /**
+     * The algorithm an {@code x-amz-checksum-*} header name refers to, or {@code null} when the
+     * name is not one this service knows.
+     */
+    public static ChecksumAlgorithm fromChecksumHeader(String headerName) {
+        String prefix = "x-amz-checksum-";
+        if (headerName == null || headerName.length() <= prefix.length()
+                || !headerName.regionMatches(true, 0, prefix, 0, prefix.length())) {
+            return null;
+        }
+        return lookup(headerName.substring(prefix.length()));
+    }
+
+    /**
      * Parses an {@code x-amz-checksum-algorithm} value. Returns {@code null} when the header is absent.
      */
     public static ChecksumAlgorithm fromWireValue(String value) {
+        ChecksumAlgorithm algorithm = lookup(value);
+        if (algorithm != null || value == null || value.isBlank()) {
+            return algorithm;
+        }
+        String normalized = value.trim().toUpperCase(Locale.ROOT);
+        if (KNOWN_UNSUPPORTED.contains(normalized)) {
+            throw new AwsException("InvalidRequest", "The checksum algorithm you specified is a valid AWS checksum "
+                    + "algorithm, but is not currently supported by Floci (supported: CRC32, CRC32C, CRC64NVME, SHA1, SHA256).", 400);
+        }
+        throw new AwsException("InvalidArgument", "The checksum algorithm you specified is not supported.", 400);
+    }
+
+    private static ChecksumAlgorithm lookup(String value) {
         if (value == null || value.isBlank()) {
             return null;
         }
@@ -91,10 +117,6 @@ public enum ChecksumAlgorithm {
                 return algorithm;
             }
         }
-        if (KNOWN_UNSUPPORTED.contains(normalized)) {
-            throw new AwsException("InvalidRequest", "The checksum algorithm you specified is a valid AWS checksum "
-                    + "algorithm, but is not currently supported by Floci (supported: CRC32, CRC32C, CRC64NVME, SHA1, SHA256).", 400);
-        }
-        throw new AwsException("InvalidArgument", "The checksum algorithm you specified is not supported.", 400);
+        return null;
     }
 }

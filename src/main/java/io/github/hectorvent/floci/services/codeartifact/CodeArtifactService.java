@@ -662,6 +662,64 @@ public class CodeArtifactService implements Resettable {
                         + "' was not found.", version, "package-version"));
     }
 
+    /**
+     * Floci never ingests packages from an upstream source, so every package it holds was first
+     * published directly. That is the one case where CodeArtifact's default origin controls are
+     * publish ALLOW and upstream BLOCK.
+     */
+    public record PackageDescription(String format, String namespace, String packageName,
+                                     String publishRestriction, String upstreamRestriction) {}
+
+    public PackageDescription describePackage(String region, String domain, String domainOwner, String repository,
+                                              String format, String namespace, String packageName) {
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        validatePackageToken("package", packageName);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        // The API reference's own namespace parameter doc for this action: "The namespace is
+        // required when requesting packages of the following formats: Maven, Swift, generic."
+        // pypi, nuget, ruby, and cargo packages have no namespace at all, so a supplied one can
+        // never be real; echoing it back in the response would misrepresent a package that way.
+        if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
+            throw validation("namespace is required when describing a " + format + " package.");
+        }
+        if ("pypi".equals(format) && namespace != null) {
+            throw validation("pypi packages do not have a namespace.");
+        }
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        boolean exists = CONTAINER_BACKED_FORMATS.contains(format)
+                ? containerBackedPackageExists(region, domain, owner, repository, format, namespace, packageName)
+                : genericPackageExists(region, domain, owner, repository, format, namespace, packageName);
+        if (!exists) {
+            throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+        }
+        return new PackageDescription(format, namespace, packageName, "ALLOW", "BLOCK");
+    }
+
+    private boolean containerBackedPackageExists(String region, String domain, String owner, String repository,
+            String format, String namespace, String packageName) {
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        return sidecarRegistry.forFormat(format)
+                .map(manager -> manager.packageExists(repoId, domain, repository, namespace, packageName))
+                .orElse(false);
+    }
+
+    private boolean genericPackageExists(String region, String domain, String owner, String repository,
+            String format, String namespace, String packageName) {
+        String prefix = packageVersionKey(region, domain, repository, format, namespace, packageName, "");
+        String wantedNamespace = namespace == null ? "" : namespace;
+        return packageVersions.scanForAccount(owner, key -> key.startsWith(prefix)).stream()
+                .anyMatch(pv -> format.equals(pv.getFormat())
+                        && packageName.equals(pv.getPackageName())
+                        && wantedNamespace.equals(pv.getNamespace() == null ? "" : pv.getNamespace()));
+    }
+
     public PackageVersionAssetResult getPackageVersionAsset(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, String version,
             String assetName, String packageVersionRevision) {
@@ -676,7 +734,7 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
 
         // Maven, npm, and pypi are metadata-free passthroughs straight to their own sidecar
-        // (ReposiliteSidecarClient/VerdaccioSidecarManager/PypiserverSidecarManager): publish for
+        // (ReposiliteSidecarClient/VerdaccioSidecarClient/PypiserverSidecarClient): publish for
         // these formats never goes through publishPackageVersion (it only ever accepts "generic"),
         // so packageVersions can never hold a record for them. Bridge straight to the sidecar
         // that actually has the asset instead of always 404ing here.

@@ -1,15 +1,15 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
-import io.quarkus.test.junit.QuarkusTest;
-import static io.restassured.RestAssured.given;
-import io.restassured.http.ContentType;
 
 @QuarkusTest
 class ApiGatewayAccountIntegrationTest {

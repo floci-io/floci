@@ -87,8 +87,13 @@ public class AccountContextFilter implements ContainerRequestFilter {
             rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
             rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
         } else {
-            String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
-            if (credential != null && !credential.isEmpty()) {
+            // A present Authorization header wins, as in IamEnforcementFilter: an unrecognised one
+            // must not let the query string pick an account that IAM then never checks.
+            boolean hasAuthHeader = auth != null && !auth.isBlank();
+            String credential = hasAuthHeader
+                    ? null : ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+            if (credential != null && !credential.isEmpty()
+                    && ctx.getUriInfo().getQueryParameters().containsKey("X-Amz-Algorithm")) {
                 String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
                         resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));

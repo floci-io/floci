@@ -33,6 +33,29 @@ A default region the vendored data does not know only warns. AWS launches region
 than the data is refreshed, and botocore's region-shape rules (`cn-*`, `us-gov-*`, ...)
 still place it; anything else falls back to `aws`, which is what the AWS SDKs do too.
 
+### Running a China, GovCloud, ISO or EUSC deployment
+
+Start Floci with a default region in the partition, then point clients at it with a region in
+the same partition and an endpoint override:
+
+```bash
+docker run --rm -p 4566:4566 \
+  -e FLOCI_DEFAULT_REGION=cn-north-1 \
+  floci/floci:latest
+
+AWS_DEFAULT_REGION=cn-north-1 bin/awslocal sts get-caller-identity
+# "Arn": "arn:aws-cn:iam::000000000000:root"
+```
+
+With the AWS CLI directly, pass `--region cn-north-1 --endpoint-url http://localhost:4566`; with
+an SDK, set the region and the endpoint override on the client. The override replaces the
+partition's real host (`amazonaws.com.cn` here) for transport only: the SDK still signs for the
+region you gave it, and that signing region is what places each request in its partition (see
+below). If clients reach Floci on another host or port than `http://localhost:4566`, set
+`FLOCI_BASE_URL` to match, or URLs Floci returns, such as SQS queue URLs and pre-signed URLs,
+keep pointing at the default. `FLOCI_HOSTNAME` is enough when only the host differs: it replaces
+the host and keeps the port.
+
 ## Which partition a request belongs to
 
 Each request's partition comes from the region in its SigV4 credential scope, exactly as
@@ -166,12 +189,34 @@ partition.
 
 ## How it is tested
 
-Every partition-dependent rule has unit and integration tests over all eight partitions. On top
-of that, the nightly Partition Compatibility workflow runs the Java SDK compatibility suite
-against a Floci deployed with `FLOCI_DEFAULT_REGION=cn-north-1`, with the SDK clients signing for
-`cn-north-1`, so the SDK's own China partition handling has to round-trip end to end. Its known
-failures are listed in `.github/ci/compat-partition-allowlist-cn-north-1.txt`; the list only
-shrinks.
+- **The partition rules themselves** (partition and region lookup, ARN minting, hostnames,
+  service principals, managed-policy rewriting, STS) have unit tests over all eight partitions.
+- **Through the emulator**, IAM ARNs and Step Functions run in all eight partitions, and a smoke
+  test creates one resource in every non-commercial partition for SNS, Kinesis, Firehose, API
+  Gateway V2, ELBv2, Glue, IoT, ACM, CodeBuild, Batch and EFS and checks its ARN or host. A new
+  service that mints ARNs or hosts needs a case there or a recorded exemption. Most other
+  partition-dependent behaviour (S3 bucket rules, EC2 regions and DNS names, hosted zones, VPC
+  endpoint names, Lambda layers, CloudFormation pseudo-parameters, strict mode) is tested in one or
+  two partitions, nearly always China.
+- **End to end**, the nightly Partition Compatibility workflow runs the Java SDK compatibility
+  suite against a Floci deployed with `FLOCI_DEFAULT_REGION=cn-north-1`, with the SDK clients
+  signing for `cn-north-1`, so the SDK's own China partition handling has to round-trip. Its list
+  of known failures, `.github/ci/compat-partition-allowlist-cn-north-1.txt`, is empty, so any
+  failure fails the run. No other partition, and no other compatibility suite (the Python, Go,
+  Node and AWS CLI suites, CDK, Terraform, OpenTofu), runs outside the commercial partition.
+
+## Known gaps
+
+- **One process serving several partitions shares global state.** S3 bucket names are one
+  namespace, and `ListBuckets` lists buckets created from every partition; IAM, Organizations,
+  Route 53, CloudFront and the IAM Identity Center instance keep one set of resources per account,
+  whichever partition a request is signed for. AWS keeps them per partition. A deployment that serves one partition is
+  unaffected.
+- **AWS managed policies** are the commercial catalog in every partition, with their ARNs and
+  regional hosts rewritten; AWS publishes no per-partition list.
+- **Client tooling** that computes partition values itself (CDK bootstrap and
+  `AWS::Partition`, Terraform's `aws_partition`, SAM) is not tested outside the commercial
+  partition, and neither is any partition but China end to end.
 
 ## Open questions
 

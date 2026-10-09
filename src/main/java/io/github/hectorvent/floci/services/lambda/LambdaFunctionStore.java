@@ -1,12 +1,12 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 

@@ -1,12 +1,14 @@
 package com.floci.test;
 
-import org.junit.jupiter.api.*;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.junit.jupiter.api.*;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.CreateRoleRequest;
 import software.amazon.awssdk.services.iam.model.CreateSamlProviderRequest;
@@ -15,8 +17,6 @@ import software.amazon.awssdk.services.iam.model.DeleteRoleRequest;
 import software.amazon.awssdk.services.iam.model.NoSuchEntityException;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.*;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
 
 import javax.xml.crypto.dsig.CanonicalizationMethod;
 import javax.xml.crypto.dsig.DigestMethod;
@@ -35,7 +35,6 @@ import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
-
 import java.io.StringWriter;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;

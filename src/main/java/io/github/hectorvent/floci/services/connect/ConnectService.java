@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.connect.model.ConnectInstance;
 import io.github.hectorvent.floci.services.connect.model.ConnectStorageConfig;
+import io.github.hectorvent.floci.services.iam.ServiceLinkedRoles;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -132,8 +133,9 @@ public class ConnectService implements TagHandler {
         instance.setDirectoryId(directoryId);
         instance.setCreatedTime(Instant.now());
         instance.setServiceRole(regionResolver.buildGlobalArn("iam",
-                "role/aws-service-role/" + ServicePrincipals.of("connect")
-                        + "/AWSServiceRoleForAmazonConnect_" + instanceId));
+                "role/aws-service-role/" + ServicePrincipals.of("connect") + "/"
+                        + ServiceLinkedRoles.roleName(ServicePrincipals.of("connect")).orElseThrow()
+                        + "_" + instanceId));
         instance.setInboundCallsEnabled(inboundCallsEnabled);
         instance.setOutboundCallsEnabled(outboundCallsEnabled);
         if (instanceAlias != null) {

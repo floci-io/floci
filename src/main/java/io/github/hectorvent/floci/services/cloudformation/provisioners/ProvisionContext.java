@@ -19,13 +19,7 @@ import java.util.function.Consumer;
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
                                String accountId, String stackName, String priorPhysicalId,
-                               Consumer<StackEvent> progress, CfnResourceContext resources) {
-
-    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
-                            String accountId, String stackName, String priorPhysicalId,
-                            Consumer<StackEvent> progress) {
-        this(engine, region, accountId, stackName, priorPhysicalId, progress, CfnResourceContext.EMPTY);
-    }
+                               Consumer<StackEvent> progress) {
 
     public ProvisionContext(CloudFormationTemplateEngine engine, String region,
                             String accountId, String stackName, String priorPhysicalId) {

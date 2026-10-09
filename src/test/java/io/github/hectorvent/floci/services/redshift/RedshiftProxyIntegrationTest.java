@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.redshift;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.awaitility.Awaitility;
+import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -13,8 +15,6 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.Objects;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionTimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -74,6 +76,8 @@ class EcsTaskDefinitionLegacyKeyTest {
         assertEquals(List.of(registered.getTaskDefinitionArn()), arns(service, REGION));
         assertEquals(registered.getTaskDefinitionArn(),
                 service.describeTaskDefinition(FAMILY + ":1", REGION).getTaskDefinitionArn());
+        assertEquals(registered.getTaskDefinitionArn(),
+                service.describeTaskDefinition(FAMILY, REGION).getTaskDefinitionArn());
     }
 
     @Test
@@ -91,6 +95,18 @@ class EcsTaskDefinitionLegacyKeyTest {
                 service.describeTaskDefinition(FAMILY + ":1", OTHER).getTaskDefinitionArn());
         assertEquals(List.of(other.getTaskDefinitionArn()), arns(service, OTHER));
         assertEquals(2, register(service, REGION).getRevision());
+    }
+
+    // Catches: a missing reference dereferenced while searching a populated region, a 500
+    // NullPointerException instead of the ClientException any unknown reference gets.
+    @Test
+    void aMissingReferenceInAPopulatedRegionIsAClientException() {
+        EcsService service = newService(new InMemoryStorageFactory());
+        register(service, REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describeTaskDefinition(null, REGION));
+
+        assertEquals("ClientException", e.getErrorCode());
     }
 
     private static TaskDefinition legacyDefinition() {

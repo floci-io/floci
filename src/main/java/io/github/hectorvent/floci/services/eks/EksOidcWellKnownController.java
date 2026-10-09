@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.eks;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import jakarta.enterprise.context.ApplicationScoped;

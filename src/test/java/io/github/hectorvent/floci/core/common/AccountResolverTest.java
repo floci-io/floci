@@ -34,6 +34,32 @@ class AccountResolverTest {
         assertEquals(DEFAULT_ACCOUNT, resolver.resolve(""));
     }
 
+    @Test
+    void extractAccessKeyIdReturnsNullForBareCredentialHeader() {
+        String auth = "Credential=111122223333/20260617/us-east-1/s3/aws4_request";
+        assertNull(resolver.extractAccessKeyId(auth));
+        assertEquals(DEFAULT_ACCOUNT, resolver.resolve(auth));
+    }
+
+    @Test
+    void extractAccessKeyIdReturnsNullForNonSigV4Header() {
+        String auth = "X Credential=111122223333/20260617/us-east-1/s3/aws4_request";
+        assertNull(resolver.extractAccessKeyId(auth));
+    }
+
+    @Test
+    void resolvesFallbackToDefaultForMalformedAuthHeader() {
+        String auth = "X Credential=111122223333/20260617/us-east-1/s3/aws4_request";
+        assertEquals(DEFAULT_ACCOUNT, resolver.resolve(auth));
+    }
+
+    @Test
+    void extractsAccessKeyIdFromSigV4AHeader() {
+        String auth = "AWS4-ECDSA-P256-SHA256 Credential=000000000001/20260617/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc";
+        assertEquals("000000000001", resolver.extractAccessKeyId(auth));
+        assertEquals("000000000001", resolver.resolve(auth));
+    }
+
     // --- resolveFromPresignedCredential(String credentialValue) tests ---
 
     @Test

@@ -4,6 +4,7 @@ import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -48,6 +49,15 @@ public final class CidrCanonicalizer {
             // callers get the exact same String back rather than a merely-equal copy.
             return rendered.equals(cidr) ? cidr : rendered;
         });
+    }
+
+    /**
+     * Reports whether two CIDR blocks name the same network once both are canonical, so
+     * {@code 10.0.1.9/24} and {@code 10.0.1.0/24} are the same block. A side that cannot be
+     * parsed is compared as its raw string, and two nulls are the same block.
+     */
+    public static boolean sameBlock(String a, String b) {
+        return Objects.equals(canonicalize(a).orElse(a), canonicalize(b).orElse(b));
     }
 
     /**

@@ -1,15 +1,14 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.emptyOrNullString;
-import static org.hamcrest.Matchers.equalTo;
-
+import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import io.quarkus.test.junit.QuarkusTest;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.emptyOrNullString;
+import static org.hamcrest.Matchers.equalTo;
 
 /**
  * Covers the cross-account and multi-target scenarios the same-account lifecycle test

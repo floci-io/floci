@@ -8,7 +8,6 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;

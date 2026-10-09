@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -12,6 +13,7 @@ import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
+import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.Priority;
@@ -21,6 +23,10 @@ import jakarta.inject.Inject;
 import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -87,6 +93,8 @@ public class RedshiftServerlessService implements Resettable {
     public static final int MIN_CREDENTIAL_DURATION_SECONDS = 900;
     public static final int MAX_CREDENTIAL_DURATION_SECONDS = 3600;
 
+    private static final int MAX_RETENTION_DAYS = 3653;
+    private static final Pattern SNAPSHOT_NAME = Pattern.compile("[a-z0-9-]+");
     private static final Pattern WORKGROUP_NAME = Pattern.compile("[a-z0-9-]+");
     private static final Pattern TRACK_NAME = Pattern.compile("[a-zA-Z0-9_]+");
     private static final Set<String> IP_ADDRESS_TYPES = Set.of("ipv4", "dualstack");
@@ -94,20 +102,26 @@ public class RedshiftServerlessService implements Resettable {
 
     private final AccountAwareStorageBackend<Namespace> namespaces;
     private final AccountAwareStorageBackend<Workgroup> workgroups;
+    private final AccountAwareStorageBackend<RedshiftServerlessSnapshot> snapshots;
     private final RegionResolver regionResolver;
     private final RedshiftServerlessEndpoints endpoints;
     private final RedshiftServerlessRuntime runtime;
+    private final EmulatorConfig config;
 
     @Inject
     public RedshiftServerlessService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                     RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime) {
+                                     RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime,
+                                     EmulatorConfig config) {
         this.namespaces = storageFactory.create("redshiftserverless", "redshiftserverless-namespaces.json",
                 new TypeReference<Map<String, Namespace>>() {});
         this.workgroups = storageFactory.create("redshiftserverless", "redshiftserverless-workgroups.json",
                 new TypeReference<Map<String, Workgroup>>() {});
+        this.snapshots = storageFactory.create("redshiftserverless", "redshiftserverless-snapshots.json",
+                new TypeReference<Map<String, RedshiftServerlessSnapshot>>() {});
         this.regionResolver = regionResolver;
         this.endpoints = endpoints;
         this.runtime = runtime;
+        this.config = config;
     }
 
     /**
@@ -333,13 +347,209 @@ public class RedshiftServerlessService implements Resettable {
         return deleted;
     }
 
+    /**
+     * Creates a snapshot directly in {@code region}. Real {@code CreateSnapshot} always creates
+     * in the source namespace's own region; a snapshot that should appear as a cross-region copy
+     * is created by calling this in the standby region, where it is immediately AVAILABLE. When
+     * the namespace's workgroup has a live database its contents are dumped with pg_dump, the way
+     * provisioned Redshift snapshots work; with no live database the snapshot is metadata only.
+     */
+    public synchronized RedshiftServerlessSnapshot createSnapshot(String snapshotName, String namespaceName,
+                                                                  Integer retentionPeriod,
+                                                                  Map<String, String> tags, String region) {
+        validateSnapshotName(snapshotName);
+        Integer retentionDays = validateRetentionPeriod(retentionPeriod);
+        Namespace namespace = getNamespace(namespaceName, region);
+        String key = storageKey(region, snapshotName);
+        if (snapshots.get(key).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "The snapshot " + snapshotName + " already exists.", 409);
+        }
+        RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot();
+        snapshot.setSnapshotName(snapshotName);
+        snapshot.setNamespaceName(namespaceName);
+        snapshot.setNamespaceArn(namespace.getNamespaceArn());
+        snapshot.setRegion(region);
+        snapshot.setAccountId(regionResolver.getAccountId());
+        snapshot.setOwnerAccount(regionResolver.getAccountId());
+        snapshot.setSnapshotArn(regionResolver.buildArn("redshift-serverless", region, "snapshot/" + snapshotName));
+        snapshot.setStatus("AVAILABLE");
+        snapshot.setSnapshotCreateTime(Instant.now());
+        snapshot.setAdminUsername(adminUserOf(namespace));
+        snapshot.setKmsKeyId(namespace.getKmsKeyId());
+        snapshot.setRetentionPeriod(retentionDays);
+        snapshot.setTags(tags);
+        dumpDatabase(snapshot, namespace, region);
+        snapshots.put(key, snapshot);
+        return snapshot;
+    }
+
+    private static Integer validateRetentionPeriod(Integer retentionPeriod) {
+        if (retentionPeriod == null || retentionPeriod == -1) {
+            return null;
+        }
+        if (retentionPeriod < 1 || retentionPeriod > MAX_RETENTION_DAYS) {
+            throw validation("retentionPeriod must be -1 (indefinite) or between 1 and " + MAX_RETENTION_DAYS + ".");
+        }
+        return retentionPeriod;
+    }
+
+    private void dumpDatabase(RedshiftServerlessSnapshot snapshot, Namespace namespace, String region) {
+        Optional<Workgroup> attached = workgroupOf(namespace.getNamespaceName(), region);
+        if (attached.isEmpty() || !hasLiveRuntime(attached.get())) {
+            return;
+        }
+        Path dumpFile = dumpFileOf(snapshot.getSnapshotName(), region);
+        try {
+            Files.createDirectories(dumpFile.getParent());
+            runtime.takeSnapshot(workgroups.accountId(), region, attached.get().getWorkgroupName(),
+                    attached.get().getMasterUsername(), namespace.getDbName(), dumpFile);
+            snapshot.setSqlDump(dumpFile.toString());
+        } catch (IOException e) {
+            throw new AwsException("InternalServerException",
+                    "Failed to take snapshot " + snapshot.getSnapshotName() + ": " + e.getMessage(), 500);
+        } catch (RuntimeException e) {
+            deleteDumpQuietly(dumpFile);
+            throw e;
+        }
+    }
+
+    private static boolean hasLiveRuntime(Workgroup workgroup) {
+        return workgroup.getRuntimeHost() != null && workgroup.getRuntimePort() > 0;
+    }
+
+    /** Absolute, normalised {@code <persistentPath>/redshift-serverless-dumps/<accountId>/<region>} directory. */
+    private Path dumpDir(String region) {
+        return Paths.get(config.storage().persistentPath())
+                .resolve("redshift-serverless-dumps")
+                .resolve(workgroups.accountId())
+                .resolve(region)
+                .toAbsolutePath()
+                .normalize();
+    }
+
+    private Path dumpFileOf(String snapshotName, String region) {
+        Path dir = dumpDir(region);
+        Path file = dir.resolve(snapshotName + ".sql").normalize();
+        if (!file.startsWith(dir)) {
+            throw validation("Invalid snapshotName.");
+        }
+        return file;
+    }
+
+    /** A stored dump path is trusted only while it still resolves inside this account's dump directory. */
+    private Optional<Path> trustedDump(RedshiftServerlessSnapshot snapshot, String region) {
+        String stored = snapshot.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return Optional.empty();
+        }
+        Path file = Paths.get(stored).toAbsolutePath().normalize();
+        return file.startsWith(dumpDir(region)) ? Optional.of(file) : Optional.empty();
+    }
+
+    private static void deleteDumpQuietly(Path dumpFile) {
+        try {
+            Files.deleteIfExists(dumpFile);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not delete the snapshot dump {0}", dumpFile);
+        }
+    }
+
+    public RedshiftServerlessSnapshot getSnapshot(String snapshotName, String region) {
+        requireSnapshotName(snapshotName);
+        return snapshots.get(storageKey(region, snapshotName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The snapshot " + snapshotName + " was not found.", 404));
+    }
+
+    /**
+     * Recovers the snapshot name from a snapshot ARN, rejecting one that names another account,
+     * Region or resource type rather than resolving it to a local snapshot of the same name.
+     */
+    public String snapshotNameFromArn(String snapshotArn, String region) {
+        String prefix = regionResolver.buildArn("redshift-serverless", region, "snapshot/");
+        if (snapshotArn == null || !snapshotArn.startsWith(prefix) || snapshotArn.length() == prefix.length()) {
+            throw validation("snapshotArn does not identify a snapshot in this account and Region.");
+        }
+        return snapshotArn.substring(prefix.length());
+    }
+
+    public synchronized RedshiftServerlessSnapshot deleteSnapshot(String snapshotName, String region) {
+        RedshiftServerlessSnapshot deleted = getSnapshot(snapshotName, region);
+        snapshots.delete(storageKey(region, snapshotName));
+        trustedDump(deleted, region).ifPresent(RedshiftServerlessService::deleteDumpQuietly);
+        return deleted;
+    }
+
+    /**
+     * Lists the Region's snapshots, narrowed by every filter that is supplied: the namespace by
+     * name or ARN, the owning account, and a creation-time window that includes both ends.
+     */
+    public PaginatedResult<RedshiftServerlessSnapshot> listSnapshots(String namespaceName, String namespaceArn,
+                                                                     String ownerAccount, Instant startTime,
+                                                                     Instant endTime, String region,
+                                                                     Integer maxResults, String nextToken) {
+        List<RedshiftServerlessSnapshot> all = snapshots.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(snapshot -> namespaceName == null || namespaceName.isBlank()
+                        || namespaceName.equals(snapshot.getNamespaceName()))
+                .filter(snapshot -> namespaceArn == null || namespaceArn.isBlank()
+                        || namespaceArn.equals(snapshot.getNamespaceArn()))
+                .filter(snapshot -> ownerAccount == null || ownerAccount.isBlank()
+                        || ownerAccount.equals(snapshot.getOwnerAccount()))
+                .filter(snapshot -> startTime == null || !snapshot.getSnapshotCreateTime().isBefore(startTime))
+                .filter(snapshot -> endTime == null || !snapshot.getSnapshotCreateTime().isAfter(endTime))
+                .toList();
+        return Pagination.paginate(all, RedshiftServerlessSnapshot::getSnapshotName, maxResults, nextToken,
+                100, 100, "ValidationException");
+    }
+
+    /**
+     * Restores into the already-existing namespace and workgroup in {@code region} and never
+     * creates either, mirroring real {@code RestoreFromSnapshot}. A snapshot that carries a dump
+     * replaces the workgroup's database contents with it; a metadata-only snapshot leaves the
+     * database untouched and only reports the namespace {@code AVAILABLE}.
+     */
+    public synchronized RestoreResult restoreFromSnapshot(String namespaceName, String workgroupName,
+                                                          String snapshotName, String ownerAccount,
+                                                          String region) {
+        validateNamespaceName(namespaceName);
+        RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
+        if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(snapshot.getOwnerAccount())) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The snapshot " + snapshotName + " was not found.", 404);
+        }
+        Workgroup workgroup = getWorkgroup(workgroupName, region);
+        if (!namespaceName.equals(workgroup.getNamespaceName())) {
+            throw validation("The workgroup " + workgroupName + " does not belong to the namespace "
+                    + namespaceName + ".");
+        }
+        Namespace namespace = getNamespace(namespaceName, region);
+        if (snapshot.getSqlDump() != null && hasLiveRuntime(workgroup)) {
+            Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> new AwsException(
+                    "InternalServerException", "The data of snapshot " + snapshotName + " is no longer available.",
+                    500));
+            runtime.restoreSnapshot(workgroups.accountId(), region, workgroupName, workgroup.getMasterUsername(),
+                    namespace.getDbName(), dump);
+        }
+        Namespace restored = new Namespace(namespace);
+        restored.setStatus("AVAILABLE");
+        namespaces.put(storageKey(region, namespaceName), restored);
+        return new RestoreResult(restored, snapshot);
+    }
+
+    public record RestoreResult(Namespace namespace, RedshiftServerlessSnapshot snapshot) {}
+
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
         requireResourceArn(resourceArn);
         Optional<Namespace> namespace = namespaceByArn(resourceArn, region);
         if (namespace.isPresent()) {
             return new LinkedHashMap<>(namespace.get().getTags());
         }
-        return new LinkedHashMap<>(workgroupByArn(resourceArn, region).orElseThrow(
+        Optional<Workgroup> workgroup = workgroupByArn(resourceArn, region);
+        if (workgroup.isPresent()) {
+            return new LinkedHashMap<>(workgroup.get().getTags());
+        }
+        return new LinkedHashMap<>(snapshotByArn(resourceArn, region).orElseThrow(
                 () -> resourceNotFound(resourceArn)).getTags());
     }
 
@@ -353,7 +563,8 @@ public class RedshiftServerlessService implements Resettable {
 
     public synchronized Map<String, String> untagResource(String resourceArn, List<String> tagKeys, String region) {
         requireResourceArn(resourceArn);
-        if (namespaceByArn(resourceArn, region).isEmpty() && workgroupByArn(resourceArn, region).isEmpty()) {
+        if (namespaceByArn(resourceArn, region).isEmpty() && workgroupByArn(resourceArn, region).isEmpty()
+                && snapshotByArn(resourceArn, region).isEmpty()) {
             throw resourceNotFound(resourceArn);
         }
         if (tagKeys == null) {
@@ -364,7 +575,7 @@ public class RedshiftServerlessService implements Resettable {
 
     /**
      * Redshift Serverless tags whatever the ARN names, so the lookup is by ARN rather than by name.
-     * Namespaces and workgroups are the taggable resources in Floci, so any other Redshift Serverless
+     * Namespaces, workgroups and snapshots are the taggable resources in Floci, so any other Redshift Serverless
      * ARN resolves to nothing and is reported as absent rather than as an unsupported resource type.
      * The change is applied to a copy and stored, never to the instance readers may hold.
      */
@@ -377,11 +588,25 @@ public class RedshiftServerlessService implements Resettable {
             namespaces.put(storageKey(region, updated.getNamespaceName()), updated);
             return new LinkedHashMap<>(updated.getTags());
         }
-        Workgroup workgroup = workgroupByArn(resourceArn, region).orElseThrow(() -> resourceNotFound(resourceArn));
-        Workgroup updated = new Workgroup(workgroup);
+        Optional<Workgroup> workgroup = workgroupByArn(resourceArn, region);
+        if (workgroup.isPresent()) {
+            Workgroup updated = new Workgroup(workgroup.get());
+            change.accept(updated.getTags());
+            workgroups.put(storageKey(region, updated.getWorkgroupName()), updated);
+            return new LinkedHashMap<>(updated.getTags());
+        }
+        RedshiftServerlessSnapshot snapshot = snapshotByArn(resourceArn, region)
+                .orElseThrow(() -> resourceNotFound(resourceArn));
+        RedshiftServerlessSnapshot updated = new RedshiftServerlessSnapshot(snapshot);
         change.accept(updated.getTags());
-        workgroups.put(storageKey(region, updated.getWorkgroupName()), updated);
+        snapshots.put(storageKey(region, updated.getSnapshotName()), updated);
         return new LinkedHashMap<>(updated.getTags());
+    }
+
+    private Optional<RedshiftServerlessSnapshot> snapshotByArn(String resourceArn, String region) {
+        return snapshots.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(snapshot -> resourceArn.equals(snapshot.getSnapshotArn()))
+                .findFirst();
     }
 
     private Optional<Namespace> namespaceByArn(String resourceArn, String region) {
@@ -673,6 +898,27 @@ public class RedshiftServerlessService implements Resettable {
         }
         namespaces.clear();
         workgroups.clear();
+        for (AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot> entry
+                : snapshots.scanAllAccountEntries(key -> true)) {
+            String dump = entry.value().getSqlDump();
+            if (dump != null && !dump.isBlank()) {
+                deleteDumpQuietly(Paths.get(dump));
+            }
+        }
+        snapshots.clear();
+    }
+
+    private static void requireSnapshotName(String snapshotName) {
+        if (snapshotName == null || snapshotName.isBlank()) {
+            throw validation("snapshotName is required.");
+        }
+    }
+
+    private static void validateSnapshotName(String snapshotName) {
+        requireSnapshotName(snapshotName);
+        if (snapshotName.length() < 3 || snapshotName.length() > 255 || !SNAPSHOT_NAME.matcher(snapshotName).matches()) {
+            throw validation("snapshotName must be 3-255 characters of lowercase letters, numbers, and hyphens.");
+        }
     }
 
     private static void validateNamespaceName(String namespaceName) {

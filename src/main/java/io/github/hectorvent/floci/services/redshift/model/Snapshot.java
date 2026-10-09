@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;

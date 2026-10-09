@@ -22,7 +22,8 @@ public record MessageHeader(
         return name != null && !name.isBlank() && noCrlf(name) && value != null && noCrlf(value);
     }
 
-    private static boolean noCrlf(String s) {
+    /** True when {@code s} has no CR or LF, so it cannot start another MIME header line. */
+    public static boolean noCrlf(String s) {
         return s.indexOf('\r') < 0 && s.indexOf('\n') < 0;
     }
 }

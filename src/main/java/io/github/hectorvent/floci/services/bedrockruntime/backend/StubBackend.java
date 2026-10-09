@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.services.bedrockruntime.backend;
 
-import io.github.hectorvent.floci.core.common.AwsEventStreamWriter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsEventStreamWriter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 

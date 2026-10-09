@@ -1,21 +1,10 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.util.HexFormat;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
 import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -59,6 +48,16 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Unified AWS API Gateway management endpoints (v1 REST and v2 HTTP).

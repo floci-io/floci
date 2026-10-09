@@ -13,16 +13,23 @@ import java.util.function.Function;
 /**
  * The integrity headers an upload body is checked against: Content-MD5 and the x-amz-checksum-*
  * values. A malformed Content-MD5 is rejected before any of the body is read; the digests are
- * compared once it has been.
+ * compared once it has been. {@code trailerAlgorithm} is the checksum named by {@code x-amz-trailer}
+ * when that header names an {@code x-amz-checksum-*} value.
  */
-record UploadChecksums(String contentMd5, Map<ChecksumAlgorithm, String> claimed) {
+record UploadChecksums(String contentMd5, Map<ChecksumAlgorithm, String> claimed,
+                       ChecksumAlgorithm trailerAlgorithm) {
 
     /** No integrity headers, as for the part an UploadPartCopy reads from another object. */
-    static final UploadChecksums NONE = new UploadChecksums(null, Map.of());
+    static final UploadChecksums NONE = new UploadChecksums(null, Map.of(), null);
 
     // The order the checksums have always been checked in, so a body failing several reports the same one.
     private static final List<ChecksumAlgorithm> CHECK_ORDER = List.of(ChecksumAlgorithm.SHA1,
             ChecksumAlgorithm.SHA256, ChecksumAlgorithm.CRC32, ChecksumAlgorithm.CRC32C, ChecksumAlgorithm.CRC64NVME);
+
+    /** A request that does not declare a trailing checksum. */
+    UploadChecksums(String contentMd5, Map<ChecksumAlgorithm, String> claimed) {
+        this(contentMd5, claimed, null);
+    }
 
     UploadChecksums {
         claimed = Map.copyOf(claimed);
@@ -48,10 +55,34 @@ record UploadChecksums(String contentMd5, Map<ChecksumAlgorithm, String> claimed
         for (ChecksumAlgorithm algorithm : CHECK_ORDER) {
             String claimedValue = claimed.get(algorithm);
             if (claimedValue != null && !claimedValue.equals(actualChecksum.apply(algorithm))) {
-                throw new AwsException("BadDigest", "The " + algorithm.name()
-                        + " checksum you specified did not match the payload.", 400);
+                throw checksumMismatch(algorithm);
             }
         }
+    }
+
+    /**
+     * Compares the trailing checksum named by {@code x-amz-trailer} to the decoded body.
+     * {@code x-amz-trailer-signature} is not a checksum and is ignored. A declared trailer whose
+     * checksum line is missing, or any other {@code x-amz-checksum-*} line, fails the same way as
+     * a value that does not match.
+     */
+    void verifyTrailers(AwsChunkedInputStream chunked, Function<ChecksumAlgorithm, String> actualChecksum) {
+        String claimedValue = chunked.trailerChecksum();
+        if (trailerAlgorithm != null
+                && (claimedValue == null || !claimedValue.equals(actualChecksum.apply(trailerAlgorithm)))) {
+            throw checksumMismatch(trailerAlgorithm);
+        }
+        if (chunked.hasUndeclaredChecksum()) {
+            ChecksumAlgorithm reported = chunked.undeclaredTrailer() != null
+                    ? chunked.undeclaredTrailer() : trailerAlgorithm;
+            throw checksumMismatch(reported);
+        }
+    }
+
+    private static AwsException checksumMismatch(ChecksumAlgorithm algorithm) {
+        String name = algorithm != null ? algorithm.name() : "checksum";
+        return new AwsException("BadDigest",
+                "The " + name + " you specified did not match the calculated checksum.", 400);
     }
 
     private byte[] expectedMd5() {

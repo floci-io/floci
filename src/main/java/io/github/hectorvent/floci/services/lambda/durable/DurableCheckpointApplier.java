@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -37,18 +38,31 @@ final class DurableCheckpointApplier {
     private DurableCheckpointApplier() {
     }
 
-    /** {@code chainedInvokes} names the CHAINED_INVOKE operations this batch started, for the service to run. */
-    record Outcome(boolean closed, List<String> chainedInvokes) {
+    /**
+     * A non-null {@code closingStatus} means the batch closed the execution, which the service then
+     * closes. {@code chainedInvokes} names the CHAINED_INVOKE operations this batch started, for the
+     * service to run. {@code unreachableChainedInvokes} holds those whose target cannot be invoked,
+     * with the error that fails them, in batch order.
+     */
+    record Outcome(DurableExecutionStatus closingStatus, String closingResult, DurableErrorObject closingError,
+                   List<String> chainedInvokes, Map<String, AwsException> unreachableChainedInvokes) {
+
+        boolean closed() {
+            return closingStatus != null;
+        }
     }
 
-    static Outcome apply(DurableExecution execution, List<DurableOperationUpdate> updates, long now) {
+    /** {@code unreachableTarget} gives the error for a chained target that cannot be invoked, or null. */
+    static Outcome apply(DurableExecution execution, List<DurableOperationUpdate> updates, long now,
+                         Function<String, AwsException> unreachableTarget) {
         validateBatch(updates);
-        Draft draft = new Draft(execution, now);
+        Draft draft = new Draft(execution, now, unreachableTarget);
         for (DurableOperationUpdate update : updates) {
             draft.apply(update);
         }
         draft.commit();
-        return new Outcome(draft.closingStatus != null, List.copyOf(draft.chainedInvokes));
+        return new Outcome(draft.closingStatus, draft.closingResult, draft.closingError,
+                List.copyOf(draft.chainedInvokes), draft.unreachableChainedInvokes);
     }
 
     /** Completes waits, step retries and callback timeouts whose time has come. The sweeper and every checkpoint call it. */
@@ -157,17 +171,20 @@ final class DurableCheckpointApplier {
 
         private final DurableExecution execution;
         private final long now;
+        private final Function<String, AwsException> unreachableTarget;
         private final LinkedHashMap<String, DurableOperation> operations = new LinkedHashMap<>();
         private final List<Consumer<DurableExecution>> events = new ArrayList<>();
         private final List<String> chainedInvokes = new ArrayList<>();
+        private final LinkedHashMap<String, AwsException> unreachableChainedInvokes = new LinkedHashMap<>();
         private long changeSequence;
         private DurableExecutionStatus closingStatus;
         private String closingResult;
         private DurableErrorObject closingError;
 
-        Draft(DurableExecution execution, long now) {
+        Draft(DurableExecution execution, long now, Function<String, AwsException> unreachableTarget) {
             this.execution = execution;
             this.now = now;
+            this.unreachableTarget = unreachableTarget;
             this.changeSequence = execution.getChangeSequence();
             for (Map.Entry<String, DurableOperation> entry : execution.getOperations().entrySet()) {
                 operations.put(entry.getKey(), entry.getValue().copy());
@@ -218,17 +235,6 @@ final class DurableCheckpointApplier {
             for (Consumer<DurableExecution> event : events) {
                 event.accept(execution);
             }
-            if (closingStatus != null) {
-                execution.setStatus(closingStatus);
-                execution.setResult(closingResult);
-                execution.setError(closingError);
-                execution.setEndTimestamp(now);
-                if (closingStatus == DurableExecutionStatus.SUCCEEDED) {
-                    DurableHistory.executionSucceeded(execution, now);
-                } else {
-                    DurableHistory.executionEnded(execution, "ExecutionFailed", now);
-                }
-            }
         }
 
         private void applyExecution(DurableOperationUpdate update) {
@@ -245,12 +251,6 @@ final class DurableCheckpointApplier {
             closingStatus = succeeded ? DurableExecutionStatus.SUCCEEDED : DurableExecutionStatus.FAILED;
             closingResult = succeeded ? update.payload() : null;
             closingError = succeeded ? null : update.error();
-            DurableOperation operation = operations.get(execution.getExecutionId());
-            if (operation != null) {
-                operation.setStatus(succeeded ? DurableOperationStatus.SUCCEEDED : DurableOperationStatus.FAILED);
-                operation.setEndTimestamp(now);
-                touch(operation);
-            }
         }
 
         private void applyContext(DurableOperationUpdate update, DurableOperation existing) {
@@ -393,7 +393,19 @@ final class DurableCheckpointApplier {
             operation.setChainedFunctionName(update.chainedFunctionName());
             operation.setChainedTenantId(update.chainedTenantId());
             operation.setInputPayload(update.payload());
-            chainedInvokes.add(update.id());
+            AwsException unreachable = unreachableTarget.apply(update.chainedFunctionName());
+            if (unreachable == null) {
+                chainedInvokes.add(update.id());
+                return;
+            }
+            // AWS logs the start of a target it cannot invoke in batch order, naming only the function.
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("FunctionName", update.chainedFunctionName());
+            if (update.chainedTenantId() != null) {
+                details.put("TenantId", update.chainedTenantId());
+            }
+            event(operation, "ChainedInvokeStarted", details);
+            unreachableChainedInvokes.put(update.id(), unreachable);
         }
 
         /** A name that does not parse is left to the target lookup, which fails the operation. */

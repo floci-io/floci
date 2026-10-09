@@ -1,7 +1,12 @@
 package io.github.hectorvent.floci.services.kinesis;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -9,7 +14,6 @@ import io.github.hectorvent.floci.services.kinesis.model.KinesisConsumer;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -20,14 +24,10 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import java.util.ArrayList;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
 public class KinesisService implements ResourceProvider {

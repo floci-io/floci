@@ -131,7 +131,7 @@ class AwsIncludeProcessor {
      * count: AWS documents that a snippet may not itself use {@code AWS::Include}, not that it may
      * carry no other transform. Package-private: also used by {@code CloudFormationService} to
      * report {@code AWS::Include} in {@code GetTemplateSummary}'s {@code DeclaredTransforms} and to
-     * skip {@code validateConditionDependencies} for a template the merge has not run against yet.
+     * skip {@code validateResourceDependencies} for a template the merge has not run against yet.
      */
     boolean containsAwsInclude(JsonNode node) {
         if (node.isObject()) {

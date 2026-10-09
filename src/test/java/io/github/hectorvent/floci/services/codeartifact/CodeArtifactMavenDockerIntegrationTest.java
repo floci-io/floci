@@ -89,6 +89,13 @@ class CodeArtifactMavenDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .head("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + GAV)
                 .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike")
+                .then().statusCode(200).body("package.name", equalTo("spike"))
+                .body("package.namespace", equalTo("com.example"))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"));
     }
 
     /**
@@ -147,6 +154,11 @@ class CodeArtifactMavenDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/maven/" + DOMAIN + "/no-such-repo/does/not/exist.jar")
                 .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test

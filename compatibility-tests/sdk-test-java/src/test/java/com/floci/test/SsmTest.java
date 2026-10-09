@@ -17,15 +17,15 @@ import software.amazon.awssdk.services.ssm.model.GetParameterHistoryRequest;
 import software.amazon.awssdk.services.ssm.model.GetParameterHistoryResponse;
 import software.amazon.awssdk.services.ssm.model.GetParameterRequest;
 import software.amazon.awssdk.services.ssm.model.GetParameterResponse;
-import software.amazon.awssdk.services.ssm.model.ListCommandInvocationsRequest;
-import software.amazon.awssdk.services.ssm.model.ListCommandInvocationsResponse;
-import software.amazon.awssdk.services.ssm.model.ListCommandsRequest;
-import software.amazon.awssdk.services.ssm.model.ListCommandsResponse;
 import software.amazon.awssdk.services.ssm.model.GetParametersByPathRequest;
 import software.amazon.awssdk.services.ssm.model.GetParametersByPathResponse;
 import software.amazon.awssdk.services.ssm.model.GetParametersRequest;
 import software.amazon.awssdk.services.ssm.model.GetParametersResponse;
 import software.amazon.awssdk.services.ssm.model.LabelParameterVersionRequest;
+import software.amazon.awssdk.services.ssm.model.ListCommandInvocationsRequest;
+import software.amazon.awssdk.services.ssm.model.ListCommandInvocationsResponse;
+import software.amazon.awssdk.services.ssm.model.ListCommandsRequest;
+import software.amazon.awssdk.services.ssm.model.ListCommandsResponse;
 import software.amazon.awssdk.services.ssm.model.ListTagsForResourceRequest;
 import software.amazon.awssdk.services.ssm.model.ListTagsForResourceResponse;
 import software.amazon.awssdk.services.ssm.model.ParameterNotFoundException;
@@ -36,11 +36,13 @@ import software.amazon.awssdk.services.ssm.model.RemoveTagsFromResourceRequest;
 import software.amazon.awssdk.services.ssm.model.SendCommandRequest;
 import software.amazon.awssdk.services.ssm.model.SendCommandResponse;
 import software.amazon.awssdk.services.ssm.model.SsmException;
-
-import static org.assertj.core.api.Assertions.*;
+import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionRequest;
+import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionResponse;
 
 import java.util.List;
 import java.util.Map;
+
+import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("SSM Parameter Store")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -107,6 +109,38 @@ class SsmTest {
                 .parameterVersion(1L)
                 .build());
         // No exception means success
+    }
+
+    @Test
+    void unlabelParameterVersion() {
+        String name = "/sdk-test/unlabel";
+        ssm.putParameter(PutParameterRequest.builder()
+                .name(name)
+                .value("v1")
+                .type(ParameterType.STRING)
+                .overwrite(true)
+                .build());
+        try {
+            ssm.labelParameterVersion(LabelParameterVersionRequest.builder()
+                    .name(name)
+                    .labels("prod", "stable")
+                    .parameterVersion(1L)
+                    .build());
+
+            UnlabelParameterVersionResponse response = ssm.unlabelParameterVersion(
+                    UnlabelParameterVersionRequest.builder()
+                            .name(name)
+                            .parameterVersion(1L)
+                            .labels("prod", "missing")
+                            .build());
+
+            assertThat(response.removedLabels()).containsExactly("prod");
+            assertThat(response.invalidLabels()).containsExactly("missing");
+            assertThat(ssm.getParameterHistory(GetParameterHistoryRequest.builder().name(name).build())
+                    .parameters().get(0).labels()).containsExactly("stable");
+        } finally {
+            ssm.deleteParameter(DeleteParameterRequest.builder().name(name).build());
+        }
     }
 
     @Test

@@ -99,6 +99,7 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class IamService implements SessionAccountLookup, ResourceProvider {
 
+    private static final int ROLE_INLINE_POLICY_SIZE_LIMIT = 10_240;
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
@@ -160,12 +161,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final SecureRandom secureRandom = new SecureRandom();
 
     private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
-    private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
-    private static final Map<String, String> SERVICE_LINKED_ROLE_NAMES = Map.of(
-            ServicePrincipals.of("autoscaling"), "AutoScaling",
-            ServicePrincipals.of("cloud9"), "AWSCloud9",
-            ServicePrincipals.of("ram"), "ResourceAccessManager"
-    );
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
@@ -173,6 +168,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int ROLE_NAME_MAX_LENGTH = 64;
     /** groupNameType / instanceProfileNameType: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern IAM_RESOURCE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
+    /**
+     * serviceSpecificCredentialId, kept as the model spells it because the pattern is quoted
+     * back in the error message. AWS checks the format before it looks for the credential.
+     */
+    private static final Pattern SERVICE_CREDENTIAL_ID_PATTERN = Pattern.compile("[\\w]+");
+    private static final int SERVICE_CREDENTIAL_ID_MIN_LENGTH = 20;
+    private static final int SERVICE_CREDENTIAL_ID_MAX_LENGTH = 128;
     /** pathType: a bare slash, or a slash-delimited run of {@code !}-{@code ~}. */
     private static final Pattern IAM_PATH_PATTERN = Pattern.compile("(/)|(/[\\x21-\\x7E]+/)");
     private static final int IAM_PATH_MAX_LENGTH = 512;
@@ -727,11 +729,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         // order here and in UpdateUser, and nowhere else in more than one, so it cannot deadlock.
         synchronized (serviceCredentialLock) {
             // AWS lists these among the items to remove first, under their CodeCommit
-            // name: "Git credentials (DeleteServiceSpecificCredential)".
+            // name: "Git credentials (DeleteServiceSpecificCredential)". Unlike the
+            // cases above it has no message of its own: AWS falls back to the generic
+            // referenced-objects wording here.
             if (!userServiceCredentials(userName).isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must delete service-specific credentials "
-                                + "first.", 409);
+                        "Cannot delete entity, must remove referenced objects first.", 409);
             }
             synchronized (sshPublicKeyLock) {
                 if (!userSshPublicKeys(userName).isEmpty()) {
@@ -1106,14 +1109,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("InvalidInput",
                     "CustomSuffix must be 1-64 characters matching [\\w+=,.@-].", 400);
         }
-        String roleName = SERVICE_LINKED_ROLE_NAME_PREFIX + derivedServiceName(awsServiceName)
+        // Most services refuse a suffix outright. The table carries what AWS was recorded
+        // doing, and UNKNOWN keeps taking one rather than refusing on an inference: the name
+        // as the caller sent it, since every recording used the canonical form and the two
+        // cannot be told apart from the evidence.
+        if (customSuffix != null && !customSuffix.isEmpty()
+                && ServiceLinkedRoles.customSuffixSupport(awsServiceName)
+                        == ServiceLinkedRoles.CustomSuffixSupport.REFUSED) {
+            throw new AwsException("InvalidInput",
+                    "Custom suffix is not allowed for " + awsServiceName, 400);
+        }
+        String baseName = ServiceLinkedRoles.roleName(awsServiceName)
+                .orElseThrow(() -> new AwsException("InvalidInput",
+                        "The request must include a valid AWSServiceName, for example "
+                                + "es.amazonaws.com.", 400)); // partition-literal: AWS's own message text
+        String roleName = baseName
                 + (customSuffix == null || customSuffix.isEmpty() ? "" : "_" + customSuffix);
-        // AWSServiceName allows 128 characters, but AWS caps RoleName at 64 — on every action that
-        // takes one, and on the Role this action returns — so a longer principal would derive a
-        // name AWS could not represent.
+        // AWSServiceName allows 128 characters and a CustomSuffix another 64, but AWS caps
+        // RoleName at 64, on every action that takes one and on the Role this action returns,
+        // so the two together can name a role AWS could not represent. The name is no longer
+        // always derived, now that the table carries what AWS mints, and a few of its entries are
+        // long enough that a suffix alone breaches the limit. The boundary is pinned by a test
+        // rather than counted here, since a margin quoted in a comment goes stale the moment the
+        // table changes.
         if (roleName.length() > ROLE_NAME_MAX_LENGTH) {
             throw new AwsException("InvalidInput",
-                    "The derived role name " + roleName + " exceeds the "
+                    "The role name " + roleName + " exceeds the "
                             + ROLE_NAME_MAX_LENGTH + "-character role name limit.", 400);
         }
         synchronized (resourceNameLock) {
@@ -1121,7 +1142,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // duplicate-suffix case is an InvalidInput as far as its published error list is concerned.
             if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
                 throw new AwsException("InvalidInput",
-                        "A role named " + roleName + " already exists; supply a different CustomSuffix.", 400);
+                        "Service role name " + roleName + " has been taken in this account, "
+                                + "please try a different suffix.", 400);
             }
             // A legacy spelling (es.amazonaws.com.cn) names the same role, so its path and trust
             // policy carry the universal principal the name was derived from.
@@ -1162,32 +1184,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 + roleName + "/" + UUID.randomUUID();
         serviceLinkedRoleDeletions.put(deletionTaskId, roleName);
         return deletionTaskId;
-    }
-
-    /**
-     * Every dot- and hyphen-separated label contributes, because the leading one alone is not unique:
-     * {@code rds.amazonaws.com} and {@code rds.application-autoscaling.amazonaws.com} are separate
-     * roles on AWS, and a config declaring both must not collide on one name here.
-     */
-    private static String derivedServiceName(String awsServiceName) {
-        // The principal may arrive in the partition form AWS accepted before the universal one
-        // (es.amazonaws.com.cn); the derived name is the same either way.
-        String canonicalName = SERVICE_LINKED_ROLE_NAMES.get(ServicePrincipals.canonical(awsServiceName));
-        if (canonicalName != null) {
-            return canonicalName;
-        }
-        String core = awsServiceName == null ? "" : ServicePrincipals.serviceName(awsServiceName);
-        StringBuilder derived = new StringBuilder();
-        for (String segment : core.split("[.-]")) {
-            if (!segment.isEmpty()) {
-                derived.append(Character.toUpperCase(segment.charAt(0))).append(segment.substring(1));
-            }
-        }
-        if (derived.isEmpty()) {
-            throw new AwsException("InvalidInput",
-                    "The request must include a valid AWSServiceName, for example es.amazonaws.com.", 400); // partition-literal: AWS's own message text
-        }
-        return derived.toString();
     }
 
     public String getServiceLinkedRoleDeletionStatus(String deletionTaskId) {
@@ -1423,8 +1419,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 && !"AWS".equalsIgnoreCase(scope)
                 && !"Local".equalsIgnoreCase(scope)) {
             throw new AwsException("ValidationError",
-                    "Value '" + scope + "' at 'scope' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [All, AWS, Local]", 400);
+                    "1 validation error detected: Value '" + scope + "' at 'scope' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: "
+                            + "[All, AWS, Local]", 400);
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
         boolean blankScope = scope == null || scope.isBlank();
@@ -1811,8 +1808,30 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putRolePolicy(String roleName, String policyName, String policyDocument) {
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
-        role.getInlinePolicies().put(policyName, policyDocument);
-        roles.put(roleName, role);
+        Map<String, String> inlinePolicies = role.getInlinePolicies();
+        synchronized (inlinePolicies) {
+            long aggregateSize = inlinePolicies.entrySet().stream()
+                    .filter(entry -> !entry.getKey().equals(policyName))
+                    .mapToLong(entry -> nonWhitespaceLength(entry.getValue()))
+                    .sum() + nonWhitespaceLength(policyDocument);
+            if (aggregateSize > ROLE_INLINE_POLICY_SIZE_LIMIT) {
+                throw new AwsException("LimitExceeded",
+                        "Maximum policy size of 10240 bytes exceeded for role " + roleName, 409);
+            }
+            inlinePolicies.put(policyName, policyDocument);
+            roles.put(roleName, role);
+        }
+    }
+
+    private static int nonWhitespaceLength(String policyDocument) {
+        int size = 0;
+        for (int i = 0; i < policyDocument.length(); i++) {
+            char character = policyDocument.charAt(i);
+            if (character != ' ' && character != '\t' && character != '\n' && character != '\r') {
+                size++;
+            }
+        }
+        return size;
     }
 
     public String getRolePolicy(String roleName, String policyName) {
@@ -2309,8 +2328,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
             throw new AwsException("ValidationError",
-                    "Value null at 'properties' failed to satisfy constraint: Member must not be "
-                            + "null", 400);
+                    "1 validation error detected: Value null at 'properties' failed to "
+                            + "satisfy constraint: Member must not be null", 400);
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -2333,12 +2352,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 properties.size(), namespace);
     }
 
-    /** The namespace half of the key, having checked the whole key against the model. */
+    /**
+     * The namespace half of the key, having checked the whole key against the model.
+     *
+     * <p>The two rejections here are not the same kind of error. The length and the pattern are
+     * published constraints on the parameter, and the API Reference defines {@code ValidationError}
+     * as the common error for input that "doesn't meet the required format or constraints". The
+     * {@code Namespace/PropertyName} rule is not expressible in the published pattern, which admits
+     * no slash, several, and a trailing one, so it is a rule the service applies after the format
+     * is already satisfied: that is {@code InvalidInput}, "an invalid or out-of-range value".
+     */
     private String validateAccountPropertyKey(String key) {
         if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
                 || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
-            throw new AwsException("InvalidInput",
-                    "Value '" + key + "' at 'properties' failed to satisfy constraint: Map keys "
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + key + "' at 'properties' failed "
+                            + "to satisfy constraint: Map keys "
                             + "must satisfy constraint: [Member must have length less than or "
                             + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
                             + "satisfy regular expression pattern: "
@@ -2347,9 +2376,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         int separator = key.indexOf('/');
         if (separator <= 0 || separator != key.lastIndexOf('/') || separator == key.length() - 1) {
             throw new AwsException("InvalidInput",
-                    "Value '" + key + "' at 'properties' failed to satisfy constraint: a key is "
-                            + "Namespace/PropertyName, with exactly one forward slash and neither "
-                            + "a leading nor a trailing one.", 400);
+                    "The property key '" + key + "' is not Namespace/PropertyName: a key has "
+                            + "exactly one forward slash, and neither a leading nor a trailing "
+                            + "one.", 400);
         }
         return key.substring(0, separator);
     }
@@ -2357,10 +2386,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private void validateAccountPropertyValue(String key, String value) {
         if (value == null || value.isEmpty()
                 || value.length() > MAX_ACCOUNT_PROPERTY_VALUE_LENGTH) {
-            throw new AwsException("InvalidInput",
-                    "Value at 'properties." + key + "' failed to satisfy constraint: Member must "
-                            + "have length between 1 and " + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH,
-                    400);
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'properties." + key + "' failed to "
+                            + "satisfy constraint: Member must have length between 1 and "
+                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH, 400);
         }
     }
 
@@ -2369,8 +2398,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (globalEndpointTokenVersion == null
                 || !GLOBAL_ENDPOINT_TOKEN_VERSIONS.contains(globalEndpointTokenVersion)) {
             throw new AwsException("ValidationError",
-                    "Value '" + globalEndpointTokenVersion + "' at 'globalEndpointTokenVersion' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: ["
+                    "1 validation error detected: Value '" + globalEndpointTokenVersion
+                            + "' at 'globalEndpointTokenVersion' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: ["
                             + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]", 400);
         }
         stsPreferences.put(STS_PREFERENCES_KEY, globalEndpointTokenVersion);
@@ -2727,6 +2757,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return getServerCertificate(name).getTags();
     }
 
+    // Credential status, shared by the three operations that take statusType
+    // =========================================================================
+
+    /**
+     * {@code statusType}, shared by UpdateSigningCertificate, UpdateSSHPublicKey and
+     * UpdateServiceSpecificCredential. One rendering serves all three because one front end
+     * validates one shape: the recording is of UpdateServiceSpecificCredential, and AWS names
+     * neither the offending value nor the permitted set, unlike this message elsewhere in the
+     * tree. Matched rather than made uniform.
+     */
+    private void requireStatusFromEnum(String status) {
+        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'status' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set", 400);
+        }
+    }
+
     // Signing certificates
     // =========================================================================
 
@@ -2782,12 +2830,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateSigningCertificate(String userName, String certificateId, String status) {
-        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
-                            + "satisfy enum value set: [" + String.join(", ",
-                            CREDENTIAL_STATUSES) + "]", 400);
-        }
+        requireStatusFromEnum(status);
         synchronized (signingCertificateLock) {
             SigningCertificate certificate = userSigningCertificate(userName, certificateId);
             certificate.setStatus(status);
@@ -2951,12 +2994,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateSshPublicKey(String userName, String keyId, String status) {
-        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
-                            + "satisfy enum value set: [" + String.join(", ",
-                            CREDENTIAL_STATUSES) + "]", 400);
-        }
+        requireStatusFromEnum(status);
         synchronized (sshPublicKeyLock) {
             SshPublicKey stored = userSshPublicKey(userName, keyId);
             stored.setStatus(status);
@@ -3060,10 +3098,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
                     || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
                 throw new AwsException("ValidationError",
-                        "Value '" + credentialAgeDays + "' at 'credentialAgeDays' failed to "
-                                + "satisfy constraint: Member must be between "
-                                + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS,
-                        400);
+                        "1 validation error detected: Value '" + credentialAgeDays
+                                + "' at 'credentialAgeDays' failed to satisfy constraint: "
+                                + "Member must be between " + MIN_CREDENTIAL_AGE_DAYS + " and "
+                                + MAX_CREDENTIAL_AGE_DAYS, 400);
             }
         }
         synchronized (serviceCredentialLock) {
@@ -3231,12 +3269,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void updateServiceSpecificCredential(String userName, String credentialId,
                                                 String status) {
-        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw new AwsException("ValidationError",
-                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
-                            + "satisfy enum value set: [" + String.join(", ",
-                            CREDENTIAL_STATUSES) + "]", 400);
-        }
+        requireCredentialIdFormat(credentialId);
+        requireStatusFromEnum(status);
         synchronized (serviceCredentialLock) {
             ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
             credential.setStatus(status);
@@ -3250,6 +3284,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public ServiceSpecificCredential resetServiceSpecificCredential(String userName,
                                                                     String credentialId) {
+        requireCredentialIdFormat(credentialId);
         synchronized (serviceCredentialLock) {
             ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
             if (LONG_TERM_API_KEY_SERVICES.contains(credential.getServiceName())) {
@@ -3263,23 +3298,66 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteServiceSpecificCredential(String userName, String credentialId) {
+        requireCredentialIdFormat(credentialId);
         synchronized (serviceCredentialLock) {
             ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
             serviceCredentials.delete(credential.getServiceSpecificCredentialId());
         }
     }
 
+    /**
+     * The id has to satisfy the model before anything looks for it: AWS answers a malformed one
+     * with a {@code ValidationError} naming the constraint it broke, and only a well-formed id
+     * that matches nothing gets {@code NoSuchEntity}. Different mistakes, different answers.
+     *
+     * <p>The API Reference publishes a length of 20 to 128 as well as the pattern, so both are
+     * checked, and both are reported when both are broken, in the order it prints them. The
+     * pattern message is the one recorded against AWS; the length wording is the form AWS uses for
+     * a member carrying both bounds, which {@link #validateLoginProfilePassword} spells the same
+     * way.
+     */
+    private void requireCredentialIdFormat(String credentialId) {
+        String id = credentialId == null ? "" : credentialId;
+        List<String> violations = new ArrayList<>();
+        if (id.length() < SERVICE_CREDENTIAL_ID_MIN_LENGTH
+                || id.length() > SERVICE_CREDENTIAL_ID_MAX_LENGTH) {
+            violations.add("Member must have length less than or equal to "
+                    + SERVICE_CREDENTIAL_ID_MAX_LENGTH + " and greater than or equal to "
+                    + SERVICE_CREDENTIAL_ID_MIN_LENGTH);
+        }
+        if (!SERVICE_CREDENTIAL_ID_PATTERN.matcher(id).matches()) {
+            violations.add("Member must satisfy regular expression pattern: [\\w]+");
+        }
+        if (violations.isEmpty()) {
+            return;
+        }
+        StringBuilder message = new StringBuilder()
+                .append(violations.size())
+                .append(violations.size() == 1 ? " validation error detected: "
+                                               : " validation errors detected: ");
+        for (int i = 0; i < violations.size(); i++) {
+            if (i > 0) {
+                message.append("; ");
+            }
+            message.append("Value at 'serviceSpecificCredentialId' failed to satisfy constraint: ")
+                    .append(violations.get(i));
+        }
+        throw new AwsException("ValidationError", message.toString(), 400);
+    }
+
+    /** AWS's wording for an id that matches the pattern and no credential. */
+    private AwsException noSuchCredential(String credentialId) {
+        return new AwsException("NoSuchEntity",
+                "No such credential " + credentialId + " exists", 404);
+    }
+
     /** A credential of that id belonging to that user, reported missing when it belongs elsewhere. */
     private ServiceSpecificCredential userServiceCredential(String userName, String credentialId) {
         getUser(userName); // validates existence
         ServiceSpecificCredential credential = serviceCredentials.get(credentialId)
-                .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "The Service Specific Credential with id " + credentialId
-                                + " cannot be found.", 404));
+                .orElseThrow(() -> noSuchCredential(credentialId));
         if (!userName.equals(credential.getUserName())) {
-            throw new AwsException("NoSuchEntity",
-                    "The Service Specific Credential with id " + credentialId
-                            + " cannot be found.", 404);
+            throw noSuchCredential(credentialId);
         }
         return credential;
     }

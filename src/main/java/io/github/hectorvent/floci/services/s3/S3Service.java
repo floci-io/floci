@@ -79,6 +79,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -112,6 +113,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
     private static final int SSE_C_KEY_BYTES = 32;
+    private static final int DELETE_PREFIX_PAGE_SIZE = 1000;
 
     @FunctionalInterface
     interface LambdaInvoker {
@@ -119,6 +121,8 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static final Logger LOG = Logger.getLogger(S3Service.class);
+    /** Last {@code s3.object.sequencer} handed out, in microseconds since the epoch. */
+    private final AtomicLong lastEventSequencer = new AtomicLong();
 
     record RequestAuthorization(boolean signed, String accessKeyId, String sessionToken) {
         static RequestAuthorization unsigned() {
@@ -656,15 +660,12 @@ public class S3Service implements Resettable, ResourceProvider {
         // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
         ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
                 : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
-        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
-        algorithms.addAll(checksums.algorithms());
-        if (computed != null) {
-            algorithms.add(computed);
-        }
-        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(checksums, computed));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
             S3Checksum checksum = null;
             if (computed != null) {
                 checksum = new S3Checksum();
@@ -937,6 +938,9 @@ public class S3Service implements Resettable, ResourceProvider {
             putObjectForAccount(bucketOwnerAccount, objectKey(bucketName, key), object);
             LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, body.size());
         }
+        // Still under the bucket lock, so the sequencers of concurrent writes to one key follow
+        // the order they were stored in, whenever their notifications are built.
+        object.setEventSequencer(nextEventSequencer());
         return object;
     }
 
@@ -1912,6 +1916,37 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Deletes every object whose key starts with {@code prefix}. The bucket monitor is held across the
+     * listing, the authorization of each key and the deletes, so a concurrent PutObject cannot land
+     * between them and survive. {@code authorizeDelete} runs for every key before the first delete, so
+     * a denial removes nothing.
+     */
+    public int deleteObjectsWithPrefix(String bucketName, String prefix, Consumer<String> authorizeDelete) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            List<String> keys = new ArrayList<>();
+            String continuationToken = null;
+            do {
+                ListObjectsResult page = listObjectsWithPrefixes(
+                        bucketName, prefix, null, DELETE_PREFIX_PAGE_SIZE, continuationToken, null);
+                for (S3Object object : page.objects()) {
+                    keys.add(object.getKey());
+                }
+                continuationToken = page.isTruncated() ? page.nextContinuationToken() : null;
+            } while (continuationToken != null);
+            for (String key : keys) {
+                authorizeDelete.accept(key);
+            }
+            for (String key : keys) {
+                deleteObject(bucketName, key);
+            }
+            return keys.size();
+        }
+    }
+
     // A current delete marker answers 404 NoSuchKey, the same as a missing key. That is deliberate:
     // the S3 conditional-deletes guide says "If the latest version of the object is a delete marker,
     // the object doesn't exist and the DeleteObject API will fail and return a 412 Precondition
@@ -2659,6 +2694,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = requireBucket(bucketName);
         S3Object[] notificationTarget = {null};
         ObjectAnnotation annotation;
+        String sequencer;
         synchronized (bucket) {
             versionId = normalizeNullVersionId(versionId);
             S3Object parent = resolveParentObject(bucketName, key, versionId);
@@ -2702,10 +2738,11 @@ public class S3Service implements Resettable, ResourceProvider {
             annotationStore.put(storeKey, annotation);
             LOG.debugv("Put annotation {0} on object: {1}/{2}", annotationName, bucketName, key);
             notificationTarget[0] = parent;
+            sequencer = nextEventSequencer();
         }
         // Fired outside the bucket monitor (the storeObject callers' pattern): a slow SQS/SNS/
         // Lambda delivery must not block every other write and annotation op on the bucket.
-        fireNotifications(bucketName, key, "ObjectAnnotation:Put", notificationTarget[0]);
+        fireNotifications(bucketName, key, "ObjectAnnotation:Put", notificationTarget[0], sequencer);
         return annotation;
     }
 
@@ -2772,6 +2809,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = requireBucket(bucketName);
         S3Object[] notificationTarget = {null};
         String parentVersionId;
+        String sequencer;
         synchronized (bucket) {
             versionId = normalizeNullVersionId(versionId);
             S3Object parent = resolveParentObject(bucketName, key, versionId);
@@ -2797,9 +2835,10 @@ public class S3Service implements Resettable, ResourceProvider {
             LOG.debugv("Deleted annotation {0} from object: {1}/{2}", annotationName, bucketName, key);
             parentVersionId = parent.getVersionId();
             notificationTarget[0] = parent;
+            sequencer = nextEventSequencer();
         }
         // Fired outside the bucket monitor, as in putObjectAnnotation.
-        fireNotifications(bucketName, key, "ObjectAnnotation:Delete", notificationTarget[0]);
+        fireNotifications(bucketName, key, "ObjectAnnotation:Delete", notificationTarget[0], sequencer);
         return parentVersionId;
     }
 
@@ -3871,12 +3910,12 @@ public class S3Service implements Resettable, ResourceProvider {
                     sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
         }
         ChecksumAlgorithm algorithm = declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
-        Set<ChecksumAlgorithm> algorithms = EnumSet.of(algorithm);
-        algorithms.addAll(checksums.algorithms());
-        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(checksums, algorithm));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
             S3Checksum partChecksum = new S3Checksum();
             partChecksum.setValueFor(algorithm, digests.checksum(algorithm));
             return withMultipartOperationLock(bucket, uploadId, () -> {
@@ -3908,7 +3947,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * with EntityTooLarge once it outgrows the largest array the JDK allocates.
      */
     private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
-        DigestingInputStream digests = new DigestingInputStream(body, checksums.algorithms());
+        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(checksums, null));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[64 * 1024];
         try {
@@ -3920,7 +3959,31 @@ public class S3Service implements Resettable, ResourceProvider {
             throw new UncheckedIOException("Failed to read the upload body", e);
         }
         checksums.verify(digests.md5(), digests::checksum);
+        verifyChunkedTrailers(body, digests, checksums);
         return out.toByteArray();
+    }
+
+    /**
+     * Algorithms hashed as a body is read. A trailing checksum is hashed only when
+     * {@code x-amz-trailer} named it, which is the only trailer line that is checked.
+     */
+    private static Set<ChecksumAlgorithm> digestAlgorithms(UploadChecksums checksums, ChecksumAlgorithm stored) {
+        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
+        algorithms.addAll(checksums.algorithms());
+        if (stored != null) {
+            algorithms.add(stored);
+        }
+        if (checksums.trailerAlgorithm() != null) {
+            algorithms.add(checksums.trailerAlgorithm());
+        }
+        return algorithms;
+    }
+
+    private static void verifyChunkedTrailers(InputStream body, DigestingInputStream digests,
+                                              UploadChecksums checksums) {
+        if (body instanceof AwsChunkedInputStream chunked) {
+            checksums.verifyTrailers(chunked, digests::checksum);
+        }
     }
 
     /**
@@ -5364,6 +5427,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void fireNotifications(String bucketName, String key, String eventName, S3Object obj) {
+        fireNotifications(bucketName, key, eventName, obj, eventSequencer(eventName, obj));
+    }
+
+    /**
+     * Fires the event with a {@code sequencer} the caller took under the bucket lock, so it orders
+     * against other writes to the key the way they were applied, however late the event is built.
+     */
+    private void fireNotifications(String bucketName, String key, String eventName, S3Object obj,
+                                   String sequencer) {
         if (s3UpdatedEvent != null && eventName.startsWith("ObjectCreated")) {
             s3UpdatedEvent.fire(new S3ObjectUpdatedEvent(bucketName, key));
         }
@@ -5381,7 +5453,8 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         String region = bucket.getRegion();
-        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled());
+        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled(),
+                sequencer);
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
@@ -5534,7 +5607,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private String buildS3EventJson(String bucketName, String key, String eventName,
-                                    S3Object obj, String region, boolean isVersionEnabled) {
+                                    S3Object obj, String region, boolean isVersionEnabled, String sequencer) {
         try {
             String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
             long size = obj != null ? obj.getSize() : 0;
@@ -5546,13 +5619,14 @@ public class S3Service implements Resettable, ResourceProvider {
             bucketNode.put("arn", AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString());
 
             ObjectNode objectNode = objectMapper.createObjectNode();
-            objectNode.put("key", key);
+            objectNode.put("key", eventRecordKey(key));
             objectNode.put("size", size);
             objectNode.put("eTag", eTag);
             if(isVersionEnabled) {
                 String versionId = obj !=null && obj.getVersionId()!=null ? obj.getVersionId() : "";
                 objectNode.put("versionId", versionId);
             }
+            objectNode.put("sequencer", sequencer);
             ObjectNode s3Node = objectMapper.createObjectNode();
             s3Node.put("s3SchemaVersion", "1.0");
             s3Node.put("configurationId", "emulator");
@@ -5576,6 +5650,41 @@ public class S3Service implements Resettable, ResourceProvider {
         } catch (Exception e) {
             return "{\"Records\":[]}";
         }
+    }
+
+    /**
+     * The key as S3 writes it into an event record: form URL-encoded (a space is {@code +}, a
+     * {@code +} is {@code %2B}) with {@code /} left as is, so consumers decode it the documented
+     * way, with {@code unquote_plus} or {@code URLDecoder}.
+     */
+    static String eventRecordKey(String key) {
+        if (key == null) {
+            return null;
+        }
+        return URLEncoder.encode(key, StandardCharsets.UTF_8).replace("%2F", "/");
+    }
+
+    /**
+     * The sequencer a created object was given when it was stored. Any other event names an object
+     * that already existed, whose stored sequencer belongs to its own creation, so it gets a new one:
+     * the delete paths fire inside the bucket lock, so that value is still taken under it.
+     */
+    private String eventSequencer(String eventName, S3Object obj) {
+        if (eventName.startsWith("ObjectCreated") && obj != null && obj.getEventSequencer() != null) {
+            return obj.getEventSequencer();
+        }
+        return nextEventSequencer();
+    }
+
+    /**
+     * An 18-digit uppercase hex value that increases with every event this process emits, so two
+     * events for one key compare in the order they happened, as S3's sequencer does. It is seeded
+     * from the clock, so values keep increasing across a restart too.
+     */
+    private String nextEventSequencer() {
+        long nowMicros = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now());
+        long value = lastEventSequencer.updateAndGet(last -> Math.max(last + 1, nowMicros));
+        return String.format(Locale.ROOT, "%018X", value);
     }
 
     private void cleanupMultipart(String uploadId) {

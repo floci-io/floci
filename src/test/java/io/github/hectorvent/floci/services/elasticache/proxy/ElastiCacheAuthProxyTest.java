@@ -3,12 +3,37 @@ package io.github.hectorvent.floci.services.elasticache.proxy;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ElastiCacheAuthProxyTest {
+
+    @Test
+    void authModeIsReadFromTheCacheOnEachConnection() {
+        AtomicReference<AuthMode> cacheAuthMode = new AtomicReference<>();
+        ElastiCacheAuthProxy.PasswordValidator passwordValidator = new ElastiCacheAuthProxy.PasswordValidator() {
+            @Override
+            public boolean validatePassword(String username, String password) {
+                return false;
+            }
+
+            @Override
+            public AuthMode authMode() {
+                return cacheAuthMode.get();
+            }
+        };
+        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("grp-live", AuthMode.IAM, "127.0.0.1", 6379,
+                passwordValidator, mock(SigV4Validator.class));
+
+        assertTrue(proxy.authRequired(), "the mode the proxy started with applies until the cache reports one");
+
+        cacheAuthMode.set(AuthMode.NO_AUTH);
+        assertFalse(proxy.authRequired(), "a cache whose last user group was removed has no access control");
+    }
 
     @Test
     void groupWithIamAuthModeAuthenticatesPasswordUserWhenAssociated() {

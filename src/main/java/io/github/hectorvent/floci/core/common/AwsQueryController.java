@@ -1,25 +1,25 @@
 package io.github.hectorvent.floci.core.common;
 
-import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
-import io.github.hectorvent.floci.services.neptune.NeptuneService;
-import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
-import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingQueryHandler;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsQueryHandler;
+import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.ec2.Ec2QueryHandler;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheQueryHandler;
 import io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkQueryHandler;
 import io.github.hectorvent.floci.services.elb.ElbClassicQueryHandler;
 import io.github.hectorvent.floci.services.elbv2.ElbV2QueryHandler;
-import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsQueryHandler;
-import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
-import io.github.hectorvent.floci.services.elasticache.ElastiCacheQueryHandler;
 import io.github.hectorvent.floci.services.iam.IamQueryHandler;
 import io.github.hectorvent.floci.services.iam.StsQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneService;
 import io.github.hectorvent.floci.services.rds.RdsQueryHandler;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.redshift.RedshiftQueryHandler;
-import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.ses.SesQueryHandler;
+import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -128,7 +128,21 @@ public class AwsQueryController {
             "UploadSSHPublicKey", "GetSSHPublicKey", "ListSSHPublicKeys",
             "UpdateSSHPublicKey", "DeleteSSHPublicKey",
             "UploadSigningCertificate", "ListSigningCertificates",
-            "UpdateSigningCertificate", "DeleteSigningCertificate"
+            "UpdateSigningCertificate", "DeleteSigningCertificate",
+            "CreateAccountAlias", "DeleteAccountAlias", "ListAccountAliases",
+            "GetAccountPasswordPolicy", "UpdateAccountPasswordPolicy", "DeleteAccountPasswordPolicy",
+            "GetAccessKeyLastUsed", "UpdateGroup", "UpdateAssumeRolePolicy",
+            "PutUserPermissionsBoundary", "DeleteUserPermissionsBoundary",
+            "PutRolePermissionsBoundary", "DeleteRolePermissionsBoundary",
+            "CreateOpenIDConnectProvider", "GetOpenIDConnectProvider",
+            "ListOpenIDConnectProviders", "DeleteOpenIDConnectProvider",
+            "AddClientIDToOpenIDConnectProvider", "RemoveClientIDFromOpenIDConnectProvider",
+            "UpdateOpenIDConnectProviderThumbprint", "TagOpenIDConnectProvider",
+            "UntagOpenIDConnectProvider", "ListOpenIDConnectProviderTags",
+            "ListOrganizationsFeatures",
+            "EnableOrganizationsRootCredentialsManagement",
+            "DisableOrganizationsRootCredentialsManagement",
+            "EnableOrganizationsRootSessions", "DisableOrganizationsRootSessions"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(
@@ -191,6 +205,8 @@ public class AwsQueryController {
             "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
             "ReplaceNetworkAclAssociation",
             "CreateNatGateway", "DescribeNatGateways", "DeleteNatGateway",
+            "CreateTransitGatewayPeeringAttachment", "AcceptTransitGatewayPeeringAttachment",
+            "DeleteTransitGatewayPeeringAttachment", "DescribeTransitGatewayPeeringAttachments",
             "CreateCapacityReservation", "DescribeCapacityReservations",
             "ModifyCapacityReservation", "CancelCapacityReservation",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
@@ -519,7 +535,8 @@ public class AwsQueryController {
     private static final Set<String> ELASTICACHE_ACTIONS = Set.of(
             "ValidateIamAuthToken",
             "CreateReplicationGroup", "DescribeReplicationGroups", "ModifyReplicationGroup", "DeleteReplicationGroup",
-            "CreateUser", "DescribeUsers", "ModifyUser", "DeleteUser"
+            "CreateUser", "DescribeUsers", "ModifyUser", "DeleteUser",
+            "CreateUserGroup", "DescribeUserGroups", "ModifyUserGroup", "DeleteUserGroup"
     );
 
     private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(

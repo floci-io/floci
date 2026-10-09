@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -272,6 +273,7 @@ class DockerClientProducerTest {
         when(docker.dockerConfigPath()).thenReturn(Optional.empty());
         when(docker.maxConnections()).thenReturn(100);
         when(docker.streamingMaxConnections()).thenReturn(512);
+        when(docker.connectionRequestTimeoutSeconds()).thenReturn(30);
 
         DockerClientProducer producer = new DockerClientProducer(config);
 
@@ -670,6 +672,23 @@ class DockerClientProducerTest {
         assertEquals(1024, DockerClientProducer.validateMaxConnections(1024));
     }
 
+    // Catches: a zero lease timeout reaching httpclient5, which reads it as no timeout, so a call
+    // on a full pool would wait forever.
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1})
+    void validateConnectionRequestTimeoutSeconds_belowOne_throwsNamingTheSetting(int seconds) {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> DockerClientProducer.validateConnectionRequestTimeoutSeconds(seconds));
+
+        assertThat(e.getMessage(), containsString("floci.docker.connection-request-timeout-seconds"));
+    }
+
+    @Test
+    void validateConnectionRequestTimeoutSeconds_positive_returnsItUnchanged() {
+        assertEquals(1, DockerClientProducer.validateConnectionRequestTimeoutSeconds(1));
+        assertEquals(30, DockerClientProducer.validateConnectionRequestTimeoutSeconds(30));
+    }
+
     /**
      * The pool size comes from {@code floci.docker.max-connections}. A followed log stream holds
      * its connection until the container exits, and this fake daemon never answers, so with a
@@ -697,6 +716,7 @@ class DockerClientProducerTest {
             when(docker.dockerHost()).thenReturn("tcp://127.0.0.1:" + daemon.getLocalPort());
             when(docker.dockerConfigPath()).thenReturn(Optional.empty());
             when(docker.maxConnections()).thenReturn(2);
+            when(docker.connectionRequestTimeoutSeconds()).thenReturn(30);
 
             DockerClient client = new DockerClientProducer(config).dockerClient();
             try {
@@ -740,7 +760,8 @@ class DockerClientProducerTest {
 
         // An HTTP client that actually uses the SSL config must read the certificates, so
         // unreadable ones fail the build; one that ignores the config builds silently.
-        assertThrows(RuntimeException.class, () -> DockerClientProducer.newHttpClient(tlsConfig, 10));
+        assertThrows(RuntimeException.class,
+                () -> DockerClientProducer.newHttpClient(tlsConfig, 10, Duration.ofSeconds(30)));
     }
 
     @Test
@@ -752,7 +773,8 @@ class DockerClientProducerTest {
                         .withDockerTlsVerify(false)
                         .build();
 
-        try (FlociDockerHttpClient client = DockerClientProducer.newHttpClient(plainConfig, 10)) {
+        try (FlociDockerHttpClient client =
+                DockerClientProducer.newHttpClient(plainConfig, 10, Duration.ofSeconds(30))) {
             assertNull(plainConfig.getSSLConfig(), "a config without TLS verify carries no SSL config");
             assertEquals("tcp://127.0.0.1:2375", plainConfig.getDockerHost().toString());
         }

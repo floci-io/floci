@@ -1,5 +1,14 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.MountType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -16,21 +25,13 @@ import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
-import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.model.Container;
-import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.Mount;
-import com.github.dockerjava.api.model.MountType;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -46,13 +47,10 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Consumer;
-import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -61,8 +59,9 @@ import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BiPredicate;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiPredicate;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -597,13 +596,13 @@ public class Ec2ContainerManager {
         String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
         String serviceEndpoint = reachableEndpoint.baseUrl();
 
-        while (true) {
+        return portAllocator.allocateAndStart(
+                config.services().ec2().sshPortRangeStart(),
+                config.services().ec2().sshPortRangeEnd(), sshHostPort -> {
             if (isLaunchCancelled(instance)) {
+                portAllocator.release(sshHostPort);
                 return null;
             }
-            int sshHostPort = portAllocator.allocate(
-                    config.services().ec2().sshPortRangeStart(),
-                    config.services().ec2().sshPortRangeEnd());
             SecurityGroupFirewallManager.Namespace namespace = null;
             String eniId = null;
             String containerId = null;
@@ -665,18 +664,9 @@ public class Ec2ContainerManager {
                     }
                     lifecycleManager.removeIfExists(namespace.helperId());
                 }
-                if (isHostPortCollision(e)) {
-                    // Docker Desktop can own a published port without exposing it to a host-side
-                    // ServerSocket probe. Keep it unavailable for this process and try the next port.
-                    portAllocator.markReserved(sshHostPort);
-                    LOG.warnv("EC2 instance {0} could not use SSH host port {1}; trying another port",
-                            instanceId, String.valueOf(sshHostPort));
-                    continue;
-                }
-                portAllocator.release(sshHostPort);
                 throw e;
             }
-        }
+        });
     }
 
     private ContainerSpec buildContainerSpec(String containerName, ResolvedAmiImage image, String region,
@@ -866,17 +856,6 @@ public class Ec2ContainerManager {
         return "shutting-down".equals(state) || "terminated".equals(state);
     }
 
-    private static boolean isHostPortCollision(Exception exception) {
-        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
-            String message = cause.getMessage();
-            if (message != null && (message.toLowerCase(Locale.ROOT).contains("port is already allocated")
-                    || message.toLowerCase(Locale.ROOT).contains("address already in use"))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private record StartedContainer(String containerId, int sshHostPort, String vpcAddress,
                                     SecurityGroupFirewallManager.Namespace namespace, String eniId) {
     }
@@ -910,9 +889,10 @@ public class Ec2ContainerManager {
      * reboot already handle a null container id, so the rest of the lifecycle keeps working.
      */
     private void markContainerlessRunning(Instance instance) {
-        LOG.infov("EC2 instance {0} is running without a backing container (no Docker daemon reachable)",
-                instance.getInstanceId());
-        instance.setState(InstanceState.running());
+        if (markRunning(instance)) {
+            LOG.infov("EC2 instance {0} is running without a backing container (no Docker daemon reachable)",
+                    instance.getInstanceId());
+        }
     }
 
     /**

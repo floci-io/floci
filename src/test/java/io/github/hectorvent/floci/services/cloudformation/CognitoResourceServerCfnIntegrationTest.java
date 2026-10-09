@@ -5,8 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
-import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
+import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
@@ -107,6 +108,61 @@ class CognitoResourceServerCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(stack);
         createdStack = false;
         assertServerGone(poolB, renamed);
+    }
+
+    @Test
+    void twoConsecutivePoolReplacementsKeepTheExactIdentifierRef() throws Exception {
+        String originalPool = createPool();
+        String secondPool = createPool();
+        String thirdPool = createPool();
+        createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
+        assertEquals(IDENTIFIER, output("ServerRef"));
+
+        updateStack(template(secondPool, IDENTIFIER, "Second API", "write"), "UPDATE_COMPLETE");
+        assertEquals(IDENTIFIER, output("ServerRef"));
+        assertServerGone(originalPool, IDENTIFIER);
+        assertServer(secondPool, IDENTIFIER, "Second API", "write");
+
+        updateStack(template(thirdPool, IDENTIFIER, "Third API", "admin"), "UPDATE_COMPLETE");
+        assertEquals(IDENTIFIER, output("ServerRef"));
+        assertServerGone(originalPool, IDENTIFIER);
+        assertServerGone(secondPool, IDENTIFIER);
+        assertServer(thirdPool, IDENTIFIER, "Third API", "admin");
+
+        cloudFormation("DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        createdStack = false;
+        assertServerGone(thirdPool, IDENTIFIER);
+    }
+
+    @Test
+    void aPoolReplacementAfterFailedRollbackUsesTheRestoredPoolAndClearsTheOrphan() throws Exception {
+        String originalPool = createPool();
+        String failedPool = createPool();
+        String finalPool = createPool();
+        createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
+        doThrow(new AwsException("InternalErrorException", "temporary replacement delete failure", 500))
+                .when(cognitoService).deleteResourceServer(failedPool, IDENTIFIER);
+        try {
+            ObjectNode attempted = template(failedPool, IDENTIFIER, "Failed replacement", "write");
+            addFailingDependentResource(attempted);
+            updateStack(attempted, "UPDATE_ROLLBACK_FAILED");
+            assertEquals(IDENTIFIER, output("ServerRef"));
+            assertServer(originalPool, IDENTIFIER, "Original API", "read");
+            assertServer(failedPool, IDENTIFIER, "Failed replacement", "write");
+        } finally {
+            doCallRealMethod().when(cognitoService).deleteResourceServer(failedPool, IDENTIFIER);
+        }
+        clearInvocations(cognitoService);
+
+        updateStack(template(finalPool, IDENTIFIER, "Final API", "admin"), "UPDATE_COMPLETE");
+
+        assertEquals(IDENTIFIER, output("ServerRef"));
+        assertServerGone(originalPool, IDENTIFIER);
+        assertServerGone(failedPool, IDENTIFIER);
+        assertServer(finalPool, IDENTIFIER, "Final API", "admin");
+        verify(cognitoService, times(1)).deleteResourceServer(failedPool, IDENTIFIER);
+        verify(cognitoService, times(1)).deleteResourceServer(originalPool, IDENTIFIER);
     }
 
     @Test
@@ -275,73 +331,6 @@ class CognitoResourceServerCfnIntegrationTest {
         assertEquals(IDENTIFIER, output("ServerRef"));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void deletingAFailedRollbackPreservesAnotherStacksServerAtThePendingCleanupAddress(boolean anotherRegion)
-            throws Exception {
-        String originalPool = createPool();
-        String replacementPool = createPool();
-        createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
-        doThrow(new AwsException("InternalErrorException", "temporary replacement delete failure", 500))
-                .when(cognitoService).deleteResourceServer(replacementPool, IDENTIFIER);
-        try {
-            ObjectNode attempted = template(replacementPool, IDENTIFIER, "Failed replacement", "write");
-            addFailingDependentResource(attempted);
-            updateStack(attempted, "UPDATE_ROLLBACK_FAILED");
-            assertServer(originalPool, IDENTIFIER, "Original API", "read");
-            assertServer(replacementPool, IDENTIFIER, "Failed replacement", "write");
-        } finally {
-            doCallRealMethod().when(cognitoService).deleteResourceServer(replacementPool, IDENTIFIER);
-        }
-
-        cognitoAction("DeleteResourceServer", mapper.createObjectNode().put("UserPoolId", replacementPool)
-                .put("Identifier", IDENTIFIER).toString()).then().statusCode(200);
-        assertServerGone(replacementPool, IDENTIFIER);
-        String secondStack = stack + "-new-owner";
-        String secondAuth = anotherRegion ? CFN_AUTH.replace("us-east-1", "eu-west-1") : CFN_AUTH;
-        given().contentType("application/x-www-form-urlencoded").header("Authorization", secondAuth)
-                .formParam("Action", "CreateStack").formParam("StackName", secondStack)
-                .formParam("TemplateBody", template(replacementPool, IDENTIFIER, "Second stack API", "admin").toString())
-                .post("/").then().statusCode(200);
-        boolean secondDeleted = false;
-        try {
-            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(secondStack, secondAuth).status());
-            assertServer(replacementPool, IDENTIFIER, "Second stack API", "admin");
-            doThrow(new AwsException("InternalErrorException", "temporary current server delete failure", 500))
-                    .when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
-            cloudFormation("DeleteStack", null);
-            assertEquals("DELETE_FAILED", CfnStackWaits.awaitTerminal(stack).status());
-            Stack owner = cloudFormationService.describeStacks(stack, "us-east-1", "000000000000").getFirst();
-            assertFalse(owner.resourcesSnapshot().get("Server").getAttributes()
-                    .containsKey("__FlociResourceServerCleanup"));
-            assertTrue(owner.getEvents().stream().anyMatch(event -> "DELETE_SKIPPED".equals(event.getResourceStatus())
-                    && IDENTIFIER.equals(event.getPhysicalResourceId())
-                    && event.getResourceStatusReason().contains("another stack manages")));
-            assertServer(replacementPool, IDENTIFIER, "Second stack API", "admin");
-
-            given().contentType("application/x-www-form-urlencoded").header("Authorization", secondAuth)
-                    .formParam("Action", "DeleteStack").formParam("StackName", secondStack)
-                    .post("/").then().statusCode(200);
-            CfnStackWaits.awaitStackDeleted(secondStack, secondAuth);
-            secondDeleted = true;
-            assertServerGone(replacementPool, IDENTIFIER);
-            createServer(replacementPool, "Reused after second stack", "read");
-            doCallRealMethod().when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
-            cloudFormation("DeleteStack", null);
-            CfnStackWaits.awaitStackDeleted(stack);
-            createdStack = false;
-            assertServerGone(originalPool, IDENTIFIER);
-            assertServer(replacementPool, IDENTIFIER, "Reused after second stack", "read");
-        } finally {
-            doCallRealMethod().when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
-            if (!secondDeleted) {
-                given().contentType("application/x-www-form-urlencoded").header("Authorization", secondAuth)
-                        .formParam("Action", "DeleteStack").formParam("StackName", secondStack)
-                        .post("/").then().statusCode(200);
-                CfnStackWaits.awaitStackDeleted(secondStack, secondAuth);
-            }
-        }
-    }
 
     @Test
     void pendingInPlaceRestorationRecoversTheTemplateAfterOutOfBandRecreation() throws Exception {
@@ -433,7 +422,7 @@ class CognitoResourceServerCfnIntegrationTest {
         assertServerGone(historicalPool, IDENTIFIER);
         Stack owner = cloudFormationService.describeStacks(stack, "us-east-1", "000000000000").getFirst();
         boolean cleanupRestored = owner.resourcesSnapshot().get("Server").getAttributes()
-                .containsKey("__FlociResourceServerCleanup");
+                .containsKey(CfnRollback.REPLACEMENT_CLEANUP_ATTR);
         createServer(historicalPool, "Directly reused API", "admin");
         clearInvocations(cognitoService);
 

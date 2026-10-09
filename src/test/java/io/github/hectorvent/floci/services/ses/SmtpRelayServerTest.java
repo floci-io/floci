@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ses.model.MessageAttachment;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.vertx.core.Vertx;
 import io.vertx.ext.mail.MailClient;
@@ -154,6 +155,34 @@ class SmtpRelayServerTest {
         assertTrue(data.contains("Message-ID: <msg-7@email.amazonses.com>"), data);
         assertTrue(data.contains("X-Custom: kept"), data);
         assertTrue(data.contains("plain body"), data);
+    }
+
+    @Test
+    void structuredRelay_deliversSimpleAttachmentsOverSmtp() throws Exception {
+        server.reset();
+        byte[] pdf = "PDF-PAYLOAD".getBytes(StandardCharsets.UTF_8);
+        byte[] png = "PNG-PAYLOAD".getBytes(StandardCharsets.UTF_8);
+
+        relayAgainstServer().relay(SmtpRelay.RelayMessage.builder("sender@example.com")
+                .to(List.of("to@example.com"))
+                .subject("With attachments")
+                .bodyText("plain body")
+                .bodyHtml("<img src=\"cid:logo\">")
+                .messageId("msg-9")
+                .attachments(List.of(
+                        new MessageAttachment("report.pdf", pdf, "application/pdf",
+                                MessageAttachment.Disposition.ATTACHMENT, null, null, null),
+                        new MessageAttachment("logo.png", png, "image/png",
+                                MessageAttachment.Disposition.INLINE, null, "logo", null)))
+                .build());
+
+        assertTrue(server.awaitDelivery(), "the stub server should have accepted a message");
+        String data = server.data();
+        assertTrue(data.contains("report.pdf"), data);
+        assertTrue(data.contains(Base64.getEncoder().encodeToString(pdf)), data);
+        assertTrue(data.contains("Content-ID: <logo>"), data);
+        assertTrue(data.contains(Base64.getEncoder().encodeToString(png)), data);
+        assertTrue(data.contains("multipart/related"), data);
     }
 
     @Test

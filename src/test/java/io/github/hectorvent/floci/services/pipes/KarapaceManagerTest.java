@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.pipes;
 
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -10,7 +11,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
-import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

@@ -17,10 +17,10 @@ import java.util.regex.Pattern;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

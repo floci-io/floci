@@ -1,15 +1,14 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Test;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import org.junit.jupiter.api.Test;
-
-import io.quarkus.test.junit.QuarkusTest;
 
 /**
  * Issue #2190: a security group rule whose source is another security group must keep that source.

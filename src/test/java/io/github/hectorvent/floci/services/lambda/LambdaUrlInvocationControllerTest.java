@@ -301,6 +301,52 @@ class LambdaUrlInvocationControllerTest {
         assertNull(response.getEntity());
     }
 
+    private JsonNode eventFor(HttpHeaders headers) {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("my-function");
+        fn.setFunctionArn(FUNCTION_ARN);
+        fn.setAccountId("100000000012");
+
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.getTargetByUrlId("url-id")).thenReturn(fn);
+        InvokeResult invokeResult = new InvokeResult();
+        invokeResult.setStatusCode(200);
+        invokeResult.setPayload("{\"statusCode\":200}".getBytes(StandardCharsets.UTF_8));
+        when(lambdaService.invokeArn(eq(FUNCTION_ARN), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(invokeResult);
+
+        newController(lambdaService).handleGet("url-id", "", headers,
+                uriInfoFor("http://localhost/lambda-url/url-id/"));
+
+        ArgumentCaptor<byte[]> event = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invokeArn(eq(FUNCTION_ARN), event.capture(), eq(InvocationType.RequestResponse));
+        return readTree(event.getValue());
+    }
+
+    @Test
+    void cookieHeadersBecomeCookiesArray() {
+        HttpHeaders headers = headersWith(null);
+        headers.getRequestHeaders().add("Cookie", "a=1; b=2;; ");
+        headers.getRequestHeaders().add("cookie", " c=3 ");
+        headers.getRequestHeaders().putSingle("x-other", "v");
+
+        JsonNode eventNode = eventFor(headers);
+
+        assertEquals(3, eventNode.get("cookies").size());
+        assertEquals("a=1", eventNode.get("cookies").get(0).asText());
+        assertEquals("b=2", eventNode.get("cookies").get(1).asText());
+        assertEquals("c=3", eventNode.get("cookies").get(2).asText());
+        assertTrue(eventNode.get("headers").has("cookie"));
+        assertEquals("v", eventNode.get("headers").get("x-other").asText());
+    }
+
+    @Test
+    void requestWithoutCookiesOmitsCookiesField() {
+        JsonNode eventNode = eventFor(headersWith(null));
+
+        assertFalse(eventNode.has("cookies"));
+    }
+
     private JsonNode readTree(byte[] json) {
         try {
             return new ObjectMapper().readTree(json);

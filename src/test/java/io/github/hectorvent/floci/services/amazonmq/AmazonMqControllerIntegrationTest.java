@@ -3,9 +3,13 @@ package io.github.hectorvent.floci.services.amazonmq;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
@@ -48,6 +52,67 @@ class AmazonMqControllerIntegrationTest {
             .body("containerId", nullValue())
             .body("accountId", nullValue())
             .body("volumeId", nullValue());
+    }
+
+    @Test
+    void describeBrokerReturnsCreateBrokerMembers() {
+        String brokerId = given()
+            .contentType("application/json")
+            .body("""
+                {"brokerName": "it-members", "engineType": "RABBITMQ",
+                 "deploymentMode": "SINGLE_INSTANCE", "hostInstanceType": "mq.t3.micro",
+                 "publiclyAccessible": false,
+                 "securityGroups": ["sg-0123"], "subnetIds": ["subnet-0abc"],
+                 "logs": {"general": true},
+                 "maintenanceWindowStartTime": {"dayOfWeek": "MONDAY", "timeOfDay": "02:00", "timeZone": "UTC"},
+                 "storageType": "EBS", "authenticationStrategy": "SIMPLE",
+                 "encryptionOptions": {"kmsKeyId": "arn:aws:kms:us-east-1:000000000000:key/k1", "useAwsOwnedKey": false},
+                 "configuration": {"id": "c-123", "revision": 2},
+                 "users": [{"username": "admin", "password": "AdminPass123", "consoleAccess": true}]}
+                """)
+        .when()
+            .post("/v1/brokers")
+        .then()
+            .statusCode(200)
+            .extract().path("brokerId");
+
+        given()
+        .when()
+            .get("/v1/brokers/{id}", brokerId)
+        .then()
+            .statusCode(200)
+            .body("securityGroups", equalTo(List.of("sg-0123")))
+            .body("subnetIds", equalTo(List.of("subnet-0abc")))
+            .body("logs.general", equalTo(true))
+            .body("logs.generalLogGroup", equalTo("/aws/amazonmq/broker/" + brokerId + "/general"))
+            .body("maintenanceWindowStartTime.dayOfWeek", equalTo("MONDAY"))
+            .body("maintenanceWindowStartTime.timeOfDay", equalTo("02:00"))
+            .body("maintenanceWindowStartTime.timeZone", equalTo("UTC"))
+            .body("storageType", equalTo("EBS"))
+            .body("authenticationStrategy", equalTo("SIMPLE"))
+            .body("encryptionOptions.kmsKeyId", equalTo("arn:aws:kms:us-east-1:000000000000:key/k1"))
+            .body("encryptionOptions.useAwsOwnedKey", equalTo(false))
+            .body("configurations.current.id", equalTo("c-123"))
+            .body("configurations.current.revision", equalTo(2))
+            .body("configuration", nullValue())
+            // RabbitMQ users stay out of DescribeBroker (see createThenDescribeBroker).
+            .body("users", nullValue());
+    }
+
+    @Test
+    void describeBrokerOmitsUnsetOptionalMembers() {
+        String brokerId = createRabbitBroker("it-minimal");
+
+        given()
+        .when()
+            .get("/v1/brokers/{id}", brokerId)
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("securityGroups")))
+            .body("logs.general", equalTo(false))
+            .body("logs.generalLogGroup", equalTo("/aws/amazonmq/broker/" + brokerId + "/general"))
+            .body("$", not(hasKey("configurations")))
+            .body("$", not(hasKey("encryptionOptions")));
     }
 
     @Test

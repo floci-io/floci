@@ -150,6 +150,29 @@ class EcsServiceTaskOwnershipTest {
     }
 
     @Test
+    void listTasksByServiceArnListsTheSameTasksAsByServiceName() {
+        EcsService service = newMockModeService();
+        service.createCluster("arn-cluster", REGION);
+        registerTaskDef(service);
+        String serviceArn = service.createService("arn-cluster", "svc", "own-fam", 1, LaunchType.FARGATE,
+                List.of(), null, REGION).getServiceArn();
+        String idleArn = service.createService("arn-cluster", "idle", "own-fam", 0, LaunchType.FARGATE,
+                List.of(), null, REGION).getServiceArn();
+        service.reconcileServices();
+
+        List<String> byName = service.listTasks("arn-cluster", null, null, "svc", REGION);
+        String shortArn = serviceArn.replace("service/arn-cluster/", "service/");
+
+        assertEquals(1, byName.size(), "the service runs its one task");
+        assertEquals(byName, service.listTasks("arn-cluster", null, null, serviceArn, REGION),
+                "the service ARN selects the same tasks as the service name");
+        assertEquals(byName, service.listTasks("arn-cluster", null, null, shortArn, REGION),
+                "the old service/<name> ARN format selects them too");
+        assertEquals(List.of(), service.listTasks("arn-cluster", null, null, idleArn, REGION),
+                "another service's ARN does not select this service's tasks");
+    }
+
+    @Test
     void aSameNamedClusterInAnotherRegionIsNotSweptIntoReconciliation() {
         EcsService service = newMockModeService();
         service.createCluster("shared-name", REGION);

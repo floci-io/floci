@@ -1,15 +1,16 @@
 package io.github.hectorvent.floci.core.common;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CidrCanonicalizerTest {
 
@@ -160,5 +161,40 @@ class CidrCanonicalizerTest {
     void whitespaceOnlyCidr_isDistinguishablyInvalid() {
         assertEquals(Optional.empty(), CidrCanonicalizer.canonicalize("   "));
         assertFalse(CidrCanonicalizer.isCanonical("   "));
+    }
+
+    // -----------------------------------------------------------------
+    // sameBlock: the comparison the CloudFormation provisioners run on update.
+    // -----------------------------------------------------------------
+
+    @Test
+    void sameBlock_hostBitsOnEitherSideAreTheSameNetwork() {
+        assertTrue(CidrCanonicalizer.sameBlock("10.0.1.9/24", "10.0.1.0/24"));
+        assertTrue(CidrCanonicalizer.sameBlock("10.0.1.0/24", "10.0.1.9/24"));
+        assertTrue(CidrCanonicalizer.sameBlock("10.0.1.9/24", "10.0.1.77/24"));
+    }
+
+    @Test
+    void sameBlock_equalBlocksMatch() {
+        assertTrue(CidrCanonicalizer.sameBlock("10.0.0.0/16", "10.0.0.0/16"));
+    }
+
+    @Test
+    void sameBlock_differentNetworksOrPrefixesDoNotMatch() {
+        assertFalse(CidrCanonicalizer.sameBlock("10.0.1.0/24", "10.0.2.0/24"));
+        assertFalse(CidrCanonicalizer.sameBlock("10.0.0.0/16", "10.0.0.0/24"));
+    }
+
+    @Test
+    void sameBlock_nullsMatchOnlyEachOther() {
+        assertTrue(CidrCanonicalizer.sameBlock(null, null));
+        assertFalse(CidrCanonicalizer.sameBlock(null, "10.0.0.0/16"));
+        assertFalse(CidrCanonicalizer.sameBlock("10.0.0.0/16", null));
+    }
+
+    @Test
+    void sameBlock_malformedSideIsComparedRaw() {
+        assertTrue(CidrCanonicalizer.sameBlock("not-a-cidr", "not-a-cidr"));
+        assertFalse(CidrCanonicalizer.sameBlock("not-a-cidr", "10.0.0.0/16"));
     }
 }

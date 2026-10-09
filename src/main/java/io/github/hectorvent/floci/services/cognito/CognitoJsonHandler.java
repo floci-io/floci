@@ -10,13 +10,13 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
+import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
-import io.github.hectorvent.floci.services.cognito.model.ManagedLoginBranding;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -983,10 +983,13 @@ public class CognitoJsonHandler {
     }
 
     private Response handleConfirmSignUp(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.confirmSignUp(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
-                request.path("ConfirmationCode").asText()
+                request.path("ConfirmationCode").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -1005,9 +1008,12 @@ public class CognitoJsonHandler {
     }
 
     private Response handleAdminConfirmSignUp(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.adminConfirmSignUp(
                 request.path("UserPoolId").asText(),
-                request.path("Username").asText()
+                request.path("Username").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -1035,11 +1041,14 @@ public class CognitoJsonHandler {
     }
 
     private Response handleConfirmForgotPassword(JsonNode request) {
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
         service.confirmForgotPassword(
                 request.path("ClientId").asText(),
                 request.path("Username").asText(),
                 request.path("ConfirmationCode").asText(),
-                request.path("Password").asText()
+                request.path("Password").asText(),
+                clientMetadata
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }

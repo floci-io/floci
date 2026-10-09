@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
@@ -13,6 +14,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -227,6 +230,51 @@ class CustomResourceProvisionerTest {
         assertEquals(STACK_ID, deleteEvent.get("StackId").asText());
         assertEquals("phys-123", deleteEvent.get("PhysicalResourceId").asText());
         assertEquals("hi", deleteEvent.get("ResourceProperties").get("Message").asText());
+    }
+
+    @Test
+    void resourceOutsideAStackGetsOneStackIdForCreateAndDelete() {
+        stubHandler("phys-123", Map.of());
+        // Cloud Control's engine has no stack, so its stack id is not an ARN.
+        CloudFormationTemplateEngine standalone = CloudFormationTemplateEngine.standalone(
+                "000000000000", "us-east-1", "cloudcontrol", mapper, null);
+        StackResource r = provisioner.provision("resource", "Custom::Test", props(),
+                standalone, "us-east-1", "000000000000", "cloudcontrol");
+
+        provisioner.delete(r, "us-east-1");
+
+        List<JsonNode> events = capturedEvents(2);
+        String createStackId = events.get(0).get("StackId").asText();
+        assertTrue(AwsArnUtils.isArnFor(createStackId, "cloudformation"), createStackId);
+        assertEquals(createStackId, events.get(1).get("StackId").asText());
+    }
+
+    @Test
+    void deleteOfAResourceWithNoRecordedStackIdStillSendsAStackArn() {
+        stubHandler("phys-123", Map.of());
+        // Stashed by a release that did not record the stack id.
+        StackResource legacy = new StackResource();
+        legacy.setLogicalId("MyCr");
+        legacy.setResourceType("Custom::Test");
+        legacy.setPhysicalId("phys-123");
+        legacy.getAttributes().put("__FlociServiceToken", SERVICE_TOKEN);
+        legacy.getAttributes().put("__FlociResourceProperties", props().toString());
+
+        provisioner.delete(legacy, "us-east-1");
+
+        String stackId = capturedEvents(1).get(0).get("StackId").asText();
+        assertTrue(AwsArnUtils.isArnFor(stackId, "cloudformation"), stackId);
+    }
+
+    private List<JsonNode> capturedEvents(int count) {
+        ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService, times(count)).invoke(any(), eq(SERVICE_TOKEN), payloads.capture(),
+                eq(InvocationType.RequestResponse));
+        List<JsonNode> events = new ArrayList<>();
+        for (byte[] payload : payloads.getAllValues()) {
+            events.add(readEvent(() -> payload));
+        }
+        return events;
     }
 
     private JsonNode readEvent(ArgumentCaptor<byte[]> captor) {

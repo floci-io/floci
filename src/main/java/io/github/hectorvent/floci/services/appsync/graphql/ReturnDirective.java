@@ -4,8 +4,8 @@ import org.apache.velocity.context.InternalContextAdapter;
 import org.apache.velocity.runtime.directive.Directive;
 import org.apache.velocity.runtime.parser.node.Node;
 
-import java.io.Writer;
 import java.io.IOException;
+import java.io.Writer;
 
 public class ReturnDirective extends Directive {
 

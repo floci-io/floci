@@ -156,9 +156,12 @@ PUT, PATCH and DELETE).
   method; any other method returns 403 `Invalid method.`. A behavior without `AllowedMethods` allows
   GET and HEAD. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
 - POST, PUT, PATCH and DELETE are forwarded to custom origins with the viewer request body and its
-  `Content-Type`; `Content-Length` is set from the body. Their responses are never cached, as on AWS.
-  Signed URL and signed cookie enforcement applies to them like any other method. Request bodies are
-  bounded by the emulator-wide `floci.protocols.max-request-size` limit.
+  `Content-Type`. The body is streamed to the origin with the viewer's `Content-Length`, or chunked
+  when the viewer sent it chunked or, as HTTP/2 allows, with no length, so it is never held in
+  memory. Their responses are never cached, as on AWS. Signed URL and signed cookie enforcement
+  applies to them like any other method. Request bodies are bounded by the emulator-wide
+  `floci.protocols.max-request-size` limit (`FLOCI_PROTOCOLS_MAX_REQUEST_SIZE`, 2048 MB by default);
+  CloudFront accepts up to 64 GB, so raise it for larger uploads.
 - Every distribution is also served as `{id}.cloudfront.{host}` for each endpoint host Floci
   resolves: `localhost`, `localhost.floci.io`, `localhost.localstack.cloud`, `FLOCI_HOSTNAME` and
   every `FLOCI_DNS_EXTRA_SUFFIXES` entry. `{id}.cloudfront.localhost.floci.io` and
@@ -223,6 +226,10 @@ PUT, PATCH and DELETE).
   `Elemental-MediaPackage` or the `UseOriginCacheControlHeaders` policies.
 - In-process S3 origins do not apply forwarding settings: viewer query strings, cookies and headers
   do not change the S3 read.
+- Origin responses are streamed to the viewer, from in-process S3 origins and custom origins alike,
+  so a large object is never held in memory. A custom origin's `Content-Length` is passed on, and a
+  response it sends chunked stays chunked. Floci does not cache, so it serves objects larger than
+  50 GB the way CloudFront does with caching disabled; with caching enabled, CloudFront refuses them.
 - Origin `Set-Cookie` headers always reach the viewer. With legacy `Forward=none`, AWS strips them
   from the response; Floci does not.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.

@@ -53,6 +53,11 @@ public class S3Object {
     @JsonIgnore
     private String dataGeneration;
 
+    // Internal-only s3.object.sequencer of the write that stored this instance, assigned under the
+    // bucket lock so concurrent writes to one key get values in the order they were stored.
+    @JsonIgnore
+    private String eventSequencer;
+
     public S3Object() {
         this.metadata = new HashMap<>();
         this.storageClass = "STANDARD";
@@ -166,6 +171,9 @@ public class S3Object {
 
     public String getDataGeneration() { return dataGeneration; }
     public void setDataGeneration(String dataGeneration) { this.dataGeneration = dataGeneration; }
+
+    public String getEventSequencer() { return eventSequencer; }
+    public void setEventSequencer(String eventSequencer) { this.eventSequencer = eventSequencer; }
 
     public static String computeETag(byte[] data) {
         try {

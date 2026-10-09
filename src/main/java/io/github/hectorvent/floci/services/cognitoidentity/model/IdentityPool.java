@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.cognitoidentity.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
-
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;

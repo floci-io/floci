@@ -217,6 +217,30 @@ class SshPublicKeyIntegrationTest {
         }
     }
 
+    /**
+     * And nothing outside the enum. {@code statusType} is one shape across the three operations
+     * that take it, so this is the same answer AWS gives on UpdateServiceSpecificCredential, where
+     * it was recorded: the offending value and the permitted set are both absent.
+     */
+    @Test
+    void theStatusTakesNothingOutsideTheEnum() {
+        String userName = user();
+        String id = upload(userName, SshPublicKeys.toOpenSsh(generated()));
+
+        for (String status : List.of("inactive", "Revoked", "")) {
+            iam("UpdateSSHPublicKey")
+                .formParam("UserName", userName)
+                .formParam("SSHPublicKeyId", id)
+                .formParam("Status", status)
+            .when().post("/").then().statusCode(400)
+                .body(containsString("ValidationError"))
+                .body(containsString("1 validation error detected"))
+                .body(containsString("Member must satisfy enum value set"))
+                .body(not(containsString("enum value set:")))
+                .body(not(containsString("Revoked")));
+        }
+    }
+
     @Test
     void deleteRemovesIt() {
         String userName = user();

@@ -25,7 +25,7 @@ import java.util.function.Function;
  * checks pool existence through {@link #dedicatedIpPoolExists}.
  */
 @ApplicationScoped
-public class SesDedicatedIpService {
+public class SesDedicatedIpService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesDedicatedIpService.class);
 
@@ -107,6 +107,7 @@ public class SesDedicatedIpService {
         LOG.infov("Deleted SES dedicated IP pool: {0} in region {1}", poolName, region);
     }
 
+    @Override
     public List<Tag> listTags(String poolName, String region) {
         DedicatedIpPool pool = dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName))
                 .orElseThrow(() -> tagTargetNotFound(poolName));
@@ -117,6 +118,7 @@ public class SesDedicatedIpService {
      * Merges the incoming tags into the stored pool. The lookup and write share the mutation lock
      * so tagging can't resurrect a concurrently deleted pool or lose a concurrent tag update.
      */
+    @Override
     public void tag(String poolName, String region, List<Tag> newTags) {
         String key = dedicatedIpPoolKey(region, poolName);
         synchronized (poolMutationLock) {
@@ -128,6 +130,7 @@ public class SesDedicatedIpService {
         LOG.infov("Tagged SES dedicated IP pool: {0} in region {1} (+{2} tags)", poolName, region, newTags.size());
     }
 
+    @Override
     public void untag(String poolName, String region, List<String> tagKeys) {
         String key = dedicatedIpPoolKey(region, poolName);
         synchronized (poolMutationLock) {

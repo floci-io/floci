@@ -45,6 +45,26 @@ class TestSSMParameter:
         finally:
             ssm_client.delete_parameter(Name=param_name)
 
+    def test_unlabel_parameter_version(self, ssm_client, unique_name):
+        """Test UnlabelParameterVersion removes attached labels and reports the rest."""
+        param_name = f"/pytest-sdk-test/{unique_name}"
+
+        ssm_client.put_parameter(Name=param_name, Value="value", Type="String")
+        try:
+            ssm_client.label_parameter_version(
+                Name=param_name, Labels=["py-prod", "py-stable"], ParameterVersion=1
+            )
+            response = ssm_client.unlabel_parameter_version(
+                Name=param_name, Labels=["py-prod", "py-missing"], ParameterVersion=1
+            )
+            assert response["RemovedLabels"] == ["py-prod"]
+            assert response["InvalidLabels"] == ["py-missing"]
+
+            history = ssm_client.get_parameter_history(Name=param_name)
+            assert history["Parameters"][0]["Labels"] == ["py-stable"]
+        finally:
+            ssm_client.delete_parameter(Name=param_name)
+
     def test_get_parameter_history(self, ssm_client, unique_name):
         """Test GetParameterHistory returns parameter versions."""
         param_name = f"/pytest-sdk-test/{unique_name}"

@@ -76,6 +76,36 @@ class ApplicationAutoScalingServiceTest {
         return config;
     }
 
+    /**
+     * Application Auto Scaling has one service-linked role per scalable dimension, and AWS names
+     * five of them in evidence the role table carries. Those must come from the table rather than
+     * from the switch below it, which has no arm for sagemaker and would fall to CustomResource.
+     *
+     * <p>The case above covers the other direction, ecs, which no recording names: it keeps the
+     * switch's own dimension. Without a covered namespace tested here, preferring the table was
+     * not pinned by anything.
+     */
+    @Test
+    void aDimensionAwsNamesComesFromTheRoleTableRatherThanTheLocalSwitch() {
+        ScalableTarget target = service.registerScalableTarget("sagemaker",
+                "endpoint/my-endpoint/variant/my-variant",
+                "sagemaker:variant:DesiredInstanceCount", 1, 10, null, null, Map.of(), REGION);
+
+        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/"
+                + "sagemaker.application-autoscaling.amazonaws.com/"
+                + "AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint",
+                target.getRoleArn());
+
+        // dynamodb is the one namespace the switch used to name itself. Its arm is gone, so this
+        // is what proves the table serves it: without the case, nothing else would.
+        ScalableTarget fromTable = service.registerScalableTarget("dynamodb", "table/my-table",
+                "dynamodb:table:WriteCapacityUnits", 1, 10, null, null, Map.of(), REGION);
+        assertEquals("arn:aws:iam::000000000000:role/aws-service-role/"
+                + "dynamodb.application-autoscaling.amazonaws.com/"
+                + "AWSServiceRoleForApplicationAutoScaling_DynamoDBTable",
+                fromTable.getRoleArn());
+    }
+
     @Test
     void registerCreatesTargetWithArnAndServiceLinkedRole() {
         ScalableTarget target = register();

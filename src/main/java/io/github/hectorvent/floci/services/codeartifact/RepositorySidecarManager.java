@@ -56,4 +56,12 @@ public interface RepositorySidecarManager {
      */
     Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version, String assetName);
+
+    /**
+     * {@code true} when this sidecar holds at least one version of the named package. {@code namespace}
+     * follows the same convention as {@link #fetchPackageVersionAsset}: {@code null} for a format that
+     * has none. A repository that was never started for this format holds nothing, so it is {@code false}.
+     */
+    boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName);
 }

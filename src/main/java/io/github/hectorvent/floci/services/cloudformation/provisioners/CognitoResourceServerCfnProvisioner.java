@@ -3,9 +3,9 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
@@ -14,10 +14,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
-import java.util.Objects;
+import java.util.Map;
 import java.util.Set;
-import java.util.function.Consumer;
+import java.util.function.Function;
 
 @ApplicationScoped
 public class CognitoResourceServerCfnProvisioner implements CfnResourceProvisioner {
@@ -25,7 +26,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     private static final String TYPE = "AWS::Cognito::UserPoolResourceServer";
     private static final String POOL_ATTR = "__FlociResourceServerPoolId";
     private static final String UPDATE_ATTR = "__FlociResourceServerUpdate";
-    private static final String CLEANUP_ATTR = "__FlociResourceServerCleanup";
+    private static final String LEGACY_CLEANUP_ATTR = "__FlociResourceServerCleanup";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final CognitoService cognitoService;
@@ -50,9 +51,9 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         validateString(name, "Name", 256, "[\\w\\s+=,.@-]+");
         List<ResourceServerScope> scopes = scopes(properties, ctx);
 
-        if (ctx.isUpdate() && resource.getAttributes().containsKey(UPDATE_ATTR)) {
+        if (ctx.isUpdate() && retainsFailedUpdateState(resource)) {
             try {
-                rollbackUpdate(resource, ctx.progress(), ctx.resources());
+                rollbackUpdate(resource);
                 resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
                 resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
             } catch (RuntimeException failure) {
@@ -61,8 +62,10 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             }
         }
         String priorPhysicalId = ctx.isUpdate() ? resource.getPhysicalId() : null;
-        deletePending(resource, ctx.resources());
-        Identity prior = ctx.isUpdate() ? identity(resource, priorPhysicalId) : null;
+        cleanupBeforeProvision(resource);
+        boolean priorIsStub = ctx.isUpdate()
+                && CfnResourceDispatcher.isStub(priorPhysicalId, resource.getAttributes());
+        Identity prior = ctx.isUpdate() && !priorIsStub ? identity(resource, priorPhysicalId) : null;
         boolean replacement = prior != null
                 && (!prior.poolId().equals(poolId) || !prior.identifier().equals(identifier));
         ResourceServer existing = prior == null ? null
@@ -75,11 +78,17 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             resource.getAttributes().put(UPDATE_ATTR, snapshot(prior, existing, false).toString());
             cognitoService.updateResourceServer(poolId, identifier, name, scopes);
         }
-        if (replacement) {
-            resource.getAttributes().put(UPDATE_ATTR, snapshot(prior, existing, true).toString());
-            setCleanup(resource, prior, true);
-        }
+        Map<String, String> attributesBefore = new HashMap<>(resource.getAttributes());
         setIdentity(resource, target);
+        if (priorIsStub) {
+            resource.getAttributes().remove("Arn");
+        }
+        ProvisionContext cleanupContext = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(),
+                ctx.stackName(), priorIsStub ? priorPhysicalId : prior == null ? null : encode(prior), ctx.progress());
+        withProjection(resource, projected -> {
+            ReplacementCleanup.record(projected, cleanupContext, attributesBefore);
+            return null;
+        });
         resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
     }
 
@@ -166,31 +175,147 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         return snapshot;
     }
 
-    private static void setCleanup(StackResource resource, Identity identity, boolean retainable) {
-        ObjectNode cleanup = address(identity);
-        cleanup.put("retainable", retainable);
-        cleanup.put("attempts", 0);
-        resource.getAttributes().put(CLEANUP_ATTR, cleanup.toString());
+    private static String encode(Identity identity) {
+        return MAPPER.createArrayNode().add(identity.poolId()).add(identity.identifier()).toString();
     }
 
-    @Override
-    public void delete(StackResource resource, String region) {
-        delete(resource, region, CfnResourceContext.EMPTY);
-    }
-
-    @Override
-    public void delete(StackResource resource, String region, CfnResourceContext context) {
-        deletePending(resource, context);
-        deleteAfterCleanup(resource, region);
-    }
-
-    @Override
-    public void deleteAfterCleanup(StackResource resource, String region) {
-        if (resource.getPhysicalId() != null) {
-            delete(identity(resource, resource.getPhysicalId()));
+    private static Identity decode(String physicalId) {
+        try {
+            JsonNode address = MAPPER.readTree(physicalId);
+            if (address != null && address.isArray() && address.size() == 2
+                    && address.get(0).isTextual() && !address.get(0).asText().isBlank()
+                    && address.get(1).isTextual() && !address.get(1).asText().isBlank()) {
+                return new Identity(address.get(0).asText(), address.get(1).asText());
+            }
+        } catch (JsonProcessingException invalid) {
+            throw new IllegalStateException("Invalid Cognito resource server cleanup address", invalid);
         }
-        resource.getAttributes().remove(UPDATE_ATTR);
-        resource.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+        throw new IllegalStateException("Invalid Cognito resource server cleanup address");
+    }
+
+    /*
+     * Ref is only Identifier, whereas a resource server's delete address also includes its pool.
+     * Only this detached view gives ReplacementCleanup the full address; no encoded id is assigned
+     * to the stack resource or passed to the template engine.
+     */
+    private static StackResource project(StackResource resource) {
+        StackResource projected = new StackResource();
+        projected.setLogicalId(resource.getLogicalId());
+        projected.setResourceType(resource.getResourceType());
+        projected.setStatus(resource.getStatus());
+        projected.setDeletionPolicy(resource.getDeletionPolicy());
+        projected.setUpdateReplacePolicy(resource.getUpdateReplacePolicy());
+        projected.setAttributes(new HashMap<>(resource.getAttributes()));
+        if (resource.getPhysicalId() != null) {
+            projected.setPhysicalId(CfnResourceDispatcher.isStub(resource.getPhysicalId(), resource.getAttributes())
+                    ? resource.getPhysicalId() : encode(identity(resource, resource.getPhysicalId())));
+        }
+        importLegacy(projected);
+        validateCleanup(projected);
+        return projected;
+    }
+
+    private static <T> T withProjection(StackResource resource, Function<StackResource, T> operation) {
+        StackResource projected = project(resource);
+        try {
+            return operation.apply(projected);
+        } finally {
+            // Rollback restores the prior identity before deleting the replacement, even if that delete fails.
+            boolean restoredStub = CfnResourceDispatcher.isStub(projected.getPhysicalId(), projected.getAttributes());
+            Identity restored = projected.getPhysicalId() == null || restoredStub
+                    ? null : decode(projected.getPhysicalId());
+            resource.getAttributes().clear();
+            resource.getAttributes().putAll(projected.getAttributes());
+            if (restoredStub) {
+                resource.setPhysicalId(projected.getPhysicalId());
+                resource.getAttributes().remove(POOL_ATTR);
+            } else if (restored != null) {
+                setIdentity(resource, restored);
+            }
+        }
+    }
+
+    private static void importLegacy(StackResource projected) {
+        ObjectNode legacy = read(projected, LEGACY_CLEANUP_ATTR);
+        ObjectNode snapshot = read(projected, UPDATE_ATTR);
+        boolean legacyReplacement = snapshot != null && snapshot.path("replacement").asBoolean();
+        if (legacy == null && !legacyReplacement) {
+            return;
+        }
+        ObjectNode cleanup = read(projected, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+        if (cleanup == null) {
+            cleanup = MAPPER.createObjectNode();
+            cleanup.putArray("displaced");
+        }
+        if (legacy != null) {
+            Identity owed = identity(legacy);
+            requireIdentity(owed);
+            String encoded = encode(owed);
+            JsonNode existing = null;
+            for (JsonNode entry : cleanup.path("displaced")) {
+                if (encoded.equals(entry.path("physicalId").asText(null))) {
+                    existing = entry;
+                    break;
+                }
+            }
+            if (existing == null) {
+                ObjectNode entry = cleanup.withArray("displaced").addObject();
+                entry.put("physicalId", encoded);
+                entry.put("resourceType", TYPE);
+                entry.put("retainable", legacy.path("retainable").asBoolean());
+                entry.put("cleanupAttempts", legacy.path("attempts").asInt(0));
+            }
+            projected.getAttributes().remove(LEGACY_CLEANUP_ATTR);
+        }
+        if (legacyReplacement) {
+            Identity prior = identity(snapshot);
+            requireIdentity(prior);
+            if (!cleanup.hasNonNull("priorPhysicalId")) {
+                cleanup.put("priorPhysicalId", encode(prior));
+                cleanup.putObject("priorAttributes");
+            }
+            projected.getAttributes().remove(UPDATE_ATTR);
+        }
+        projected.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, cleanup.toString());
+    }
+
+    private static void requireIdentity(Identity identity) {
+        if (identity.poolId().isBlank() || identity.identifier().isBlank()) {
+            throw new IllegalStateException("Invalid Cognito resource server lifecycle identity");
+        }
+    }
+
+    private static void validateCleanup(StackResource projected) {
+        ObjectNode cleanup = read(projected, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+        if (cleanup == null) {
+            return;
+        }
+        if (cleanup.has("displaced") && !cleanup.path("displaced").isArray()) {
+            throw new IllegalStateException("Invalid Cognito resource server cleanup entries");
+        }
+        for (JsonNode entry : cleanup.path("displaced")) {
+            if (!entry.isObject() || !entry.path("physicalId").isTextual()
+                    || entry.path("cleanupAttempts").asInt(0) < 0) {
+                throw new IllegalStateException("Invalid Cognito resource server cleanup entry");
+            }
+            decode(entry.path("physicalId").asText());
+        }
+        if (cleanup.hasNonNull("priorPhysicalId")) {
+            if (!cleanup.path("priorAttributes").isObject()) {
+                throw new IllegalStateException("Invalid Cognito resource server rollback attributes");
+            }
+            Map<String, String> priorAttributes = new HashMap<>();
+            cleanup.path("priorAttributes").fields()
+                    .forEachRemaining(entry -> priorAttributes.put(entry.getKey(), entry.getValue().asText()));
+            String priorPhysicalId = cleanup.path("priorPhysicalId").asText();
+            if (!CfnResourceDispatcher.isStub(priorPhysicalId, priorAttributes)) {
+                decode(priorPhysicalId);
+            }
+        }
+    }
+
+    private void deleteAddress(String resourceType, String physicalId, String region) {
+        delete(decode(physicalId));
     }
 
     private void delete(Identity identity) {
@@ -199,55 +324,57 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
                 "ResourceNotFoundException");
     }
 
-    private boolean deletePending(StackResource resource, CfnResourceContext context) {
-        ObjectNode cleanup = read(resource, CLEANUP_ATTR);
-        if (cleanup != null) {
-            if (cleanup.path("attempts").asInt() >= 3) {
-                resource.getAttributes().remove(CLEANUP_ATTR);
-                return false;
+    private void cleanupBeforeProvision(StackResource resource) {
+        RuntimeException[] failure = new RuntimeException[1];
+        withProjection(resource, projected -> {
+            UpdateCleanupResult result = ReplacementCleanup.complete(projected, (type, physicalId, region) -> {
+                try {
+                    deleteAddress(type, physicalId, region);
+                } catch (RuntimeException deleteFailure) {
+                    failure[0] = deleteFailure;
+                    throw deleteFailure;
+                }
+            });
+            ReplacementCleanup.clear(projected);
+            if (failure[0] != null) {
+                throw failure[0];
             }
-            Identity pending = identity(cleanup);
-            boolean claimed = context.managedElsewhere(other -> TYPE.equals(other.getResourceType())
-                    && pending.poolId().equals(other.getAttributes().get(POOL_ATTR))
-                    && pending.identifier().equals(other.getPhysicalId()));
-            if (!claimed) {
-                delete(pending);
+            return result;
+        });
+    }
+
+    @Override
+    public void delete(StackResource resource, String region) {
+        withProjection(resource, projected -> {
+            if (projected.getPhysicalId() != null
+                    && !CfnResourceDispatcher.isStub(projected.getPhysicalId(), projected.getAttributes())) {
+                deleteAddress(projected.getResourceType(), projected.getPhysicalId(), region);
             }
-            resource.getAttributes().remove(CLEANUP_ATTR);
-            return claimed;
-        }
-        return false;
+            projected.getAttributes().remove(UPDATE_ATTR);
+            projected.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+            ReplacementCleanup.clear(projected);
+            return null;
+        });
     }
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return rollbackUpdate(resource, event -> {}, CfnResourceContext.EMPTY);
-    }
-
-    @Override
-    public boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress, CfnResourceContext context) {
-        ObjectNode snapshot = read(resource, UPDATE_ATTR);
-        if (snapshot == null) {
-            return false;
-        }
-        Identity prior = identity(snapshot);
-        String name = snapshot.path("name").asText();
-        if (snapshot.path("replacement").asBoolean()) {
-            Identity replacement = identity(resource, resource.getPhysicalId());
-            setIdentity(resource, prior);
-            resource.getAttributes().remove(UPDATE_ATTR);
-            resource.getAttributes().remove(CLEANUP_ATTR);
-            if (!Objects.equals(prior, replacement)) {
-                setCleanup(resource, replacement, false);
-                deletePending(resource, context);
+        return withProjection(resource, projected -> {
+            if (ReplacementCleanup.rollback(projected, this::deleteAddress)) {
+                return true;
             }
-        } else {
-            cognitoService.updateResourceServer(prior.poolId(), prior.identifier(), name,
+            ObjectNode snapshot = read(projected, UPDATE_ATTR);
+            if (snapshot == null) {
+                return false;
+            }
+            Identity prior = identity(snapshot);
+            requireIdentity(prior);
+            cognitoService.updateResourceServer(prior.poolId(), prior.identifier(), snapshot.path("name").asText(),
                     scopes(snapshot.path("scopes")));
-            setIdentity(resource, prior);
-            resource.getAttributes().remove(UPDATE_ATTR);
-        }
-        return true;
+            projected.setPhysicalId(encode(prior));
+            projected.getAttributes().remove(UPDATE_ATTR);
+            return true;
+        });
     }
 
     private static List<ResourceServerScope> scopes(JsonNode nodes) {
@@ -263,102 +390,118 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
 
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
-        ObjectNode snapshot = read(resource, UPDATE_ATTR);
-        return snapshot != null && snapshot.path("replacement").asBoolean();
+        return withProjection(resource, ReplacementCleanup::hasReplacement);
+    }
+
+    private static boolean hasPendingRollback(StackResource projected) {
+        ObjectNode cleanup = read(projected, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+        return projected.getAttributes().containsKey(UPDATE_ATTR)
+                || (cleanup != null && cleanup.hasNonNull("priorPhysicalId"));
     }
 
     @Override
     public boolean retainsFailedUpdateState(StackResource resource) {
-        return resource.getAttributes().containsKey(UPDATE_ATTR);
+        return withProjection(resource, CognitoResourceServerCfnProvisioner::hasPendingRollback);
     }
 
     @Override
     public String updateCleanupPhysicalId(StackResource resource) {
-        ObjectNode cleanup = read(resource, CLEANUP_ATTR);
-        return cleanup == null || retained(resource, cleanup) ? null : cleanup.path("identifier").asText();
+        return withProjection(resource, projected -> {
+            String physicalId = ReplacementCleanup.cleanupPhysicalId(projected);
+            return physicalId == null ? null : decode(physicalId).identifier();
+        });
+    }
+
+    private static UpdateCleanupResult publicResult(UpdateCleanupResult result) {
+        String physicalId = result.previousPhysicalId();
+        return new UpdateCleanupResult(result.applicable(), result.complete(),
+                physicalId == null ? null : decode(physicalId).identifier(),
+                result.attempts(), result.failureReason());
     }
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
-        return completeUpdate(resource, CfnResourceContext.EMPTY);
-    }
-
-    @Override
-    public UpdateCleanupResult completeUpdate(StackResource resource, CfnResourceContext context) {
-        if ("UPDATE_FAILED".equals(resource.getStatus()) && retainsFailedUpdateState(resource)) {
-            throw new IllegalStateException("Resource server rollback is still pending; its original configuration "
-                    + "cannot be discarded by another resource's update cleanup");
-        }
-        boolean updated = resource.getAttributes().remove(UPDATE_ATTR) != null;
-        UpdateCleanupResult cleanup = completeCleanup(resource, context);
-        return !cleanup.applicable() && updated ? new UpdateCleanupResult(true, true, null, 0, null) : cleanup;
+        return withProjection(resource, projected -> {
+            if ("UPDATE_FAILED".equals(projected.getStatus()) && hasPendingRollback(projected)) {
+                throw new IllegalStateException("Resource server rollback is still pending; its original configuration "
+                        + "cannot be discarded by another resource's update cleanup");
+            }
+            boolean updated = projected.getAttributes().remove(UPDATE_ATTR) != null;
+            ObjectNode committed = read(projected, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+            if (committed != null) {
+                // Committing the update spends its rollback identity, independently of delete retry debt.
+                committed.remove("priorPhysicalId");
+                committed.remove("priorAttributes");
+                projected.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, committed.toString());
+            }
+            UpdateCleanupResult cleanup = ReplacementCleanup.complete(projected, this::deleteAddress);
+            return !cleanup.applicable() && updated
+                    ? new UpdateCleanupResult(true, true, null, 0, null) : publicResult(cleanup);
+        });
     }
 
     @Override
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
-        return completeDeleteCleanup(resource, CfnResourceContext.EMPTY);
-    }
-
-    @Override
-    public UpdateCleanupResult completeDeleteCleanup(StackResource resource, CfnResourceContext context) {
-        return completeCleanup(resource, context);
+        return withProjection(resource, projected -> publicResult(ReplacementCleanup.complete(projected,
+                this::deleteAddress)));
     }
 
     @Override
     public void clearDeleteCleanup(StackResource resource) {
-        // The rollback snapshot remains until deleting the managed server succeeds.
-        ObjectNode cleanup = read(resource, CLEANUP_ATTR);
-        if (cleanup != null && cleanup.path("attempts").asInt() >= 3) {
-            resource.getAttributes().remove(CLEANUP_ATTR);
-        }
-    }
-
-    private UpdateCleanupResult completeCleanup(StackResource resource, CfnResourceContext context) {
-        ObjectNode cleanup = read(resource, CLEANUP_ATTR);
-        if (cleanup == null) {
-            return UpdateCleanupResult.notApplicable();
-        }
-        String identifier = cleanup.path("identifier").asText();
-        if (retained(resource, cleanup)) {
-            resource.getAttributes().remove(CLEANUP_ATTR);
-            return new UpdateCleanupResult(true, true, identifier, 0, null);
-        }
-        int priorAttempts = cleanup.path("attempts").asInt();
-        if (priorAttempts >= 3) {
-            return new UpdateCleanupResult(true, false, identifier, priorAttempts,
-                    "Historical resource server cleanup exhausted");
-        }
-        try {
-            if (deletePending(resource, context)) {
-                return UpdateCleanupResult.skipped(identifier,
-                        "Historical cleanup abandoned because another stack manages the resource server address");
+        withProjection(resource, projected -> {
+            ObjectNode cleanup = read(projected, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+            JsonNode prior = cleanup == null ? null : cleanup.get("priorPhysicalId");
+            JsonNode attributes = cleanup == null ? null : cleanup.get("priorAttributes");
+            ReplacementCleanup.clear(projected);
+            if (prior != null) {
+                ObjectNode remaining = read(projected, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+                if (remaining == null) {
+                    remaining = MAPPER.createObjectNode();
+                    remaining.putArray("displaced");
+                }
+                remaining.set("priorPhysicalId", prior);
+                remaining.set("priorAttributes", attributes);
+                projected.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, remaining.toString());
             }
-            return new UpdateCleanupResult(true, true, identifier, 0, null);
-        } catch (RuntimeException failure) {
-            int attempts = cleanup.path("attempts").asInt() + 1;
-            cleanup.put("attempts", attempts);
-            resource.getAttributes().put(CLEANUP_ATTR, cleanup.toString());
-            return new UpdateCleanupResult(true, false, identifier, attempts, failure.getMessage());
-        }
-    }
-
-    private static boolean retained(StackResource resource, JsonNode cleanup) {
-        return cleanup.path("retainable").asBoolean() && "Retain".equals(resource.getUpdateReplacePolicy());
+            return null;
+        });
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
-        resource.getAttributes().remove(UPDATE_ATTR);
-        clearDeleteCleanup(resource);
+        withProjection(resource, projected -> {
+            projected.getAttributes().remove(UPDATE_ATTR);
+            ReplacementCleanup.clear(projected);
+            return null;
+        });
     }
 
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        ObjectNode cleanup = read(attempted, CLEANUP_ATTR);
-        if (cleanup == null) {
-            previous.getAttributes().remove(CLEANUP_ATTR);
-        } else if (!cleanup.path("retainable").asBoolean()) {
-            previous.getAttributes().put(CLEANUP_ATTR, cleanup.toString());
+        // The attempted resource is authoritative about debts it already consumed before failing.
+        // The dispatcher's additive merge cannot remove those entries from the restored metadata.
+        StackResource projectedAttempt = project(attempted);
+        ObjectNode cleanup = read(projectedAttempt, CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+        ObjectNode carried = cleanup == null ? null : cleanup.deepCopy();
+        if (carried != null) {
+            ArrayNode debts = MAPPER.createArrayNode();
+            String current = previous.getPhysicalId() == null
+                    || CfnResourceDispatcher.isStub(previous.getPhysicalId(), previous.getAttributes())
+                    ? null : encode(identity(previous, previous.getPhysicalId()));
+            for (JsonNode entry : carried.path("displaced")) {
+                if (!entry.path("physicalId").asText().equals(current)) {
+                    debts.add(entry);
+                }
+            }
+            carried.set("displaced", debts);
+            carried.remove("priorPhysicalId");
+            carried.remove("priorAttributes");
+        }
+        previous.getAttributes().remove(LEGACY_CLEANUP_ATTR);
+        if (carried == null || carried.path("displaced").isEmpty()) {
+            previous.getAttributes().remove(CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+        } else {
+            previous.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, carried.toString());
         }
     }
 

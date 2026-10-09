@@ -561,6 +561,23 @@ class ReposiliteSidecarClientTest {
         assertFalse(client.artifactExists("dom--repo", "absent.jar"));
     }
 
+    @Test
+    void packageExistsReflectsAGetResponseOnTheGroupArtifactDirectory() {
+        server.createContext("/dom--repo/com/example/present/", exchange -> respond(exchange, 200, ""));
+        server.createContext("/dom--repo/com/example/absent/", exchange -> respond(exchange, 404, ""));
+
+        assertTrue(client.packageExists("dom--repo", "dom", "repo", "com.example", "present"));
+        assertFalse(client.packageExists("dom--repo", "dom", "repo", "com.example", "absent"));
+    }
+
+    @Test
+    void packageExistsThrowsRatherThanReportingAbsentOnASidecarServerError() {
+        server.createContext("/dom--repo/com/example/broken/", exchange -> respond(exchange, 500, ""));
+
+        assertThrows(IllegalStateException.class, () -> client.packageExists("dom--repo", "dom", "repo",
+                "com.example", "broken"));
+    }
+
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);

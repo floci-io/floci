@@ -442,7 +442,7 @@ public class IotMqttWebSocketIntegrationTest {
                 options.setUserName(username);
                 options.setPassword(password.toCharArray());
             }
-            client.connect(options);
+            PahoWebSocketConnect.connect(client, options);
             return wsClient;
         }
 

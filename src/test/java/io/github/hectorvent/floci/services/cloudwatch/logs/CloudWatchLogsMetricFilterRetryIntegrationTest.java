@@ -2,10 +2,10 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
-import io.quarkus.test.junit.mockito.InjectSpy;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;

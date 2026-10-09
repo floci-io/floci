@@ -12,14 +12,18 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | Action | Description |
 | --- | --- |
 | `ValidateIamAuthToken` | Validate an IAM auth token (data-plane auth) |
-| `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled`, `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow` and `Tags` are kept and returned, with the group `ARN` |
+| `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled`, `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow`, `Tags` and `UserGroupIds` are kept and returned, with the group `ARN`. `UserGroupIds` needs `TransitEncryptionEnabled` or an `AuthToken` |
 | `DescribeReplicationGroups` | List clusters and their connection info |
-| `ModifyReplicationGroup` | Modify `SnapshotRetentionLimit` and `SnapshotWindow`, and the associated user groups |
+| `ModifyReplicationGroup` | Modify `SnapshotRetentionLimit` and `SnapshotWindow`, and the associated user groups (`UserGroupIdsToAdd`, `UserGroupIdsToRemove`, `RemoveUserGroups`). A cache with user groups no longer takes its AUTH token, `AuthTokenUpdateStrategy=DELETE` removes the token when adding a user group, and removing the last user group leaves the cache without access control. Changing the AUTH token (`ROTATE`, `SET`) is not supported |
 | `DeleteReplicationGroup` | Stop and remove a cluster |
 | `CreateUser` | Create a user with password, no-password-required or IAM authentication, set through `AuthenticationMode` or the top-level `Passwords` and `NoPasswordRequired` |
 | `DescribeUsers` | List ElastiCache users |
 | `ModifyUser` | Change a user's passwords and authentication mode, replace its access string with `AccessString` or add to it with `AppendAccessString` |
 | `DeleteUser` | Remove an ElastiCache user |
+| `CreateUserGroup` | Create a user group; a `redis` group must contain a user named `default`, a `valkey` group need not |
+| `DescribeUserGroups` | List user groups with their users and the replication groups using them |
+| `ModifyUserGroup` | Add or remove users, or change the engine; membership changes apply to authentication at once |
+| `DeleteUserGroup` | Remove a user group that no replication group uses |
 | `CreateCacheCluster` | Start a Memcached cluster, or a single-node Redis/Valkey one (`NumCacheNodes` must be 1) |
 | `DescribeCacheClusters` | List cache clusters: Memcached, single-node Redis/Valkey, and replication group members |
 | `DeleteCacheCluster` | Stop and remove a cache cluster |

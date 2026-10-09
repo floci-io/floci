@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -15,28 +17,30 @@ import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
+import io.github.hectorvent.floci.services.ses.model.MessageAttachment;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SendBulkEmailRequest;
 import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
-import io.github.hectorvent.floci.services.ses.model.Topic;
-import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
+import io.github.hectorvent.floci.services.ses.model.SentAttachment;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
-import io.github.hectorvent.floci.services.ses.model.Tenant;
-import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.ses.model.Tenant;
+import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
+import io.github.hectorvent.floci.services.ses.model.Topic;
+import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.james.mime4j.dom.Message;
 import org.jboss.logging.Logger;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -132,6 +136,8 @@ public class SesService {
     // Resolves the caller's account per request so send-event payloads report the sending account, not
     // the fixed default. Null in the package-private test constructor (falls back to defaultAccountId).
     private final RegionResolver regionResolver;
+    // The V2 tag endpoints' resource types, keyed by the ARN's type segment.
+    private final Map<String, SesTaggable> taggableDomains;
 
     @Inject
     public SesService(SesIdentityService identityService, SesCvetService cvetService,
@@ -158,6 +164,7 @@ public class SesService {
         this.defaultAccountId = config.defaultAccountId();
         this.baseUrl = config.effectiveBaseUrl();
         this.regionResolver = regionResolver;
+        this.taggableDomains = taggableDomains();
     }
 
     SesService(SesIdentityService identityService,
@@ -188,6 +195,18 @@ public class SesService {
         this.defaultAccountId = "000000000000";
         this.baseUrl = "http://localhost:4566";
         this.regionResolver = null;
+        this.taggableDomains = taggableDomains();
+    }
+
+    private Map<String, SesTaggable> taggableDomains() {
+        return Map.of(
+                "configuration-set", configSetService,
+                "template", templateService,
+                "identity", identityService,
+                "contact-list", contactService,
+                "custom-verification-email-template", cvetService,
+                "dedicated-ip-pool", dedicatedIpService,
+                "tenant", tenantService);
     }
 
     /**
@@ -286,7 +305,8 @@ public class SesService {
             content = new EmailContent.Simple(content.subject(),
                     replaceUnsubscribePlaceholder(content.bodyText(), url),
                     replaceUnsubscribePlaceholder(content.bodyHtml(), url),
-                    withUnsubscribeHeaders(content.headers(), url));
+                    withUnsubscribeHeaders(content.headers(), url),
+                    content.attachments());
             request = request.toBuilder().content(content).build();
         }
 
@@ -305,6 +325,21 @@ public class SesService {
         boolean rejected = SesContentScan.containsTestVirus(content.subject(), content.bodyText(),
                 content.bodyHtml())
                 || SesContentScan.containsTestVirus(headerText(content.headers()));
+        // Attachments make the message multipart, so it is assembled once as the MIME the relay
+        // delivers (Bcc stays off it, as on the wire) and scanned the way a raw send is.
+        byte[] mime = null;
+        if (content.hasAttachments()) {
+            mime = SmtpRelay.encodeMime(simpleRelayMessage(request, content, effectiveReturnPath, messageId,
+                    request.toAddresses(), request.ccAddresses(), null));
+            Message parsedMime = SmtpRelay.parseMime(mime);
+            rejectBlockedAttachments(parsedMime);
+            SesContentScan.Result scan = SesContentScan.scan(mime, parsedMime);
+            if (scan == SesContentScan.Result.UNREADABLE) {
+                LOG.warnv("SES content scan could not parse the assembled message, only its bytes were checked: "
+                        + "messageId={0}", messageId);
+            }
+            rejected = rejected || scan == SesContentScan.Result.REJECTED;
+        }
         SentEmail email = new SentEmail(messageId, region, source, request.toAddresses(),
                 request.ccAddresses(), request.bccAddresses(), request.replyToAddresses(), content.subject(),
                 content.bodyText(), content.bodyHtml());
@@ -313,6 +348,10 @@ public class SesService {
         email.setTenantName(firstNonBlank(request.tenantName()));
         if (content.hasHeaders()) {
             email.setHeaders(content.headers());
+        }
+        if (mime != null) {
+            email.setAttachments(sentAttachments(content.attachments()));
+            email.setMimeData(Base64.getEncoder().encodeToString(mime));
         }
         email.setEmailTags(request.emailTags());
         email.setInsights(SesMessageInsights.build(envelope,
@@ -326,18 +365,8 @@ public class SesService {
         List<String> relayedCc = filterUnsuppressed(request.ccAddresses(), suppressedReasons);
         List<String> relayedBcc = filterUnsuppressed(request.bccAddresses(), suppressedReasons);
         if (!rejected && sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
-            smtpRelay.relay(SmtpRelay.RelayMessage.builder(source)
-                    .returnPath(effectiveReturnPath)
-                    .to(relayedTo)
-                    .cc(relayedCc)
-                    .bcc(relayedBcc)
-                    .replyTo(request.replyToAddresses())
-                    .subject(content.subject())
-                    .bodyText(content.bodyText())
-                    .bodyHtml(content.bodyHtml())
-                    .headers(content.headers())
-                    .messageId(messageId)
-                    .build());
+            smtpRelay.relay(simpleRelayMessage(request, content, effectiveReturnPath, messageId,
+                    relayedTo, relayedCc, relayedBcc));
         } else {
             LOG.infov("SES email accepted but not relayed ({0}): messageId={1}",
                     rejected ? "content rejected" : "all recipients suppressed", messageId);
@@ -351,6 +380,38 @@ public class SesService {
                 request.toAddresses(), request.ccAddresses(), request.bccAddresses(), envelope,
                 suppressedReasons, rejected, request.emailTags(), content.headers(), region);
         return messageId;
+    }
+
+    private static SmtpRelay.RelayMessage simpleRelayMessage(SendEmailRequest request, EmailContent.Simple content,
+                                                             String returnPath, String messageId,
+                                                             List<String> to, List<String> cc,
+                                                             List<String> bcc) {
+        return SmtpRelay.RelayMessage.builder(request.source())
+                .returnPath(returnPath)
+                .to(to)
+                .cc(cc)
+                .bcc(bcc)
+                .replyTo(request.replyToAddresses())
+                .subject(content.subject())
+                .bodyText(content.bodyText())
+                .bodyHtml(content.bodyHtml())
+                .headers(content.headers())
+                .messageId(messageId)
+                .attachments(content.hasAttachments() ? content.attachments() : null)
+                .build();
+    }
+
+    private static List<SentAttachment> sentAttachments(List<MessageAttachment> attachments) {
+        List<SentAttachment> out = new ArrayList<>();
+        for (MessageAttachment attachment : attachments) {
+            String contentId = attachment.contentId() == null || attachment.contentId().isBlank()
+                    ? null
+                    : SmtpRelay.formatContentId(attachment.contentId());
+            out.add(new SentAttachment(attachment.fileName(), SmtpRelay.attachmentContentType(attachment),
+                    attachment.effectiveDisposition().name(), contentId, attachment.contentDescription(),
+                    attachment.size()));
+        }
+        return List.copyOf(out);
     }
 
     private String sendRawEmail(SendEmailRequest request, EmailContent.Raw raw) {
@@ -421,6 +482,7 @@ public class SesService {
         if (scan == SesContentScan.Result.UNREADABLE) {
             throw new AwsException("InvalidParameterValue", "Raw message could not be parsed.", 400);
         }
+        rejectBlockedAttachments(parsed.message());
         boolean rejected = scan == SesContentScan.Result.REJECTED;
         // AWS routes bounces to the Return-Path carried by the message, falling back to the
         // request's return path and then the sender. A rejected message keeps nothing read off its
@@ -1124,19 +1186,15 @@ public class SesService {
     }
 
     public List<Tag> listResourceTags(String arn, String region) {
+        if (arn == null) {
+            // AWS answers an omitted ResourceArn on this read with a 500 InternalFailure
+            // (probe-confirmed); Floci keeps a client error rather than mirror a server fault.
+            throw new AwsException("BadRequestException", "ResourceArn is required.", 400);
+        }
         ResourceRef ref = parseSesArn(arn);
         requireCallerAccount(ref);
-        List<Tag> tags = switch (ref.type()) {
-            case "configuration-set" -> configSetService.listTags(ref.name(), region);
-            case "template" -> templateService.listTags(ref.name(), region);
-            case "identity" -> identityService.listTags(ref.name(), region);
-            case "contact-list" -> contactService.listTags(ref.name(), region);
-            case "custom-verification-email-template" -> cvetService.listTags(ref.name(), region);
-            case "dedicated-ip-pool" -> dedicatedIpService.listTags(ref.name(), region);
-            case "tenant" -> tenantService.listTags(ref.name(), region);
-            default -> throw new AwsException("NotFoundException",
-                    "Resource " + arn + " was not found.", 404);
-        };
+        requireValidResourceName(ref);
+        List<Tag> tags = taggableDomains.get(ref.type()).listTags(ref.name(), region);
         // AWS checks existence against the signing region but keys the tag store by the literal
         // ARN: a mismatched ARN region passes the existence check above yet addresses an ARN
         // nothing was ever tagged under, so the result is empty (probe-confirmed across all six
@@ -1148,8 +1206,13 @@ public class SesService {
     }
 
     public void tagResource(String arn, String region, List<Tag> newTags) {
-        ResourceRef ref = parseSesArn(arn);
+        ResourceRef ref = parseSesArn(requireResourceArnMember(arn));
         requireCallerAccount(ref);
+        requireValidResourceName(ref);
+        // Existence in the signing region is checked before the ARN's region is compared: a missing
+        // resource is a 404 even when the regions also differ (probe-confirmed).
+        SesTaggable domain = taggableDomains.get(ref.type());
+        domain.listTags(ref.name(), region);
         if (!ref.region().equals(region)) {
             throw new AwsException("BadRequestException", "Failed to tag resource", 400);
         }
@@ -1157,44 +1220,27 @@ public class SesService {
         // checks and then applies the empty merge as a no-op (probe-confirmed).
         List<Tag> tags = newTags == null ? List.of() : newTags;
         SesTags.validate(tags);
-        switch (ref.type()) {
-            case "configuration-set" -> configSetService.tag(ref.name(), region, tags);
-            case "template" -> templateService.tag(ref.name(), region, tags);
-            case "identity" -> identityService.tag(ref.name(), region, tags);
-            case "contact-list" -> contactService.tag(ref.name(), region, tags);
-            case "custom-verification-email-template" -> cvetService.tag(ref.name(), region, tags);
-            case "dedicated-ip-pool" -> dedicatedIpService.tag(ref.name(), region, tags);
-            case "tenant" -> tenantService.tag(ref.name(), region, tags);
-            default -> throw new AwsException("NotFoundException",
-                    "Resource " + arn + " was not found.", 404);
-        }
+        domain.tag(ref.name(), region, tags);
     }
 
     public void untagResource(String arn, String region, List<String> tagKeys) {
-        ResourceRef ref = parseSesArn(arn);
+        ResourceRef ref = parseSesArn(requireResourceArnMember(arn));
         requireCallerAccount(ref);
         if (tagKeys == null || tagKeys.isEmpty()) {
             // AWS rejects a missing/empty TagKeys member with a message-less ValidationException
             // (probe-confirmed: only the error-type header, empty body), after the account guard
-            // and before the region guard. The null message is deliberate — it surfaces through
-            // Floci's standard error body as "message":null, which restJson1 SDKs parse the same
-            // way as AWS's empty body since they read x-amzn-errortype first.
+            // and before the name, existence and region checks. The null message is deliberate: it
+            // surfaces through Floci's standard error body as "message":null, which restJson1 SDKs
+            // parse the same way as AWS's empty body since they read x-amzn-errortype first.
             throw new AwsException("ValidationException", null, 400);
         }
+        requireValidResourceName(ref);
+        SesTaggable domain = taggableDomains.get(ref.type());
+        domain.listTags(ref.name(), region);
         if (!ref.region().equals(region)) {
             throw new AwsException("BadRequestException", "Failed to untag resource", 400);
         }
-        switch (ref.type()) {
-            case "configuration-set" -> configSetService.untag(ref.name(), region, tagKeys);
-            case "template" -> templateService.untag(ref.name(), region, tagKeys);
-            case "identity" -> identityService.untag(ref.name(), region, tagKeys);
-            case "contact-list" -> contactService.untag(ref.name(), region, tagKeys);
-            case "custom-verification-email-template" -> cvetService.untag(ref.name(), region, tagKeys);
-            case "dedicated-ip-pool" -> dedicatedIpService.untag(ref.name(), region, tagKeys);
-            case "tenant" -> tenantService.untag(ref.name(), region, tagKeys);
-            default -> throw new AwsException("NotFoundException",
-                    "Resource " + arn + " was not found.", 404);
-        }
+        domain.untag(ref.name(), region, tagKeys);
     }
 
     // name is everything after the type's first slash and may itself contain one: a tenant ARN's
@@ -1214,31 +1260,58 @@ public class SesService {
         }
     }
 
-    private static ResourceRef parseSesArn(String arn) {
-        if (arn == null || arn.isBlank()) {
-            throw new AwsException("BadRequestException", "ResourceArn is required.", 400);
+    // TagResource and UntagResource reject an omitted ResourceArn with the same message-less
+    // ValidationException as an omitted TagKeys (probe-confirmed).
+    private static String requireResourceArnMember(String arn) {
+        if (arn == null) {
+            throw new AwsException("ValidationException", null, 400);
         }
+        return arn;
+    }
+
+    // A configuration-set name that breaks the naming rule is a message-less ValidationException,
+    // after the account check and before existence (probe-confirmed).
+    private static void requireValidResourceName(ResourceRef ref) {
+        if ("configuration-set".equals(ref.type()) && !SesConfigurationSetService.isValidName(ref.name())) {
+            throw new AwsException("ValidationException", null, 400);
+        }
+    }
+
+    /**
+     * AWS answers every malformed tag ARN with one message (probe-confirmed). The partition and
+     * service are never compared, only required: any value addresses the same resource. The region
+     * may be empty; it only meets the signing-region comparison.
+     */
+    private ResourceRef parseSesArn(String arn) {
         AwsArnUtils.Arn parsed;
         try {
             parsed = AwsArnUtils.parse(arn);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("BadRequestException", "Invalid ARN: " + arn, 400);
+            throw invalidResourceArn();
         }
-        if (!"ses".equals(parsed.service())) {
-            throw new AwsException("BadRequestException",
-                    "ResourceArn must be a SES ARN: " + arn, 400);
-        }
-        if (parsed.region().isEmpty() || parsed.accountId().isEmpty()) {
-            throw new AwsException("BadRequestException",
-                    "ResourceArn must include region and account: " + arn, 400);
+        if (parsed.partition().isEmpty() || parsed.service().isEmpty() || parsed.accountId().isEmpty()) {
+            throw invalidResourceArn();
         }
         String resource = parsed.resource();
         int slash = resource.indexOf('/');
-        if (slash <= 0 || slash == resource.length() - 1) {
-            throw new AwsException("BadRequestException", "Invalid ARN: " + arn, 400);
+        if (slash < 0) {
+            throw invalidResourceArn();
         }
-        return new ResourceRef(parsed.accountId(), parsed.region(),
-                resource.substring(0, slash), resource.substring(slash + 1));
+        String type = resource.substring(0, slash);
+        String name = resource.substring(slash + 1);
+        if (!taggableDomains.containsKey(type) || name.isBlank()) {
+            throw invalidResourceArn();
+        }
+        // Identity names keep their pass-through: an email local part may legally hold either character.
+        if (!"identity".equals(type)
+                && (name.contains(":") || (!"tenant".equals(type) && name.contains("/")))) {
+            throw invalidResourceArn();
+        }
+        return new ResourceRef(parsed.accountId(), parsed.region(), type, name);
+    }
+
+    private static AwsException invalidResourceArn() {
+        return new AwsException("BadRequestException", "ResourceArn is not the expected format", 400);
     }
 
     // ──────────────────────────── Suppression list ────────────────────────────
@@ -1450,6 +1523,14 @@ public class SesService {
         if (!hasSubject && !hasText && !hasHtml) {
             throw new AwsException("InvalidTemplate",
                     "Template must have at least a subject, text, or html part.", 400);
+        }
+    }
+
+    // SES refuses the send outright for an attachment type it does not accept, unlike the content
+    // scan, which accepts the message and rejects it afterwards.
+    private static void rejectBlockedAttachments(Message parsed) {
+        if (SesContentScan.hasBlockedAttachment(parsed)) {
+            throw new AwsException("MessageRejected", "Message contains invalid content.", 400);
         }
     }
 

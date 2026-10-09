@@ -184,10 +184,12 @@ public class RdsAuthProxy {
 
             switch (engine) {
                 case POSTGRES -> {
+                    // forwardStartupParameters = true: an RDS for PostgreSQL endpoint is the
+                    // server itself, so the client's options and run-time parameters apply.
                     session = PostgresProtocolHandler.authenticate(
                                     client, connector, masterUsername, masterPassword, dbName,
                                     iamEnabled, sigV4, binding, tlsCertificates, authAdapter,
-                                    handshakeTimeoutMillis);
+                                    handshakeTimeoutMillis, true);
                     if (session != null) {
                         PostgresProtocolHandler.bridge(session);
                     }

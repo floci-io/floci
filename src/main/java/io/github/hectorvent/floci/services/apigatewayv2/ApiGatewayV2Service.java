@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
@@ -9,7 +10,6 @@ import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;

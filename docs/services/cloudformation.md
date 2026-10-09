@@ -116,29 +116,19 @@ passing model validation does not imply provider acceptance.
 `AWS::Cognito::UserPoolResourceServer` returns its `Identifier` for `Ref`. Changing `Identifier`
 or `UserPoolId` replaces the server; changing `Name` or `Scopes` updates it in place. Optional
 `Scopes` or individual scope entries can be omitted by `Fn::If` selecting `AWS::NoValue`.
-Changed-template updates and `DeleteStack` address the currently present server by `UserPoolId`
-and `Identifier`, including a server recreated outside the stack at the same address.
+The provisioner keeps the pool and identifier together in private replacement bookkeeping,
+so changing only the pool still cleans up the displaced server without changing the `Ref` value.
 
-Failed in-place restoration keeps the prior name and scopes for retry while the stack still
-allows `UpdateStack`. If a later update skips that resource, pending restoration can leave the
-stack in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, which blocks another update. `DeleteStack` removes
-the managed server and retains its tracking if deletion fails. Committed replacements honor
-`UpdateReplacePolicy: Retain`. Otherwise, old-server deletion uses at most three attempts; after
-three failures the old server leaves stack management and must be deleted through Cognito.
-Failed rollback replacements remain tracked while their cleanup retry budget remains. Floci's
-historical cleanup hooks stop after three failed attempts. Exhausted records stay abandoned across
-later updates and `DeleteStack` retries, including when deletion of the current managed server fails.
-Abandoning historical cleanup does not discard a pending restoration snapshot. The committed server stays current.
-Historical cleanup that completes successfully stays removed if a later provisioning step fails
-and the committed resource metadata is restored. Failures before cleanup completes keep the
-cleanup record for retry.
-Before retrying historical cleanup, Floci checks live resources managed by other stacks in the same
-account, including stacks in another region. If one manages the same pool and identifier, Floci
-skips deletion and permanently drops that cleanup record. A later deletion of the other stack does
-not reactivate the record. This lookup and the subsequent Cognito deletion are not atomic: a
-concurrent stack create can claim the address after the lookup. Direct Cognito API writers are not
-tracked as stack claims and remain subject to address-based deletion.
-`ContinueUpdateRollback` remains unsupported.
+Replacement rollback and historical cleanup use the shared bounded replacement lifecycle.
+Committed replacements honor `UpdateReplacePolicy: Retain`; failed rollback replacements remain
+owed cleanup while their retry budget remains. Exhausted historical records are abandoned across
+later updates and stack-delete retries. Historical cleanup is address-based and does not provide
+an atomic ownership check against another stack or a direct Cognito API writer reusing the address.
+
+Failed in-place restoration preserves the original name and scopes for a later update retry.
+Deleting the current server keeps this snapshot if deletion fails. An update that skips a server
+with pending restoration can remain in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, blocking another
+update. `ContinueUpdateRollback` remains unsupported.
 
 ## Supported Resource Types
 
@@ -176,7 +166,7 @@ cross-resource references.
 | Cloud Map | `HttpNamespace`, `PrivateDnsNamespace`, `PublicDnsNamespace`, `Service` |
 | API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
 | API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `VpcLink` |
-| AppSync | `GraphQLApi`, `GraphQLSchema`, `DataSource`, `FunctionConfiguration`, `Resolver`, `ApiKey` |
+| AppSync | `GraphQLApi`, `GraphQLSchema`, `DataSource`, `FunctionConfiguration`, `Resolver`, `ApiKey`. `Ref` on `GraphQLApi` and `ApiKey` returns the id where AWS returns the ARN. See [AppSync](appsync.md#cloudformation) for `Ref` and `Fn::GetAtt` compared with AWS. |
 | Step Functions | `StateMachine` |
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
@@ -318,6 +308,7 @@ accepts, not only by name:
 - A no-op redeploy keeps the existing physical function name and does not call Lambda update APIs, so warm containers can be reused.
 - Code and mutable configuration changes update the existing function in place.
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
+- A changed `DurableConfig` updates the function in place. A `RetentionPeriodInDays` the template leaves out goes back to 14, and a `KMSKeyArn` it leaves out is cleared. Adding or removing `DurableConfig` replaces the function, since Lambda cannot do either in place. A durable function created without `Timeout` gets `min(ExecutionTimeout, 900)`, while an update without it sets 3, as on AWS.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 - Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
 - `Tags` are applied when the function is created, including a replacement function. On `UpdateStack` the template's tags are applied and only the keys the previous template set and the new one drops are removed, so a tag added outside the template is kept, as in AWS.
@@ -432,6 +423,9 @@ Lambda. floci supports two shapes:
   event and waits for it to `PUT` its `SUCCESS`/`FAILED` result to the response URL. Inline `ZipFile`
   handlers get the `cfn-response` / `cfnresponse` module bundled in (see the Lambda row in
   [Supported Resource Types](#supported-resource-types)), so Solutions-style handlers work unmodified.
+  The event's `StackId` is the id of the stack that contains the resource, the value
+  `Ref AWS::StackId` returns and `DescribeStacks` reports, on `Create`, `Update` and `Delete` alike.
+  In a nested stack it is the nested stack's own id.
 - **CDK Provider framework** — when the `ServiceToken` points at a CDK `framework.onEvent` function,
   floci drives the asynchronous provider protocol: `onEvent` starts the work and `framework.isComplete`
   is polled (via Step Functions [`Retry`](step-functions.md)) until it reports done, at which point the

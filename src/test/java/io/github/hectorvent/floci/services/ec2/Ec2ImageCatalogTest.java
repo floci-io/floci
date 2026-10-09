@@ -1,19 +1,18 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import org.junit.jupiter.api.Test;
-
-import io.quarkus.test.junit.QuarkusTest;
-import io.github.hectorvent.floci.core.common.AwsException;
-import jakarta.inject.Inject;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class Ec2ImageCatalogTest {

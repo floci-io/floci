@@ -121,6 +121,37 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         return Optional.of(response.body());
     }
 
+    /**
+     * Only a confirmed 404 means absent; confirmed live (a {@code GET} on a missing directory, or a
+     * never-provisioned repository, both answer a clean 404). Anything else, an auth failure or a
+     * server error, throws instead of collapsing to "not found": a Reposilite outage must not read
+     * as every Maven package having been deleted.
+     */
+    @Override
+    public boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        String baseUrl = manager.ensureReady();
+        StringBuilder path = new StringBuilder("/").append(SidecarUriUtils.encodeSegment(repositoryContainerId));
+        for (String namespacePart : namespace.split("\\.", -1)) {
+            path.append('/').append(SidecarUriUtils.encodeSegment(namespacePart));
+        }
+        path.append('/').append(SidecarUriUtils.encodeSegment(packageName)).append('/');
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path.toString()))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        int status = send(request, BodyHandlers.discarding()).statusCode();
+        if (status == 404) {
+            return false;
+        }
+        if (status != 200) {
+            throw new IllegalStateException("Could not look up " + packageName + " on the Reposilite sidecar: "
+                    + "upstream returned " + status);
+        }
+        return true;
+    }
+
     /** Ensures a Reposilite repository named {@code repoId} exists, creating it if not. */
     public void ensureRepository(String repoId) {
         String baseUrl = manager.ensureReady();

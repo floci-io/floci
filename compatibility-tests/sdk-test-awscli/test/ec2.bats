@@ -451,6 +451,56 @@ create_attachment_fixture() {
     TRANSIT_GATEWAY_ID=""
 }
 
+# ─── transit gateway peering attachments ────────────────────────────────────
+
+@test "EC2: a transit gateway peering is accepted, holds its gateway, and is deleted" {
+    local out peer_tgw account id
+    out=$(aws_cmd ec2 create-transit-gateway --description "bats peering requester")
+    TRANSIT_GATEWAY_ID=$(json_get "$out" '.TransitGateway.TransitGatewayId')
+    out=$(aws_cmd ec2 create-transit-gateway --description "bats peering accepter")
+    peer_tgw=$(json_get "$out" '.TransitGateway.TransitGatewayId')
+    account=$(json_get "$out" '.TransitGateway.OwnerId')
+
+    run aws_cmd ec2 create-transit-gateway-peering-attachment \
+        --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --peer-transit-gateway-id "$peer_tgw" \
+        --peer-account-id "$account" \
+        --peer-region "$AWS_DEFAULT_REGION" \
+        --tag-specifications 'ResourceType=transit-gateway-attachment,Tags=[{Key=Name,Value=bats-peering}]'
+    assert_success
+    id=$(json_get "$output" '.TransitGatewayPeeringAttachment.TransitGatewayAttachmentId')
+    [ "$(json_get "$output" '.TransitGatewayPeeringAttachment.State')" = "pendingAcceptance" ]
+
+    # How the accepter module finds it: by its own gateway and the pending state.
+    run aws_cmd ec2 describe-transit-gateway-peering-attachments \
+        --filters "Name=transit-gateway-id,Values=$peer_tgw" "Name=state,Values=pendingAcceptance"
+    assert_success
+    [ "$(json_get "$output" '.TransitGatewayPeeringAttachments[0].TransitGatewayAttachmentId')" = "$id" ]
+    [ "$(json_get "$output" '.TransitGatewayPeeringAttachments[0].AccepterTgwInfo.TransitGatewayId')" = "$peer_tgw" ]
+    [ "$(json_get "$output" '.TransitGatewayPeeringAttachments[0].Tags[0].Value')" = "bats-peering" ]
+
+    run aws_cmd ec2 accept-transit-gateway-peering-attachment --transit-gateway-attachment-id "$id"
+    assert_success
+
+    run aws_cmd ec2 describe-transit-gateway-peering-attachments --transit-gateway-attachment-ids "$id"
+    assert_success
+    [ "$(json_get "$output" '.TransitGatewayPeeringAttachments[0].State')" = "available" ]
+
+    run aws_cmd ec2 delete-transit-gateway --transit-gateway-id "$peer_tgw"
+    assert_failure
+    assert_output --partial "IncorrectState"
+
+    run aws_cmd ec2 delete-transit-gateway-peering-attachment --transit-gateway-attachment-id "$id"
+    assert_success
+
+    run aws_cmd ec2 describe-transit-gateway-peering-attachments --transit-gateway-attachment-ids "$id"
+    assert_failure
+    assert_output --partial "InvalidTransitGatewayAttachmentID.NotFound"
+
+    run aws_cmd ec2 delete-transit-gateway --transit-gateway-id "$peer_tgw"
+    assert_success
+}
+
 # ─── transit gateway route tables, associations, propagations and routes ────
 
 @test "EC2: route table associations move between tables" {

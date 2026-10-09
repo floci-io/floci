@@ -20,6 +20,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -27,6 +28,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -181,6 +183,96 @@ class LambdaCfnProvisionerTest {
 
         verify(lambda, never()).untagResource(anyString(), any());
         verify(lambda).tagResource(FUNCTION_ARN + "my-fn", Map.of("team", "b"));
+    }
+
+    @Test
+    void addingDurableConfigToANamedFunctionCannotReplaceIt() {
+        stubInPlaceUpdate("my-fn", Map.of());
+        ObjectNode props = props("my-fn");
+        props.putObject("DurableConfig").put("ExecutionTimeout", 60);
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> provisioner.provision(function("my-fn"), props, updateCtx("my-fn")));
+
+        assertEquals("Cannot replace Lambda function my-fn without a new FunctionName", rejected.getMessage());
+        verify(lambda, never()).updateFunctionConfiguration(anyString(), anyString(), anyMap());
+    }
+
+    @Test
+    void aDurableConfigThatIsNotAnObjectLeavesTheFunctionAlone() {
+        // A generated name, so treating the value as removed would replace and delete the function.
+        String generated = "my-stack-MyFunction-ABCDEFGHIJKL";
+        LambdaFunction existing = lambdaFunction(generated);
+        existing.setDurableExecutionTimeout(60);
+        when(lambda.getFunction(REGION, generated)).thenReturn(existing);
+        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("replacement"));
+        for (JsonNode malformed : List.of(mapper.getNodeFactory().textNode("abc"), mapper.getNodeFactory().textNode(""),
+                mapper.getNodeFactory().numberNode(5), mapper.createArrayNode())) {
+            StackResource r = function(generated);
+            r.getAttributes().put("FlociLambdaFunctionNameMode", "generated");
+            ObjectNode props = mapper.createObjectNode();
+            props.set("DurableConfig", malformed);
+
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> provisioner.provision(r, props, updateCtx(generated)));
+
+            assertEquals("ValidationError", rejected.getErrorCode());
+        }
+        verify(lambda, never()).createFunction(anyString(), anyMap());
+        verify(lambda, never()).updateFunctionConfiguration(anyString(), anyString(), anyMap());
+        verify(lambda, never()).deleteFunction(anyString(), anyString());
+    }
+
+    @Test
+    void aDurableConfigWithoutExecutionTimeoutOrWithAnUnknownMemberIsRejectedOnUpdate() {
+        LambdaFunction existing = lambdaFunction("my-fn");
+        existing.setDurableExecutionTimeout(60);
+        when(lambda.getFunction(REGION, "my-fn")).thenReturn(existing);
+        ObjectNode withoutTimeout = props("my-fn");
+        withoutTimeout.putObject("DurableConfig").put("RetentionPeriodInDays", 5);
+        ObjectNode unknownMember = props("my-fn");
+        unknownMember.putObject("DurableConfig").put("ExecutionTimeout", 90).put("executionTimeout", 1);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> provisioner.provision(function("my-fn"), withoutTimeout, updateCtx("my-fn")));
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> provisioner.provision(function("my-fn"), unknownMember, updateCtx("my-fn")));
+
+        assertEquals("AWS::Lambda::Function DurableConfig requires ExecutionTimeout", missing.getMessage());
+        assertEquals("AWS::Lambda::Function DurableConfig does not allow the member executionTimeout",
+                unknown.getMessage());
+        verify(lambda, never()).updateFunctionConfiguration(anyString(), anyString(), anyMap());
+    }
+
+    @Test
+    void anExecutionTimeoutBeyondAnIntegerReachesLambdaUnchanged() {
+        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("my-fn"));
+        ObjectNode props = props("my-fn");
+        props.putObject("DurableConfig").put("ExecutionTimeout", 4_294_967_356L);
+
+        provisioner.provision(function(null), props, ctx());
+
+        assertEquals(4_294_967_356L, ((Map<?, ?>) capturedCreateRequest().get("DurableConfig")).get("ExecutionTimeout"));
+    }
+
+    @Test
+    void aKmsKeyArnTheTemplateDropsIsClearedOnUpdate() {
+        LambdaFunction existing = lambdaFunction("my-fn");
+        existing.setDurableExecutionTimeout(60);
+        existing.setDurableRetentionPeriodInDays(14);
+        existing.setDurableKmsKeyArn("arn:aws:kms:us-east-1:000000000000:key/k1");
+        when(lambda.getFunction(REGION, "my-fn")).thenReturn(existing);
+        when(lambda.updateFunctionConfiguration(anyString(), anyString(), anyMap())).thenReturn(existing);
+        when(lambda.updateFunctionCode(anyString(), anyString(), anyMap())).thenReturn(existing);
+        when(lambda.listTags(FUNCTION_ARN + "my-fn")).thenReturn(new HashMap<>());
+        ObjectNode props = props("my-fn");
+        props.putObject("DurableConfig").put("ExecutionTimeout", 60);
+
+        provisioner.provision(function("my-fn"), props, updateCtx("my-fn"));
+
+        verify(lambda).updateFunctionConfiguration(eq(REGION), eq("my-fn"),
+                argThat(request -> "".equals(((Map<?, ?>) request.get("DurableConfig")).get("KMSKeyArn"))));
+        verify(lambda, times(1)).getFunction(REGION, "my-fn");
     }
 
     @SuppressWarnings("unchecked")

@@ -403,7 +403,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         // only MapPublicIpOnLaunch is applied; changed, a new subnet replaces it.
         Subnet existing = ctx.isUpdate() ? findSubnet(ctx.priorPhysicalId(), ctx.region()) : null;
         boolean reuse = existing != null && Objects.equals(vpcId, existing.getVpcId())
-                && Objects.equals(cidr, existing.getCidrBlock())
+                // Both sides canonical: a subnet saved before canonicalization may still hold host bits.
+                && CidrCanonicalizer.sameBlock(cidr, existing.getCidrBlock())
                 && (az == null || az.equals(existing.getAvailabilityZone()));
         Subnet subnet = reuse ? existing : ec2Service.createSubnet(ctx.region(), vpcId, cidr, az);
         r.setPhysicalId(subnet.getSubnetId());

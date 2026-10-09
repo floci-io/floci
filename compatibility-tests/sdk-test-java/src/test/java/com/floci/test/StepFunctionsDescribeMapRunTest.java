@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -20,8 +21,6 @@ import software.amazon.awssdk.services.sfn.model.MapRunExecutionCounts;
 import software.amazon.awssdk.services.sfn.model.MapRunItemCounts;
 import software.amazon.awssdk.services.sfn.model.MapRunStatus;
 import software.amazon.awssdk.services.sfn.model.ResourceNotFoundException;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;

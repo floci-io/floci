@@ -176,7 +176,7 @@ public class RabbitMqManager {
         String shortId = info.containerId().length() >= 8
                 ? info.containerId().substring(0, 8)
                 : info.containerId();
-        String logGroup = "/aws/amazonmq/broker/" + broker.getBrokerId();
+        String logGroup = broker.generalLogGroup();
         String logStream = logStreamer.generateLogStreamName(shortId);
         String region = brokerRegion(broker);
         Closeable logHandle = logStreamer.attach(

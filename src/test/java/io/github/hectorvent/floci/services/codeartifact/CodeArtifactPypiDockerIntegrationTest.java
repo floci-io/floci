@@ -95,6 +95,11 @@ class CodeArtifactPypiDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertEquals(new String(content, StandardCharsets.UTF_8), new String(fetched, StandardCharsets.UTF_8));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package=" + PACKAGE_NAME)
+                .then().statusCode(200).body("package.name", equalTo(PACKAGE_NAME))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"));
     }
 
     /**
@@ -148,6 +153,10 @@ class CodeArtifactPypiDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/pypi/" + DOMAIN + "/no-such-repo/simple/does-not-exist/")
                 .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test

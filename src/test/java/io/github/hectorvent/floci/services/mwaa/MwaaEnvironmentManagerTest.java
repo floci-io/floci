@@ -1,6 +1,11 @@
 package io.github.hectorvent.floci.services.mwaa;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Mount;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
@@ -11,12 +16,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
-import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
-import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.Mount;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;

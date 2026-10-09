@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
@@ -15,7 +16,6 @@ import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

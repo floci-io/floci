@@ -1,8 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
-import org.jboss.logging.Logger;
-
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.time.ZoneId;

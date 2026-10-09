@@ -17,6 +17,9 @@ on:
       - 'src/main/resources/aws/**'
       - 'tools/partition/**'
       - 'tools/aws/**'
+      - 'tools/slr/**'
+      - 'src/main/resources/iam/service-linked-roles.tsv'
+      - 'src/main/resources/iam/managed-policy-documents.json'
       - 'Makefile'
       - '.github/workflows/partition-literals.yml'
   push:
@@ -27,6 +30,9 @@ on:
       - 'src/main/resources/aws/**'
       - 'tools/partition/**'
       - 'tools/aws/**'
+      - 'tools/slr/**'
+      - 'src/main/resources/iam/service-linked-roles.tsv'
+      - 'src/main/resources/iam/managed-policy-documents.json'
       - 'Makefile'
       - '.github/workflows/partition-literals.yml'
 
@@ -89,4 +95,14 @@ jobs:
       # or its generator changes, so an outage cannot fail an unrelated Java pull request.
       - name: Check the vendored IAM namespace list is well-formed
         run: make iam-namespaces-check
+
+      # Also offline: the service-linked role table is checked against the vendored managed
+      # policy documents in the repository, never against AWS. The half that comes from a
+      # recorded create cannot be re-derived without the snapshot, which is why every row in
+      # the table carries the source it rests on.
+      - name: Run the service-linked role generator tests
+        run: make slr-test
+
+      - name: Check the service-linked role table against the vendored policy documents
+        run: make slr-check
 

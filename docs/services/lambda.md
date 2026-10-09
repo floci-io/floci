@@ -768,7 +768,8 @@ is a permanent diff rather than a cosmetic omission.
 `DurableConfig` requires `ExecutionTimeout` on create. A durable function created without
 a `Timeout` gets `min(ExecutionTimeout, 900)`. It always logs in JSON format, and
 `LogFormat: Text` is rejected. On update the members are merged, and a function created
-without `DurableConfig` cannot gain one. See Durable Functions for the execution itself.
+without `DurableConfig` cannot gain one. CloudFormation and Terraform (`durable_config`) replace
+the function to add or remove it. See Durable Functions for the execution itself.
 
 `LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
 `[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any

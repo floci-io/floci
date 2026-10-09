@@ -1081,4 +1081,32 @@ class ServiceLastAccessedIntegrationTest {
             .statusCode(200)
             .body(containsString("ListPoliciesGrantingServiceAccessResponse"));
     }
+
+    /**
+     * Two of the three constraint reports that were still opening without the count. The third,
+     * {@code optionalInt}, is reached only through CredentialAgeDays and is pinned beside the test
+     * that already exercises it. None of their text was pinned before, which is why they survived
+     * a change that touched every other one.
+     */
+    @Test
+    void theRemainingEnumReportsAlsoOpenWithTheCount() {
+        // GenerateServiceLastAccessedDetails: the Granularity enum. The ARN has to resolve first,
+        // because the handler looks the target up before the granularity is checked, so a
+        // nonexistent one answers NoSuchEntity and never reaches it.
+        String arn = createUser("granularity-" + suffix());
+        iam("GenerateServiceLastAccessedDetails")
+            .formParam("Arn", arn)
+            .formParam("Granularity", "HOURLY")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("ValidationError"))
+            .body(containsString("1 validation error detected"))
+            .body(containsString("Member must satisfy enum value set"));
+
+        // ListPolicies: the Scope enum.
+        iam("ListPolicies").formParam("Scope", "Everything")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("ValidationError"))
+            .body(containsString("1 validation error detected"))
+            .body(containsString("Member must satisfy enum value set"));
+    }
 }

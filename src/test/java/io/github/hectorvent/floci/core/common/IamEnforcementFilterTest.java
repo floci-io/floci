@@ -1337,7 +1337,43 @@ class IamEnforcementFilterTest {
                 "AKIADENIEDUSER/20260907/us-east-1/s3/aws4_request");
         when(containerRequest.getHeaderString("Authorization")).thenReturn(null);
         when(containerRequest.getMediaType()).thenReturn(null);
-        when(accountResolver.extractAccessKeyId("Credential=AKIADENIEDUSER/20260907/us-east-1/s3/aws4_request"))
+        when(accountResolver.extractAccessKeyId("AWS4-HMAC-SHA256 Credential=AKIADENIEDUSER/20260907/us-east-1/s3/aws4_request"))
+                .thenReturn("AKIADENIEDUSER");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:PutObject");
+        when(iamService.resolveCallerContext("AKIADENIEDUSER"))
+                .thenReturn(CallerContext.of(List.of("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Deny","Action":"s3:PutObject","Resource":"*"}
+                        ]}""")));
+        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+                .thenReturn(List.of("arn:aws:s3:::some-bucket/test.txt"));
+        when(conditionContextResolver.resolve("s3", "s3:PutObject", containerRequest))
+                .thenReturn(null);
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("s3:PutObject"),
+                eq("arn:aws:s3:::some-bucket/test.txt"),
+                any()))
+                .thenReturn(IamPolicyEvaluator.Decision.DENY);
+
+        newFilter().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any(Response.class));
+    }
+
+    @Test
+    void filterFallsBackToPresignedCredentialWhenAuthorizationHeaderIsBlank() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("us-east-1");
+
+        stubPresignedCredential(containerRequest,
+                "AKIADENIEDUSER/20260907/us-east-1/s3/aws4_request");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn("   ");
+        when(containerRequest.getMediaType()).thenReturn(null);
+        when(accountResolver.extractAccessKeyId("AWS4-HMAC-SHA256 Credential=AKIADENIEDUSER/20260907/us-east-1/s3/aws4_request"))
                 .thenReturn("AKIADENIEDUSER");
         when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:PutObject");
         when(iamService.resolveCallerContext("AKIADENIEDUSER"))
@@ -1372,7 +1408,7 @@ class IamEnforcementFilterTest {
         stubPresignedCredential(containerRequest,
                 "AKIAALLOWEDUSER/20260907/us-east-1/s3/aws4_request");
         when(containerRequest.getHeaderString("Authorization")).thenReturn(null);
-        when(accountResolver.extractAccessKeyId("Credential=AKIAALLOWEDUSER/20260907/us-east-1/s3/aws4_request"))
+        when(accountResolver.extractAccessKeyId("AWS4-HMAC-SHA256 Credential=AKIAALLOWEDUSER/20260907/us-east-1/s3/aws4_request"))
                 .thenReturn("AKIAALLOWEDUSER");
         when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:PutObject");
         when(iamService.resolveCallerContext("AKIAALLOWEDUSER"))

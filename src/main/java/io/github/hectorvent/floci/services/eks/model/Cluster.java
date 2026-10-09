@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -119,10 +120,33 @@ public class Cluster {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Boolean defaultStorageClass;
 
+    // Internal persisted map of joined EC2 instance IDs to their region.
+    @JsonProperty("joinedInstanceIds")
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private Map<String, String> joinedInstanceIds;
+
     private AccessConfig accessConfig;
 
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
+
+    public Map<String, String> getJoinedInstanceIds() {
+        if (joinedInstanceIds != null && !(joinedInstanceIds instanceof ConcurrentHashMap)) {
+            joinedInstanceIds = new ConcurrentHashMap<>(joinedInstanceIds);
+        }
+        return joinedInstanceIds;
+    }
+
+    public void setJoinedInstanceIds(Map<String, String> joinedInstanceIds) {
+        this.joinedInstanceIds = joinedInstanceIds != null ? new ConcurrentHashMap<>(joinedInstanceIds) : null;
+    }
+
+    public synchronized void recordJoinedInstance(String instanceId, String region) {
+        if (joinedInstanceIds == null) {
+            joinedInstanceIds = new ConcurrentHashMap<>();
+        }
+        joinedInstanceIds.put(instanceId, region);
+    }
 
     public Cluster() {}
 
@@ -228,6 +252,7 @@ public class Cluster {
         c.nodeInstanceType = this.nodeInstanceType;
         c.clusterArgs = this.clusterArgs != null ? new ArrayList<>(this.clusterArgs) : null;
         c.defaultStorageClass = this.defaultStorageClass;
+        c.joinedInstanceIds = this.joinedInstanceIds != null ? new ConcurrentHashMap<>(this.joinedInstanceIds) : null;
         c.accessConfig = this.accessConfig;
         return c;
     }

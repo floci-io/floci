@@ -40,7 +40,7 @@ import static org.mockito.Mockito.when;
  * {@link HttpServer}, not a mock of the JDK {@link HttpClient}, since that client's request/response
  * types are effectively unmockable) so the proxy-passthrough, auth-resolution, and pre-upload
  * overwrite-rejection logic all run for real. {@link CodeArtifactService} and
- * {@link PypiserverSidecarManager} are mocked: what they do is already covered by
+ * {@link PypiserverSidecarClient} are mocked: what they do is already covered by
  * {@code CodeArtifactServiceTest} and {@code PypiserverSidecarManagerTest}, what matters here is how
  * this controller uses their results.
  */
@@ -54,7 +54,7 @@ class CodeArtifactPypiControllerTest {
     private HttpServer backend;
     private String backendUrl;
     private CodeArtifactService service;
-    private PypiserverSidecarManager pypiserver;
+    private PypiserverSidecarClient pypiserver;
     private CodeArtifactPypiController controller;
 
     @BeforeEach
@@ -64,7 +64,7 @@ class CodeArtifactPypiControllerTest {
         backendUrl = "http://127.0.0.1:" + backend.getAddress().getPort();
 
         service = mock(CodeArtifactService.class);
-        pypiserver = mock(PypiserverSidecarManager.class);
+        pypiserver = mock(PypiserverSidecarClient.class);
         when(service.resolveAuthorizationToken(anyString(), eq(DOMAIN)))
                 .thenReturn(Optional.of(new AuthorizationTokenScope(OWNER, REGION)));
         when(service.ensureFormatContainerId(eq("pypi"), eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY)))

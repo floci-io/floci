@@ -16,9 +16,9 @@ import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederati
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
-import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
+import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
@@ -903,9 +903,9 @@ public class IamQueryHandler {
             return Integer.valueOf(raw.trim());
         } catch (NumberFormatException e) {
             throw new AwsException("ValidationError",
-                    "Value '" + raw + "' at '" + Character.toLowerCase(name.charAt(0))
-                            + name.substring(1) + "' failed to satisfy constraint: Member must be "
-                            + "an integer", 400);
+                    "1 validation error detected: Value '" + raw + "' at '"
+                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                            + "' failed to satisfy constraint: Member must be an integer", 400);
         }
     }
 
@@ -1354,8 +1354,8 @@ public class IamQueryHandler {
     }
 
     private Response handleUpdateAssumeRolePolicy(MultivaluedMap<String, String> params) {
-        iamService.updateAssumeRolePolicy(getParam(params, "RoleName"),
-                getParam(params, "PolicyDocument"));
+        iamService.updateAssumeRolePolicy(requireParam(params, "RoleName"),
+                requireParam(params, "PolicyDocument"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAssumeRolePolicy", AwsNamespaces.IAM)).build();
     }
 
@@ -2020,27 +2020,27 @@ public class IamQueryHandler {
     // =========================================================================
 
     private Response handlePutUserPermissionsBoundary(MultivaluedMap<String, String> params) {
-        String userName = getParam(params, "UserName");
-        String boundaryArn = getParam(params, "PermissionsBoundary");
+        String userName = requireParam(params, "UserName");
+        String boundaryArn = requireParam(params, "PermissionsBoundary");
         iamService.putUserPermissionsBoundary(userName, boundaryArn);
         return Response.ok(AwsQueryResponse.envelope("PutUserPermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handleDeleteUserPermissionsBoundary(MultivaluedMap<String, String> params) {
-        String userName = getParam(params, "UserName");
+        String userName = requireParam(params, "UserName");
         iamService.deleteUserPermissionsBoundary(userName);
         return Response.ok(AwsQueryResponse.envelope("DeleteUserPermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handlePutRolePermissionsBoundary(MultivaluedMap<String, String> params) {
-        String roleName = getParam(params, "RoleName");
-        String boundaryArn = getParam(params, "PermissionsBoundary");
+        String roleName = requireParam(params, "RoleName");
+        String boundaryArn = requireParam(params, "PermissionsBoundary");
         iamService.putRolePermissionsBoundary(roleName, boundaryArn);
         return Response.ok(AwsQueryResponse.envelope("PutRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handleDeleteRolePermissionsBoundary(MultivaluedMap<String, String> params) {
-        String roleName = getParam(params, "RoleName");
+        String roleName = requireParam(params, "RoleName");
         iamService.deleteRolePermissionsBoundary(roleName);
         return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
@@ -2913,7 +2913,8 @@ public class IamQueryHandler {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
             throw new AwsException("ValidationError",
-                    "Value null at '" + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                    "1 validation error detected: Value null at '"
+                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
                             + "' failed to satisfy constraint: Member must not be null", 400);
         }
         return value;

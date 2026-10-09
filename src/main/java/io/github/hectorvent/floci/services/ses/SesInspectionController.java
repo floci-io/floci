@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.ses.model.SentAttachment;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
@@ -90,6 +91,18 @@ public class SesInspectionController {
                     body.put("html_part", email.getBodyHtml());
                 } else {
                     body.putNull("html_part");
+                }
+
+                // A Simple send with attachments also carries the assembled MIME message, base64
+                // encoded like the RawData of a raw send, and a summary of each attachment.
+                if (email.getAttachments() != null && !email.getAttachments().isEmpty()) {
+                    ArrayNode attachments = node.putArray("Attachments");
+                    for (SentAttachment attachment : email.getAttachments()) {
+                        attachments.add(objectMapper.valueToTree(attachment));
+                    }
+                    if (email.getMimeData() != null) {
+                        node.put("RawData", email.getMimeData());
+                    }
                 }
             }
 

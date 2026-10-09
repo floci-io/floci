@@ -393,6 +393,51 @@ class AccountContextFilterTest {
     }
 
     @Test
+    void nonSigV4AuthHeaderDoesNotSelectAccount() {
+        ContainerRequestContext ctx = mockContext(
+                "X Credential=111122223333/20260617/us-west-2/s3/aws4_request",
+                null);
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+    }
+
+    @Test
+    void bareCredentialHeaderSelectsNeitherAccountNorRegion() {
+        ContainerRequestContext ctx = mockContext(
+                "Credential=111122223333/20260617/us-west-2/s3/aws4_request",
+                null);
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
+    @Test
+    void unrecognisedAuthHeaderStopsQueryCredentialFromSelectingAccount() {
+        ContainerRequestContext ctx = mockContext("Credential=111122223333/20260617/us-west-2/s3/aws4_request",
+                "444455556666/20260617/eu-west-1/s3/aws4_request");
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
+    @Test
+    void blankAuthHeaderDoesNotHidePresignedQueryCredential() {
+        ContainerRequestContext ctx = mockContext("   ", "111122223333/20260617/eu-west-1/s3/aws4_request");
+        filter.filter(ctx);
+        assertEquals("111122223333", requestContext.getAccountId());
+        assertEquals("eu-west-1", requestContext.getRegion());
+    }
+
+    @Test
+    void presignedCredentialWithoutAlgorithmDoesNotSelectAccount() {
+        ContainerRequestContext ctx = mockContext(null,
+                "111122223333/20260617/eu-west-1/s3/aws4_request", null);
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
+    @Test
     void populatesAccessKeyIdInRequestContextFromAuthHeader() {
         String auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
@@ -414,16 +459,6 @@ class AccountContextFilterTest {
         ContainerRequestContext ctx = mockContext(null, null);
         filter.filter(ctx);
         assertNull(requestContext.getAccessKeyId());
-    }
-
-    @Test
-    void resolvesFromPresignedCredentialWhenAlgorithmIsMissing() {
-        ContainerRequestContext ctx = mockContext(null,
-                "AKIAIOSFODNN7EXAMPLE/20261001/us-east-1/sqs/aws4_request", null);
-        filter.filter(ctx);
-        assertEquals("AKIAIOSFODNN7EXAMPLE", requestContext.getAccessKeyId());
-        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
-        assertEquals("us-east-1", requestContext.getRegion());
     }
 
     @Test
