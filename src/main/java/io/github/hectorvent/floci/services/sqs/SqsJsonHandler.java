@@ -327,6 +327,7 @@ public class SqsJsonHandler {
     private Response handleDeleteMessageBatch(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
         JsonNode entries = request.path("Entries");
+        sqsService.validateBatchEntryCount(entries.isArray() ? entries.size() : 0);
 
         ArrayNode successful = objectMapper.createArrayNode();
         ArrayNode failed = objectMapper.createArrayNode();
@@ -362,6 +363,7 @@ public class SqsJsonHandler {
     private Response handleSendMessageBatch(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
         JsonNode entries = request.path("Entries");
+        sqsService.validateBatchEntryCount(entries.isArray() ? entries.size() : 0);
 
         ArrayNode successful = objectMapper.createArrayNode();
         ArrayNode failed = objectMapper.createArrayNode();
@@ -513,6 +515,7 @@ public class SqsJsonHandler {
     private Response handleChangeMessageVisibilityBatch(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
         JsonNode entries = request.path("Entries");
+        sqsService.validateBatchEntryCount(entries.isArray() ? entries.size() : 0);
 
         List<SqsService.ChangeVisibilityBatchEntry> batchEntries = new ArrayList<>();
         if (entries.isArray()) {

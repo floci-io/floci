@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -760,5 +762,82 @@ class SqsJsonProtocolTest {
                 .body("{\"QueueUrl\":\"" + testQueueUrl + "\"}")
             .when().post("/");
         }
+    }
+
+    @Test
+    void batchRequestsWithMoreThanTenEntriesAreRejectedWithoutProcessingAnyEntry() {
+        String batchQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-batch-limit-queue\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+        try {
+            for (String target : List.of("SendMessageBatch", "DeleteMessageBatch", "ChangeMessageVisibilityBatch")) {
+                given()
+                    .contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "AmazonSQS." + target)
+                    .body(batchBody(batchQueueUrl, 11))
+                .when().post("/")
+                .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("TooManyEntriesInBatchRequest"));
+            }
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\"]}")
+            .when().post("/")
+            .then().statusCode(200)
+                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"));
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void sendMessageBatchAcceptsExactlyTenEntries() {
+        String batchQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-batch-ten-queue\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+        try {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+                .body(batchBody(batchQueueUrl, 10))
+            .when().post("/")
+            .then().statusCode(200)
+                .body("Successful", hasSize(10));
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    // One body shape serves all three batch actions: unknown members are ignored, and the
+    // entry-count check runs before any entry is read.
+    private static String batchBody(String url, int entryCount) {
+        StringBuilder entries = new StringBuilder();
+        for (int i = 0; i < entryCount; i++) {
+            if (i > 0) {
+                entries.append(',');
+            }
+            entries.append("{\"Id\":\"e").append(i).append("\",\"MessageBody\":\"m").append(i)
+                    .append("\",\"ReceiptHandle\":\"rh\",\"VisibilityTimeout\":0}");
+        }
+        return "{\"QueueUrl\":\"" + url + "\",\"Entries\":[" + entries + "]}";
     }
 }

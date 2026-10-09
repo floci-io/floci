@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.sqs;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.*;
 
 import java.util.LinkedHashMap;
@@ -1030,5 +1031,47 @@ class SqsIntegrationTest {
             attributes.put(names.get(i), values.get(i));
         }
         return attributes;
+    }
+
+    @Test
+    void batchRequestsWithMoreThanTenEntriesAreRejectedWithoutProcessingAnyEntry() {
+        String batchQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-batch-limit-queue")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+        try {
+            Map<String, String> entryPrefixes = new LinkedHashMap<>();
+            entryPrefixes.put("SendMessageBatch", "SendMessageBatchRequestEntry");
+            entryPrefixes.put("DeleteMessageBatch", "DeleteMessageBatchRequestEntry");
+            entryPrefixes.put("ChangeMessageVisibilityBatch", "ChangeMessageVisibilityBatchRequestEntry");
+            for (Map.Entry<String, String> action : entryPrefixes.entrySet()) {
+                RequestSpecification request = given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", action.getKey())
+                    .formParam("QueueUrl", batchQueueUrl);
+                for (int i = 1; i <= 11; i++) {
+                    request = request
+                        .formParam(action.getValue() + "." + i + ".Id", "e" + i)
+                        .formParam(action.getValue() + "." + i + ".MessageBody", "m" + i)
+                        .formParam(action.getValue() + "." + i + ".ReceiptHandle", "rh")
+                        .formParam(action.getValue() + "." + i + ".VisibilityTimeout", "0");
+                }
+                request.when().post("/")
+                    .then()
+                    .statusCode(400)
+                    .body(containsString("AWS.SimpleQueueService.TooManyEntriesInBatchRequest"));
+            }
+
+            assertEquals("0", allQueueAttributes(batchQueueUrl).get("ApproximateNumberOfMessages"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", batchQueueUrl)
+            .when().post("/");
+        }
     }
 }

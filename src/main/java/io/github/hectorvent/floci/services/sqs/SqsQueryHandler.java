@@ -331,6 +331,7 @@ public class SqsQueryHandler {
 
     private Response handleDeleteMessageBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount(countBatchEntries(params, "DeleteMessageBatchRequestEntry"));
         XmlBuilder xml = new XmlBuilder();
 
         for (int i = 1; ; i++) {
@@ -355,6 +356,7 @@ public class SqsQueryHandler {
 
     private Response handleSendMessageBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount(countBatchEntries(params, "SendMessageBatchRequestEntry"));
         XmlBuilder xml = new XmlBuilder();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
@@ -504,6 +506,7 @@ public class SqsQueryHandler {
 
     private Response handleChangeMessageVisibilityBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount(countBatchEntries(params, "ChangeMessageVisibilityBatchRequestEntry"));
         List<SqsService.ChangeVisibilityBatchEntry> entries = new ArrayList<>();
         for (int i = 1; ; i++) {
             String id = getParam(params, "ChangeMessageVisibilityBatchRequestEntry." + i + ".Id");
@@ -572,6 +575,14 @@ public class SqsQueryHandler {
     }
 
     // --- Helpers ---
+
+    private int countBatchEntries(MultivaluedMap<String, String> params, String entryPrefix) {
+        int count = 0;
+        while (getParam(params, entryPrefix + "." + (count + 1) + ".Id") != null) {
+            count++;
+        }
+        return count;
+    }
 
     private String getParam(MultivaluedMap<String, String> params, String name) {
         return params.getFirst(name);
