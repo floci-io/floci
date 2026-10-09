@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -31,7 +32,7 @@ class Ec2EbsEncryptionByDefaultAppliedIntegrationTest {
     private static final String AUTH_HEADER = authHeader(REGION);
 
     private static String createVolume(String... extraParams) {
-        var request = given()
+        RequestSpecification request = given()
                 .formParam("Action", "CreateVolume")
                 .formParam("AvailabilityZone", AZ)
                 .formParam("Size", "1")
