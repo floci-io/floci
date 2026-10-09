@@ -365,10 +365,27 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
+- `REGION '<region>'` is accepted and ignored: Floci has one S3.
+- `CREDENTIALS 'aws_iam_role=<arn>'` behaves like `IAM_ROLE`. `ACCESS_KEY_ID` with `SECRET_ACCESS_KEY`
+  (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...'`,
+  are accepted but never verified or stored: S3 is read as an unsigned request, the same as with no
+  authorization clause. Combining key credentials with `IAM_ROLE`, or giving only one of the pair, is
+  not intercepted, and neither is a blank key, secret, token or role.
+- `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
+  (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
+  level options need a single-byte `DELIMITER`, are not combined with `FORMAT AS JSON`, and normalise
+  `CRLF` line endings to `LF`. A nulled field is written as the `NULL AS` string, or `\N` in text
+  mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
+  `CHAR`/`VARCHAR` length in bytes (Redshift's meaning of the declared length, so `éééé` into
+  `VARCHAR(3)` loads `é`), never inside a multi-byte character or a backslash escape. Its column
+  lengths come from the database catalog, so it works only over the **Simple Query protocol** (`preferQueryMode=simple`);
+  over Extended Query the COPY fails with an error that names this requirement. A field-level option
+  buffers each decompressed object in memory, so an object over 64 MiB, or a heap budget shared
+  across connections that is used up, fails the COPY instead of exhausting the emulator.
 - Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
-  `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
-  `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, `CREDENTIALS`, and so on) is not
-  recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.
+  `DATEFORMAT`, `TIMEFORMAT`, `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
+  `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL
+  returns its own error.
 - A multi-statement query whose COPY is followed by another statement is not intercepted; send the
   COPY on its own.
 - Extended Query COPY is supported when the complete statement is present in `Parse` and has no
@@ -407,6 +424,32 @@ the result to S3 as one or more objects under `<prefix>`.
 - A zero-row result still writes one object (empty, or the header row alone when
   `HEADER` is set).
 - `GZIP` compresses each object and appends `.gz` to its key.
+- `EXTENSION '<ext>'` is appended to each data object key, with a `.` inserted when the value does not
+  start with one: `EXTENSION 'csv'` and `EXTENSION '.csv'` both give `<prefix>0000_part_00.csv`. As in
+  AWS, the compression suffix is added only when no extension is given, so `EXTENSION 'txt.gz' GZIP`
+  gives `<prefix>0000_part_00.txt.gz`. The value is not validated; an empty value or one containing
+  `/` is not intercepted. AWS does not document whether it inserts the dot itself.
+- `REGION` and the credential clauses (`CREDENTIALS`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`,
+  `SESSION_TOKEN`) behave as described for COPY.
+- `ESCAPE` is accepted and relies on PostgreSQL text framing, which already escapes the backslash,
+  newline, carriage return and the delimiter. It is only valid with text framing: combined with
+  `CSV`, `ADDQUOTES` or `HEADER` (which switch the framing to CSV here) the statement is not
+  intercepted. Unlike Redshift, PostgreSQL also writes a tab as `\t`.
+- `CLEANPATH` deletes every object whose key starts with the target prefix. The objects are listed and
+  every delete is authorized up front, like the writes (with `FLOCI_SERVICES_S3_ENFORCE_AUTH` on, the
+  role needs list and delete permission, and a denial fails the UNLOAD before anything is removed or
+  written). The deletes themselves run when the first output arrives, so a query that PostgreSQL
+  rejects leaves the previous export in place. They run on a fresh listing of the prefix, authorized
+  and deleted under one bucket lock, so an object uploaded in the meantime does not survive. Objects
+  already deleted are not restored if the UNLOAD fails later. The match is a plain string prefix, so `TO 's3://b/sales_' CLEANPATH` also removes
+  `sales_archive/...`; end the prefix with `/` to limit it to one folder. It cannot be combined with
+  `ALLOWOVERWRITE`, and an empty prefix (the bucket root) is not intercepted so a typo cannot wipe a
+  bucket.
+- `ENCRYPTED AUTO` is accepted and writes objects as usual. `ENCRYPTED KMS_KEY_ID '<key>'` stores the
+  data and manifest objects with `aws:kms` server-side encryption and that key id; Floci does not
+  encrypt the data beyond what its S3 service does for those headers. Bare `ENCRYPTED` (server-side
+  encryption with the default S3 key) and the client-side `MASTER_SYMMETRIC_KEY` form are not
+  intercepted.
 - `MANIFEST` writes `<prefix>manifest` listing every object with its
   `content_length`.
 - Without `ALLOWOVERWRITE`, a non-empty target prefix fails with SQL error XX000 and the select
@@ -419,8 +462,8 @@ the result to S3 as one or more objects under `<prefix>`.
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
-- Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `CREDENTIALS`,
-  `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
+- Any other option (`PARQUET`, `JSON`, `FIXEDWIDTH`, `MASTER_SYMMETRIC_KEY`, `MANIFEST VERBOSE`,
+  `ZSTD`, `BZIP2`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
 - Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no
   bind parameters. Parameterized statements are forwarded unchanged.

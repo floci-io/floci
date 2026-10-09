@@ -62,13 +62,23 @@ import java.util.stream.Stream;
  * {@code ApacheDockerHttpClient} builds, owned here so Floci can set what that builder does not
  * expose (idle-connection validation and eviction, the connection-lease timeout). It applies
  * docker-java's settings (npipe and tcp hosts, TLS from the SSL config, a pool of
- * {@code maxConnections} for one route, no socket read timeout on the pool, no stale-connection
- * validation, hijacked exec/attach upgrades through {@link HijackingHttpRequestExecutor}) with two
- * differences: a {@code unix://} host connects through {@link UnixDomainSocket}, which honours read
+ * {@code maxConnections} for one route, no socket read timeout on the pool, hijacked exec/attach
+ * upgrades through {@link HijackingHttpRequestExecutor}), validates a pooled connection idle over a
+ * second before reusing it and evicts idle ones, where docker-java disabled both, and differs in two
+ * more ways: a {@code unix://} host connects through {@link UnixDomainSocket}, which honours read
  * timeouts where docker-java's socket ignored them, and requests that hold a stream open get no
  * response timeout ({@link #isLongLivedStream}), while every other call keeps it.
  */
 public final class FlociDockerHttpClient implements DockerHttpClient {
+
+    /**
+     * A pooled connection idle this long is checked before it is leased again, so a socket the daemon
+     * (or Podman) already closed is replaced instead of failing on its next write. The check reads with
+     * a 1 ms timeout, which {@link UnixDomainSocket} honours.
+     */
+    static final TimeValue VALIDATE_AFTER_INACTIVITY = TimeValue.ofSeconds(1);
+    /** Idle pooled connections are closed in the background after this long. */
+    static final TimeValue EVICT_IDLE_AFTER = TimeValue.ofSeconds(30);
 
     private final CloseableHttpClient httpClient;
     private final HttpHost host;
@@ -108,7 +118,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         connectionManager.setMaxTotal(maxConnections);
         connectionManager.setDefaultMaxPerRoute(maxConnections);
         connectionManager.setDefaultConnectionConfig(ConnectionConfig.custom()
-                .setValidateAfterInactivity(TimeValue.NEG_ONE_SECOND)
+                .setValidateAfterInactivity(VALIDATE_AFTER_INACTIVITY)
                 .setConnectTimeout(connectionTimeout != null
                         ? Timeout.of(connectionTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
                 .build());
@@ -124,6 +134,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                 .setRequestExecutor(new HijackingHttpRequestExecutor(null))
                 .setConnectionManager(connectionManager)
                 .setDefaultRequestConfig(requestConfig)
+                .evictIdleConnections(EVICT_IDLE_AFTER)
                 .disableConnectionState()
                 .build();
     }

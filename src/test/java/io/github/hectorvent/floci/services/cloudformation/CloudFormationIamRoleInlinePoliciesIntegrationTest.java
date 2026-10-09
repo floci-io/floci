@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end check that CloudFormation applies the inline {@code Policies} of an
@@ -20,6 +21,43 @@ class CloudFormationIamRoleInlinePoliciesIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String IAM_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/iam/aws4_request";
+
+    @Test
+    void updateStackRenamesLargeInlinePolicyWithoutExceedingQuota() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-policy-quota-" + suffix;
+        String roleName = "cfn-policy-quota-role-" + suffix;
+        String template = """
+                {"Resources":{"AppRole":{"Type":"AWS::IAM::Role","Properties":{
+                  "RoleName":"%s","AssumeRolePolicyDocument":{"Statement":[]},
+                  "Policies":[{"PolicyName":"%%s","PolicyDocument":{"Statement":[{
+                    "Effect":"Allow","Action":"s3:GetObject","Resource":"*","Sid":"%s"
+                  }]}}]}}}}
+                """.formatted(roleName, "x".repeat(6_000));
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "CreateStack").formParam("StackName", stackName)
+                .formParam("TemplateBody", template.formatted("old-policy"))
+                .formParam("Capabilities.member.1", "CAPABILITY_NAMED_IAM")
+                .post("/").then().statusCode(200);
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
+            given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                    .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+                    .formParam("TemplateBody", template.formatted("new-policy"))
+                    .formParam("Capabilities.member.1", "CAPABILITY_NAMED_IAM")
+                    .post("/").then().statusCode(200);
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
+            given().contentType("application/x-www-form-urlencoded").header("Authorization", IAM_AUTH)
+                    .formParam("Action", "ListRolePolicies").formParam("RoleName", roleName)
+                    .post("/").then().statusCode(200)
+                    .body(containsString("new-policy")).body(not(containsString("old-policy")));
+        } finally {
+            given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                    .formParam("Action", "DeleteStack").formParam("StackName", stackName)
+                    .post("/").then().statusCode(200);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
 
     @Test
     void createStackProvisionsInlineRolePoliciesAndDeleteStackRemovesRole() {

@@ -99,6 +99,7 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class IamService implements SessionAccountLookup, ResourceProvider {
 
+    private static final int ROLE_INLINE_POLICY_SIZE_LIMIT = 10_240;
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
@@ -1418,8 +1419,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 && !"AWS".equalsIgnoreCase(scope)
                 && !"Local".equalsIgnoreCase(scope)) {
             throw new AwsException("ValidationError",
-                    "Value '" + scope + "' at 'scope' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [All, AWS, Local]", 400);
+                    "1 validation error detected: Value '" + scope + "' at 'scope' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: "
+                            + "[All, AWS, Local]", 400);
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
         boolean blankScope = scope == null || scope.isBlank();
@@ -1806,8 +1808,30 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putRolePolicy(String roleName, String policyName, String policyDocument) {
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
-        role.getInlinePolicies().put(policyName, policyDocument);
-        roles.put(roleName, role);
+        Map<String, String> inlinePolicies = role.getInlinePolicies();
+        synchronized (inlinePolicies) {
+            long aggregateSize = inlinePolicies.entrySet().stream()
+                    .filter(entry -> !entry.getKey().equals(policyName))
+                    .mapToLong(entry -> nonWhitespaceLength(entry.getValue()))
+                    .sum() + nonWhitespaceLength(policyDocument);
+            if (aggregateSize > ROLE_INLINE_POLICY_SIZE_LIMIT) {
+                throw new AwsException("LimitExceeded",
+                        "Maximum policy size of 10240 bytes exceeded for role " + roleName, 409);
+            }
+            inlinePolicies.put(policyName, policyDocument);
+            roles.put(roleName, role);
+        }
+    }
+
+    private static int nonWhitespaceLength(String policyDocument) {
+        int size = 0;
+        for (int i = 0; i < policyDocument.length(); i++) {
+            char character = policyDocument.charAt(i);
+            if (character != ' ' && character != '\t' && character != '\n' && character != '\r') {
+                size++;
+            }
+        }
+        return size;
     }
 
     public String getRolePolicy(String roleName, String policyName) {
@@ -2304,8 +2328,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
             throw new AwsException("ValidationError",
-                    "Value null at 'properties' failed to satisfy constraint: Member must not be "
-                            + "null", 400);
+                    "1 validation error detected: Value null at 'properties' failed to "
+                            + "satisfy constraint: Member must not be null", 400);
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -2342,7 +2366,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
                 || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
             throw new AwsException("ValidationError",
-                    "Value '" + key + "' at 'properties' failed to satisfy constraint: Map keys "
+                    "1 validation error detected: Value '" + key + "' at 'properties' failed "
+                            + "to satisfy constraint: Map keys "
                             + "must satisfy constraint: [Member must have length less than or "
                             + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
                             + "satisfy regular expression pattern: "
@@ -2362,9 +2387,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (value == null || value.isEmpty()
                 || value.length() > MAX_ACCOUNT_PROPERTY_VALUE_LENGTH) {
             throw new AwsException("ValidationError",
-                    "Value at 'properties." + key + "' failed to satisfy constraint: Member must "
-                            + "have length between 1 and " + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH,
-                    400);
+                    "1 validation error detected: Value at 'properties." + key + "' failed to "
+                            + "satisfy constraint: Member must have length between 1 and "
+                            + MAX_ACCOUNT_PROPERTY_VALUE_LENGTH, 400);
         }
     }
 
@@ -2373,8 +2398,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (globalEndpointTokenVersion == null
                 || !GLOBAL_ENDPOINT_TOKEN_VERSIONS.contains(globalEndpointTokenVersion)) {
             throw new AwsException("ValidationError",
-                    "Value '" + globalEndpointTokenVersion + "' at 'globalEndpointTokenVersion' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: ["
+                    "1 validation error detected: Value '" + globalEndpointTokenVersion
+                            + "' at 'globalEndpointTokenVersion' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: ["
                             + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]", 400);
         }
         stsPreferences.put(STS_PREFERENCES_KEY, globalEndpointTokenVersion);
@@ -3072,10 +3098,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
                     || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
                 throw new AwsException("ValidationError",
-                        "Value '" + credentialAgeDays + "' at 'credentialAgeDays' failed to "
-                                + "satisfy constraint: Member must be between "
-                                + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS,
-                        400);
+                        "1 validation error detected: Value '" + credentialAgeDays
+                                + "' at 'credentialAgeDays' failed to satisfy constraint: "
+                                + "Member must be between " + MIN_CREDENTIAL_AGE_DAYS + " and "
+                                + MAX_CREDENTIAL_AGE_DAYS, 400);
             }
         }
         synchronized (serviceCredentialLock) {

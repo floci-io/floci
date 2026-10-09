@@ -208,6 +208,20 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void theCheckpointAnswerListsOperationsInCreationOrder() {
+        invoker.script(event -> {
+            String next = checkpoint(event, token(event), List.of(step("s1", DurableOperationAction.START, null, null)))
+                    .checkpointToken();
+            CheckpointResult answer = checkpoint(event, next, List.of(step("s2", DurableOperationAction.START, null,
+                    null), step("s1", DurableOperationAction.SUCCEED, "1", null)));
+            assertEquals(List.of("s1", "s2"), answer.newExecutionState().stream().map(DurableOperation::getId).toList());
+            return succeeded("");
+        });
+
+        start("exec-1", "{}", false);
+    }
+
+    @Test
     void aClosingCheckpointEndsTheInvocationAndTheHandlerReturnIsIgnored() {
         List<CheckpointResult> closing = new ArrayList<>();
         invoker.script(event -> {

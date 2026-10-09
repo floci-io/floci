@@ -113,6 +113,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
     private static final int SSE_C_KEY_BYTES = 32;
+    private static final int DELETE_PREFIX_PAGE_SIZE = 1000;
 
     @FunctionalInterface
     interface LambdaInvoker {
@@ -1912,6 +1913,37 @@ public class S3Service implements Resettable, ResourceProvider {
         synchronized (bucket) {
             checkDeletePrecondition(bucketName, key, ifMatch);
             return deleteObjectLocked(bucket, bucketName, key, versionId, bypassGovernance);
+        }
+    }
+
+    /**
+     * Deletes every object whose key starts with {@code prefix}. The bucket monitor is held across the
+     * listing, the authorization of each key and the deletes, so a concurrent PutObject cannot land
+     * between them and survive. {@code authorizeDelete} runs for every key before the first delete, so
+     * a denial removes nothing.
+     */
+    public int deleteObjectsWithPrefix(String bucketName, String prefix, Consumer<String> authorizeDelete) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            List<String> keys = new ArrayList<>();
+            String continuationToken = null;
+            do {
+                ListObjectsResult page = listObjectsWithPrefixes(
+                        bucketName, prefix, null, DELETE_PREFIX_PAGE_SIZE, continuationToken, null);
+                for (S3Object object : page.objects()) {
+                    keys.add(object.getKey());
+                }
+                continuationToken = page.isTruncated() ? page.nextContinuationToken() : null;
+            } while (continuationToken != null);
+            for (String key : keys) {
+                authorizeDelete.accept(key);
+            }
+            for (String key : keys) {
+                deleteObject(bucketName, key);
+            }
+            return keys.size();
         }
     }
 

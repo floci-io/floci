@@ -416,7 +416,7 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
 
     @Test
-    void postConfirmationFiresOnConfirmSignUp() {
+    void postConfirmationFiresOnConfirmSignUp() throws Exception {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PostConfirmation", "arn:aws:lambda:::post-confirm"));
         UserPoolClient client = createClient(pool);
 
@@ -428,11 +428,72 @@ class CognitoLambdaTriggersTest {
                 any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(ok(Map.of()));
 
-        service.confirmSignUp(client.getClientId(), "alice");
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("ClientId", client.getClientId());
+        request.put("Username", "alice");
+        request.put("ConfirmationCode", "123456");
+        request.putObject("ClientMetadata").put("source", "confirm-sign-up");
+        new CognitoJsonHandler(service, MAPPER).handle("ConfirmSignUp", request, "us-east-1");
 
-        verify(lambdaService, atLeastOnce())
-                .invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
-                        any(byte[].class), eq(InvocationType.RequestResponse));
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode event = MAPPER.readTree(payload.getValue());
+        assertEquals("PostConfirmation_ConfirmSignUp", event.path("triggerSource").asText());
+        assertEquals("confirm-sign-up", event.path("request").path("clientMetadata").path("source").asText());
+    }
+
+    @Test
+    void postConfirmationFiresOnAdminConfirmSignUp() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PostConfirmation", "arn:aws:lambda:::post-confirm"));
+        UserPoolClient client = createClient(pool);
+        service.signUp(client.getClientId(), "alice", "Perm1234!", Map.of("email", "alice@example.com"));
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                any(byte[].class), eq(InvocationType.RequestResponse))).thenReturn(ok(Map.of()));
+
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("UserPoolId", pool.getId());
+        request.put("Username", "alice");
+        request.putObject("ClientMetadata").put("source", "admin-confirm");
+        new CognitoJsonHandler(service, MAPPER).handle("AdminConfirmSignUp", request, "us-east-1");
+
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode event = MAPPER.readTree(payload.getValue());
+        assertEquals("PostConfirmation_ConfirmSignUp", event.path("triggerSource").asText());
+        assertEquals("admin-confirm", event.path("request").path("clientMetadata").path("source").asText());
+    }
+
+    @Test
+    void postConfirmationFiresOnConfirmForgotPassword() throws Exception {
+        VerificationCodeService verificationCodes = mock(VerificationCodeService.class);
+        CognitoService svc = createServiceWithMessaging(
+                mock(SesService.class), mock(SnsService.class), verificationCodes);
+        UserPool pool = svc.createUserPool(Map.of(
+                "PoolName", "trigger-pool",
+                "LambdaConfig", Map.of("PostConfirmation", "arn:aws:lambda:::post-confirm")), "us-east-1");
+        UserPoolClient client = svc.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        svc.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), null);
+        svc.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                any(byte[].class), eq(InvocationType.RequestResponse))).thenReturn(ok(Map.of()));
+
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("ClientId", client.getClientId());
+        request.put("Username", "alice");
+        request.put("ConfirmationCode", "123456");
+        request.put("Password", "NewPass1234!");
+        request.putObject("ClientMetadata").put("source", "forgot-password");
+        new CognitoJsonHandler(svc, MAPPER).handle("ConfirmForgotPassword", request, "us-east-1");
+
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode event = MAPPER.readTree(payload.getValue());
+        assertEquals("PostConfirmation_ConfirmForgotPassword", event.path("triggerSource").asText());
+        assertEquals("forgot-password", event.path("request").path("clientMetadata").path("source").asText());
     }
 
     @Test

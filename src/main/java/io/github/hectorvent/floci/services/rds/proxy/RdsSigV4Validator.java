@@ -12,8 +12,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
 
@@ -137,17 +135,15 @@ public class RdsSigV4Validator {
     /**
      * The {@code X-Amz-Credential} scope split into its parts
      * ({@code accessKeyId/date/region/service/aws4_request}), or {@code null} if absent or malformed.
+     * Read as the signature check reads it, so the key authorized is the key that signed.
      */
     private static String[] credentialScope(String rawQuery) {
-        for (String pair : rawQuery.split("&")) {
-            int eq = pair.indexOf('=');
-            if (eq >= 0 && "X-Amz-Credential".equals(pair.substring(0, eq))) {
-                String[] parts = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8)
-                        .split("/");
-                return parts.length >= 5 ? parts : null;
-            }
+        String credential = SigV4RequestValidator.queryParameter(rawQuery, "X-Amz-Credential");
+        if (credential == null) {
+            return null;
         }
-        return null;
+        String[] parts = credential.split("/");
+        return parts.length >= 5 ? parts : null;
     }
 
     /**

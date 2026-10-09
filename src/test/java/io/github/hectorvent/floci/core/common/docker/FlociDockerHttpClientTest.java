@@ -25,6 +25,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -137,6 +138,107 @@ class FlociDockerHttpClientTest {
                     channel.close();
                 }
                 acceptor.interrupt();
+            }
+        }
+    }
+
+    // Catches: a call that opens a new connection every time (as Connection: close forced) instead of
+    // reusing the pooled one.
+    @Test
+    @Timeout(60)
+    void consecutiveCallsReuseOnePooledConnection(@TempDir Path dir) throws Exception {
+        try (KeepAliveServer server = new KeepAliveServer(dir.resolve("docker.sock"), false);
+             FlociDockerHttpClient client = new FlociDockerHttpClient.Builder()
+                     .dockerHost(URI.create("unix://" + server.path))
+                     .responseTimeout(Duration.ofSeconds(5))
+                     .build()) {
+            for (int i = 0; i < 3; i++) {
+                try (DockerHttpClient.Response response = client.execute(get("/_ping"))) {
+                    assertEquals("ok", new String(response.getBody().readAllBytes(), StandardCharsets.UTF_8));
+                }
+            }
+            assertEquals(1, server.connections.get(), "three calls should share one connection");
+        }
+    }
+
+    // Catches: leasing a pooled connection the daemon closed while it sat idle, which then fails on
+    // its next write; the validation after a second of inactivity must replace it.
+    @Test
+    @Timeout(60)
+    void aConnectionTheDaemonClosedWhileIdleIsReplacedBeforeReuse(@TempDir Path dir) throws Exception {
+        try (KeepAliveServer server = new KeepAliveServer(dir.resolve("docker.sock"), true);
+             FlociDockerHttpClient client = new FlociDockerHttpClient.Builder()
+                     .dockerHost(URI.create("unix://" + server.path))
+                     .responseTimeout(Duration.ofSeconds(5))
+                     .build()) {
+            try (DockerHttpClient.Response response = client.execute(get("/_ping"))) {
+                response.getBody().readAllBytes();
+            }
+            Thread.sleep(1_500);
+            // A POST, which httpclient5 never re-sends by itself, so only the validation can save it.
+            try (DockerHttpClient.Response response = client.execute(DockerHttpClient.Request.builder()
+                    .method(DockerHttpClient.Request.Method.POST).path("/containers/abc/stop").build())) {
+                assertEquals("ok", new String(response.getBody().readAllBytes(), StandardCharsets.UTF_8));
+            }
+            assertEquals(2, server.connections.get(), "the closed connection should have been replaced");
+        }
+    }
+
+    /** Answers every request with a keep-alive 200 "ok"; optionally closes each connection after one answer. */
+    private static final class KeepAliveServer implements AutoCloseable {
+
+        private final Path path;
+        private final ServerSocketChannel server;
+        private final AtomicInteger connections = new AtomicInteger();
+        private final List<SocketChannel> channels = new CopyOnWriteArrayList<>();
+
+        KeepAliveServer(Path path, boolean closeAfterOneAnswer) throws IOException {
+            this.path = path;
+            this.server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
+            server.bind(UnixDomainSocketAddress.of(path));
+            Thread.ofVirtual().start(() -> {
+                try {
+                    while (true) {
+                        SocketChannel channel = server.accept();
+                        connections.incrementAndGet();
+                        channels.add(channel);
+                        Thread.ofVirtual().start(() -> serve(channel, closeAfterOneAnswer));
+                    }
+                } catch (IOException expected) {
+                    // The server channel closed at the end of the test.
+                }
+            });
+        }
+
+        private static void serve(SocketChannel channel, boolean closeAfterOneAnswer) {
+            try {
+                ByteBuffer buffer = ByteBuffer.allocate(4096);
+                StringBuilder pending = new StringBuilder();
+                while (channel.read(buffer) != -1) {
+                    buffer.flip();
+                    pending.append(StandardCharsets.UTF_8.decode(buffer));
+                    buffer.clear();
+                    int end;
+                    while ((end = pending.indexOf("\r\n\r\n")) >= 0) {
+                        pending.delete(0, end + 4);
+                        channel.write(ByteBuffer.wrap(("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                                .getBytes(StandardCharsets.UTF_8)));
+                        if (closeAfterOneAnswer) {
+                            channel.close();
+                            return;
+                        }
+                    }
+                }
+            } catch (IOException expected) {
+                // The client or the test closed the connection.
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            server.close();
+            for (SocketChannel channel : channels) {
+                channel.close();
             }
         }
     }

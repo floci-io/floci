@@ -35,11 +35,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -1053,6 +1055,35 @@ class CodeArtifactServiceTest {
         AwsException missingNamespaceForMaven = assertThrows(AwsException.class, () -> service.describePackage(
                 REGION, "dom", null, "repo", "maven", null, "my-artifact"));
         assertEquals("ValidationException", missingNamespaceForMaven.getErrorCode());
+    }
+
+    /**
+     * {@code domain}/{@code repository}/{@code package} being required, and an unrecognized format
+     * being rejected, are not new behavior (every other action in this file already enforces them),
+     * but {@code describePackage} had no regression test proving any of them, and none of these
+     * rejections may start a sidecar or otherwise touch state before failing.
+     */
+    @Test
+    void describePackageRejectsMissingRequiredFieldsAndUnknownFormatsWithoutTouchingAnyState() {
+        AwsException missingDomain = assertThrows(AwsException.class, () -> service.describePackage(REGION, null,
+                null, "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ValidationException", missingDomain.getErrorCode());
+
+        AwsException missingRepository = assertThrows(AwsException.class, () -> service.describePackage(REGION,
+                "dom", null, null, "generic", "ns", "my-pkg"));
+        assertEquals("ValidationException", missingRepository.getErrorCode());
+
+        AwsException missingPackageName = assertThrows(AwsException.class, () -> service.describePackage(REGION,
+                "dom", null, "repo", "generic", "ns", null));
+        assertEquals("ValidationException", missingPackageName.getErrorCode());
+
+        AwsException unknownFormat = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "not-a-real-format", "ns", "my-pkg"));
+        assertEquals("ValidationException", unknownFormat.getErrorCode());
+
+        verify(verdaccioClient, never()).packageExists(any(), any(), any(), any(), any());
+        verify(reposiliteClient, never()).packageExists(any(), any(), any(), any(), any());
+        verify(pypiserverClient, never()).packageExists(any(), any(), any(), any(), any());
     }
 
     /**

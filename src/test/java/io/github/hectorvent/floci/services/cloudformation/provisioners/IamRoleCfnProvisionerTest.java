@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
@@ -292,6 +293,28 @@ class IamRoleCfnProvisionerTest {
     }
 
     @Test
+    void failedPolicyRenameRestoresOriginalPoliciesWithinQuota() throws Exception {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner realProvisioner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        String policy = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"*\",\"Sid\":\"" + "x".repeat(6_000) + "\"}]}";
+        JsonNode original = mapper.readTree("{\"RoleName\":\"app-role\",\"Policies\":["
+                + "{\"PolicyName\":\"old\",\"PolicyDocument\":" + policy + "}]}");
+        realProvisioner.provision(r, original, ctx());
+        JsonNode replacement = mapper.readTree("{\"RoleName\":\"app-role\",\"Policies\":["
+                + "{\"PolicyName\":\"new\",\"PolicyDocument\":" + policy + "},"
+                + "{\"PolicyName\":\"overflow\",\"PolicyDocument\":" + policy + "}]}");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> realProvisioner.provision(r, replacement, ctx()));
+
+        assertEquals("LimitExceeded", failure.getErrorCode());
+        assertEquals(0, failure.getSuppressed().length);
+        assertEquals(Map.of("old", policy), realIam.getRole("app-role").getInlinePolicies());
+    }
+
+    @Test
     void failedUpdateRestoresTheInlinePolicyItAlreadyOverwrote() {
         // An update that adopts an existing role must not keep the permissions a half-applied
         // attempt granted, and must not delete a role it did not create.
@@ -321,8 +344,8 @@ class IamRoleCfnProvisionerTest {
 
         InOrder order = inOrder(iam);
         order.verify(iam).putRolePolicy("app-role", "first", EMPTY_TRUST);
+        order.verify(iam).deleteRolePolicy("app-role", "first");
         order.verify(iam).putRolePolicy("app-role", "first", priorDocument);
-        verify(iam, never()).deleteRolePolicy(anyString(), anyString());
         verify(iam, never()).deleteRole(anyString());
     }
 

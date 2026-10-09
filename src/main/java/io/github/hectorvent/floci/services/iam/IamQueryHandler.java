@@ -903,9 +903,9 @@ public class IamQueryHandler {
             return Integer.valueOf(raw.trim());
         } catch (NumberFormatException e) {
             throw new AwsException("ValidationError",
-                    "Value '" + raw + "' at '" + Character.toLowerCase(name.charAt(0))
-                            + name.substring(1) + "' failed to satisfy constraint: Member must be "
-                            + "an integer", 400);
+                    "1 validation error detected: Value '" + raw + "' at '"
+                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                            + "' failed to satisfy constraint: Member must be an integer", 400);
         }
     }
 
@@ -2913,7 +2913,8 @@ public class IamQueryHandler {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
             throw new AwsException("ValidationError",
-                    "Value null at '" + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                    "1 validation error detected: Value null at '"
+                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
                             + "' failed to satisfy constraint: Member must not be null", 400);
         }
         return value;

@@ -2605,14 +2605,21 @@ public class RdsService implements Resettable, ResourceProvider {
         if (secretArn == null || secretsManagerService == null) {
             return;
         }
+        detachManagedMasterUserSecret(secretArn, region);
+        cluster.setMasterUserSecretArn(null);
+        cluster.setMasterUserSecretStatus(null);
+        cluster.setMasterUserSecretKmsKeyId(null);
+    }
+
+    private void detachManagedMasterUserSecret(String secretArn, String region) {
+        if (secretArn == null || secretsManagerService == null) {
+            return;
+        }
         try {
             secretsManagerService.deleteSecret(secretArn, null, true, region);
         } catch (RuntimeException e) {
             LOG.debugv(e, "Managed master user secret {0} could not be deleted", secretArn);
         }
-        cluster.setMasterUserSecretArn(null);
-        cluster.setMasterUserSecretStatus(null);
-        cluster.setMasterUserSecretKmsKeyId(null);
     }
 
     /**
@@ -3760,6 +3767,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB instance " + id + " is registered with a DB proxy target group.", 400);
         }
 
+        String clusterId = instance.getDbClusterIdentifier();
         instance.setStatus(DbInstanceStatus.DELETING);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         detachReadReplicaLinksBeforeDelete(instance);
@@ -3769,7 +3777,6 @@ public class RdsService implements Resettable, ResourceProvider {
             proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
         }
 
-        String clusterId = instance.getDbClusterIdentifier();
         if (clusterId == null || clusterId.isBlank()) {
             // Standalone, so stop its container and clean up its Docker volume. Neither exists in
             // mock mode, and an instance with no container and no reachable daemon has nothing
@@ -3786,6 +3793,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         resolvedInstanceStorageResourceId(instance),
                         resolvedInstanceDockerVolumeName(instance));
             }
+            detachManagedMasterUserSecret(instance.getMasterUserSecretArn(), effectiveRegion);
         } else {
             // Cluster member — remove from cluster's member list
             DbCluster cluster = findClusterForScope(

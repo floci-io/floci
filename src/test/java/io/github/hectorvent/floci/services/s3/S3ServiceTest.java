@@ -35,6 +35,10 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -1633,5 +1637,73 @@ class S3ServiceTest {
     @Test
     void authorizeSignedDeleteObjectIsANoOpWhenEnforceAuthIsOff() {
         assertDoesNotThrow(() -> s3Service.authorizeSignedDeleteObject("ASIAFAKEKEY00000001", "sessiontoken", "signed-del-bucket", "some/key"));
+    }
+
+    @Test
+    void deleteObjectsWithPrefixRemovesOnlyTheMatchingKeys() {
+        s3Service.createBucket("prefix-del", "us-east-1");
+        s3Service.putObject("prefix-del", "out/a", new byte[]{1}, "text/plain", Map.of());
+        s3Service.putObject("prefix-del", "out/b", new byte[]{2}, "text/plain", Map.of());
+        s3Service.putObject("prefix-del", "keep/c", new byte[]{3}, "text/plain", Map.of());
+
+        int deleted = s3Service.deleteObjectsWithPrefix("prefix-del", "out/", key -> { });
+
+        assertEquals(2, deleted);
+        assertFalse(s3Service.objectExists("prefix-del", "out/a"));
+        assertFalse(s3Service.objectExists("prefix-del", "out/b"));
+        assertTrue(s3Service.objectExists("prefix-del", "keep/c"));
+    }
+
+    @Test
+    void deleteObjectsWithPrefixRemovesNothingWhenAnyKeyIsDenied() {
+        s3Service.createBucket("prefix-deny", "us-east-1");
+        s3Service.putObject("prefix-deny", "out/a", new byte[]{1}, "text/plain", Map.of());
+        s3Service.putObject("prefix-deny", "out/b", new byte[]{2}, "text/plain", Map.of());
+
+        assertThrows(AwsException.class, () -> s3Service.deleteObjectsWithPrefix("prefix-deny", "out/", key -> {
+            if (key.equals("out/b")) {
+                throw new AwsException("AccessDenied", "denied", 403);
+            }
+        }));
+
+        assertTrue(s3Service.objectExists("prefix-deny", "out/a"));
+        assertTrue(s3Service.objectExists("prefix-deny", "out/b"));
+    }
+
+    @Test
+    void deleteObjectsWithPrefixHoldsOffAConcurrentPutUntilItIsDone() throws Exception {
+        s3Service.createBucket("prefix-lock", "us-east-1");
+        s3Service.putObject("prefix-lock", "out/old", new byte[]{1}, "text/plain", Map.of());
+        CountDownLatch authorizing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+
+        CompletableFuture<Integer> delete = CompletableFuture.supplyAsync(() ->
+                s3Service.deleteObjectsWithPrefix("prefix-lock", "out/", key -> {
+                    authorizing.countDown();
+                    try {
+                        assertTrue(release.await(10, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    }
+                }));
+        assertTrue(authorizing.await(10, TimeUnit.SECONDS));
+
+        FutureTask<S3Object> put = new FutureTask<>(() ->
+                s3Service.putObject("prefix-lock", "out/late", new byte[]{2}, "text/plain", Map.of()));
+        Thread putThread = new Thread(put);
+        putThread.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (putThread.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertEquals(Thread.State.BLOCKED, putThread.getState());
+        assertFalse(put.isDone());
+
+        release.countDown();
+        assertEquals(1, delete.get(10, TimeUnit.SECONDS));
+        put.get(10, TimeUnit.SECONDS);
+        assertFalse(s3Service.objectExists("prefix-lock", "out/old"));
+        assertTrue(s3Service.objectExists("prefix-lock", "out/late"));
     }
 }
