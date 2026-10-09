@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataJsonHandler;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
@@ -47,14 +48,14 @@ class AslExecutorRedshiftDataDisabledTest {
                          String status, String error, String cause) {
         ObjectMapper objectMapper = new ObjectMapper();
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().redshift().enabled()).thenReturn(parentEnabled);
-        when(config.services().redshiftData().enabled()).thenReturn(childEnabled);
+        ServiceRegistry serviceRegistry = mock(ServiceRegistry.class);
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(parentEnabled && childEnabled);
         RedshiftDataService service = mock(RedshiftDataService.class);
         when(service.listStatements(any())).thenReturn(objectMapper.createObjectNode());
         RedshiftDataJsonHandler handler = spy(new RedshiftDataJsonHandler(service));
         AslExecutor executor = new AslExecutor(null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null, objectMapper,
-                new JsonataEvaluator(objectMapper), null, config, null, null, handler);
+                new JsonataEvaluator(objectMapper), null, config, null, null, handler, serviceRegistry);
 
         StateMachine stateMachine = new StateMachine();
         stateMachine.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:disabled-data");

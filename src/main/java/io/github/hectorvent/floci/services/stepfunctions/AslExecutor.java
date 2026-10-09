@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
@@ -254,6 +255,7 @@ public class AslExecutor {
     private final SchedulerController schedulerController;
     private final RdsDataService rdsDataService;
     private final RedshiftDataJsonHandler redshiftDataHandler;
+    private final ServiceRegistry serviceRegistry;
     private final ObjectMapper objectMapper;
     private final Configuration jsonPathConfiguration;
     private final JsonataEvaluator jsonataEvaluator;
@@ -283,13 +285,14 @@ public class AslExecutor {
                        SchedulerController schedulerController, RdsDataService rdsDataService,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
-                       CustomResourceLiveness customResourceLiveness, RedshiftDataJsonHandler redshiftDataHandler) {
+                       CustomResourceLiveness customResourceLiveness, RedshiftDataJsonHandler redshiftDataHandler,
+                       ServiceRegistry serviceRegistry) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler);
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -304,7 +307,8 @@ public class AslExecutor {
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness,
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride,
-                RedshiftDataJsonHandler redshiftDataHandler) {
+                RedshiftDataJsonHandler redshiftDataHandler, ServiceRegistry serviceRegistry) {
+        this.serviceRegistry = serviceRegistry;
         this.customResourceLiveness = customResourceLiveness;
         this.redshiftDataHandler = redshiftDataHandler;
         this.lambdaExecutor = lambdaExecutor;
@@ -361,7 +365,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null);
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -382,7 +386,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                clock, sleeper, maxWaitSecondsOverride, null);
+                clock, sleeper, maxWaitSecondsOverride, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -2342,7 +2346,7 @@ public class AslExecutor {
      * the {@code aws-sdk:} integration renders the SDK's ISO-8601 {@code Instant}.
      */
     private JsonNode invokeAwsSdkRedshiftData(StatesIntegration integration, JsonNode input, String region) {
-        if (!config.services().redshift().enabled() || !config.services().redshiftData().enabled()) {
+        if (!serviceRegistry.isServiceEnabled("redshift-data")) {
             throw new FailStateException(sdkExceptionName("RedshiftData", "ServiceNotAvailableException"),
                     "Service redshift-data is not enabled.");
         }

@@ -1,13 +1,11 @@
-package io.github.hectorvent.floci.services.scheduler;
+package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
-import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataConnectionFactory;
-import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataResourceResolver;
-import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
+import io.github.hectorvent.floci.services.scheduler.ScheduleInvoker;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import io.quarkus.test.InjectMock;
@@ -17,9 +15,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -71,6 +71,7 @@ class SchedulerRedshiftDataAccountIntegrationTest {
         JsonNode described = RequestScopes.callAs(SCHEDULE_ACCOUNT,
                 () -> redshiftDataService.describeStatement(JsonNodeFactory.instance.objectNode().put("Id", statementId)));
         assertEquals(statementId, described.path("Id").asText());
+        awaitFailed(statementId);
 
         // Statement is not visible under default account
         JsonNode defaultStatements = redshiftDataService.listStatements(JsonNodeFactory.instance.objectNode());
@@ -96,6 +97,7 @@ class SchedulerRedshiftDataAccountIntegrationTest {
         JsonNode described = RequestScopes.callAs(SCHEDULE_ACCOUNT,
                 () -> redshiftDataService.describeStatement(JsonNodeFactory.instance.objectNode().put("Id", statementId)));
         assertEquals(statementId, described.path("Id").asText());
+        awaitFailed(statementId);
 
         // Statement is not visible under default account
         JsonNode defaultStatements = redshiftDataService.listStatements(JsonNodeFactory.instance.objectNode());
@@ -104,6 +106,14 @@ class SchedulerRedshiftDataAccountIntegrationTest {
         AwsException exception = assertThrows(AwsException.class,
                 () -> redshiftDataService.describeStatement(JsonNodeFactory.instance.objectNode().put("Id", statementId)));
         assertEquals("ResourceNotFoundException", exception.getErrorCode());
+    }
+
+    // The SQL runs off the invoking thread. Waiting for its outcome shows it ran as the schedule's account
+    // too, and keeps a late write from leaking into the next test.
+    private void awaitFailed(String statementId) {
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertEquals("FAILED",
+                RequestScopes.callAs(SCHEDULE_ACCOUNT, () -> redshiftDataService.describeStatement(
+                        JsonNodeFactory.instance.objectNode().put("Id", statementId))).path("Status").asText()));
     }
 
     private static Schedule scheduleFor(String targetArn, String input) {
