@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.DeadlineCharSequence;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -25,8 +26,8 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
-import jakarta.annotation.PreDestroy;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
@@ -1758,41 +1759,6 @@ public class CodePipelineService {
 
     private static final long MATCHES_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(1);
 
-    /** A regex subject whose {@code charAt} throws once the deadline passes, so a catastrophically
-     * backtracking pattern aborts instead of holding the run forever. */
-    private static final class DeadlineCharSequence implements CharSequence {
-        private final CharSequence delegate;
-        private final long deadlineNanos;
-
-        DeadlineCharSequence(CharSequence delegate, long deadlineNanos) {
-            this.delegate = delegate;
-            this.deadlineNanos = deadlineNanos;
-        }
-
-        @Override
-        public char charAt(int index) {
-            if (System.nanoTime() - deadlineNanos > 0) {
-                throw new IllegalStateException("MATCHES pattern evaluation timed out");
-            }
-            return delegate.charAt(index);
-        }
-
-        @Override
-        public int length() {
-            return delegate.length();
-        }
-
-        @Override
-        public CharSequence subSequence(int start, int end) {
-            return new DeadlineCharSequence(delegate.subSequence(start, end), deadlineNanos);
-        }
-
-        @Override
-        public String toString() {
-            return delegate.toString();
-        }
-    }
-
     private boolean variableCheckPasses(CodePipelineExecution execution, JsonNode rule) {
         JsonNode config = rule.path("configuration");
         String variable = resolveVariableReference(execution, config.path("Variable").asText(""));
@@ -1809,7 +1775,7 @@ public class CodePipelineService {
                                     + MAX_VARIABLE_CHECK_MATCH_LENGTH + " characters", 400);
                 }
                 yield Pattern.compile(value).matcher(new DeadlineCharSequence(variable,
-                        System.nanoTime() + MATCHES_TIMEOUT_NANOS)).matches();
+                        System.nanoTime() + MATCHES_TIMEOUT_NANOS, "MATCHES pattern evaluation timed out")).matches();
             }
             default -> throw new AwsException("ValidationException",
                     "Unknown VariableCheck operator", 400);

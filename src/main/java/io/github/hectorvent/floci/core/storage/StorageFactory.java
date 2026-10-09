@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.core.storage;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;

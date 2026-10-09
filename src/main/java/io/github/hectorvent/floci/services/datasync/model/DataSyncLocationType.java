@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.datasync.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.List;
 import java.util.Optional;
 

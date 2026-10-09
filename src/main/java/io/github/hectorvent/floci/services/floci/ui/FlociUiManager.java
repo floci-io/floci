@@ -1,21 +1,10 @@
 package io.github.hectorvent.floci.services.floci.ui;
 
-import java.io.Closeable;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URI;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Pattern;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dockerjava.api.exception.DockerClientException;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Container;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -31,12 +20,23 @@ import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkReso
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
-import com.github.dockerjava.api.exception.DockerClientException;
-import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.Container;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
+
+import java.io.Closeable;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 /**
  * Manages the lifecycle of the web-console sidecar container, the browser-facing Floci console.

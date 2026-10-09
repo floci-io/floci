@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.cloudwatch.metricstreams;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStream;
-import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStreamFilter;
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStreamStatisticsConfiguration;
 import org.junit.jupiter.api.BeforeEach;

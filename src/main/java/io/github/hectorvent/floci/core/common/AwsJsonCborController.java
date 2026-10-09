@@ -13,10 +13,10 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJ
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
+import io.github.hectorvent.floci.services.marketplace.MarketplaceEntitlementController;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandler;
-import io.github.hectorvent.floci.services.marketplace.MarketplaceEntitlementController;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;

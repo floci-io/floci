@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
-import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
+import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;

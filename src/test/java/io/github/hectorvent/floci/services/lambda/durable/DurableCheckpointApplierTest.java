@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class DurableCheckpointApplierTest {
 
     private static final long NOW = 1_700_000_000_000L;
+    private static final Function<String, AwsException> REACHABLE = functionName -> null;
     private static final String EXECUTION_ARN =
             "arn:aws:lambda:us-east-1:000000000000:function:fn:1/durable-execution/exec/exec-id";
 
@@ -56,7 +58,7 @@ class DurableCheckpointApplierTest {
                 "Cannot update the same operation twice in a single request.");
         DurableExecution execution = execution();
         DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null), update("s1", null,
-                DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1")), NOW);
+                DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1")), NOW, REACHABLE);
         assertEquals(DurableOperationStatus.SUCCEEDED, execution.getOperations().get("s1").getStatus());
     }
 
@@ -64,7 +66,7 @@ class DurableCheckpointApplierTest {
     void parentMustBeAContextAndMetadataMustStayConsistent() {
         assertRejected(List.of(stepStart("s1", "missing")), "Invalid parent operation id.");
         DurableExecution execution = execution();
-        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null)), NOW);
+        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null)), NOW, REACHABLE);
         assertEquals("Inconsistent operation type.", reject(execution, List.of(waitStart("s1"))));
         assertEquals("Inconsistent parent operation id.", reject(execution, List.of(stepStart("ctx", null),
                 update("s1", "ctx", DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1"))));
@@ -73,7 +75,7 @@ class DurableCheckpointApplierTest {
     @Test
     void stepTransitionsAreGuarded() {
         DurableExecution execution = execution();
-        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null)), NOW);
+        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null)), NOW, REACHABLE);
         assertEquals("Invalid current STEP state to start.", reject(execution, List.of(stepStart("s1", null))));
         assertEquals("Cannot provide an Error for SUCCEED action.", reject(execution, List.of(
                 new DurableOperationUpdate("s1", null, null, DurableOperationType.STEP, null,
@@ -81,7 +83,7 @@ class DurableCheckpointApplierTest {
         assertEquals("Invalid StepOptions for the given action.", reject(execution, List.of(
                 update("s1", null, DurableOperationType.STEP, DurableOperationAction.RETRY, null))));
         DurableCheckpointApplier.apply(execution, List.of(update("s1", null, DurableOperationType.STEP,
-                DurableOperationAction.FAIL, null)), NOW);
+                DurableOperationAction.FAIL, null)), NOW, REACHABLE);
         assertEquals("Invalid current STEP state to close.", reject(execution, List.of(
                 update("s1", null, DurableOperationType.STEP, DurableOperationAction.SUCCEED, "1"))));
     }
@@ -93,10 +95,10 @@ class DurableCheckpointApplierTest {
         assertRejected(List.of(update("w1", null, DurableOperationType.WAIT, DurableOperationAction.CANCEL, null)),
                 "Cannot cancel a WAIT that does not exist or has already completed.");
         DurableExecution execution = execution();
-        DurableCheckpointApplier.apply(execution, List.of(waitStart("w1")), NOW);
+        DurableCheckpointApplier.apply(execution, List.of(waitStart("w1")), NOW, REACHABLE);
         assertEquals("Cannot start a WAIT that already exist.", reject(execution, List.of(waitStart("w1"))));
         DurableCheckpointApplier.apply(execution, List.of(update("w1", null, DurableOperationType.WAIT,
-                DurableOperationAction.CANCEL, null)), NOW);
+                DurableOperationAction.CANCEL, null)), NOW, REACHABLE);
         assertEquals(DurableOperationStatus.CANCELLED, execution.getOperations().get("w1").getStatus());
     }
 
@@ -131,7 +133,7 @@ class DurableCheckpointApplierTest {
         DurableExecution execution = execution();
         DurableCheckpointApplier.Outcome outcome = DurableCheckpointApplier.apply(execution,
                 List.of(chainedStart("i1", "arn:aws:lambda:us-east-1:000000000000:function:target-fn",
-                        "\"" + "x".repeat(300 * 1024) + "\"")), NOW);
+                        "\"" + "x".repeat(300 * 1024) + "\"")), NOW, REACHABLE);
         assertEquals(List.of("i1"), outcome.chainedInvokes(), "the service runs what the batch started");
         DurableOperation invoke = execution.getOperations().get("i1");
         assertEquals(DurableOperationStatus.STARTED, invoke.getStatus());
@@ -143,7 +145,7 @@ class DurableCheckpointApplierTest {
     @Test
     void aCallbackStartsWithAnIdThatNamesItsExecution() {
         DurableExecution execution = execution();
-        DurableCheckpointApplier.apply(execution, List.of(callbackStart("c1", 30, 10)), NOW);
+        DurableCheckpointApplier.apply(execution, List.of(callbackStart("c1", 30, 10)), NOW, REACHABLE);
 
         DurableOperation callback = execution.getOperations().get("c1");
         assertEquals(DurableOperationStatus.STARTED, callback.getStatus());
@@ -162,7 +164,7 @@ class DurableCheckpointApplierTest {
     void aCallbackTimesOutOnTheDeadlineItMissesFirst() {
         DurableExecution execution = execution();
         DurableCheckpointApplier.apply(execution, List.of(callbackStart("slow", 5, 0), callbackStart("silent", 60, 3)),
-                NOW);
+                NOW, REACHABLE);
 
         DurableCheckpointApplier.fireDueTimers(execution, NOW + 3_000);
         DurableOperation silent = execution.getOperations().get("silent");
@@ -197,7 +199,7 @@ class DurableCheckpointApplierTest {
 
     private static String reject(DurableExecution execution, List<DurableOperationUpdate> updates) {
         AwsException rejected = assertThrows(AwsException.class,
-                () -> DurableCheckpointApplier.apply(execution, updates, NOW));
+                () -> DurableCheckpointApplier.apply(execution, updates, NOW, REACHABLE));
         assertEquals(400, rejected.getHttpStatus());
         assertEquals("InvalidParameterValueException", rejected.getErrorCode());
         return rejected.getMessage();

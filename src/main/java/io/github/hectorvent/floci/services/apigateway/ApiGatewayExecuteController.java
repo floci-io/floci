@@ -1,5 +1,12 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+// REST and v2 both define Authorizer; the less-used REST type is qualified below.
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jayway.jsonpath.Configuration;
 import com.jayway.jsonpath.InvalidPathException;
 import com.jayway.jsonpath.JsonPath;
@@ -28,7 +35,6 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
-// REST and v2 both define Authorizer; the less-used REST type is qualified below.
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
@@ -41,11 +47,6 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;

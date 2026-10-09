@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.athena.model;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.List;
 
 @RegisterForReflection

@@ -11,8 +11,8 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.util.UUID;
 import java.util.List;
+import java.util.UUID;
 
 @ApplicationScoped
 public class ServiceCatalogJsonHandler {

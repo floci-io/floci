@@ -1,13 +1,13 @@
 package io.github.hectorvent.floci.services.iam;
 
-import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.equalTo;
-
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 
 /**
  * Verifies the AWS-managed {@code SecurityAudit} policy is resolvable and

@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.floci.ui;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-
-import jakarta.enterprise.context.ApplicationScoped;
 
 /**
  * Loads and caches the small embedded HTML pages served to browsers: the Floci

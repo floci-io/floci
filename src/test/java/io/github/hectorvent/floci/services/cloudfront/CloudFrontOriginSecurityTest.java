@@ -4,8 +4,8 @@ import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import org.junit.jupiter.api.Test;
 
-import java.net.InetAddress;
 import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.URI;
 import java.util.LinkedHashMap;
 import java.util.Map;

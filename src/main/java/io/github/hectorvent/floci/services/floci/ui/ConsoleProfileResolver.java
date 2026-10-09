@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.floci.ui;
 
-import java.util.Map;
-import java.util.Optional;
-
 import io.github.hectorvent.floci.config.EmulatorConfig.UiServiceConfig;
 import org.jboss.logging.Logger;
+
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * Resolves the {@link ConsoleProfile} for the configured console image.

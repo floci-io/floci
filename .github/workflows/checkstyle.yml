@@ -51,3 +51,6 @@ jobs:
 
       - name: Run Checkstyle
         run: ./mvnw -B checkstyle:check
+
+      - name: Test import-order rules
+        run: python3 tools/checkstyle/test_import_order.py

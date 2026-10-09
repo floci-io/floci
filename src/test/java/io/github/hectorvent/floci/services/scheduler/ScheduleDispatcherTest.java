@@ -2,9 +2,9 @@ package io.github.hectorvent.floci.services.scheduler;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.DeadLetterConfig;
 import io.github.hectorvent.floci.services.scheduler.model.RetryPolicy;
+import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;

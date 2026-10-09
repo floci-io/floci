@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import org.jboss.logging.Logger;
+import org.xerial.snappy.SnappyHadoopCompatibleOutputStream;
+import org.xerial.snappy.SnappyOutputStream;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -10,9 +12,6 @@ import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
-
-import org.xerial.snappy.SnappyHadoopCompatibleOutputStream;
-import org.xerial.snappy.SnappyOutputStream;
 
 /**
  * The {@code CompressionFormat} values Firehose applies when it delivers to S3,

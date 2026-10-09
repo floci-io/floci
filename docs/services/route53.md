@@ -45,6 +45,7 @@ Route53 emulation supporting hosted zones, resource record sets, health checks, 
 - Supported change actions: `CREATE`, `UPSERT`, `DELETE`.
 - Hosted zone IDs are returned with the `/hostedzone/` prefix in XML responses (e.g. `/hostedzone/Z1PA6795UKMFR9`). The AWS SDK strips this prefix client-side.
 - Health check IDs are plain UUIDs without a prefix.
+- `CreateHealthCheck` with a `CallerReference` already in use returns that health check when the settings match, so an SDK retry succeeds, and fails with `HealthCheckAlreadyExists` when they differ. A deleted health check's reference can be reused at once; AWS keeps refusing it for some days.
 - Tags are supported for both `hostedzone` and `healthcheck` resource types.
 - A hosted zone is private when `CreateHostedZone` carries a `<VPC>` element; `HostedZoneConfig.PrivateZone` is response-only.
 - `AssociateVPCWithHostedZone` rejects public zones with `PublicZoneVPCAssociation`, and `DisassociateVPCFromHostedZone` rejects removing the last VPC with `LastVPCAssociation`.

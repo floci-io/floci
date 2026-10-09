@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.cloudwatch.logs;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -17,13 +21,13 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.MetricFilter;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.ResourcePolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -33,15 +37,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
-import java.time.Instant;
-import java.util.Set;
 
 import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.invalid;
 

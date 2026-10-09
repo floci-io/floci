@@ -536,7 +536,7 @@ jobs:
             -e FLOCI_EC2_CONTAINERS="$1" \
             -v "$(pwd)/test-results/$1:/results" \
             --entrypoint bash \
-            compat-sdk-test-java -c 'status=0; mvn test -B -Dtest=Ec2ContainerTest -Dorg.slf4j.simpleLogger.defaultLogLevel=warn || status=$?; cp target/surefire-reports/TEST-*.xml /results/ 2>/dev/null || true; exit $status'
+            compat-sdk-test-java -c 'status=0; mvn test -B -Dtest=Ec2ContainerTest,Ec2CreateVpcLatencyTest -Dorg.slf4j.simpleLogger.defaultLogLevel=warn || status=$?; cp target/surefire-reports/TEST-*.xml /results/ 2>/dev/null || true; exit $status'
           SH
 
       - name: Run tests with security group enforcement

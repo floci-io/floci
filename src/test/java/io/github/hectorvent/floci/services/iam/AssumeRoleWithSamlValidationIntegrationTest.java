@@ -26,7 +26,6 @@ import javax.xml.crypto.dsig.spec.TransformParameterSpec;
 import javax.xml.crypto.dsig.spec.XPathFilter2ParameterSpec;
 import javax.xml.crypto.dsig.spec.XPathFilterParameterSpec;
 import javax.xml.crypto.dsig.spec.XPathType;
-
 import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;

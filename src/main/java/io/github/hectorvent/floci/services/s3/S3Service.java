@@ -659,15 +659,12 @@ public class S3Service implements Resettable, ResourceProvider {
         // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
         ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
                 : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
-        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
-        algorithms.addAll(checksums.algorithms());
-        if (computed != null) {
-            algorithms.add(computed);
-        }
-        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(checksums, computed));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
             S3Checksum checksum = null;
             if (computed != null) {
                 checksum = new S3Checksum();
@@ -3881,12 +3878,12 @@ public class S3Service implements Resettable, ResourceProvider {
                     sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
         }
         ChecksumAlgorithm algorithm = declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
-        Set<ChecksumAlgorithm> algorithms = EnumSet.of(algorithm);
-        algorithms.addAll(checksums.algorithms());
-        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(checksums, algorithm));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
             S3Checksum partChecksum = new S3Checksum();
             partChecksum.setValueFor(algorithm, digests.checksum(algorithm));
             return withMultipartOperationLock(bucket, uploadId, () -> {
@@ -3918,7 +3915,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * with EntityTooLarge once it outgrows the largest array the JDK allocates.
      */
     private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
-        DigestingInputStream digests = new DigestingInputStream(body, checksums.algorithms());
+        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(checksums, null));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[64 * 1024];
         try {
@@ -3930,7 +3927,31 @@ public class S3Service implements Resettable, ResourceProvider {
             throw new UncheckedIOException("Failed to read the upload body", e);
         }
         checksums.verify(digests.md5(), digests::checksum);
+        verifyChunkedTrailers(body, digests, checksums);
         return out.toByteArray();
+    }
+
+    /**
+     * Algorithms hashed as a body is read. A trailing checksum is hashed only when
+     * {@code x-amz-trailer} named it, which is the only trailer line that is checked.
+     */
+    private static Set<ChecksumAlgorithm> digestAlgorithms(UploadChecksums checksums, ChecksumAlgorithm stored) {
+        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
+        algorithms.addAll(checksums.algorithms());
+        if (stored != null) {
+            algorithms.add(stored);
+        }
+        if (checksums.trailerAlgorithm() != null) {
+            algorithms.add(checksums.trailerAlgorithm());
+        }
+        return algorithms;
+    }
+
+    private static void verifyChunkedTrailers(InputStream body, DigestingInputStream digests,
+                                              UploadChecksums checksums) {
+        if (body instanceof AwsChunkedInputStream chunked) {
+            checksums.verifyTrailers(chunked, digests::checksum);
+        }
     }
 
     /**

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.aps;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -11,7 +12,6 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.aps.model.PrometheusWorkspace;
 import io.github.hectorvent.floci.services.aps.model.RuleGroupsNamespace;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;

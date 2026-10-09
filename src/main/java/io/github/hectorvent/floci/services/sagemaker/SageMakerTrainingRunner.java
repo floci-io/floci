@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.sagemaker;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.command.LogContainerResultCallback;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.Resettable;

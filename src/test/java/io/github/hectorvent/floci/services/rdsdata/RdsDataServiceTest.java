@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import org.h2.Driver;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -25,13 +26,12 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.h2.Driver;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;

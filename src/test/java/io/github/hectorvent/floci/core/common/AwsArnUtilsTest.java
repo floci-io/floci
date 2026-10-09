@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.core.common;
 
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;

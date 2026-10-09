@@ -6,8 +6,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
-import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
 import org.h2.Driver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,20 +16,20 @@ import java.sql.DriverManager;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.time.Clock;
-import java.util.UUID;
 import java.util.List;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.verify;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class RedshiftDataServiceTest {
 

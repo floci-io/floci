@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
@@ -7,7 +8,6 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -132,6 +132,16 @@ public class Ec2QueryHandler {
                         handleModifyTransitGatewayVpcAttachment(params, region);
                 case "DeleteTransitGatewayVpcAttachment" ->
                         handleDeleteTransitGatewayVpcAttachment(params, region);
+                case "CreateTransitGatewayPeeringAttachment" ->
+                        handleCreateTransitGatewayPeeringAttachment(params, region);
+                case "DescribeTransitGatewayPeeringAttachments" ->
+                        handleDescribeTransitGatewayPeeringAttachments(params, region);
+                case "AcceptTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
+                        "AcceptTransitGatewayPeeringAttachmentResponse", service.acceptTransitGatewayPeeringAttachment(
+                                region, params.getFirst("TransitGatewayAttachmentId")));
+                case "DeleteTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
+                        "DeleteTransitGatewayPeeringAttachmentResponse", service.deleteTransitGatewayPeeringAttachment(
+                                region, params.getFirst("TransitGatewayAttachmentId")));
                 // Transit Gateway route tables, associations, propagations and routes
                 case "CreateTransitGatewayRouteTable" -> handleCreateTransitGatewayRouteTable(params, region);
                 case "DescribeTransitGatewayRouteTables" ->
@@ -535,11 +545,28 @@ public class Ec2QueryHandler {
      * spellings are read, because an action that used the plural silently lost every tag.
      */
     private List<Tag> parseTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
+        return parseTagsForResource(p, resourceType, false);
+    }
+
+    private List<Tag> parseTagsForResource(MultivaluedMap<String, String> p, String resourceType,
+                                         boolean requireMatchingResourceType) {
         List<Tag> tags = new ArrayList<>();
         for (String prefix : new String[] {"TagSpecification", "TagSpecifications"}) {
             for (int i = 1; ; i++) {
-                String resType = p.getFirst(prefix + "." + i + ".ResourceType");
-                if (resType == null) break;
+                String specificationPrefix = prefix + "." + i + ".";
+                String resType = p.getFirst(specificationPrefix + "ResourceType");
+                if (resType == null && p.keySet().stream().noneMatch(key -> key.startsWith(specificationPrefix))) {
+                    break;
+                }
+                if (requireMatchingResourceType && !resourceType.equals(resType)) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Tag specification resource type '" + (resType == null ? "" : resType)
+                                    + "' is not valid for this operation. The valid resource type is '"
+                                    + resourceType + "'.", 400);
+                }
+                if (resType == null) {
+                    break;
+                }
                 if (resourceType.equals(resType)) {
                     for (int j = 1; ; j++) {
                         String key = p.getFirst(prefix + "." + i + ".Tag." + j + ".Key");
@@ -2490,6 +2517,63 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleCreateTransitGatewayPeeringAttachment(MultivaluedMap<String, String> p, String region) {
+        return peeringAttachmentResponse("CreateTransitGatewayPeeringAttachmentResponse",
+                service.createTransitGatewayPeeringAttachment(region,
+                        p.getFirst("TransitGatewayId"),
+                        p.getFirst("PeerTransitGatewayId"),
+                        p.getFirst("PeerAccountId"),
+                        p.getFirst("PeerRegion"),
+                        p.getFirst("Options.DynamicRouting"),
+                        parseTagsForResource(p, "transit-gateway-attachment")));
+    }
+
+    private Response handleDescribeTransitGatewayPeeringAttachments(MultivaluedMap<String, String> p,
+                                                                   String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayPeeringAttachmentsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayPeeringAttachments");
+        for (TransitGatewayPeeringAttachment attachment : service.describeTransitGatewayPeeringAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p))) {
+            xml.start("item").raw(peeringAttachmentXml(attachment)).end("item");
+        }
+        xml.end("transitGatewayPeeringAttachments").end("DescribeTransitGatewayPeeringAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /** Create, accept and delete all answer with the attachment under the same member name. */
+    private Response peeringAttachmentResponse(String responseName, TransitGatewayPeeringAttachment attachment) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(responseName, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayPeeringAttachment").raw(peeringAttachmentXml(attachment))
+                .end("transitGatewayPeeringAttachment")
+                .end(responseName);
+        return xmlResponse(xml.build());
+    }
+
+    private String peeringAttachmentXml(TransitGatewayPeeringAttachment attachment) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId());
+        List<Map.Entry<String, TransitGatewayPeeringAttachment.TgwInfo>> sides = List.of(
+                Map.entry("requesterTgwInfo", attachment.getRequesterTgwInfo()),
+                Map.entry("accepterTgwInfo", attachment.getAccepterTgwInfo()));
+        for (Map.Entry<String, TransitGatewayPeeringAttachment.TgwInfo> side : sides) {
+            xml.start(side.getKey())
+                    .elem("transitGatewayId", side.getValue().getTransitGatewayId())
+                    .elem("ownerId", side.getValue().getOwnerId())
+                    .elem("region", side.getValue().getRegion())
+                    .end(side.getKey());
+        }
+        return xml.start("options").elem("dynamicRouting", attachment.getDynamicRouting()).end("options")
+                .start("status").elem("code", attachment.getState()).end("status")
+                .elem("state", attachment.getState())
+                .elem("creationTime", attachment.getCreationTime())
+                .raw(tagSetXml(attachment.getTags()))
+                .build();
+    }
+
     private TransitGatewayVpcAttachmentOptions parseVpcAttachmentOptions(MultivaluedMap<String, String> p) {
         TransitGatewayVpcAttachmentOptions options = new TransitGatewayVpcAttachmentOptions();
         options.setDnsSupport(p.getFirst("Options.DnsSupport"));
@@ -2974,8 +3058,21 @@ public class Ec2QueryHandler {
         String az = p.getFirst("AvailabilityZone");
         String azId = p.getFirst("AvailabilityZoneId");
         String ipv6CidrBlock = p.getFirst("Ipv6CidrBlock");
+        List<Tag> tags = parseTagsForResource(p, "subnet", true);
         Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId, ipv6CidrBlock);
-        applyResourceTags(p, region, "subnet", subnet.getSubnetId());
+        try {
+            if (!tags.isEmpty()) {
+                service.createTags(region, List.of(subnet.getSubnetId()), tags);
+            }
+        } catch (RuntimeException failure) {
+            try {
+                service.deleteSubnet(region, subnet.getSubnetId());
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+                LOG.warnv(cleanupFailure, "Failed to delete subnet {0} after tagging failed", subnet.getSubnetId());
+            }
+            throw failure;
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

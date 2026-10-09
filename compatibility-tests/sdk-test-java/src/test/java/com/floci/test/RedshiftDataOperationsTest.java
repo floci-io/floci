@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -14,8 +15,6 @@ import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementReques
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultRequest;
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultResponse;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
-
-import org.jboss.logging.Logger;
 
 import java.time.Duration;
 import java.time.Instant;

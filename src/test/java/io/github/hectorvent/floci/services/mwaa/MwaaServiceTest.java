@@ -1,12 +1,13 @@
 package io.github.hectorvent.floci.services.mwaa;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.mwaa.model.CreateEnvironmentRequest;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
@@ -15,7 +16,6 @@ import io.github.hectorvent.floci.services.mwaa.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.mwaa.model.UpdateEnvironmentRequest;
 import io.github.hectorvent.floci.services.mwaa.proxy.MwaaProxyManager;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import com.fasterxml.jackson.core.type.TypeReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -30,8 +30,8 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;

@@ -2,17 +2,17 @@ package io.github.hectorvent.floci.services.transfer;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
-import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import jakarta.enterprise.inject.Instance;
 import io.github.hectorvent.floci.services.transfer.model.Server;
 import io.github.hectorvent.floci.services.transfer.model.SshPublicKey;
 import io.github.hectorvent.floci.services.transfer.model.User;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -24,10 +24,10 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.when;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.when;
 
 class TransferServiceTest {
 

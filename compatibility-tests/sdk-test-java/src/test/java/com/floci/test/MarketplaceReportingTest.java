@@ -4,9 +4,9 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.marketplacereporting.MarketplaceReportingClient;
 import software.amazon.awssdk.services.marketplacereporting.model.GetBuyerDashboardResponse;
 
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class MarketplaceReportingTest {
 

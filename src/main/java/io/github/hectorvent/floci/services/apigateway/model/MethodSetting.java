@@ -1,8 +1,7 @@
 package io.github.hectorvent.floci.services.apigateway.model;
 
-import io.quarkus.runtime.annotations.RegisterForReflection;
-
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
  * Per-method settings on an API Gateway v1 Stage, addressed by the

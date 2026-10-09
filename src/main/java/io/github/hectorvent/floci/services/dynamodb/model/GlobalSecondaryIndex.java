@@ -4,8 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
-import java.util.List;
 import java.util.ArrayList;
+import java.util.List;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)

@@ -208,6 +208,26 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void aClosingCheckpointEndsTheInvocationAndTheHandlerReturnIsIgnored() {
+        List<CheckpointResult> closing = new ArrayList<>();
+        invoker.script(event -> {
+            closing.add(checkpoint(event, token(event), List.of(step("s1", DurableOperationAction.START, null, null),
+                    executionSucceed("\"closed\""))));
+            return functionError("{\"errorMessage\":\"after close\"}");
+        });
+
+        DurableExecution execution = service.get(start("exec-1", "{}", false).getExecutionArn());
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, execution.getStatus());
+        assertEquals("\"closed\"", execution.getResult());
+        assertEquals(List.of("ExecutionStarted", "StepStarted", "InvocationCompleted", "ExecutionSucceeded"),
+                eventTypes(execution));
+        Map<?, ?> completed = (Map<?, ?>) execution.getHistory().get(2).getDetails().get("InvocationCompletedDetails");
+        assertEquals(invoker.requestIds.get(0), completed.get("RequestId"));
+        assertTrue(closing.get(0).newExecutionState().isEmpty());
+    }
+
+    @Test
     void aRetriedCheckpointWithTheSameClientTokenGetsTheSameAnswer() {
         invoker.script(event -> {
             String arn = event.get("DurableExecutionArn").asText();
@@ -794,9 +814,25 @@ class DurableExecutionServiceTest {
 
         assertEquals(List.of("{\"n\":1}"), received);
         assertEquals("\"closed\"", execution.getResult());
-        assertTrue(eventTypes(execution).contains("ChainedInvokeStarted"));
-        assertFalse(eventTypes(execution).contains("ChainedInvokeSucceeded"));
+        assertEquals(List.of("ExecutionStarted", "InvocationCompleted", "ChainedInvokeStarted", "ExecutionSucceeded"),
+                eventTypes(execution));
         assertEquals(1, invoker.events.size());
+    }
+
+    @Test
+    void aTargetThatCannotBeInvokedStartsInBatchOrderAndFailsBeforeTheInvocationEnds() {
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(step("s1", DurableOperationAction.START, null, null),
+                    chainedStart("i1", "missing-fn", null), step("s2", DurableOperationAction.START, null, null),
+                    executionSucceed("\"closed\"")));
+            return succeeded("");
+        });
+
+        DurableExecution execution = service.get(start("exec-1", "{}", false).getExecutionArn());
+
+        assertEquals(List.of("ExecutionStarted", "StepStarted", "ChainedInvokeStarted", "StepStarted",
+                "ChainedInvokeFailed", "InvocationCompleted", "ExecutionSucceeded"), eventTypes(execution));
+        assertEquals(DurableOperationStatus.FAILED, execution.getOperations().get("i1").getStatus());
     }
 
     @Test
@@ -920,6 +956,7 @@ class DurableExecutionServiceTest {
 
         final Deque<Function<JsonNode, DurableInvocationResult>> scripts = new ArrayDeque<>();
         final List<JsonNode> events = new ArrayList<>();
+        final List<String> requestIds = new ArrayList<>();
         /** Durable functions other than the one under test, each with its own scripts. */
         final Map<String, Deque<Function<JsonNode, DurableInvocationResult>>> childScripts = new HashMap<>();
         /** Plain functions a chained invoke may call, answering the raw payload. */
@@ -956,7 +993,7 @@ class DurableExecutionServiceTest {
         }
 
         @Override
-        public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload) {
+        public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
             JsonNode event;
             try {
                 event = MAPPER.readTree(payload);
@@ -972,6 +1009,7 @@ class DurableExecutionServiceTest {
                 return script != null ? script.apply(event) : pending();
             }
             events.add(event);
+            requestIds.add(requestId);
             Function<JsonNode, DurableInvocationResult> script = scripts.poll();
             if (script == null) {
                 return handlerResponse("{\"Status\":\"FAILED\",\"Error\":{\"ErrorMessage\":\"no script for "

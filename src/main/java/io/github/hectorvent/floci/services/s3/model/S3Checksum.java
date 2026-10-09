@@ -7,9 +7,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.List;
 import java.util.regex.Pattern;
-import java.util.zip.Checksum;
 import java.util.zip.CRC32;
 import java.util.zip.CRC32C;
+import java.util.zip.Checksum;
 
 @RegisterForReflection
 public class S3Checksum {

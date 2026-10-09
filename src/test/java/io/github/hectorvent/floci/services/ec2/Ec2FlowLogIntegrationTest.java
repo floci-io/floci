@@ -1,14 +1,14 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.startsWith;
-
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.startsWith;
 
 /**
  * Integration tests for VPC Flow Logs via the EC2 Query Protocol

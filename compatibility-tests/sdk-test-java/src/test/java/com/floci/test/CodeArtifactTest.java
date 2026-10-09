@@ -1,12 +1,13 @@
 package com.floci.test;
 
+// Explicit import: this file's Tag usage is the CodeArtifact model type, not JUnit's @Tag.
+
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.codeartifact.CodeartifactClient;
 import software.amazon.awssdk.services.codeartifact.model.*;
-// Explicit import: this file's Tag usage is the CodeArtifact model type, not JUnit's @Tag.
 import software.amazon.awssdk.services.codeartifact.model.Tag;
 
 import java.nio.charset.StandardCharsets;

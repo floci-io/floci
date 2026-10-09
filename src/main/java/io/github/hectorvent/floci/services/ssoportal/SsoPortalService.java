@@ -14,8 +14,8 @@ import io.github.hectorvent.floci.services.ssooidc.SsoOidcException;
 import io.github.hectorvent.floci.services.ssooidc.SsoOidcService;
 import io.github.hectorvent.floci.services.ssooidc.model.TokenSession;
 import io.github.hectorvent.floci.services.ssoportal.model.PortalAccountInfo;
-import io.github.hectorvent.floci.services.ssoportal.model.PortalRoleInfo;
 import io.github.hectorvent.floci.services.ssoportal.model.PortalRoleCredentials;
+import io.github.hectorvent.floci.services.ssoportal.model.PortalRoleInfo;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 

@@ -11,6 +11,8 @@ import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.services.cloudwatch.model.Dimension;
 
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -23,8 +25,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import javax.xml.XMLConstants;
-import javax.xml.parsers.DocumentBuilderFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

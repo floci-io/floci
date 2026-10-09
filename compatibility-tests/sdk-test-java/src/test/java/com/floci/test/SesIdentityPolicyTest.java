@@ -7,13 +7,11 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.DeleteIdentityPolicyRequest;
 import software.amazon.awssdk.services.ses.model.GetIdentityPoliciesRequest;
 import software.amazon.awssdk.services.ses.model.ListIdentityPoliciesRequest;
 import software.amazon.awssdk.services.ses.model.PutIdentityPolicyRequest;
-
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.AlreadyExistsException;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityPolicyRequest;

@@ -13,18 +13,18 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
-import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
-import io.github.hectorvent.floci.services.rds.model.DbCluster;
-import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
-import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
-import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
+import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
-import io.github.hectorvent.floci.services.kms.KmsService;
-import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
@@ -81,12 +81,13 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.doCallRealMethod;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -956,6 +957,97 @@ class RdsServiceTest {
         assertEquals("localhost", instance.getEndpoint().address());
         assertEquals(49173, instance.getEndpoint().port());
         assertEquals(7000, instance.getProxyPort());
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), anyBoolean(), eq(7000), any(), anyInt(),
+                any(), any(), any(), any(), any(), binding.capture());
+        assertEquals(new RdsProxyBinding("localhost", 49173, "us-east-1", "123456789012",
+                instance.getDbiResourceId(), true), binding.getValue());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,7000", "true,49173"})
+    void iamBindingUsesStoredEndpointWhenPublishedPortLookupChanges(boolean mapped, int advertisedPort) {
+        CurrentContainerNetworkResolver resolver = mock(CurrentContainerNetworkResolver.class);
+        when(config.services().rds().endpointHost()).thenReturn(Optional.of("localhost"));
+        when(resolver.resolvePublishedPort(7000)).thenReturn(
+                mapped ? OptionalInt.of(49173) : OptionalInt.empty(), OptionalInt.of(49174));
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, resolver);
+
+        DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro", 20, true, null, null, null);
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), anyBoolean(), eq(7000), any(), anyInt(),
+                any(), any(), any(), any(), any(), binding.capture());
+        assertEquals(advertisedPort, instance.getEndpoint().port());
+        assertEquals(new RdsProxyBinding(instance.getEndpoint().address(), instance.getEndpoint().port(),
+                "us-east-1", "123456789012", instance.getDbiResourceId(), true), binding.getValue());
+        verify(resolver).resolvePublishedPort(7000);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,7000", "true,49173"})
+    void clusterIamBindingUsesStoredEndpointWhenPublishedPortLookupChanges(boolean mapped, int advertisedPort) {
+        CurrentContainerNetworkResolver resolver = mock(CurrentContainerNetworkResolver.class);
+        when(config.services().rds().endpointHost()).thenReturn(Optional.of("localhost"));
+        when(resolver.resolvePublishedPort(7000)).thenReturn(
+                mapped ? OptionalInt.of(49173) : OptionalInt.empty(), OptionalInt.of(49174));
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, resolver);
+
+        DbCluster cluster = service.createDbCluster("cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "app", true, null);
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), anyBoolean(), eq(7000), any(), anyInt(),
+                any(), any(), any(), any(), any(), binding.capture());
+        assertEquals(advertisedPort, cluster.getEndpoint().port());
+        assertEquals(new RdsProxyBinding(cluster.getEndpoint().address(), cluster.getEndpoint().port(),
+                "us-east-1", "123456789012", cluster.getDbClusterResourceId(), true), binding.getValue());
+        verify(resolver).resolvePublishedPort(7000);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"postgres,POSTGRESQL,5432", "mysql,MYSQL,3306"})
+    void dbProxyIamBindingUsesEachListenerPort(String engine, String family, int defaultPort) {
+        CurrentContainerNetworkResolver resolver = mock(CurrentContainerNetworkResolver.class);
+        when(config.services().rds().endpointHost()).thenReturn(Optional.of("localhost"));
+        when(resolver.resolvePublishedPort(anyInt())).thenReturn(OptionalInt.of(49173));
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, null, resolver);
+        service.createDbInstance("mydb", engine, null, "admin", "password", "app",
+                "db.t3.micro", 20, true, null, null, null);
+        DbProxy first = service.createDbProxy("proxy-a", family, true, true, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        DbProxy second = service.createDbProxy("proxy-b", family, true, true, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        clearInvocations(proxyManager, resolver);
+
+        for (DbProxy proxy : List.of(first, second)) {
+            service.registerDbProxyTargets(proxy.getDbProxyName(), null,
+                    List.of(), List.of("mydb"), 90, 40);
+            ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+            verify(proxyManager).startProxy(any(), any(), anyBoolean(), eq(proxy.getProxyPort()), any(), anyInt(),
+                    any(), any(), any(), any(), any(), binding.capture());
+            assertEquals(proxy.getEndpointHost(), proxy.getEndpoint());
+            assertEquals(new RdsProxyBinding(proxy.getEndpointHost(), proxy.getProxyPort(), "us-east-1",
+                    "123456789012", proxy.getDbProxyResourceId(), true), binding.getValue());
+            clearInvocations(proxyManager);
+            service.modifyDbProxy(proxy.getDbProxyName(), null, PROXY_AUTH, null, null, null,
+                    null, null, null, "us-east-1");
+            verify(proxyManager).startProxy(any(), any(), eq(false), eq(proxy.getProxyPort()), any(), anyInt(),
+                    any(), any(), any(), any(), any(), binding.capture());
+            assertEquals(new RdsProxyBinding(proxy.getEndpointHost(), proxy.getProxyPort(), "us-east-1",
+                    "123456789012", proxy.getDbProxyResourceId(), true), binding.getValue());
+            clearInvocations(proxyManager);
+        }
+        assertEquals(defaultPort, first.getProxyPort());
+        assertNotEquals(defaultPort, second.getProxyPort());
+        verifyNoInteractions(resolver);
     }
 
     @Test

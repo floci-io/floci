@@ -8,8 +8,8 @@ import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementRespo
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementResponse;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
-import software.amazon.awssdk.services.redshiftserverless.model.GetCredentialsResponse;
 import software.amazon.awssdk.services.redshiftserverless.model.ConflictException;
+import software.amazon.awssdk.services.redshiftserverless.model.GetCredentialsResponse;
 import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
 import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;

@@ -1,14 +1,13 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Test;
+
 import static io.restassured.RestAssured.given;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
-
-import org.junit.jupiter.api.Test;
-
-import io.quarkus.test.junit.QuarkusTest;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * A load balancer or target group that has never been modified used to answer with an empty

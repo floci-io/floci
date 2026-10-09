@@ -25,7 +25,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;

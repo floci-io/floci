@@ -48,6 +48,7 @@ public class DurableExecution {
     private long seenSequence;
     private long checkpointSequence;
     private String currentInvocationId;
+    private Long currentInvocationStartedAt;
     private boolean reinvokeRequested;
     private int consecutiveInvocationFailures;
     private Long nextInvocationAttemptAt;
@@ -188,6 +189,11 @@ public class DurableExecution {
 
     public String getCurrentInvocationId() { return currentInvocationId; }
     public void setCurrentInvocationId(String currentInvocationId) { this.currentInvocationId = currentInvocationId; }
+
+    public Long getCurrentInvocationStartedAt() { return currentInvocationStartedAt; }
+    public void setCurrentInvocationStartedAt(Long currentInvocationStartedAt) {
+        this.currentInvocationStartedAt = currentInvocationStartedAt;
+    }
 
     public boolean isReinvokeRequested() { return reinvokeRequested; }
     public void setReinvokeRequested(boolean reinvokeRequested) { this.reinvokeRequested = reinvokeRequested; }

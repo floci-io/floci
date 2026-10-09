@@ -1,14 +1,16 @@
 package io.github.hectorvent.floci.services.ecr;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
-import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
@@ -17,9 +19,6 @@ import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
 import java.io.OutputStream;

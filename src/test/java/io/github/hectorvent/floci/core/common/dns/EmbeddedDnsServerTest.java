@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common.dns;
 
+import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +13,8 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -671,6 +675,29 @@ class EmbeddedDnsServerTest {
         assertThrows(Exception.class, () -> EmbeddedDnsServer.forwardToTargets(
                 buildQuery("db.corp.internal", (short) 8),
                 List.of(new DnsForwardingRule.Target("127.0.0.1", 1))));
+    }
+
+    @Test
+    void submitForward_slowForwardDoesNotBlockTheNextOneOnTheSameContext() throws Exception {
+        // Catches: forwards submitted from one event-loop context run one at a time, so a single
+        // unresponsive upstream stalls every other query's forwarding until it times out.
+        Vertx vertx = Vertx.vertx();
+        WorkerExecutor pool = vertx.createSharedWorkerExecutor("dns-forward-test", 2);
+        CountDownLatch releaseSlow = new CountDownLatch(1);
+        CountDownLatch fastDone = new CountDownLatch(1);
+        try {
+            vertx.getOrCreateContext().runOnContext(v -> {
+                EmbeddedDnsServer.submitForward(pool, () -> releaseSlow.await(10, TimeUnit.SECONDS));
+                EmbeddedDnsServer.submitForward(pool, () -> {
+                    fastDone.countDown();
+                    return null;
+                });
+            });
+            assertTrue(fastDone.await(5, TimeUnit.SECONDS));
+        } finally {
+            releaseSlow.countDown();
+            vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+        }
     }
 
     /** Replies to the first datagram received with a fixed payload, on a daemon thread. */

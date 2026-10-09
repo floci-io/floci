@@ -34,9 +34,9 @@ import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroup
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersResponse;
+import software.amazon.awssdk.services.redshift.model.DescribeOrderableClusterOptionsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeSnapshotCopyGrantsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeSnapshotCopyGrantsResponse;
-import software.amazon.awssdk.services.redshift.model.DescribeOrderableClusterOptionsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeTagsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeTagsResponse;
 import software.amazon.awssdk.services.redshift.model.ModifyClusterIamRolesRequest;

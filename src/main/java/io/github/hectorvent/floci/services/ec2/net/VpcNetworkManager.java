@@ -170,43 +170,60 @@ public class VpcNetworkManager {
     // ─── Declaration: CreateVpc / CreateSubnet ────────────────────────────────
 
     /**
-     * Records the address plan for a VPC. Called from CreateVpc and from default-resource
-     * seeding; the Docker network itself is only created when the first instance needs it
-     * (see {@link #attach}), because most roots in this corpus create VPCs they never launch
-     * anything into and a Linux bridge per unused VPC is pure daemon churn.
+     * Records a VPC declaration without contacting Docker. Its address plan is resolved when
+     * a consumer first needs an effective CIDR or private address; the network itself is only
+     * created on attachment. Management requests must not wait for the Docker daemon.
      */
     public void declareVpc(String region, String vpcId, String declaredCidr) {
         if (!enabled() || region == null || vpcId == null) {
             return;
         }
-        synchronized (planLock) {
-            // Deliberately not computeIfAbsent: planVpc reads the whole binding map to detect
-            // collisions, and ConcurrentHashMap forbids that from inside a mapping function.
-            String vpcKey = key(region, vpcId);
-            if (!bindings.containsKey(vpcKey)) {
-                bindings.put(vpcKey, planVpc(region, vpcId, declaredCidr));
-            }
-        }
+        bindings.putIfAbsent(key(region, vpcId),
+                new VpcBinding(region, vpcId, declaredCidr, networkName(region, vpcId)));
     }
 
-    /** Records the address plan for a subnet inside an already-declared VPC. */
+    /** Records a subnet declaration inside an already-declared VPC. */
     public void declareSubnet(String region, String vpcId, String subnetId, String declaredCidr) {
         if (!enabled() || region == null || vpcId == null || subnetId == null) {
             return;
         }
-        synchronized (planLock) {
-            VpcBinding vpc = bindings.get(key(region, vpcId));
-            if (vpc == null) {
-                return;
+        VpcBinding vpc = bindings.get(key(region, vpcId));
+        if (vpc == null) {
+            return;
+        }
+        synchronized (vpc.declarationLock) {
+            if (!vpc.subnetDeclarations.containsKey(subnetId)) {
+                vpc.subnetDeclarations.put(subnetId, declaredCidr);
             }
-            if (!vpc.subnets.containsKey(subnetId)) {
+            if (vpc.planned && !vpc.subnets.containsKey(subnetId)) {
                 vpc.subnets.put(subnetId, planSubnet(vpc, subnetId, declaredCidr));
             }
             subnetOwner.put(key(region, subnetId), key(region, vpcId));
         }
     }
 
-    private VpcBinding planVpc(String region, String vpcId, String declaredCidr) {
+    private VpcBinding plannedVpc(String region, String vpcId) {
+        VpcBinding vpc = bindings.get(key(region, vpcId));
+        if (vpc == null || vpc.planned) {
+            return vpc;
+        }
+        synchronized (planLock) {
+            if (!vpc.planned) {
+                planVpc(vpc);
+                synchronized (vpc.declarationLock) {
+                    vpc.subnetDeclarations.forEach((subnetId, cidr) ->
+                            vpc.subnets.put(subnetId, planSubnet(vpc, subnetId, cidr)));
+                    vpc.planned = true;
+                }
+            }
+        }
+        return vpc;
+    }
+
+    private void planVpc(VpcBinding vpc) {
+        String region = vpc.region;
+        String vpcId = vpc.vpcId;
+        String declaredCidr = vpc.declaredCidr;
         Optional<Cidr4> declared = Cidr4.parse(declaredCidr);
         String rejection = rejectionReason(region, vpcId, declared, declaredCidr, List.of());
         Cidr4 effective;
@@ -229,8 +246,8 @@ public class VpcNetworkManager {
                         vpcId, region, String.valueOf(declaredCidr), rejection, effective);
             }
         }
-        return new VpcBinding(region, vpcId, declared.orElse(null), effective, rejection != null,
-                networkName(region, vpcId));
+        vpc.effective = effective;
+        vpc.substituted = rejection != null;
     }
 
     /**
@@ -480,7 +497,9 @@ public class VpcNetworkManager {
     }
 
     public void releasePrivateIp(String region, String subnetId, String address) {
-        SubnetBinding subnet = subnetBinding(region, subnetId);
+        String vpcKey = subnetOwner.get(key(region, subnetId));
+        VpcBinding vpc = vpcKey == null ? null : bindings.get(vpcKey);
+        SubnetBinding subnet = vpc == null ? null : vpc.subnets.get(subnetId);
         if (subnet != null && address != null) {
             subnet.leased.remove(address);
         }
@@ -505,7 +524,7 @@ public class VpcNetworkManager {
         if (!enabled() || containerId == null || address == null) {
             return Optional.empty();
         }
-        VpcBinding vpc = bindings.get(key(region, vpcId));
+        VpcBinding vpc = plannedVpc(region, vpcId);
         if (vpc == null || vpc.effective == null) {
             return Optional.empty();
         }
@@ -549,7 +568,7 @@ public class VpcNetworkManager {
         if (!enabled() || containerId == null || vpcId == null) {
             return false;
         }
-        VpcBinding vpc = bindings.get(key(region, vpcId));
+        VpcBinding vpc = plannedVpc(region, vpcId);
         if (vpc == null || vpc.effective == null) {
             return false;
         }
@@ -773,7 +792,10 @@ public class VpcNetworkManager {
         }
         VpcBinding vpc = bindings.get(vpcKey);
         if (vpc != null) {
-            vpc.subnets.remove(subnetId);
+            synchronized (vpc.declarationLock) {
+                vpc.subnetDeclarations.remove(subnetId);
+                vpc.subnets.remove(subnetId);
+            }
         }
     }
 
@@ -783,7 +805,9 @@ public class VpcNetworkManager {
         if (vpc == null) {
             return;
         }
-        vpc.subnets.keySet().forEach(subnetId -> subnetOwner.remove(key(region, subnetId)));
+        synchronized (vpc.declarationLock) {
+            vpc.subnetDeclarations.keySet().forEach(subnetId -> subnetOwner.remove(key(region, subnetId)));
+        }
         if (!vpc.created) {
             return;
         }
@@ -901,7 +925,7 @@ public class VpcNetworkManager {
     // ─── Introspection, for tests and reporting ──────────────────────────────
 
     public Optional<String> effectiveVpcCidr(String region, String vpcId) {
-        VpcBinding vpc = bindings.get(key(region, vpcId));
+        VpcBinding vpc = plannedVpc(region, vpcId);
         return vpc == null || vpc.effective == null ? Optional.empty() : Optional.of(vpc.effective.toString());
     }
 
@@ -917,7 +941,7 @@ public class VpcNetworkManager {
     }
 
     public boolean isSubstituted(String region, String vpcId) {
-        VpcBinding vpc = bindings.get(key(region, vpcId));
+        VpcBinding vpc = plannedVpc(region, vpcId);
         return vpc != null && vpc.substituted;
     }
 
@@ -932,6 +956,9 @@ public class VpcNetworkManager {
             return null;
         }
         VpcBinding vpc = bindings.get(vpcKey);
+        if (vpc != null) {
+            vpc = plannedVpc(vpc.region, vpc.vpcId);
+        }
         return vpc == null ? null : vpc.subnets.get(subnetId);
     }
 
@@ -977,21 +1004,23 @@ public class VpcNetworkManager {
     private static final class VpcBinding {
         final String region;
         final String vpcId;
+        final String declaredCidr;
         final Cidr4 declared;
-        final Cidr4 effective;
-        final boolean substituted;
+        Cidr4 effective;
+        boolean substituted;
         final String networkName;
+        final Object declarationLock = new Object();
+        final Map<String, String> subnetDeclarations = new LinkedHashMap<>();
         final Map<String, SubnetBinding> subnets = new ConcurrentHashMap<>();
+        volatile boolean planned;
         volatile boolean created;
         volatile String flociContainerId;
 
-        VpcBinding(String region, String vpcId, Cidr4 declared, Cidr4 effective,
-                   boolean substituted, String networkName) {
+        VpcBinding(String region, String vpcId, String declaredCidr, String networkName) {
             this.region = region;
             this.vpcId = vpcId;
-            this.declared = declared;
-            this.effective = effective;
-            this.substituted = substituted;
+            this.declaredCidr = declaredCidr;
+            this.declared = Cidr4.parse(declaredCidr).orElse(null);
             this.networkName = networkName;
         }
     }

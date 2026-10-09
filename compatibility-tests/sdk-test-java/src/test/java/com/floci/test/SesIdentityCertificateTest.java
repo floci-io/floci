@@ -7,7 +7,6 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.sesv2.SesV2Client;

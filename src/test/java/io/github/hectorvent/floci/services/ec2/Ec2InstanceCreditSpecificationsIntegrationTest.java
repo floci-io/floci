@@ -1,15 +1,15 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.equalTo;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * DescribeInstanceCreditSpecifications on the Query wire. Terraform's aws_instance resource

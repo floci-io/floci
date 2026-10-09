@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.acm.AcmService;
+import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
@@ -16,7 +17,6 @@ import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
-import io.github.hectorvent.floci.services.route53.Route53Service;
 
 import java.security.SecureRandom;
 import java.time.Clock;

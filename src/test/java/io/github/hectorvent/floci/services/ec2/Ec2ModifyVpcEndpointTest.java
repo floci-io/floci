@@ -2,8 +2,8 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
-import org.junit.jupiter.api.Test;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,8 +16,8 @@ import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.xml.HasXPath.hasXPath;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * ModifyVpcEndpoint. A gateway endpoint is normally declared with its route tables and
