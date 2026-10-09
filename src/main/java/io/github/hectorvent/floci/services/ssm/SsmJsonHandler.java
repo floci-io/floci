@@ -65,6 +65,7 @@ public class SsmJsonHandler {
             case "GetParameterHistory" -> handleGetParameterHistory(request, region);
             case "DescribeParameters" -> handleDescribeParameters(request, region);
             case "LabelParameterVersion" -> handleLabelParameterVersion(request, region);
+            case "UnlabelParameterVersion" -> handleUnlabelParameterVersion(request, region);
             case "AddTagsToResource" -> handleAddTagsToResource(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
             case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(request, region);
@@ -1076,6 +1077,29 @@ public class SsmJsonHandler {
         result.invalidLabels().forEach(invalidArray::add);
         response.set("InvalidLabels", invalidArray);
         response.put("ParameterVersion", result.parameterVersion());
+        return Response.ok(response).build();
+    }
+
+    private Response handleUnlabelParameterVersion(JsonNode request, String region) {
+        String name = request.path("Name").asText();
+        if (!request.hasNonNull("ParameterVersion")) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'parameterVersion' failed to satisfy constraint: Member must not be null",
+                    400);
+        }
+        long parameterVersion = request.path("ParameterVersion").asLong();
+        List<String> labels = requireLabels(request);
+
+        SsmService.UnlabelParameterVersionResult result = ssmService.unlabelParameterVersion(
+                name, parameterVersion, labels, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode removedArray = objectMapper.createArrayNode();
+        result.removedLabels().forEach(removedArray::add);
+        response.set("RemovedLabels", removedArray);
+        ArrayNode invalidArray = objectMapper.createArrayNode();
+        result.invalidLabels().forEach(invalidArray::add);
+        response.set("InvalidLabels", invalidArray);
         return Response.ok(response).build();
     }
 

@@ -36,6 +36,8 @@ import software.amazon.awssdk.services.ssm.model.RemoveTagsFromResourceRequest;
 import software.amazon.awssdk.services.ssm.model.SendCommandRequest;
 import software.amazon.awssdk.services.ssm.model.SendCommandResponse;
 import software.amazon.awssdk.services.ssm.model.SsmException;
+import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionRequest;
+import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionResponse;
 
 import java.util.List;
 import java.util.Map;
@@ -107,6 +109,38 @@ class SsmTest {
                 .parameterVersion(1L)
                 .build());
         // No exception means success
+    }
+
+    @Test
+    void unlabelParameterVersion() {
+        String name = "/sdk-test/unlabel";
+        ssm.putParameter(PutParameterRequest.builder()
+                .name(name)
+                .value("v1")
+                .type(ParameterType.STRING)
+                .overwrite(true)
+                .build());
+        try {
+            ssm.labelParameterVersion(LabelParameterVersionRequest.builder()
+                    .name(name)
+                    .labels("prod", "stable")
+                    .parameterVersion(1L)
+                    .build());
+
+            UnlabelParameterVersionResponse response = ssm.unlabelParameterVersion(
+                    UnlabelParameterVersionRequest.builder()
+                            .name(name)
+                            .parameterVersion(1L)
+                            .labels("prod", "missing")
+                            .build());
+
+            assertThat(response.removedLabels()).containsExactly("prod");
+            assertThat(response.invalidLabels()).containsExactly("missing");
+            assertThat(ssm.getParameterHistory(GetParameterHistoryRequest.builder().name(name).build())
+                    .parameters().get(0).labels()).containsExactly("stable");
+        } finally {
+            ssm.deleteParameter(DeleteParameterRequest.builder().name(name).build());
+        }
     }
 
     @Test

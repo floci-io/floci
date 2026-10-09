@@ -2037,6 +2037,129 @@ class SsmIntegrationTest {
             .body("__type", equalTo("ValidationException"));
     }
 
+    @Test
+    void unlabelParameterVersionRemovesLabels() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/param", "Value": "v1", "Type": "String" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        given()
+            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/param", "ParameterVersion": 1, "Labels": ["prod", "stable"] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/param", "ParameterVersion": 1, "Labels": ["prod", "missing"] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RemovedLabels", contains("prod"))
+            .body("InvalidLabels", contains("missing"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/param:prod" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ParameterVersionNotFound"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameterHistory")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/param" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters[0].Labels", contains("stable"));
+    }
+
+    @Test
+    void unlabelParameterVersion_errors() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/errors", "Value": "v1", "Type": "String" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/errors", "Labels": ["prod"] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/errors", "ParameterVersion": 1, "Labels": [] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/errors", "ParameterVersion": 5, "Labels": ["prod"] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ParameterVersionNotFound"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/unlabel/no-such-param", "ParameterVersion": 1, "Labels": ["prod"] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ParameterNotFound"));
+    }
+
     private io.restassured.response.ValidatableResponse describeParameters(String body) {
         return given()
             .header("X-Amz-Target", "AmazonSSM.DescribeParameters")

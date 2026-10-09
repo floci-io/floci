@@ -686,28 +686,7 @@ public class SsmService implements ResourceProvider {
 
     public synchronized LabelParameterVersionResult labelParameterVersion(String name, Long parameterVersion,
                                                              List<String> labels, String region) {
-        if (labels == null || labels.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
-                    400);
-        }
-        if (labels.size() > 10) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to 10",
-                    400);
-        }
-        for (String label : labels) {
-            if (label == null || label.isEmpty()) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
-                        400);
-            }
-            if (label.length() > 100) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to 100",
-                        400);
-            }
-        }
+        validateLabelList(labels);
 
         String storageKey = regionKey(region, name);
         Parameter current = parameterStore.get(storageKey).orElseThrow(() ->
@@ -789,6 +768,85 @@ public class SsmService implements ResourceProvider {
     public synchronized LabelParameterVersionResult labelParameterVersion(String name, long parameterVersion,
                                                              List<String> labels, String region) {
         return labelParameterVersion(name, Long.valueOf(parameterVersion), labels, region);
+    }
+
+    public record UnlabelParameterVersionResult(List<String> removedLabels, List<String> invalidLabels) {}
+
+    /**
+     * Detaches labels from one version. A label that is not on that version, including one
+     * attached to a different version, is reported in {@code invalidLabels} and left in place.
+     */
+    public synchronized UnlabelParameterVersionResult unlabelParameterVersion(String name, long parameterVersion,
+                                                                             List<String> labels, String region) {
+        validateLabelList(labels);
+
+        String storageKey = regionKey(region, name);
+        if (parameterStore.get(storageKey).isEmpty()) {
+            throw new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400);
+        }
+
+        List<ParameterHistory> existingHistory = historyStore.get(storageKey).orElse(List.of());
+        List<ParameterHistory> updatedHistory = new ArrayList<>(existingHistory.size());
+        ParameterHistory targetCopy = null;
+        for (ParameterHistory h : existingHistory) {
+            ParameterHistory copy = new ParameterHistory(h);
+            if (copy.getVersion() == parameterVersion) {
+                targetCopy = copy;
+            }
+            updatedHistory.add(copy);
+        }
+        if (targetCopy == null) {
+            throw new AwsException("ParameterVersionNotFound",
+                    "Parameter version " + parameterVersion + " not found.", 400);
+        }
+
+        List<String> targetLabels = targetCopy.getLabels() != null
+                ? new ArrayList<>(targetCopy.getLabels())
+                : new ArrayList<>();
+        List<String> removedLabels = new ArrayList<>();
+        List<String> invalidLabels = new ArrayList<>();
+        for (String label : labels) {
+            if (removedLabels.contains(label) || invalidLabels.contains(label)) {
+                continue;
+            }
+            if (targetLabels.remove(label)) {
+                removedLabels.add(label);
+            } else {
+                invalidLabels.add(label);
+            }
+        }
+
+        if (!removedLabels.isEmpty()) {
+            targetCopy.setLabels(targetLabels);
+            historyStore.put(storageKey, updatedHistory);
+            LOG.infov("Removed labels {0} from parameter {1} version {2}", removedLabels, name, parameterVersion);
+        }
+        return new UnlabelParameterVersionResult(removedLabels, invalidLabels);
+    }
+
+    private static void validateLabelList(List<String> labels) {
+        if (labels == null || labels.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                    400);
+        }
+        if (labels.size() > 10) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to 10",
+                    400);
+        }
+        for (String label : labels) {
+            if (label == null || label.isEmpty()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                        400);
+            }
+            if (label.length() > 100) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to 100",
+                        400);
+            }
+        }
     }
 
     private static boolean isValidLabel(String label) {
