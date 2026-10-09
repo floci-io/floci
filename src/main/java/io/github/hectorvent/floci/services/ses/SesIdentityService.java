@@ -45,6 +45,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class SesIdentityService {
 
+    static final String DKIM_SIGNING_HOSTED_ZONE = "dkim.amazonses.com";
+
     private static final Logger LOG = Logger.getLogger(SesIdentityService.class);
 
     private static final Duration DKIM_LOOKUP_CACHE_TTL = Duration.ofSeconds(5);
@@ -711,7 +713,7 @@ public class SesIdentityService {
 
     private boolean hasExpectedDkimRecord(Identity identity, String token) {
         String expectedName = normalizeDnsName(token + "._domainkey." + identity.getIdentity());
-        String expectedValue = normalizeDnsName(token + "." + identity.getDkimSigningHostedZone());
+        String expectedValue = normalizeDnsName(token + "." + DKIM_SIGNING_HOSTED_ZONE);
         for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
             for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
                     Integer.MAX_VALUE)) {
@@ -759,8 +761,7 @@ public class SesIdentityService {
                 .map(this::normalizeDnsName)
                 .sorted()
                 .toList();
-        return region + "::" + normalizeDnsName(identity.getIdentity()) + "::"
-                + normalizeDnsName(identity.getDkimSigningHostedZone()) + "::" + String.join(",", normalizedTokens);
+        return region + "::" + normalizeDnsName(identity.getIdentity()) + "::" + String.join(",", normalizedTokens);
     }
 
     private record DkimLookupCacheEntry(boolean present, Instant expiresAt) {}

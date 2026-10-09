@@ -103,28 +103,12 @@ class SesIdentityDkimLookupCacheTest {
     }
 
     @Test
-    void dnsDetectionUsesTheIdentitySigningHostedZone() {
+    void dnsDetectionUsesTheReportedSigningHostedZone() {
         Identity identity = storePendingDomainIdentity();
-        identity.setDkimSigningHostedZone("dkim.identity-specific.floci.test");
         stubRoute53(identity, buildMatchingRecords(identity));
 
         assertEquals("Success", identities.getIdentityVerificationAttributes(DOMAIN, REGION)
                 .getDkimVerificationStatus());
-    }
-
-    @Test
-    void signingZoneChangeDoesNotReuseANegativeResultForTheSameTokens() {
-        Identity identity = storePendingDomainIdentity();
-        identity.setDkimSigningHostedZone("dkim.old.floci.test");
-        stubRoute53(identity, List.of());
-        assertEquals("Pending", identities.getIdentityVerificationAttributes(DOMAIN, REGION)
-                .getDkimVerificationStatus());
-
-        identity.setDkimSigningHostedZone("dkim.new.floci.test");
-        stubRoute53(identity, buildMatchingRecords(identity));
-        assertEquals("Success", identities.getIdentityVerificationAttributes(DOMAIN, REGION)
-                .getDkimVerificationStatus());
-        verify(route53Service, times(4)).listHostedZones(null, Integer.MAX_VALUE);
     }
 
     private Identity storePendingDomainIdentity() {
@@ -150,7 +134,7 @@ class SesIdentityDkimLookupCacheTest {
             ResourceRecordSet recordSet = new ResourceRecordSet();
             recordSet.setName(token + "._domainkey." + DOMAIN + ".");
             recordSet.setType("CNAME");
-            recordSet.setRecords(List.of(new ResourceRecord(token + "." + identity.getDkimSigningHostedZone() + ".")));
+            recordSet.setRecords(List.of(new ResourceRecord(token + ".dkim.amazonses.com.")));
             records.add(recordSet);
         }
         return records;
