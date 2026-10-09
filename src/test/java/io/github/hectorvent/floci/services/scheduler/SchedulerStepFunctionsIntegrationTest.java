@@ -23,8 +23,8 @@ import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.services.scheduler.SchedulerTestHarness.REGION;
-import static io.github.hectorvent.floci.services.scheduler.SchedulerTestHarness.atExpression;
 import static io.github.hectorvent.floci.services.scheduler.SchedulerTestHarness.ROLE_ARN;
+import static io.github.hectorvent.floci.services.scheduler.SchedulerTestHarness.atExpression;
 import static io.github.hectorvent.floci.services.scheduler.SchedulerTestHarness.uniqueName;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
