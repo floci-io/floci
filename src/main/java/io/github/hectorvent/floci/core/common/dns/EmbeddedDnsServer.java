@@ -745,9 +745,11 @@ public class EmbeddedDnsServer {
     }
 
     /**
-     * True when the datagram answers this query: same transaction ID, QR bit set, and the query's
-     * question section echoed back. Only the question is compared: clients usually append an EDNS
-     * OPT record to the query, and the answer section takes its place in the response.
+     * True when the datagram answers this query: same transaction ID, QR bit set, the same question
+     * count, and the query's question echoed back. The name is compared ignoring ASCII case, like
+     * glibc and c-ares, since a resolver may echo it case-folded. Only the question is compared:
+     * clients usually append an EDNS OPT record to the query, and the answer section takes its place
+     * in the response.
      */
     private static boolean isValidResponse(byte[] query, byte[] response, int length) {
         int questionEnd = questionEnd(query);
@@ -761,7 +763,21 @@ public class EmbeddedDnsServer {
         if ((response[2] & 0x80) == 0) {
             return false;
         }
-        return Arrays.equals(query, 12, questionEnd, response, 12, questionEnd);
+        if (response[4] != query[4] || response[5] != query[5]) {
+            return false;
+        }
+        int nameEnd = questionEnd - 4;
+        for (int i = 12; i < nameEnd; i++) {
+            if (asciiLower(response[i]) != asciiLower(query[i])) {
+                return false;
+            }
+        }
+        return Arrays.equals(query, nameEnd, questionEnd, response, nameEnd, questionEnd);
+    }
+
+    /** Label length bytes are below 64, so lowering every byte of the name only touches letters. */
+    private static byte asciiLower(byte b) {
+        return b >= 'A' && b <= 'Z' ? (byte) (b + ('a' - 'A')) : b;
     }
 
     /** End offset of the query's single question (name, type, class), or -1 if it is malformed. */

@@ -700,14 +700,16 @@ class EmbeddedDnsServerTest {
         }
     }
 
-    /** Replies to the first datagram received with a fixed payload, on a daemon thread. */
-    private void startResponder(DatagramSocket responder, byte[] responsePayload) {
+    /** Replies to the first datagram received with the given payloads, in order, on a daemon thread. */
+    private void startResponder(DatagramSocket responder, byte[]... responsePayloads) {
         Thread t = new Thread(() -> {
             try {
                 DatagramPacket req = new DatagramPacket(new byte[4096], 4096);
                 responder.receive(req);
-                responder.send(new DatagramPacket(
-                        responsePayload, responsePayload.length, req.getAddress(), req.getPort()));
+                for (byte[] payload : responsePayloads) {
+                    responder.send(new DatagramPacket(
+                            payload, payload.length, req.getAddress(), req.getPort()));
+                }
             } catch (Exception ignored) {
                 // socket closed when the test completes
             }
@@ -756,22 +758,22 @@ class EmbeddedDnsServerTest {
     }
 
     @Test
-    void forwardToTargets_discardsSpoofedDatagramBeforeRealAnswer() throws Exception {
+    void forwardToTargets_discardsForgedAnswerFromAnotherPortBeforeRealAnswer() throws Exception {
         // Catches: a datagram from a port other than the queried target is relayed as the answer
         try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"));
              DatagramSocket spoof = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
             byte[] query = buildQuery("db.corp.internal", (short) 7);
             byte[] realReply = replyTo(query, query.length);
-            byte[] spoofedReply = replyTo(query, query.length);
-            spoofedReply[spoofedReply.length - 1] = 9;
+            // Same txId and question as the real answer; only the rcode (NXDOMAIN) differs.
+            byte[] forgedReply = replyTo(query, query.length);
+            forgedReply[3] = 3;
             DnsForwardingRule.Target target = new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort());
 
             Thread t = new Thread(() -> {
                 try {
-                    byte[] reqBuf = new byte[4096];
-                    DatagramPacket req = new DatagramPacket(reqBuf, reqBuf.length);
+                    DatagramPacket req = new DatagramPacket(new byte[4096], 4096);
                     real.receive(req);
-                    spoof.send(new DatagramPacket(spoofedReply, spoofedReply.length, req.getAddress(), req.getPort()));
+                    spoof.send(new DatagramPacket(forgedReply, forgedReply.length, req.getAddress(), req.getPort()));
                     real.send(new DatagramPacket(realReply, realReply.length, req.getAddress(), req.getPort()));
                 } catch (Exception e) {
                     throw new RuntimeException(e);
@@ -793,23 +795,10 @@ class EmbeddedDnsServerTest {
             byte[] realReply = replyTo(query, query.length);
             byte[] badReply = replyTo(query, query.length);
             badReply[1] ^= 0x01;
-            DnsForwardingRule.Target target = new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort());
+            startResponder(real, badReply, realReply);
 
-            Thread t = new Thread(() -> {
-                try {
-                    byte[] reqBuf = new byte[4096];
-                    DatagramPacket req = new DatagramPacket(reqBuf, reqBuf.length);
-                    real.receive(req);
-                    real.send(new DatagramPacket(badReply, badReply.length, req.getAddress(), req.getPort()));
-                    real.send(new DatagramPacket(realReply, realReply.length, req.getAddress(), req.getPort()));
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            });
-            t.setDaemon(true);
-            t.start();
-
-            byte[] response = EmbeddedDnsServer.forwardToTargets(query, List.of(target));
+            byte[] response = EmbeddedDnsServer.forwardToTargets(
+                    query, List.of(new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort())));
             assertArrayEquals(realReply, response);
         }
     }
@@ -842,24 +831,41 @@ class EmbeddedDnsServerTest {
             byte[] realReply = replyTo(query, query.length);
             byte[] wrongQuery = buildQuery("other.corp.internal", (short) 7);
             byte[] badReply = replyTo(wrongQuery, wrongQuery.length);
-            DnsForwardingRule.Target target = new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort());
+            startResponder(real, badReply, realReply);
 
-            Thread t = new Thread(() -> {
-                try {
-                    byte[] reqBuf = new byte[4096];
-                    DatagramPacket req = new DatagramPacket(reqBuf, reqBuf.length);
-                    real.receive(req);
-                    real.send(new DatagramPacket(badReply, badReply.length, req.getAddress(), req.getPort()));
-                    real.send(new DatagramPacket(realReply, realReply.length, req.getAddress(), req.getPort()));
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            });
-            t.setDaemon(true);
-            t.start();
-
-            byte[] response = EmbeddedDnsServer.forwardToTargets(query, List.of(target));
+            byte[] response = EmbeddedDnsServer.forwardToTargets(
+                    query, List.of(new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort())));
             assertArrayEquals(realReply, response);
+        }
+    }
+
+    @Test
+    void forwardToTargets_discardsZeroQuestionDatagramBeforeRealAnswer() throws Exception {
+        // Catches: a datagram declaring QDCOUNT 0 but carrying copied question bytes is relayed as the answer
+        try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
+            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] realReply = replyTo(query, query.length);
+            byte[] noQuestionReply = replyTo(query, query.length);
+            noQuestionReply[5] = 0; // qdcount
+            startResponder(real, noQuestionReply, realReply);
+
+            byte[] response = EmbeddedDnsServer.forwardToTargets(
+                    query, List.of(new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort())));
+            assertArrayEquals(realReply, response);
+        }
+    }
+
+    @Test
+    void forwardToTargets_acceptsAnswerThatEchoesTheNameInDifferentCase() throws Exception {
+        // Catches: a resolver that case-folds the echoed name has every answer dropped
+        try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
+            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] upperReply = replyTo(buildQuery("DB.CORP.INTERNAL", (short) 7), query.length);
+            startResponder(real, upperReply);
+
+            byte[] response = EmbeddedDnsServer.forwardToTargets(
+                    query, List.of(new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort())));
+            assertArrayEquals(upperReply, response);
         }
     }
 }
