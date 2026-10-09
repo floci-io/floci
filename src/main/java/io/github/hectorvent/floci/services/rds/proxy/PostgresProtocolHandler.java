@@ -245,6 +245,38 @@ public class PostgresProtocolHandler {
             // token naming a role the database does not have instead of silently granting a master
             // session.
             if (isIam && !isMaster && !endsWithErrorResponse(bufferedMessages)) {
+                // Phase 5a: A login as the role would load the role's own ALTER ROLE ... SET
+                // defaults, which SET SESSION AUTHORIZATION does not. They are applied while the
+                // session is still the master's because PostgreSQL applies them with the authority
+                // of whoever stored them, not the role's: a superuser-only default set by an
+                // administrator still takes effect for a role that could not set it itself. As at
+                // login, a default PostgreSQL cannot apply is skipped rather than failing the
+                // login. A role default for "role" is a membership claim, so it waits for the
+                // handover and is checked against the role.
+                SessionSetting roleDefaultRole = null;
+                if (forwardStartupParameters) {
+                    List<byte[]> lookup = runQuery(backendIn, backendOut, roleDefaultsQuery(clientUsername));
+                    if (endsWithErrorResponse(lookup)) {
+                        byte[] refusal = lookup.get(lookup.size() - 1);
+                        sendErrorResponse(clientOut, "FATAL", errorField(refusal, 'C', "XX000"),
+                                errorField(refusal, 'M', "could not read the role's defaults"));
+                        clientOut.flush();
+                        closeQuietly(client);
+                        closeQuietly(backend);
+                        return null;
+                    }
+                    List<SessionSetting> roleDefaults = new ArrayList<>();
+                    for (SessionSetting setting : settingsFromDataRows(lookup)) {
+                        if ("role".equalsIgnoreCase(setting.name())) {
+                            roleDefaultRole = setting;
+                        } else if (!"session_authorization".equalsIgnoreCase(setting.name())) {
+                            roleDefaults.add(setting);
+                        }
+                    }
+                    bufferedMessages = applyParameterStatusUpdates(bufferedMessages,
+                            applyRoleDefaults(backendIn, backendOut, roleDefaults, clientUsername));
+                }
+
                 List<byte[]> roleSwitch = assumeSessionRole(backendIn, backendOut, clientUsername);
                 if (endsWithErrorResponse(roleSwitch)) {
                     sendErrorResponse(clientOut, "FATAL", "28000",
@@ -257,6 +289,10 @@ public class PostgresProtocolHandler {
                 }
                 bufferedMessages = applyParameterStatusUpdates(bufferedMessages, roleSwitch);
                 iamRole = clientUsername;
+                if (roleDefaultRole != null) {
+                    bufferedMessages = applyParameterStatusUpdates(bufferedMessages,
+                            applyRoleDefaults(backendIn, backendOut, List.of(roleDefaultRole), clientUsername));
+                }
 
                 // Phase 5c: Apply the client's startup parameters now that the session belongs to
                 // the role, so PostgreSQL checks each one against the role's privileges, as it
@@ -787,6 +823,95 @@ public class PostgresProtocolHandler {
 
     /** One run-time parameter a client asked for at startup, by name. */
     record SessionSetting(String name, String value) {}
+
+    /**
+     * The {@code ALTER ROLE ... SET} defaults a login as {@code role} to the current database
+     * loads, one row per setting: the role's own, then the ones for this database, so that, applied
+     * in order, a database-specific value wins as it does at login.
+     */
+    static String roleDefaultsQuery(String role) {
+        return "SELECT pg_catalog.split_part(c.cfg, '=', 1), "
+                + "pg_catalog.substr(c.cfg, pg_catalog.strpos(c.cfg, '=') + 1) "
+                + "FROM pg_catalog.pg_db_role_setting s "
+                + "JOIN pg_catalog.pg_roles r ON r.oid = s.setrole "
+                + "CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) WITH ORDINALITY AS c(cfg, n) "
+                + "WHERE r.rolname = " + quoteLiteral(role) + " AND s.setdatabase IN (0, "
+                + "(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())) "
+                + "ORDER BY s.setdatabase = 0 DESC, c.n";
+    }
+
+    /** The two-column {@code name}/{@code value} rows among {@code messages}, in order. */
+    static List<SessionSetting> settingsFromDataRows(List<byte[]> messages) {
+        List<SessionSetting> settings = new ArrayList<>();
+        for (byte[] message : messages) {
+            if (message[0] != 'D') {
+                continue;
+            }
+            int offset = 5; // skip type byte and Int32 length
+            int columns = ((message[offset] & 0xFF) << 8) | (message[offset + 1] & 0xFF);
+            offset += 2;
+            String[] values = new String[columns];
+            for (int column = 0; column < columns; column++) {
+                int length = ((message[offset] & 0xFF) << 24) | ((message[offset + 1] & 0xFF) << 16)
+                        | ((message[offset + 2] & 0xFF) << 8) | (message[offset + 3] & 0xFF);
+                offset += 4;
+                if (length >= 0) {
+                    values[column] = new String(message, offset, length, StandardCharsets.UTF_8);
+                    offset += length;
+                }
+            }
+            if (columns == 2 && values[0] != null && values[1] != null) {
+                settings.add(new SessionSetting(values[0], values[1]));
+            }
+        }
+        return settings;
+    }
+
+    /**
+     * Applies role defaults one statement each, so that, as at login, one PostgreSQL cannot apply
+     * is skipped with a log line instead of failing the login or the defaults after it.
+     *
+     * @return the ParameterStatus messages the applied defaults produced
+     */
+    private static List<byte[]> applyRoleDefaults(InputStream in, OutputStream out,
+                                                  List<SessionSetting> defaults, String role)
+            throws IOException {
+        List<byte[]> statuses = new ArrayList<>();
+        for (SessionSetting setting : defaults) {
+            List<byte[]> result = runQuery(in, out, setConfigStatement(List.of(setting)));
+            byte[] refusal = null;
+            for (byte[] message : result) {
+                if (message[0] == 'E') {
+                    refusal = message;
+                } else if (message[0] == 'S') {
+                    statuses.add(message);
+                }
+            }
+            if (refusal != null) {
+                LOG.infov("Skipping role {0}''s default {1}: {2}", role, setting.name(),
+                        errorMessage(refusal, "refused"));
+            }
+        }
+        return statuses;
+    }
+
+    /** Runs {@code sql} as a simple query and returns every message up to ReadyForQuery. */
+    private static List<byte[]> runQuery(InputStream in, OutputStream out, String sql) throws IOException {
+        sendMessage(out, 'Q', sql.getBytes(StandardCharsets.UTF_8), new byte[]{0});
+        out.flush();
+        List<byte[]> messages = new ArrayList<>();
+        while (true) {
+            int type = in.read();
+            if (type < 0) {
+                throw new EOFException("Connection closed before ReadyForQuery");
+            }
+            byte[] message = readMessage(in, type);
+            if (type == 'Z') {
+                return messages;
+            }
+            messages.add(message);
+        }
+    }
 
     /**
      * A startup parameter PostgreSQL would refuse while parsing the StartupMessage, before any

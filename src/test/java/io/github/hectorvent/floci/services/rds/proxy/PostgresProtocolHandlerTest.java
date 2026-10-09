@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -881,6 +882,117 @@ class PostgresProtocolHandlerTest {
     }
 
     @Test
+    void iamSessionLoadsTheRoleDefaultsAsTheMasterBeforeTheHandover() throws Exception {
+        AtomicReference<String> handover = new AtomicReference<>();
+        List<String> beforeHandover = new ArrayList<>();
+        List<String> afterHandover = new ArrayList<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(), handover,
+                            "approle", true, (in, out) -> {
+                                afterHandover.add(readSimpleQuery(in));
+                                writeCommandComplete(out, "SELECT 1");
+                                writeReadyForQuery(out);
+                                afterHandover.add(readSimpleQuery(in));
+                                writeParameterStatus(out, "application_name", "svc");
+                                writeCommandComplete(out, "SELECT 1");
+                                writeReadyForQuery(out);
+                            },
+                            List.of(new String[] {"temp_file_limit", "1GB"},
+                                    new String[] {"no_such_parameter", "on"},
+                                    new String[] {"role", "reader"},
+                                    new String[] {"session_authorization", "dbadmin"},
+                                    new String[] {"search_path", "app"}),
+                            beforeHandover);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                Map<String, String> clientStartup = new LinkedHashMap<>();
+                clientStartup.put("user", "approle");
+                clientStartup.put("database", "postgres");
+                clientStartup.put("application_name", "svc");
+                writeStartup(clientOut, clientStartup);
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+                readAuthenticationOk(clientIn);
+
+                Map<String, String> params = readParametersUntilReadyForQuery(clientIn);
+                assertEquals("approle", params.get("session_authorization"));
+                assertEquals("svc", params.get("application_name"));
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+
+        assertEquals(List.of(
+                        "SELECT pg_catalog.set_config(E'temp_file_limit', E'1GB', false)",
+                        "SELECT pg_catalog.set_config(E'no_such_parameter', E'on', false)",
+                        "SELECT pg_catalog.set_config(E'search_path', E'app', false)"),
+                beforeHandover, "each default on its own, a refused one skipped, role and session_authorization held back");
+        assertEquals("SET SESSION AUTHORIZATION \"approle\"", handover.get());
+        assertEquals(List.of(
+                        "SELECT pg_catalog.set_config(E'role', E'reader', false)",
+                        "SELECT pg_catalog.set_config(E'application_name', E'svc', false)"),
+                afterHandover, "the role default is checked against the role, before the client's settings");
+    }
+
+    @Test
+    void roleDefaultsQueryReadsTheRoleWideDefaultsBeforeTheDatabaseSpecificOnes() {
+        String sql = PostgresProtocolHandler.roleDefaultsQuery("o'brien");
+        assertEquals(true, sql.contains("r.rolname = E'o''brien'"), sql);
+        assertEquals(true, sql.endsWith("ORDER BY s.setdatabase = 0 DESC, c.n"), sql);
+    }
+
+    @Test
+    void settingsFromDataRowsReadsNameValueRowsAndSkipsEverythingElse() throws Exception {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(buffer);
+        writeDataRow(out, "search_path", "app, public");
+        writeCommandComplete(out, "SELECT 1");
+        writeDataRow(out, "work_mem", "");
+        DataInputStream in = new DataInputStream(new ByteArrayInputStream(buffer.toByteArray()));
+        List<byte[]> messages = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            int type = in.readByte();
+            int length = in.readInt();
+            ByteArrayOutputStream message = new ByteArrayOutputStream();
+            DataOutputStream messageOut = new DataOutputStream(message);
+            messageOut.writeByte(type);
+            messageOut.writeInt(length);
+            messageOut.write(in.readNBytes(length - 4));
+            messages.add(message.toByteArray());
+        }
+
+        assertEquals(List.of(
+                        new PostgresProtocolHandler.SessionSetting("search_path", "app, public"),
+                        new PostgresProtocolHandler.SessionSetting("work_mem", "")),
+                PostgresProtocolHandler.settingsFromDataRows(messages));
+    }
+
+    @Test
     void sessionSettingsApplyOptionsFirstThenTheOtherParametersInOrder() throws Exception {
         Map<String, String> startup = new LinkedHashMap<>();
         startup.put("user", "approle");
@@ -1419,6 +1531,22 @@ class PostgresProtocolHandlerTest {
                                               AtomicReference<String> backendQuery,
                                               String role, boolean roleExists,
                                               BackendScript afterHandover) throws IOException {
+        mockBackendRoleSwitch(server, backendStartup, backendQuery, role, roleExists, afterHandover,
+                List.of(), new ArrayList<>());
+    }
+
+    /**
+     * Also answers the proxy's lookup of the role's own defaults with {@code roleDefaults}
+     * ({@code name}/{@code value} rows), recording each statement run before the handover in
+     * {@code beforeHandover}.
+     */
+    private static void mockBackendRoleSwitch(ServerSocket server,
+                                              AtomicReference<Map<String, String>> backendStartup,
+                                              AtomicReference<String> backendQuery,
+                                              String role, boolean roleExists,
+                                              BackendScript afterHandover,
+                                              List<String[]> roleDefaults,
+                                              List<String> beforeHandover) throws IOException {
         try (Socket socket = server.accept()) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
@@ -1444,9 +1572,27 @@ class PostgresProtocolHandlerTest {
             writeBackendKeyData(out);
             writeReadyForQuery(out);
 
-            assertEquals('Q', in.readByte());
-            byte[] query = in.readNBytes(in.readInt() - 4);
-            backendQuery.set(new String(query, 0, query.length - 1, StandardCharsets.UTF_8));
+            String query = readSimpleQuery(in);
+            if (query.contains("pg_db_role_setting")) {
+                for (String[] setting : roleDefaults) {
+                    writeDataRow(out, setting[0], setting[1]);
+                }
+                writeCommandComplete(out, "SELECT " + roleDefaults.size());
+                writeReadyForQuery(out);
+                query = readSimpleQuery(in);
+                while (query.startsWith("SELECT pg_catalog.set_config")) {
+                    beforeHandover.add(query);
+                    if (query.contains("no_such_parameter")) {
+                        writeErrorResponse(out, "ERROR", "42704",
+                                "unrecognized configuration parameter \"no_such_parameter\"");
+                    } else {
+                        writeCommandComplete(out, "SELECT 1");
+                    }
+                    writeReadyForQuery(out);
+                    query = readSimpleQuery(in);
+                }
+            }
+            backendQuery.set(query);
 
             if (!roleExists) {
                 writeErrorResponse(out, "ERROR", "42704", "role \"" + role + "\" does not exist");
@@ -1531,6 +1677,21 @@ class PostgresProtocolHandlerTest {
         out.writeInt(12);
         out.writeInt(4242);
         out.writeInt(1234);
+        out.flush();
+    }
+
+    private static void writeDataRow(DataOutputStream out, String... values) throws IOException {
+        ByteArrayOutputStream row = new ByteArrayOutputStream();
+        DataOutputStream rowOut = new DataOutputStream(row);
+        rowOut.writeShort(values.length);
+        for (String value : values) {
+            byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+            rowOut.writeInt(bytes.length);
+            rowOut.write(bytes);
+        }
+        out.writeByte('D');
+        out.writeInt(4 + row.size());
+        row.writeTo(out);
         out.flush();
     }
 
