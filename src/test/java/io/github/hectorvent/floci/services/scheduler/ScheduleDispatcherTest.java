@@ -360,6 +360,7 @@ class ScheduleDispatcherTest {
         assertTrue(retryExecutionId.matches("[0-9a-f]{16}"), retryExecutionId);
         assertNotEquals(firstExecutionId, retryExecutionId);
         verify(invoker).materializeRequest(s, scheduledAt, firstExecutionId, 1);
+        verify(invoker).materializeRequest(s, scheduledAt, retryExecutionId, 2);
         assertEquals(retryExecutionId, attribute(deadLetters(1).get(0), "EXECUTION_ID"));
     }
 

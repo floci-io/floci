@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.scheduler;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.scheduler.model.DeadLetterConfig;
+import io.github.hectorvent.floci.services.scheduler.model.RetryPolicy;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
@@ -11,6 +13,8 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -124,6 +128,43 @@ class SchedulerContextAttributesIntegrationTest {
         assertEquals(2, body.path("attempt").asInt());
         assertEquals(fireAt.toString(), body.path("time").asText());
         assertTrue(body.path("executionId").asText().matches("[0-9a-f]{16}"), body.toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deadLetterBodyMatchesLastAttemptContext(boolean expiresByAge) throws Exception {
+        String queueName = uniqueName("ctx-missing-q");
+        String dlqName = uniqueName("ctx-dlq");
+        String dlqUrl = createQueue(dlqName);
+        String scheduleName = uniqueName("ctx-dlq-schedule");
+        Instant fireAt = Instant.now().plus(1, ChronoUnit.DAYS).truncatedTo(ChronoUnit.SECONDS);
+        harness.createSchedule(scheduleName, atExpression(fireAt), "ENABLED", queueArn(queueName), CONTEXT_INPUT);
+        Schedule schedule = schedulerService.getSchedule(scheduleName, null, REGION);
+        schedule.getTarget().setDeadLetterConfig(new DeadLetterConfig(queueArn(dlqName)));
+        schedule.getTarget().setRetryPolicy(expiresByAge ? new RetryPolicy(180, 10) : new RetryPolicy(3600, 1));
+        ScheduleDispatcher dispatcher = harness.dispatcherFor(scheduleName);
+
+        dispatcher.tick(fireAt.plusSeconds(1));
+        dispatcher.tick(fireAt.plusSeconds(61));
+        if (expiresByAge) {
+            dispatcher.tick(fireAt.plusSeconds(181));
+        }
+
+        List<Message> messages = sqsService.receiveMessage(dlqUrl, 10, 30, 0, REGION);
+        assertEquals(1, messages.size());
+        Message message = messages.get(0);
+        JsonNode request = MAPPER.readTree(message.getBody());
+        JsonNode input = MAPPER.readTree(request.path("MessageBody").asText());
+        assertEquals(2, input.path("attempt").asInt());
+        assertEquals(schedule.getArn(), input.path("arn").asText());
+        assertEquals(fireAt.toString(), input.path("time").asText());
+        assertEquals(input.path("executionId").asText(),
+                message.getMessageAttributes().get("EXECUTION_ID").getStringValue());
+        assertEquals(input.path("time").asText(),
+                message.getMessageAttributes().get("SCHEDULED_TIME").getStringValue());
+        assertEquals("1", message.getMessageAttributes().get("RETRY_ATTEMPTS").getStringValue());
+        assertEquals(expiresByAge ? "MaximumEventAgeInSeconds" : "MaximumRetryAttempts",
+                message.getMessageAttributes().get("EXHAUSTED_RETRY_CONDITION").getStringValue());
     }
 
     @Test

@@ -175,6 +175,10 @@ public class ScheduleInvoker {
                 templatedPayload(schedule, input, scheduledAt));
     }
 
+    static String formatScheduledTime(Instant scheduledAt) {
+        return scheduledAt.truncatedTo(ChronoUnit.SECONDS).toString();
+    }
+
     /** A Scheduler-style execution id: 16 lowercase hex characters. */
     public static String newExecutionId() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
@@ -193,7 +197,7 @@ public class ScheduleInvoker {
         }
         String scheduledTime = scheduledAt == null
                 ? ""
-                : scheduledAt.truncatedTo(ChronoUnit.SECONDS).toString();
+                : formatScheduledTime(scheduledAt);
         return input
                 .replace(CONTEXT_SCHEDULE_ARN, schedule.getArn() == null ? "" : schedule.getArn())
                 .replace(CONTEXT_SCHEDULED_TIME, scheduledTime)
@@ -324,7 +328,7 @@ public class ScheduleInvoker {
         event.put("detail-type", "Scheduled Event");
         event.put("source", "aws.scheduler");
         event.put("account", scheduleArn.accountId());
-        event.put("time", scheduledAt.truncatedTo(ChronoUnit.SECONDS).toString());
+        event.put("time", formatScheduledTime(scheduledAt));
         event.put("region", scheduleArn.region());
         event.put("resources", List.of(schedule.getArn()));
         event.put("detail", "{}");

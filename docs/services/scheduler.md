@@ -61,7 +61,7 @@ with a 16-character hex id, and `<aws.scheduler.attempt-number>` with the
 1-based attempt number. Each attempted invocation, retries included, gets its
 own execution id and increments the attempt number; a dead-letter message
 reports the last attempt's id as `EXECUTION_ID`. The dead-letter body carries
-the first attempt's request.
+the last attempt's request, with matching context attributes.
 
 `CreateSchedule` and `UpdateSchedule` reject a non-JSON `Input` for Lambda,
 Step Functions, and EventBridge targets with a `ValidationException`, as AWS
