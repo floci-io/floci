@@ -536,7 +536,8 @@ public class AwsQueryController {
             "ValidateIamAuthToken",
             "CreateReplicationGroup", "DescribeReplicationGroups", "ModifyReplicationGroup", "DeleteReplicationGroup",
             "CreateUser", "DescribeUsers", "ModifyUser", "DeleteUser",
-            "CreateUserGroup", "DescribeUserGroups", "ModifyUserGroup", "DeleteUserGroup"
+            "CreateUserGroup", "DescribeUserGroups", "ModifyUserGroup", "DeleteUserGroup",
+            "CreateServerlessCache", "DescribeServerlessCaches", "ModifyServerlessCache", "DeleteServerlessCache"
     );
 
     private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(
