@@ -27,6 +27,7 @@ public class AwsException extends RuntimeException {
             "QueueAlreadyExists",                      "QueueNameExists",
             "ReceiptHandleIsInvalid",                  "ReceiptHandleIsInvalid",
             "AWS.SimpleQueueService.TooManyEntriesInBatchRequest", "TooManyEntriesInBatchRequest",
+            "AWS.SimpleQueueService.EmptyBatchRequest", "EmptyBatchRequest",
             "BatchEntryIdNotUnique",                   "BatchEntryIdNotDistinct"
     );
 

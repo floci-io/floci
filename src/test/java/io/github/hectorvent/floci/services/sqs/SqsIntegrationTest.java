@@ -1211,4 +1211,32 @@ class SqsIntegrationTest {
             .when().post("/");
         }
     }
+
+    @Test
+    void batchRequestsWithNoEntriesAreRejected() {
+        String batchQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-batch-empty-queue")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+        try {
+            for (String action : List.of("SendMessageBatch", "DeleteMessageBatch", "ChangeMessageVisibilityBatch")) {
+                given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", action)
+                    .formParam("QueueUrl", batchQueueUrl)
+                .when().post("/")
+                .then().statusCode(400)
+                    .body(containsString("AWS.SimpleQueueService.EmptyBatchRequest"));
+            }
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", batchQueueUrl)
+            .when().post("/");
+        }
+    }
 }

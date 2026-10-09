@@ -785,14 +785,7 @@ class SqsJsonProtocolTest {
                 .statusCode(400)
                 .body("__type", equalTo("TooManyEntriesInBatchRequest"));
 
-            given()
-                .contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
-                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
-            .when().post("/")
-            .then().statusCode(200)
-                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"))
-                .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo("0"));
+            assertMessageCounts(batchQueueUrl, "0", "0");
 
             // 2. Seed 2 messages and receive them to get valid receipt handles
             given()
@@ -818,25 +811,10 @@ class SqsJsonProtocolTest {
                 .extract().jsonPath().getList("Messages.ReceiptHandle");
             assertEquals(2, receiptHandles.size());
 
-            given()
-                .contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
-                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
-            .when().post("/")
-            .then().statusCode(200)
-                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"))
-                .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo("2"));
+            assertMessageCounts(batchQueueUrl, "0", "2");
 
             // 3. ChangeMessageVisibilityBatch with 11 entries rejects and does not change visibility
-            StringBuilder visEntries = new StringBuilder();
-            for (int i = 0; i < 11; i++) {
-                if (i > 0) {
-                    visEntries.append(',');
-                }
-                String rh = i < receiptHandles.size() ? receiptHandles.get(i) : "dummy-rh";
-                visEntries.append("{\"Id\":\"v").append(i).append("\",\"ReceiptHandle\":\"")
-                        .append(rh).append("\",\"VisibilityTimeout\":0}");
-            }
+            String visEntries = receiptHandleEntries("v", receiptHandles, ",\"VisibilityTimeout\":0");
             given()
                 .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "AmazonSQS.ChangeMessageVisibilityBatch")
@@ -846,25 +824,10 @@ class SqsJsonProtocolTest {
                 .statusCode(400)
                 .body("__type", equalTo("TooManyEntriesInBatchRequest"));
 
-            given()
-                .contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
-                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
-            .when().post("/")
-            .then().statusCode(200)
-                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"))
-                .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo("2"));
+            assertMessageCounts(batchQueueUrl, "0", "2");
 
             // 4. DeleteMessageBatch with 11 entries rejects and preserves seeded messages
-            StringBuilder delEntries = new StringBuilder();
-            for (int i = 0; i < 11; i++) {
-                if (i > 0) {
-                    delEntries.append(',');
-                }
-                String rh = i < receiptHandles.size() ? receiptHandles.get(i) : "dummy-rh";
-                delEntries.append("{\"Id\":\"d").append(i).append("\",\"ReceiptHandle\":\"")
-                        .append(rh).append("\"}");
-            }
+            String delEntries = receiptHandleEntries("d", receiptHandles, "");
             given()
                 .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "AmazonSQS.DeleteMessageBatch")
@@ -874,14 +837,7 @@ class SqsJsonProtocolTest {
                 .statusCode(400)
                 .body("__type", equalTo("TooManyEntriesInBatchRequest"));
 
-            given()
-                .contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
-                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
-            .when().post("/")
-            .then().statusCode(200)
-                .body("Attributes.ApproximateNumberOfMessages", equalTo("0"))
-                .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo("2"));
+            assertMessageCounts(batchQueueUrl, "0", "2");
         } finally {
             given()
                 .contentType(CONTENT_TYPE)
@@ -938,6 +894,35 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    void batchRequestsWithNoEntriesAreRejected() {
+        String batchQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-batch-empty-queue\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+        try {
+            for (String target : List.of("SendMessageBatch", "DeleteMessageBatch", "ChangeMessageVisibilityBatch")) {
+                given()
+                    .contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "AmazonSQS." + target)
+                    .body(batchBody(batchQueueUrl, 0))
+                .when().post("/")
+                .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("EmptyBatchRequest"));
+            }
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + batchQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    @Test
     void sendMessageBatchAcceptsExactlyTenEntries() {
         String batchQueueUrl = given()
             .contentType(CONTENT_TYPE)
@@ -961,6 +946,31 @@ class SqsJsonProtocolTest {
                 .body("{\"QueueUrl\":\"" + batchQueueUrl + "\"}")
             .when().post("/");
         }
+    }
+
+    private static void assertMessageCounts(String url, String visible, String notVisible) {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+            .body("{\"QueueUrl\":\"" + url + "\",\"AttributeNames\":[\"ApproximateNumberOfMessages\",\"ApproximateNumberOfMessagesNotVisible\"]}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Attributes.ApproximateNumberOfMessages", equalTo(visible))
+            .body("Attributes.ApproximateNumberOfMessagesNotVisible", equalTo(notVisible));
+    }
+
+    // Eleven entries: the real handles first, "dummy-rh" for the rest. extraMembers is appended to each entry.
+    private static String receiptHandleEntries(String idPrefix, List<String> receiptHandles, String extraMembers) {
+        StringBuilder entries = new StringBuilder();
+        for (int i = 0; i < 11; i++) {
+            if (i > 0) {
+                entries.append(',');
+            }
+            String receiptHandle = i < receiptHandles.size() ? receiptHandles.get(i) : "dummy-rh";
+            entries.append("{\"Id\":\"").append(idPrefix).append(i).append("\",\"ReceiptHandle\":\"")
+                    .append(receiptHandle).append('"').append(extraMembers).append('}');
+        }
+        return entries.toString();
     }
 
     // One body shape serves all three batch actions: unknown members are ignored, and the

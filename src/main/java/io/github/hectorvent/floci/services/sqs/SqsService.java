@@ -1088,11 +1088,15 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Reject a batch call carrying more than {@value #MAX_BATCH_ENTRIES} entries. AWS applies the
-     * limit to {@code SendMessageBatch}, {@code DeleteMessageBatch} and
+     * Reject a batch call carrying no entries or more than {@value #MAX_BATCH_ENTRIES}. AWS applies
+     * both checks to {@code SendMessageBatch}, {@code DeleteMessageBatch} and
      * {@code ChangeMessageVisibilityBatch} alike, fails the whole request and processes no entry.
      */
     public void validateBatchEntryCount(int entryCount) {
+        if (entryCount == 0) {
+            throw new AwsException("AWS.SimpleQueueService.EmptyBatchRequest",
+                    "There should be at least one entry in the request.", 400);
+        }
         if (entryCount > MAX_BATCH_ENTRIES) {
             throw new AwsException("AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
                     "Maximum number of entries per request are " + MAX_BATCH_ENTRIES
