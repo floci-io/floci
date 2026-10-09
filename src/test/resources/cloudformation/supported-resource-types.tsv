@@ -84,6 +84,7 @@ AWS::ECS::TaskDefinition	EcsCfnProvisioner
 AWS::EKS::Cluster	EksCfnProvisioner
 AWS::EKS::Nodegroup	EksCfnProvisioner
 AWS::ElastiCache::CacheCluster	ElastiCacheCfnProvisioner
+AWS::ElastiCache::ServerlessCache	ElastiCacheServerlessCfnProvisioner
 AWS::ElastiCache::SubnetGroup	ElastiCacheCfnProvisioner
 AWS::ElastiCache::User	ElastiCacheCfnProvisioner
 AWS::ElastiCache::UserGroup	ElastiCacheCfnProvisioner
