@@ -2110,54 +2110,91 @@ class SsmIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-
         given()
-            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
+            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
             .contentType(SSM_CONTENT_TYPE)
             .body("""
-                { "Name": "/unlabel/errors", "Labels": ["prod"] }
+                { "Name": "/unlabel/errors", "ParameterVersion": 1, "Labels": ["prod"] }
                 """)
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .statusCode(200);
 
-        given()
-            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
-                { "Name": "/unlabel/errors", "ParameterVersion": 1, "Labels": [] }
+        unlabel("{}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("3 validation errors detected: "
+                    + "Value null at 'name' failed to satisfy constraint: Member must not be null; "
+                    + "Value null at 'parameterVersion' failed to satisfy constraint: Member must not be null; "
+                    + "Value null at 'labels' failed to satisfy constraint: Member must not be null"));
+        unlabel("""
+                { "Name": "", "ParameterVersion": 1, "Labels": [] }
                 """)
-        .when()
-            .post("/")
-        .then()
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
-
-        given()
-            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
+            .body("message", equalTo("2 validation errors detected: "
+                    + "Value '' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 1; "
+                    + "Value '[]' at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1"));
+        unlabel("""
+                { "Name": "/unlabel/errors", "ParameterVersion": "1", "Labels": ["prod"] }
+                """)
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("STRING_VALUE can not be converted to a Long"));
+        unlabel("""
+                { "Name": "/unlabel/errors", "ParameterVersion": 1, "Labels": [5] }
+                """)
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("NUMBER_VALUE can not be converted to a String"));
+        unlabel("""
+                { "Name": "arn:aws:ssm:us-east-1:000000000000:parameter/unlabel/errors", "ParameterVersion": 1, "Labels": ["prod"] }
+                """)
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Parameter ARN is not supported for this operation."));
+        unlabel("""
                 { "Name": "/unlabel/errors", "ParameterVersion": 5, "Labels": ["prod"] }
                 """)
-        .when()
-            .post("/")
-        .then()
             .statusCode(400)
-            .body("__type", equalTo("ParameterVersionNotFound"));
+            .body("__type", equalTo("ParameterVersionNotFound"))
+            .body("message", equalTo("Systems Manager could not find version 5 of /unlabel/errors. "
+                    + "Verify the version and try again."));
+        unlabel("""
+                { "Name": "/unlabel/no-such-param", "ParameterVersion": 1, "Labels": ["prod"] }
+                """)
+            .statusCode(400)
+            .body("__type", equalTo("ParameterNotFound"))
+            .body("message", equalTo("Parameter /unlabel/no-such-param not found."));
 
         given()
-            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
+            .header("X-Amz-Target", "AmazonSSM.GetParameterHistory")
             .contentType(SSM_CONTENT_TYPE)
             .body("""
-                { "Name": "/unlabel/no-such-param", "ParameterVersion": 1, "Labels": ["prod"] }
+                { "Name": "/unlabel/errors" }
                 """)
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body("__type", equalTo("ParameterNotFound"));
+            .statusCode(200)
+            .body("Parameters[0].Labels", contains("prod"));
+
+        // AWS truncates a fractional version rather than rejecting it.
+        unlabel("""
+                { "Name": "/unlabel/errors", "ParameterVersion": 1.9, "Labels": ["prod"] }
+                """)
+            .statusCode(200)
+            .body("RemovedLabels", contains("prod"));
+    }
+
+    private io.restassured.response.ValidatableResponse unlabel(String body) {
+        return given()
+            .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then();
     }
 
     private io.restassured.response.ValidatableResponse describeParameters(String body) {
