@@ -70,7 +70,8 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         }
         String description = ctx.resolveOptional(props, "Description");
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
-        String permissionsBoundary = ctx.resolveOptional(props, "PermissionsBoundary");
+        // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
+        String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
 
         IamRole role;
         boolean createdRole = false;

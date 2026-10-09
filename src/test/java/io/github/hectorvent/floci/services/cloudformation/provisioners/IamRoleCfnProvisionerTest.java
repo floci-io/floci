@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -390,6 +391,31 @@ class IamRoleCfnProvisionerTest {
                 """), ctx());
 
         verify(iam, never()).deleteRolePermissionsBoundary(anyString());
+        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString());
+    }
+
+    // {"Fn::If": [cond, arn, {"Ref": "AWS::NoValue"}]} resolves to "" (CDK bootstrap's
+    // CloudFormationExecutionRole), which must mean "no boundary", not a policy named "".
+    @Test
+    void createTreatsABlankPermissionsBoundaryAsAbsent() {
+        stubCreate("app-role");
+
+        provisioner.provision(resource(), props("""
+                {"RoleName": "app-role", "PermissionsBoundary": ""}
+                """), ctx());
+
+        verify(iam).createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), isNull());
+    }
+
+    @Test
+    void updateTreatsABlankPermissionsBoundaryAsDropped() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": ""}
+                """), ctx());
+
+        verify(iam).deleteRolePermissionsBoundary("app-role");
         verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString());
     }
 

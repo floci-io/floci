@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -459,6 +460,31 @@ class IamUserCfnProvisionerTest {
                 """), updateCtx("my-user"));
 
         verify(iam, never()).deleteUserPermissionsBoundary(any());
+        verify(iam, never()).putUserPermissionsBoundary(any(), any());
+    }
+
+    // {"Fn::If": [cond, arn, {"Ref": "AWS::NoValue"}]} resolves to "", which must mean
+    // "no boundary", not a policy named "".
+    @Test
+    void createTreatsABlankPermissionsBoundaryAsAbsent() {
+        stubCreate("custom-user", "/");
+
+        provisioner.provision(resource(), props("""
+                {"UserName": "custom-user", "PermissionsBoundary": ""}
+                """), ctx());
+
+        verify(iam).createUser(eq("custom-user"), eq("/"), isNull());
+    }
+
+    @Test
+    void updateTreatsABlankPermissionsBoundaryAsDropped() {
+        StackResource r = adoptExistingUser(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"UserName": "my-user", "PermissionsBoundary": ""}
+                """), updateCtx("my-user"));
+
+        verify(iam).deleteUserPermissionsBoundary("my-user");
         verify(iam, never()).putUserPermissionsBoundary(any(), any());
     }
 

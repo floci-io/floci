@@ -66,7 +66,8 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
         List<String> groups = ctx.resolveStringList(props, "Groups");
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        String permissionsBoundary = ctx.resolveOptional(props, "PermissionsBoundary");
+        // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
+        String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
 
         IamUser user;
         boolean createdUser = false;

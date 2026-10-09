@@ -413,6 +413,64 @@ class CloudFormationIamUserIntegrationTest {
         awaitStackStatus(stackId, "DELETE_COMPLETE");
     }
 
+    /**
+     * The CDK bootstrap template's shape: PermissionsBoundary is an Fn::If whose false branch is
+     * Ref AWS::NoValue. That must create the role and user with no boundary, not fail looking up a
+     * policy named "".
+     */
+    @Test
+    void noValuePermissionsBoundaryCreatesRoleAndUserWithoutOne() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String roleName = "novalue-role-" + suffix;
+        String userName = "novalue-user-" + suffix;
+        String stackName = "cfn-novalue-boundary-" + suffix;
+        String boundary = """
+                {"Fn::If": ["HasBoundary",
+                  {"Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${InputPermissionsBoundary}"},
+                  {"Ref": "AWS::NoValue"}]}""";
+        String template = """
+                {
+                  "Parameters": {"InputPermissionsBoundary": {"Type": "String", "Default": ""}},
+                  "Conditions": {"HasBoundary": {"Fn::Not": [{"Fn::Equals": ["", {"Ref": "InputPermissionsBoundary"}]}]}},
+                  "Resources": {
+                    "ExecRole": {
+                      "Type": "AWS::IAM::Role",
+                      "Properties": {
+                        "RoleName": "%s",
+                        "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                        "PermissionsBoundary": %s
+                      }
+                    },
+                    "ExecUser": {
+                      "Type": "AWS::IAM::User",
+                      "Properties": {"UserName": "%s", "PermissionsBoundary": %s}
+                    }
+                  }
+                }
+                """.formatted(roleName, boundary, userName, boundary);
+
+        String stackId = createStack(stackName, template);
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        for (String[] read : new String[][] {{"GetRole", "RoleName", roleName}, {"GetUser", "UserName", userName}}) {
+            String body = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", read[0])
+                .formParam(read[1], read[2])
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+            assertThat(body, containsString(read[2]));
+            assertThat(body, org.hamcrest.Matchers.not(containsString("PermissionsBoundary")));
+        }
+
+        deleteStack(stackName);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+    }
+
     private static String createStack(String stackName, String template) {
         return cfnQuery("CreateStack", stackName, template)
                 .then()
