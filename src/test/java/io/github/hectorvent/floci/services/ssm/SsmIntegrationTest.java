@@ -1988,53 +1988,57 @@ class SsmIntegrationTest {
 
     @Test
     void labelParameterVersion_validationErrors() {
-        given()
-            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
+        String prefix = "1 validation error detected: ";
+        String memberRange = "Member must satisfy constraint: [Member must have length less than or equal to 100, "
+                + "Member must have length greater than or equal to 1]";
+        labelParameterVersion("""
                 { "Name": "/test/param", "Labels": [] }
                 """)
-        .when()
-            .post("/")
-        .then()
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(prefix + "Value '[]' at 'labels' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1"));
 
-        given()
-            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
+        labelParameterVersion("""
                 { "Name": "/test/param", "Labels": [""] }
                 """)
-        .when()
-            .post("/")
-        .then()
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(prefix + "Value '[]' at 'labels' failed to satisfy constraint: " + memberRange));
 
-        given()
-            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
+        String tooLong = "a".repeat(101);
+        labelParameterVersion("""
                 { "Name": "/test/param", "Labels": ["%s"] }
-                """.formatted("a".repeat(101)))
-        .when()
-            .post("/")
-        .then()
+                """.formatted(tooLong))
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(prefix + "Value '[" + tooLong + "]' at 'labels' failed to satisfy constraint: "
+                    + memberRange));
 
-        given()
-            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
+        labelParameterVersion("""
                 { "Name": "/test/param", "Labels": ["l1","l2","l3","l4","l5","l6","l7","l8","l9","l10","l11"] }
                 """)
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(prefix + "Value '[l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11]' at 'labels' "
+                    + "failed to satisfy constraint: Member must have length less than or equal to 10"));
+
+        labelParameterVersion("""
+                { "Name": "/test/param", "Labels": [5] }
+                """)
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("NUMBER_VALUE can not be converted to a String"));
+    }
+
+    private io.restassured.response.ValidatableResponse labelParameterVersion(String body) {
+        return given()
+            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
         .when()
             .post("/")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+        .then();
     }
 
     @Test

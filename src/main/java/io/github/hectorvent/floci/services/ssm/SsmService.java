@@ -62,6 +62,10 @@ public class SsmService implements ResourceProvider {
     private static final String TAG_KEY_REGEX = "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$";
     private static final Pattern TAG_KEY_PATTERN = Pattern.compile(TAG_KEY_REGEX);
     private static final int MAX_TAG_KEY_LENGTH = 128;
+    /** The tail AWS appends to every rejected parameter name, whichever prefix the operation reserves. */
+    private static final String PARAMETER_NAME_FORMAT_RULE = "If formed as a path, it can consist of sub-paths "
+            + "divided by slash symbol; each sub-path can be formed as a mix of letters, numbers and the following "
+            + "3 symbols .-_";
     /** A bare name, or a path of non-empty segments; AWS also lets a colon through here. */
     private static final Pattern UNLABEL_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_.:-]+|(/[A-Za-z0-9_.:-]+)+");
 
@@ -456,9 +460,7 @@ public class SsmService implements ResourceProvider {
                 || lower.startsWith("aws/") || lower.startsWith("ssm/")) {
             throw new AwsException("ValidationException",
                     "Parameter name: can't be prefixed with \"aws\" or \"ssm\" (case-insensitive). "
-                            + "If formed as a path, it can consist of sub-paths divided by slash symbol; "
-                            + "each sub-path can be formed as a mix of letters, numbers and the following "
-                            + "3 symbols .-_", 400);
+                            + PARAMETER_NAME_FORMAT_RULE, 400);
         }
     }
 
@@ -562,7 +564,7 @@ public class SsmService implements ResourceProvider {
         return !paramName.substring(normalizedPath.length()).contains("/");
     }
 
-    public void deleteParameter(String name, String region) {
+    public synchronized void deleteParameter(String name, String region) {
         String storageKey = regionKey(region, name);
         if (parameterStore.get(storageKey).isEmpty()) {
             throw new AwsException("ParameterNotFound",
@@ -573,7 +575,7 @@ public class SsmService implements ResourceProvider {
         LOG.infov("Deleted parameter: {0}", name);
     }
 
-    public List<String> deleteParameters(List<String> names, String region) {
+    public synchronized List<String> deleteParameters(List<String> names, String region) {
         List<String> deleted = new ArrayList<>();
         for (String name : names) {
             String storageKey = regionKey(region, name);
@@ -793,9 +795,7 @@ public class SsmService implements ResourceProvider {
         if (!UNLABEL_NAME_PATTERN.matcher(trimmed).matches() || lower.startsWith("ssm")) {
             throw new AwsException("ValidationException",
                     "Parameter name: can't be prefixed with \"ssm\" (case-insensitive). "
-                            + "If formed as a path, it can consist of sub-paths divided by slash symbol; "
-                            + "each sub-path can be formed as a mix of letters, numbers and the following "
-                            + "3 symbols .-_", 400);
+                            + PARAMETER_NAME_FORMAT_RULE, 400);
         }
         if (lower.startsWith("aws")) { // partition-literal: reserved parameter name prefix
             throw new AwsException("AccessDeniedException",

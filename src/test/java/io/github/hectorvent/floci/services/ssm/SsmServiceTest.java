@@ -571,6 +571,36 @@ class SsmServiceTest {
     }
 
     @Test
+    void deletesWaitForTheMonitorThatLabelUpdatesHold() throws Exception {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/one", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/two", "v1", "String", null, false, region);
+        List<Thread> deleters = List.of(
+                new Thread(() -> ssmService.deleteParameter("/app/one", region)),
+                new Thread(() -> ssmService.deleteParameters(List.of("/app/two"), region)));
+
+        // Holding the monitor stands in for a label or unlabel call between its lookup and its history write.
+        synchronized (ssmService) {
+            for (Thread deleter : deleters) {
+                deleter.start();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (deleter.getState() != Thread.State.BLOCKED) {
+                    assertTrue(System.nanoTime() < deadline, "delete did not wait for the service monitor");
+                    Thread.onSpinWait();
+                }
+            }
+            assertEquals("v1", ssmService.getParameter("/app/one", region).getValue());
+            assertEquals("v1", ssmService.getParameter("/app/two", region).getValue());
+        }
+        for (Thread deleter : deleters) {
+            deleter.join(TimeUnit.SECONDS.toMillis(5));
+        }
+
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/app/one", region));
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/app/two", region));
+    }
+
+    @Test
     void unlabelParameterVersionReturnsRemovedLabelsInStoredOrder() {
         String region = "eu-west-1";
         ssmService.putParameter("/app/key", "v1", "String", null, false, region);
