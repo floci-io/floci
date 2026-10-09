@@ -17,8 +17,8 @@ class ImportOrderTest(unittest.TestCase):
         fixtures = {
             "Ordered": ("""import org.junit.jupiter.api.Test;
 
-import java.util.List;
 import javax.net.SocketFactory;
+import java.util.List;
 
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
@@ -51,6 +51,36 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Test;
 """, True),
             "MissingSeparation": ("""import org.junit.jupiter.api.Test;
+import java.util.List;
+""", True),
+            "JavaBeforeJavax": ("""import java.util.List;
+import javax.net.SocketFactory;
+""", True),
+            "JavaOnly": ("""import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.mockito.Mockito.mock;
+""", False),
+            "JavaxOnly": ("""import org.junit.jupiter.api.Test;
+
+import javax.net.SocketFactory;
+
+import static org.mockito.Mockito.mock;
+""", False),
+            "MissingJavaxSeparation": ("""import org.junit.jupiter.api.Test;
+import javax.net.SocketFactory;
+import java.util.List;
+""", True),
+            "UnsortedJavaAfterJavax": ("""import javax.net.SocketFactory;
+import java.util.Map;
+import java.util.List;
+""", True),
+            "MissingStaticSeparation": ("""import javax.net.SocketFactory;
+import java.util.List;
+import static org.mockito.Mockito.mock;
+""", True),
+            "JavaxInOtherPackage": ("""import org.example.javax.Widget;
 import java.util.List;
 """, True),
         }
@@ -97,6 +127,7 @@ import java.util.List;
             report = temporary / "target/checkstyle-result.xml"
             self.assertTrue(report.exists(), result.stdout + result.stderr)
             checked = {}
+            diagnostics = {}
             for file in ET.parse(report).getroot().findall("file"):
                 name = Path(file.get("name")).stem
                 if name in fixtures:
@@ -104,7 +135,8 @@ import java.util.List;
                     for error in errors:
                         self.assertTrue(error.get("source").endswith(".ImportOrderCheck"))
                     checked[name] = bool(errors)
-            self.assertEqual({name: bad for name, (_, bad) in fixtures.items()}, checked)
+                    diagnostics[name] = [error.attrib for error in errors]
+            self.assertEqual({name: bad for name, (_, bad) in fixtures.items()}, checked, diagnostics)
             self.assertNotEqual(0, result.returncode, "Invalid import fixtures must fail Checkstyle")
 
 

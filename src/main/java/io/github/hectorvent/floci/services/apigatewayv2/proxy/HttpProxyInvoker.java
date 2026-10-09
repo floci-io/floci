@@ -4,6 +4,10 @@ import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
@@ -30,10 +34,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLParameters;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
 /**
  * Invokes an HTTP_PROXY integration: builds the target URL from the integration's

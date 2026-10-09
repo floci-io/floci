@@ -44,6 +44,7 @@ import org.apache.hc.core5.util.TimeValue;
 import org.apache.hc.core5.util.Timeout;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.Socket;
@@ -55,7 +56,6 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import javax.net.ssl.SSLContext;
 
 /**
  * Floci's own Docker HTTP transport over httpclient5: the transport docker-java's

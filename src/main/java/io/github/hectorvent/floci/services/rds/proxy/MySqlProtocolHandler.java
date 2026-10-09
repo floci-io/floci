@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLSocket;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -13,7 +14,6 @@ import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import javax.net.ssl.SSLSocket;
 
 /**
  * Handles the MySQL wire protocol auth intercept using a transparent relay.

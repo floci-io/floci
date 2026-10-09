@@ -1,11 +1,11 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.HexFormat;
 import java.util.UUID;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Floci's receipt handle. The fields are readable, and the signature rejects a handle that was

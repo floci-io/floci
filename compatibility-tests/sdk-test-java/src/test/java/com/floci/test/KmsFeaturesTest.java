@@ -28,6 +28,9 @@ import software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec;
 import software.amazon.awssdk.services.kms.model.VerifyResponse;
 import software.amazon.awssdk.services.kms.model.WrappingKeySpec;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.OAEPParameterSpec;
+import javax.crypto.spec.PSource;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.PublicKey;
@@ -35,9 +38,6 @@ import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
 import java.util.Map;
-import javax.crypto.Cipher;
-import javax.crypto.spec.OAEPParameterSpec;
-import javax.crypto.spec.PSource;
 
 import static org.assertj.core.api.Assertions.*;
 

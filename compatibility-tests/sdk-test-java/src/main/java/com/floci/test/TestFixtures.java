@@ -150,6 +150,9 @@ import software.amazon.awssdk.services.transfer.TransferClient;
 import software.amazon.awssdk.services.verifiedpermissions.VerifiedPermissionsClient;
 import software.amazon.awssdk.services.wafv2.Wafv2Client;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -162,9 +165,6 @@ import java.util.List;
 import java.util.UUID;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
 /**
  * Shared test utilities and AWS client factories.

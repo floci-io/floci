@@ -46,6 +46,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 import org.jspecify.annotations.Nullable;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -80,8 +82,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
 

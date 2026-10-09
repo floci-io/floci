@@ -33,6 +33,12 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.ExtendedSSLSession;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLPeerUnverifiedException;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.X509ExtendedTrustManager;
 import java.net.Socket;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
@@ -50,12 +56,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
-import javax.net.ssl.ExtendedSSLSession;
-import javax.net.ssl.SNIHostName;
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLPeerUnverifiedException;
-import javax.net.ssl.SSLSession;
-import javax.net.ssl.X509ExtendedTrustManager;
 
 @ApplicationScoped
 public class IotMqttBrokerService implements Resettable {

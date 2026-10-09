@@ -15,6 +15,10 @@ import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
@@ -27,10 +31,6 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.function.Function;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
 /**
  * CDI producer for the DockerClient beans.

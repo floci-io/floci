@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.net.ssl.SSLContext;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributeView;
@@ -13,7 +14,6 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.cert.X509Certificate;
 import java.util.Set;
-import javax.net.ssl.SSLContext;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;

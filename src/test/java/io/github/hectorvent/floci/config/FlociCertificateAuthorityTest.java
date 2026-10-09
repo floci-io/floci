@@ -16,6 +16,7 @@ import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.security.auth.x500.X500Principal;
 import java.io.StringWriter;
 import java.math.BigInteger;
 import java.nio.file.Files;
@@ -30,7 +31,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.List;
 import java.util.Set;
-import javax.security.auth.x500.X500Principal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;

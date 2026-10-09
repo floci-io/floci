@@ -2,14 +2,14 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.iam.IamService;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
 import java.util.Optional;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 /**
  * SigV4 verification for presigned POST policy documents. Mirrors the credential/secret-key

@@ -26,6 +26,7 @@ import org.apache.hc.core5.http2.HttpVersionPolicy;
 import org.apache.hc.core5.util.Timeout;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -43,7 +44,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
-import javax.net.ssl.SSLContext;
 
 /**
  * HTTP/1.1 transport for CloudFront custom origins that validates and pins each DNS resolution to

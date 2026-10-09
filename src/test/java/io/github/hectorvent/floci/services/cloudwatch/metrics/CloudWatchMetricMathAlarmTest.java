@@ -20,10 +20,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.w3c.dom.Document;
 
-import java.nio.file.Path;
-import java.util.Map;
 import javax.xml.xpath.XPath;
 import javax.xml.xpath.XPathFactory;
+import java.nio.file.Path;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;

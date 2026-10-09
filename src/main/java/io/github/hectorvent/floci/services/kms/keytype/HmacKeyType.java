@@ -3,11 +3,11 @@ package io.github.hectorvent.floci.services.kms.keytype;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.Base64;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 final class HmacKeyType implements KmsKeyType {
 

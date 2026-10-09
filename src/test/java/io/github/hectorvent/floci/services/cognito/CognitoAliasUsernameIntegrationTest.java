@@ -11,11 +11,11 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.UUID;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;

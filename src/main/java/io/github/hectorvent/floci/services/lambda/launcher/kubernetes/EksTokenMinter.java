@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -21,8 +23,6 @@ import java.util.TreeMap;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Mints EKS bearer tokens the way {@code aws eks get-token} does: a presigned
