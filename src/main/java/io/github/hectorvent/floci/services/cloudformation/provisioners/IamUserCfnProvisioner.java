@@ -141,11 +141,12 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
         try {
             // createUser() only applies PermissionsBoundary on first create. On adoption, set a
             // changed boundary, and remove one only if the user has one and the template dropped it.
+            // ID-verified like the path write, here and in the rollback restore.
             if (!createdUser && !Objects.equals(permissionsBoundary, boundaryToRestore)) {
                 if (permissionsBoundary != null) {
-                    iamService.putUserPermissionsBoundary(resolvedUserName, permissionsBoundary);
+                    iamService.putUserPermissionsBoundary(resolvedUserName, permissionsBoundary, userIdToRestore);
                 } else {
-                    iamService.deleteUserPermissionsBoundary(resolvedUserName);
+                    iamService.deleteUserPermissionsBoundary(resolvedUserName, userIdToRestore);
                 }
                 boundaryChangedByThisAttempt = true;
             }
@@ -299,9 +300,9 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
                 if (!CfnRollback.attemptIamCleanup(failure,
                         "restore prior permissions boundary on user " + resolvedUserName, () -> {
                             if (boundaryToRestore == null) {
-                                iamService.deleteUserPermissionsBoundary(resolvedUserName);
+                                iamService.deleteUserPermissionsBoundary(resolvedUserName, userIdToRestore);
                             } else {
-                                iamService.putUserPermissionsBoundary(resolvedUserName, boundaryToRestore);
+                                iamService.putUserPermissionsBoundary(resolvedUserName, boundaryToRestore, userIdToRestore);
                             }
                         })) {
                     cleanupSucceeded = false;

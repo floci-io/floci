@@ -366,8 +366,8 @@ class IamRoleCfnProvisionerTest {
                 {"RoleName": "app-role", "PermissionsBoundary": "%s"}
                 """.formatted(BOUNDARY_NEW)), ctx());
 
-        verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_NEW);
-        verify(iam, never()).deleteRolePermissionsBoundary(anyString());
+        verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_NEW, "AROAapp-role");
+        verify(iam, never()).deleteRolePermissionsBoundary(anyString(), any());
     }
 
     @Test
@@ -378,7 +378,7 @@ class IamRoleCfnProvisionerTest {
                 {"RoleName": "app-role"}
                 """), ctx());
 
-        verify(iam).deleteRolePermissionsBoundary("app-role");
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
     }
 
     @Test
@@ -390,8 +390,8 @@ class IamRoleCfnProvisionerTest {
                 {"RoleName": "app-role"}
                 """), ctx());
 
-        verify(iam, never()).deleteRolePermissionsBoundary(anyString());
-        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString());
+        verify(iam, never()).deleteRolePermissionsBoundary(anyString(), any());
+        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString(), any());
     }
 
     // {"Fn::If": [cond, arn, {"Ref": "AWS::NoValue"}]} resolves to "" (CDK bootstrap's
@@ -415,8 +415,8 @@ class IamRoleCfnProvisionerTest {
                 {"RoleName": "app-role", "PermissionsBoundary": ""}
                 """), ctx());
 
-        verify(iam).deleteRolePermissionsBoundary("app-role");
-        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString());
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
+        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString(), any());
     }
 
     @Test
@@ -431,9 +431,24 @@ class IamRoleCfnProvisionerTest {
                 """.formatted(BOUNDARY_NEW)), ctx()));
 
         InOrder order = inOrder(iam);
-        order.verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_NEW);
-        order.verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_OLD);
+        order.verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_NEW, "AROAapp-role");
+        order.verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_OLD, "AROAapp-role");
         verify(iam, never()).deleteRole(anyString());
+    }
+
+    @Test
+    void failedUpdateRemovesTheBoundaryItAddedOnlyFromTheAdoptedRole() {
+        StackResource r = adoptExistingRole(null);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s",
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """.formatted(BOUNDARY_NEW)), ctx()));
+
+        // The ID makes IamService refuse the delete if the name now belongs to a replacement role.
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
     }
 
     @Test

@@ -149,11 +149,12 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         try {
             // createRole() only applies PermissionsBoundary on first create. On adoption, set a
             // changed boundary, and remove one only if the role has one and the template dropped it.
+            // ID-verified like the trust-policy write, here and in the rollback restore.
             if (!createdRole && !Objects.equals(permissionsBoundary, boundaryToRestore)) {
                 if (permissionsBoundary != null) {
-                    iamService.putRolePermissionsBoundary(resolvedRoleName, permissionsBoundary);
+                    iamService.putRolePermissionsBoundary(resolvedRoleName, permissionsBoundary, roleIdToRestore);
                 } else {
-                    iamService.deleteRolePermissionsBoundary(resolvedRoleName);
+                    iamService.deleteRolePermissionsBoundary(resolvedRoleName, roleIdToRestore);
                 }
                 boundaryChangedByThisAttempt = true;
             }
@@ -266,9 +267,9 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 if (!CfnRollback.attemptIamCleanup(failure,
                         "restore prior permissions boundary on role " + resolvedRoleName, () -> {
                             if (boundaryToRestore == null) {
-                                iamService.deleteRolePermissionsBoundary(resolvedRoleName);
+                                iamService.deleteRolePermissionsBoundary(resolvedRoleName, roleIdToRestore);
                             } else {
-                                iamService.putRolePermissionsBoundary(resolvedRoleName, boundaryToRestore);
+                                iamService.putRolePermissionsBoundary(resolvedRoleName, boundaryToRestore, roleIdToRestore);
                             }
                         })) {
                     cleanupSucceeded = false;

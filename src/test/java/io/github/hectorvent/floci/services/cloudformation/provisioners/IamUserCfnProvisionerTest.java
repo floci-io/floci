@@ -435,8 +435,8 @@ class IamUserCfnProvisionerTest {
                 {"UserName": "my-user", "PermissionsBoundary": "%s"}
                 """.formatted(BOUNDARY_NEW)), updateCtx("my-user"));
 
-        verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_NEW);
-        verify(iam, never()).deleteUserPermissionsBoundary(any());
+        verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_NEW, "AIDAuser");
+        verify(iam, never()).deleteUserPermissionsBoundary(any(), any());
     }
 
     @Test
@@ -447,7 +447,7 @@ class IamUserCfnProvisionerTest {
                 {"UserName": "my-user"}
                 """), updateCtx("my-user"));
 
-        verify(iam).deleteUserPermissionsBoundary("my-user");
+        verify(iam).deleteUserPermissionsBoundary("my-user", "AIDAuser");
     }
 
     @Test
@@ -459,8 +459,8 @@ class IamUserCfnProvisionerTest {
                 {"UserName": "my-user"}
                 """), updateCtx("my-user"));
 
-        verify(iam, never()).deleteUserPermissionsBoundary(any());
-        verify(iam, never()).putUserPermissionsBoundary(any(), any());
+        verify(iam, never()).deleteUserPermissionsBoundary(any(), any());
+        verify(iam, never()).putUserPermissionsBoundary(any(), any(), any());
     }
 
     // {"Fn::If": [cond, arn, {"Ref": "AWS::NoValue"}]} resolves to "", which must mean
@@ -484,8 +484,8 @@ class IamUserCfnProvisionerTest {
                 {"UserName": "my-user", "PermissionsBoundary": ""}
                 """), updateCtx("my-user"));
 
-        verify(iam).deleteUserPermissionsBoundary("my-user");
-        verify(iam, never()).putUserPermissionsBoundary(any(), any());
+        verify(iam).deleteUserPermissionsBoundary("my-user", "AIDAuser");
+        verify(iam, never()).putUserPermissionsBoundary(any(), any(), any());
     }
 
     @Test
@@ -500,8 +500,23 @@ class IamUserCfnProvisionerTest {
                 """.formatted(BOUNDARY_NEW)), updateCtx("my-user")));
 
         InOrder order = inOrder(iam);
-        order.verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_NEW);
-        order.verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_OLD);
+        order.verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_NEW, "AIDAuser");
+        order.verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_OLD, "AIDAuser");
         verify(iam, never()).deleteUser(any());
+    }
+
+    @Test
+    void failedUpdateRemovesTheBoundaryItAddedOnlyFromTheAdoptedUser() {
+        StackResource r = adoptExistingUser(null);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachUserPolicy("my-user", "arn:aws:iam::aws:policy/Missing");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserName": "my-user", "PermissionsBoundary": "%s",
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """.formatted(BOUNDARY_NEW)), updateCtx("my-user")));
+
+        // The ID makes IamService refuse the delete if the name now belongs to a replacement user.
+        verify(iam).deleteUserPermissionsBoundary("my-user", "AIDAuser");
     }
 }
