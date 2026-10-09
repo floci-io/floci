@@ -56,6 +56,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.EcrCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EcsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EksCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ElbV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
@@ -114,6 +115,8 @@ import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.eks.EksService;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
@@ -223,6 +226,8 @@ final class CfnProvisionerFixture {
         private SqsService sqsService;
         private WafV2Service wafV2Service;
         private BackupService backupService;
+        private ElastiCacheService elastiCacheService;
+        private ElastiCacheMemcachedService elastiCacheMemcachedService;
         private RedshiftService redshiftService;
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
@@ -440,6 +445,9 @@ final class CfnProvisionerFixture {
             }
             if (transferService != null) {
                 discovered.add(new TransferCfnProvisioner(transferService));
+            }
+            if (elastiCacheService != null && elastiCacheMemcachedService != null) {
+                discovered.add(new ElastiCacheCfnProvisioner(elastiCacheService, elastiCacheMemcachedService));
             }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
@@ -700,6 +708,17 @@ final class CfnProvisionerFixture {
 
         public Builder backup(BackupService v) {
             this.backupService = v;
+            return this;
+        }
+
+        /** The cache cluster provisioner needs both engines' services; name this and elastiCacheMemcached. */
+        public Builder elastiCache(ElastiCacheService s) {
+            this.elastiCacheService = s;
+            return this;
+        }
+
+        public Builder elastiCacheMemcached(ElastiCacheMemcachedService s) {
+            this.elastiCacheMemcachedService = s;
             return this;
         }
 

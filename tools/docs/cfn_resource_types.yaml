@@ -24,6 +24,7 @@ order:
   - AWS::ECS
   - AWS::EKS
   - AWS::RDS
+  - AWS::ElastiCache
   - AWS::Redshift
   - AWS::RedshiftServerless
   - AWS::EC2
@@ -84,6 +85,8 @@ type_order:
   AWS::EKS: [Cluster, Nodegroup]
   AWS::RDS:
     [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
+  AWS::ElastiCache:
+    [CacheCluster, SubnetGroup]
   AWS::Redshift:
     [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup]
   AWS::RedshiftServerless:
@@ -137,6 +140,7 @@ service_labels:
   AWS::KinesisFirehose: Kinesis Data Firehose
   AWS::Lambda: Lambda
   AWS::Logs: CloudWatch Logs
+  AWS::ElastiCache: ElastiCache
   AWS::Organizations: Organizations
   AWS::Pipes: Pipes
   AWS::RDS: RDS
@@ -165,6 +169,7 @@ notes:
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
   AWS::RDS::DBInstance: starts a real container
   AWS::RDS::DBCluster: starts a real container
+  AWS::ElastiCache::CacheCluster: 'starts a real container; modifying an existing cluster in place is not supported'
   AWS::Redshift::ClusterSecurityGroup: accepted; no EC2-Classic security group model
   AWS::Redshift::Cluster: single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported
   AWS::RedshiftServerless::Namespace: 'ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form'
