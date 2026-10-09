@@ -136,6 +136,8 @@ public class ElastiCacheMemcachedService {
                 ? request.cacheNodeType() : DEFAULT_CACHE_NODE_TYPE);
         cluster.setCacheParameterGroupName(request.cacheParameterGroupName());
         cluster.setCacheSubnetGroupName(request.cacheSubnetGroupName());
+        cluster.setNetworkType(request.networkType() != null && !request.networkType().isBlank()
+                ? request.networkType() : "ipv4");
         cluster.setSecurityGroupIds(request.securityGroupIds() != null
                 ? new ArrayList<>(request.securityGroupIds()) : null);
         cluster.setPreferredAvailabilityZone(request.preferredAvailabilityZone() != null

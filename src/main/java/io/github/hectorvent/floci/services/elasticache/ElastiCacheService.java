@@ -2185,6 +2185,12 @@ public class ElastiCacheService implements ResourceProvider {
 
     /** Replaces the description and, when subnets are given, the whole subnet set. */
     public CacheSubnetGroup modifyCacheSubnetGroup(String name, String description, List<String> subnetIds) {
+        return modifyCacheSubnetGroup(name, description, subnetIds, null);
+    }
+
+    /** As above; a non-null {@code tags} replaces the stored tag map, an empty one clears it. */
+    public CacheSubnetGroup modifyCacheSubnetGroup(String name, String description, List<String> subnetIds,
+                                                   Map<String, String> tags) {
         validateSubnetGroupName(name);
         synchronized (lockFor("sng:" + name)) {
             CacheSubnetGroup existing = subnetGroups.get(name)
@@ -2201,7 +2207,7 @@ public class ElastiCacheService implements ResourceProvider {
             } else {
                 updated = buildSubnetGroup(name, effectiveDescription, subnetIds);
             }
-            updated.setTags(existing.getTags());
+            updated.setTags(tags != null ? tags : existing.getTags());
             subnetGroups.put(name, updated);
             return updated;
         }
