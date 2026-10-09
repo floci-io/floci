@@ -89,76 +89,35 @@ class RdsPostgresStartupParametersIntegrationTest {
     @Test
     void clientStartupParametersApplyToAnIamSessionAsTheTokenRole() throws Exception {
         String dbId = "startup-params-iam-" + Long.toString(System.nanoTime(), 36);
-        int port = rds("CreateDBInstance")
-                .formParam("DBInstanceIdentifier", dbId)
-                .formParam("Engine", "postgres")
-                .formParam("MasterUsername", MASTER_USER)
-                .formParam("MasterUserPassword", MASTER_PASSWORD)
-                .formParam("DBName", "appdb")
-                .formParam("AllocatedStorage", "20")
-                .formParam("DBInstanceClass", "db.t3.micro")
-                .formParam("EnableIAMDatabaseAuthentication", "true")
-        .when().post("/").then().statusCode(200)
-                .extract().xmlPath()
-                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+        int port = createIamInstance(dbId);
         try {
-            Properties master = new Properties();
-            master.setProperty("user", MASTER_USER);
-            master.setProperty("password", MASTER_PASSWORD);
-            master.setProperty("sslmode", "disable");
-            try (Connection connection = DriverManager.getConnection(
-                    "jdbc:postgresql://localhost:" + port + "/appdb", master);
-                 Statement statement = connection.createStatement()) {
-                statement.execute("CREATE ROLE app_user LOGIN");
-                statement.execute("CREATE SCHEMA floci_opts AUTHORIZATION app_user");
-                // A database that refuses \' in string literals must still accept the parameters.
-                statement.execute("ALTER DATABASE appdb SET backslash_quote = off");
-            }
+            asMaster(port,
+                    "CREATE ROLE app_user LOGIN",
+                    "CREATE SCHEMA floci_opts AUTHORIZATION app_user",
+                    // A database that refuses \' in string literals must still accept the parameters.
+                    "ALTER DATABASE appdb SET backslash_quote = off");
 
             Properties iam = iamLogin(port, "app_user");
             iam.setProperty("options", "-c search_path=floci_opts -c work_mem=64MB");
             iam.setProperty("ApplicationName", "floci's startup params");
 
-            try (Connection connection = DriverManager.getConnection(
-                    "jdbc:postgresql://localhost:" + port + "/appdb", iam)) {
+            try (Connection connection = DriverManager.getConnection(jdbcUrl(port), iam)) {
                 assertThat(show(connection, "search_path"), equalTo("floci_opts"));
                 assertThat(show(connection, "work_mem"), equalTo("64MB"));
                 assertThat(show(connection, "application_name"), equalTo("floci's startup params"));
                 assertThat(show(connection, "session_authorization"), equalTo("app_user"));
             }
         } finally {
-            rds("DeleteDBInstance")
-                    .formParam("DBInstanceIdentifier", dbId)
-                    .formParam("SkipFinalSnapshot", "true")
-            .when().post("/");
+            deleteInstance(dbId);
         }
     }
 
     @Test
     void anIamSessionCannotTakeTheMasterIdentityThroughStartupParameters() throws Exception {
         String dbId = "startup-params-iam-escalation-" + Long.toString(System.nanoTime(), 36);
-        int port = rds("CreateDBInstance")
-                .formParam("DBInstanceIdentifier", dbId)
-                .formParam("Engine", "postgres")
-                .formParam("MasterUsername", MASTER_USER)
-                .formParam("MasterUserPassword", MASTER_PASSWORD)
-                .formParam("DBName", "appdb")
-                .formParam("AllocatedStorage", "20")
-                .formParam("DBInstanceClass", "db.t3.micro")
-                .formParam("EnableIAMDatabaseAuthentication", "true")
-        .when().post("/").then().statusCode(200)
-                .extract().xmlPath()
-                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+        int port = createIamInstance(dbId);
         try {
-            Properties master = new Properties();
-            master.setProperty("user", MASTER_USER);
-            master.setProperty("password", MASTER_PASSWORD);
-            master.setProperty("sslmode", "disable");
-            try (Connection connection = DriverManager.getConnection(
-                    "jdbc:postgresql://localhost:" + port + "/appdb", master);
-                 Statement statement = connection.createStatement()) {
-                statement.execute("CREATE ROLE app_user LOGIN");
-            }
+            asMaster(port, "CREATE ROLE app_user LOGIN");
 
             for (String options : new String[] {
                     "-c session_authorization=" + MASTER_USER,
@@ -166,16 +125,54 @@ class RdsPostgresStartupParametersIntegrationTest {
                     "-c role=" + MASTER_USER}) {
                 Properties iam = iamLogin(port, "app_user");
                 iam.setProperty("options", options);
-                SQLException refused = assertThrows(SQLException.class, () -> DriverManager.getConnection(
-                        "jdbc:postgresql://localhost:" + port + "/appdb", iam).close(), options);
+                SQLException refused = assertThrows(SQLException.class,
+                        () -> DriverManager.getConnection(jdbcUrl(port), iam).close(), options);
                 assertThat(options, refused.getSQLState(), equalTo("42501"));
             }
         } finally {
-            rds("DeleteDBInstance")
-                    .formParam("DBInstanceIdentifier", dbId)
-                    .formParam("SkipFinalSnapshot", "true")
-            .when().post("/");
+            deleteInstance(dbId);
         }
+    }
+
+    /** Creates a PostgreSQL instance with IAM database authentication and returns its proxy port. */
+    private static int createIamInstance(String dbId) {
+        return rds("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", dbId)
+                .formParam("Engine", "postgres")
+                .formParam("MasterUsername", MASTER_USER)
+                .formParam("MasterUserPassword", MASTER_PASSWORD)
+                .formParam("DBName", "appdb")
+                .formParam("AllocatedStorage", "20")
+                .formParam("DBInstanceClass", "db.t3.micro")
+                .formParam("EnableIAMDatabaseAuthentication", "true")
+        .when().post("/").then().statusCode(200)
+                .extract().xmlPath()
+                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+    }
+
+    private static void deleteInstance(String dbId) {
+        rds("DeleteDBInstance")
+                .formParam("DBInstanceIdentifier", dbId)
+                .formParam("SkipFinalSnapshot", "true")
+        .when().post("/");
+    }
+
+    /** Runs {@code statements} in order as the master user. */
+    private static void asMaster(int port, String... statements) throws SQLException {
+        Properties master = new Properties();
+        master.setProperty("user", MASTER_USER);
+        master.setProperty("password", MASTER_PASSWORD);
+        master.setProperty("sslmode", "disable");
+        try (Connection connection = DriverManager.getConnection(jdbcUrl(port), master);
+             Statement statement = connection.createStatement()) {
+            for (String sql : statements) {
+                statement.execute(sql);
+            }
+        }
+    }
+
+    private static String jdbcUrl(int port) {
+        return "jdbc:postgresql://localhost:" + port + "/appdb";
     }
 
     private static Properties iamLogin(int port, String user) throws Exception {
