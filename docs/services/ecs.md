@@ -499,6 +499,8 @@ Known differences from AWS:
   the cluster and task dimension sets, and the performance log events are not.
 - The account default set with `PutAccountSettingDefault` does not turn metrics on for a cluster;
   only the cluster's own setting does.
+- A stack update that removes `ClusterSettings` leaves the cluster's settings in place: declare
+  `containerInsights` as `disabled` to stop the metrics.
 
 #### Service discovery
 
