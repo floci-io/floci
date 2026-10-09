@@ -1,11 +1,11 @@
 package io.github.hectorvent.floci.services.cognito.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)

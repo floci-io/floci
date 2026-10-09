@@ -1,12 +1,13 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.Test;
-import static org.assertj.core.api.Assertions.assertThat;
 import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 import software.amazon.awssdk.services.apigateway.model.GetAccountRequest;
 import software.amazon.awssdk.services.apigateway.model.GetAccountResponse;
-import software.amazon.awssdk.services.apigateway.model.UpdateAccountRequest;
 import software.amazon.awssdk.services.apigateway.model.PatchOperation;
+import software.amazon.awssdk.services.apigateway.model.UpdateAccountRequest;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ApiGatewayAccountCompatibilityTest {
 

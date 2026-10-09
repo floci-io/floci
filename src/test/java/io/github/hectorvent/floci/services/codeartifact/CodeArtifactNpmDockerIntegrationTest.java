@@ -121,6 +121,11 @@ class CodeArtifactNpmDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertArrayEquals(expectedTarballBytes, fetchedTarball);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package=" + PACKAGE_NAME)
+                .then().statusCode(200).body("package.name", equalTo(PACKAGE_NAME))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"));
     }
 
     /**
@@ -150,6 +155,10 @@ class CodeArtifactNpmDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/npm/" + DOMAIN + "/no-such-repo/does-not-exist")
                 .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test

@@ -2,8 +2,8 @@ package io.github.hectorvent.floci.services.securityhub;
 
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
-import jakarta.inject.Inject;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;

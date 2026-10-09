@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.sqs;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
-
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

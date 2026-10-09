@@ -14,6 +14,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -148,6 +149,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             // Inline policies run inside the same protected block: a failure here used to leave
             // the created role, its managed attachments and any earlier inline writes behind,
             // because rollback only deletes resources that reached CREATE_COMPLETE.
+            Map<String, String> desiredInlinePolicies = new LinkedHashMap<>();
             if (props != null && props.has("Policies")) {
                 for (JsonNode policy : props.get("Policies")) {
                     String declaredName = ctx.resolveOptional(policy, "PolicyName");
@@ -167,9 +169,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                                 "Inline policy '" + policyName + "' on role " + resolvedRoleName
                                 + " has no PolicyDocument.", 400);
                     }
-                    iamService.putRolePolicy(resolvedRoleName, policyName,
-                            ctx.engine().resolveJsonAttributeStrict(document));
-                    inlineWrittenByThisAttempt.add(policyName);
+                    desiredInlinePolicies.put(policyName, ctx.engine().resolveJsonAttributeStrict(document));
                 }
             }
 
@@ -180,11 +180,16 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             // calls raise NoSuchEntity on an absent target, which would fail an update whose desired
             // end state, the policy not being on the role, already holds.
             for (String stale : previousInlineNames) {
-                if (!inlineWrittenByThisAttempt.contains(stale)
+                if (!desiredInlinePolicies.containsKey(stale)
                         && originalInlinePolicies.containsKey(stale)) {
                     iamService.deleteRolePolicy(resolvedRoleName, stale);
                     inlineRemovedByThisAttempt.add(stale);
                 }
+            }
+            // Free the quota held by renamed policies before writing their replacements.
+            for (Map.Entry<String, String> policy : desiredInlinePolicies.entrySet()) {
+                iamService.putRolePolicy(resolvedRoleName, policy.getKey(), policy.getValue());
+                inlineWrittenByThisAttempt.add(policy.getKey());
             }
             for (String stale : previousManagedArns) {
                 if (!managedPolicyArns.contains(stale) && originalPolicyArns.contains(stale)) {
@@ -195,19 +200,6 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         } catch (RuntimeException failure) {
             boolean cleanupSucceeded = true;
 
-            // Reconciliation runs last, so unwinding it comes first. A policy this attempt took out
-            // because the template stopped declaring it goes back with the document it had.
-            for (String policyName : inlineRemovedByThisAttempt) {
-                String prior = originalInlinePolicies.get(policyName);
-                if (prior == null) {
-                    continue;
-                }
-                if (!CfnRollback.attemptIamCleanup(failure,
-                        "restore inline policy " + policyName + " on role " + resolvedRoleName,
-                        () -> iamService.putRolePolicy(resolvedRoleName, policyName, prior))) {
-                    cleanupSucceeded = false;
-                }
-            }
             for (String policyArn : detachedByThisAttempt) {
                 if (!CfnRollback.attemptIamCleanup(failure,
                         "reattach policy " + policyArn + " to role " + resolvedRoleName,
@@ -216,19 +208,24 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
 
+            // Remove this attempt's writes before restoring earlier documents, so temporary
+            // overlap cannot exceed the role quota during rollback either.
             List<String> inlineRollback = new ArrayList<>(inlineWrittenByThisAttempt);
             Collections.reverse(inlineRollback);
             for (String policyName : inlineRollback) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "remove inline policy " + policyName + " on role " + resolvedRoleName,
+                        () -> iamService.deleteRolePolicy(resolvedRoleName, policyName))) {
+                    cleanupSucceeded = false;
+                }
+            }
+            Set<String> inlineToRestore = new LinkedHashSet<>(inlineRollback);
+            inlineToRestore.addAll(inlineRemovedByThisAttempt);
+            for (String policyName : inlineToRestore) {
                 String prior = originalInlinePolicies.get(policyName);
-                String cleanupDescription = (prior == null ? "remove" : "restore")
-                        + " inline policy " + policyName + " on role " + resolvedRoleName;
-                if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription, () -> {
-                    if (prior == null) {
-                        iamService.deleteRolePolicy(resolvedRoleName, policyName);
-                    } else {
-                        iamService.putRolePolicy(resolvedRoleName, policyName, prior);
-                    }
-                })) {
+                if (prior != null && !CfnRollback.attemptIamCleanup(failure,
+                        "restore inline policy " + policyName + " on role " + resolvedRoleName,
+                        () -> iamService.putRolePolicy(resolvedRoleName, policyName, prior))) {
                     cleanupSucceeded = false;
                 }
             }

@@ -5,7 +5,9 @@ import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.quarkus.runtime.Startup;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.datagram.DatagramSocket;
 import io.vertx.core.datagram.DatagramSocketOptions;
@@ -17,6 +19,7 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -28,6 +31,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.SequencedSet;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -72,6 +76,11 @@ public class EmbeddedDnsServer {
     // Per-upstream timeout. Bounded so trying every upstream stays under a typical 5s client
     // resolver timeout even in the worst case.
     private static final int FORWARD_TIMEOUT_MS = 1500;
+    // Forwards block a thread for up to FORWARD_TIMEOUT_MS per target, so they get their own
+    // bounded pool: a burst of queries to a dead resolver must not take every thread of the
+    // shared worker pool that planQuery and the rest of the emulator also run on.
+    private static final String FORWARD_POOL_NAME = "floci-dns-forward";
+    private static final int FORWARD_POOL_SIZE = 8;
     public static final String DEFAULT_SUFFIX = "localhost.floci.io";
     public static final String LOCALSTACK_SUFFIX = "localhost.localstack.cloud";
     private static final Pattern EC2_PRIVATE_DNS_NAME =
@@ -88,6 +97,7 @@ public class EmbeddedDnsServer {
     private volatile String serverIp;
     private final SequencedSet<String> suffixes = new LinkedHashSet<>();
     private volatile List<String> upstreamDnsServers = List.of();
+    private volatile WorkerExecutor forwardPool;
     // Held as the Iterable a CDI Instance already is, so iterating resolves the beans lazily on
     // the packet path rather than at startup, where a source's storage must not be touched yet.
     private final Iterable<DnsRecordSource> recordSources;
@@ -576,7 +586,7 @@ public class EmbeddedDnsServer {
         if (upstreams.isEmpty()) {
             return;
         }
-        vertx.executeBlocking(() -> forwardToUpstreams(query, upstreams, DNS_PORT))
+        submitForward(forwardPool(vertx), () -> forwardToUpstreams(query, upstreams, DNS_PORT))
                 .onSuccess(response ->
                         socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {}))
                 .onFailure(e ->
@@ -597,7 +607,7 @@ public class EmbeddedDnsServer {
                                       String senderHost, int senderPort,
                                       List<DnsForwardingRule.Target> targets, String qname,
                                       short txId, int questionOffset, int questionEnd) {
-        vertx.executeBlocking(() -> forwardToTargets(query, shuffled(targets)))
+        submitForward(forwardPool(vertx), () -> forwardToTargets(query, shuffled(targets)))
                 .onSuccess(response ->
                         socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {}))
                 .onFailure(e -> {
@@ -607,6 +617,28 @@ public class EmbeddedDnsServer {
                                     buildServerFailureResponse(query, txId, questionOffset, questionEnd)),
                             senderPort, senderHost, v -> {});
                 });
+    }
+
+    /**
+     * Runs a blocking forward on the pool without Vert.x's per-context ordering, so one
+     * unresponsive upstream or rule target does not hold up forwarding for every other query.
+     */
+    static <T> Future<T> submitForward(WorkerExecutor pool, Callable<T> task) {
+        return pool.executeBlocking(task, false);
+    }
+
+    private WorkerExecutor forwardPool(Vertx vertx) {
+        WorkerExecutor pool = forwardPool;
+        if (pool == null) {
+            synchronized (this) {
+                pool = forwardPool;
+                if (pool == null) {
+                    pool = vertx.createSharedWorkerExecutor(FORWARD_POOL_NAME, FORWARD_POOL_SIZE);
+                    forwardPool = pool;
+                }
+            }
+        }
+        return pool;
     }
 
     private static List<DnsForwardingRule.Target> shuffled(List<DnsForwardingRule.Target> targets) {
@@ -636,13 +668,25 @@ public class EmbeddedDnsServer {
         Exception last = null;
         for (DnsForwardingRule.Target target : targets) {
             try (java.net.DatagramSocket fwd = new java.net.DatagramSocket()) {
-                fwd.setSoTimeout(FORWARD_TIMEOUT_MS);
                 InetAddress addr = InetAddress.getByName(target.address());
+                fwd.connect(addr, target.port());
                 fwd.send(new DatagramPacket(query, query.length, addr, target.port()));
+                long deadline = System.nanoTime() + FORWARD_TIMEOUT_MS * 1_000_000L;
                 byte[] buf = new byte[MAX_DNS_UDP_RESPONSE];
                 DatagramPacket resp = new DatagramPacket(buf, buf.length);
-                fwd.receive(resp);
-                return Arrays.copyOf(resp.getData(), resp.getLength());
+                while (true) {
+                    long remainingNs = deadline - System.nanoTime();
+                    if (remainingNs <= 0) {
+                        throw new SocketTimeoutException("DNS forward timeout");
+                    }
+                    resp.setLength(buf.length);
+                    // setSoTimeout(0) means wait forever, so never let the rounding reach 0.
+                    fwd.setSoTimeout((int) Math.max(1, remainingNs / 1_000_000L));
+                    fwd.receive(resp);
+                    if (isValidResponse(query, resp.getData(), resp.getLength())) {
+                        return Arrays.copyOf(resp.getData(), resp.getLength());
+                    }
+                }
             } catch (Exception e) {
                 last = e;
                 LOG.debugv("DNS forward to {0} failed: {1}", target.address(), e.getMessage());
@@ -698,5 +742,51 @@ public class EmbeddedDnsServer {
             LOG.debugv("Could not read /etc/resolv.conf: {0}", e.getMessage());
         }
         return servers;
+    }
+
+    /**
+     * True when the datagram answers this query: same transaction ID, QR bit set, the same question
+     * count, and the query's question echoed back. The name is compared ignoring ASCII case, like
+     * glibc and c-ares, since a resolver may echo it case-folded. Only the question is compared:
+     * clients usually append an EDNS OPT record to the query, and the answer section takes its place
+     * in the response.
+     */
+    private static boolean isValidResponse(byte[] query, byte[] response, int length) {
+        int questionEnd = questionEnd(query);
+        // Also stops the question comparison reading stale buffer bytes past a short datagram.
+        if (questionEnd < 0 || length < questionEnd) {
+            return false;
+        }
+        if (response[0] != query[0] || response[1] != query[1]) {
+            return false;
+        }
+        if ((response[2] & 0x80) == 0) {
+            return false;
+        }
+        if (response[4] != query[4] || response[5] != query[5]) {
+            return false;
+        }
+        int nameEnd = questionEnd - 4;
+        for (int i = 12; i < nameEnd; i++) {
+            if (asciiLower(response[i]) != asciiLower(query[i])) {
+                return false;
+            }
+        }
+        return Arrays.equals(query, nameEnd, questionEnd, response, nameEnd, questionEnd);
+    }
+
+    /** Label length bytes are below 64, so lowering every byte of the name only touches letters. */
+    private static byte asciiLower(byte b) {
+        return b >= 'A' && b <= 'Z' ? (byte) (b + ('a' - 'A')) : b;
+    }
+
+    /** End offset of the query's single question (name, type, class), or -1 if it is malformed. */
+    private static int questionEnd(byte[] query) {
+        int pos = 12;
+        while (pos < query.length && query[pos] != 0) {
+            pos += 1 + (query[pos] & 0xFF);
+        }
+        int end = pos + 1 + 4;
+        return end <= query.length ? end : -1;
     }
 }

@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.emr;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
-import io.restassured.response.Response;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;

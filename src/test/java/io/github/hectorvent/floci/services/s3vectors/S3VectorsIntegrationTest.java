@@ -654,7 +654,7 @@ class S3VectorsIntegrationTest {
     void listVectorsByIndexArnResolvesTheArnsOwnRegionNotTheRequestRegion() {
         String bucketName = "cross-region-vector-bucket";
         String indexName = "cross-region-idx";
-        String otherRegionAuth = "Credential=AKID/20260101/us-west-2/s3vectors/aws4_request";
+        String otherRegionAuth = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/s3vectors/aws4_request";
 
         // Create the bucket/index in us-west-2 (via the SigV4 credential scope region).
         given()

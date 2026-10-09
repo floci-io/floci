@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -8,21 +9,26 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceLaunchListener;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.Ipv4Cidrs;
 import io.github.hectorvent.floci.services.ec2.SecurityGroupPolicy;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.eks.model.AccessConfig;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
-import io.github.hectorvent.floci.services.eks.model.AccessConfig;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
@@ -40,7 +46,6 @@ import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -66,15 +71,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class EksService implements TagHandler, ResourceProvider {
+public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaunchListener {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
 
@@ -108,6 +111,7 @@ public class EksService implements TagHandler, ResourceProvider {
     private final Map<String, CompletableFuture<Boolean>> pendingFirstNodeGroups = new ConcurrentHashMap<>();
     // Storage hands every caller the same live Cluster, and Cluster keeps identity equality.
     private final Set<Cluster> clustersBeingDeleted = ConcurrentHashMap.newKeySet();
+    private final Set<String> restoringClusters = ConcurrentHashMap.newKeySet();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -165,8 +169,10 @@ public class EksService implements TagHandler, ResourceProvider {
         }
         if (!config.services().eks().mock()) {
             restorePersistedClusters();
-            startReadinessPoller();
+        } else {
+            restoreMockJoinedInstances();
         }
+        startReadinessPoller();
     }
 
     /**
@@ -215,6 +221,7 @@ public class EksService implements TagHandler, ResourceProvider {
                             cluster.setNodeInstanceType(selectedNodeInstanceType(group)));
                 }
                 clusterManager.restoreCluster(cluster);
+                restoreJoinedInstances(entry.accountId(), cluster);
             } catch (Exception e) {
                 if (!clusterManager.isDockerReachable()) {
                     // Same degradation as create: a restored cluster is metadata that stands on
@@ -234,13 +241,82 @@ public class EksService implements TagHandler, ResourceProvider {
 
     private List<AccountAwareStorageBackend.AccountEntry<Cluster>> allClusterEntries() {
         if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
-            return aware.scanAllAccountEntries(k -> true);
+            return aware.scanAllAccountEntries(k -> true).stream().peek(entry -> {
+                if (entry.value() != null && entry.value().getAccountId() == null) {
+                    entry.value().setAccountId(entry.accountId());
+                }
+            }).toList();
         }
         return storage.scan(k -> true).stream()
                 .map(cluster -> new AccountAwareStorageBackend.AccountEntry<>(
                         cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getAccountId(),
                         cluster.getName(), cluster))
                 .toList();
+    }
+
+    private boolean isClusterDeleting(String accountId, Cluster cluster) {
+        return cluster != null && cluster.getName() != null
+                && (cluster.getStatus() == ClusterStatus.DELETING
+                || clustersBeingDeleted.stream().anyMatch(c -> cluster.getName().equals(c.getName())
+                && (accountId == null || c.getAccountId() == null || accountId.equals(c.getAccountId()))));
+    }
+
+    private void saveClusterIfNotDeleting(String accountId, String clusterName, Consumer<Cluster> mutator) {
+        synchronized (clustersBeingDeleted) {
+            Cluster current = findAuthenticationCluster(accountId, clusterName).orElse(null);
+            if (current != null && !isClusterDeleting(accountId, current)) {
+                if (current.getAccountId() == null) {
+                    current.setAccountId(accountId);
+                }
+                mutator.accept(current);
+                putClusterForAccount(accountId, current);
+            }
+        }
+    }
+
+    private void restoreJoinedInstances(String accountId, Cluster cluster) {
+        if (cluster == null || cluster.getJoinedInstanceIds() == null || ec2Service == null
+                || isClusterDeleting(accountId, cluster) || findAuthenticationCluster(accountId, cluster.getName()).isEmpty()) {
+            return;
+        }
+        if (cluster.getAccountId() == null) {
+            cluster.setAccountId(accountId);
+        }
+        Set<String> prunedInstanceIds = new HashSet<>();
+        for (Map.Entry<String, String> instEntry : new ArrayList<>(cluster.getJoinedInstanceIds().entrySet())) {
+            if (isClusterDeleting(accountId, cluster) || findAuthenticationCluster(accountId, cluster.getName()).isEmpty()) {
+                return;
+            }
+            String instId = instEntry.getKey();
+            String reg = instEntry.getValue();
+            RequestScopes.runAs(accountId, reg, () -> {
+                Instance inst = ec2Service.getInstance(reg, instId).orElse(null);
+                if (inst == null || (inst.getState() != null && "terminated".equals(inst.getState().getName()))) {
+                    cluster.getJoinedInstanceIds().remove(instId);
+                    prunedInstanceIds.add(instId);
+                } else {
+                    try {
+                        clusterManager.joinInstance(cluster, inst);
+                    } catch (Exception e) {
+                        LOG.warnv("Failed to re-join instance {0} on restore of cluster {1}: {2}",
+                                instId, cluster.getName(), e.getMessage());
+                    }
+                }
+            });
+        }
+        if (!prunedInstanceIds.isEmpty()) {
+            saveClusterIfNotDeleting(accountId, cluster.getName(), current -> {
+                if (current.getJoinedInstanceIds() != null) {
+                    prunedInstanceIds.forEach(current.getJoinedInstanceIds()::remove);
+                }
+            });
+        }
+    }
+
+    private void restoreMockJoinedInstances() {
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+            restoreJoinedInstances(entry.accountId(), entry.value());
+        }
     }
 
     private Optional<Nodegroup> firstNodeGroup(String clusterName, String accountId) {
@@ -316,17 +392,32 @@ public class EksService implements TagHandler, ResourceProvider {
         Cluster cluster = (storage instanceof AccountAwareStorageBackend<Cluster> aware)
                 ? aware.getForAccount(accountId, clusterName).orElse(null)
                 : storage.get(clusterName).orElse(null);
-        clearAppliedClusterUserData(cluster, clusterName);
-        if (cluster == null || cluster.getArn() == null) {
-            String fallbackArn = AwsArnUtils.Arn.of("eks", config.defaultRegion(), accountId,
-                    "cluster/" + clusterName).toString();
-            appliedClusterUserData.remove(fallbackArn);
+        if (cluster != null) {
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(accountId);
+            }
+            clustersBeingDeleted.add(cluster);
+            cluster.setStatus(ClusterStatus.DELETING);
         }
-        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
-            aware.deleteForAccount(accountId, clusterName);
-            return;
+        try {
+            clearAppliedClusterUserData(cluster, clusterName);
+            if (cluster == null || cluster.getArn() == null) {
+                String fallbackArn = AwsArnUtils.Arn.of("eks", config.defaultRegion(), accountId,
+                        "cluster/" + clusterName).toString();
+                appliedClusterUserData.remove(fallbackArn);
+            }
+            synchronized (clustersBeingDeleted) {
+                if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+                    aware.deleteForAccount(accountId, clusterName);
+                    return;
+                }
+                storage.delete(clusterName);
+            }
+        } finally {
+            if (cluster != null) {
+                clustersBeingDeleted.remove(cluster);
+            }
         }
-        storage.delete(clusterName);
     }
 
     private void clearAppliedClusterUserData(Cluster cluster, String fallbackName) {
@@ -653,6 +744,69 @@ public class EksService implements TagHandler, ResourceProvider {
         return cluster;
     }
 
+    @Override
+    public void onInstanceLaunched(String accountId, String region, Instance instance) {
+        extractInstanceClusterName(instance).ifPresent(name ->
+                RequestScopes.runAs(accountId, region, () -> {
+                    try {
+                        Cluster cluster = describeCluster(name);
+                        validateInstanceRegion(cluster, instance);
+                        saveClusterIfNotDeleting(accountId, name, current ->
+                                clusterManager.recordJoinedInstanceId(current, instance));
+                    } catch (AwsException e) {
+                        LOG.warnv("Cannot join instance {0} to cluster {1}: {2}",
+                                instance.getInstanceId(), name, e.getMessage());
+                    } catch (Exception e) {
+                        LOG.warnv("Failed to join instance {0} to cluster {1}: {2}",
+                                instance.getInstanceId(), name, e.getMessage());
+                    }
+                }));
+    }
+
+    private Optional<String> extractInstanceClusterName(Instance instance) {
+        return (instance != null && instance.getUserData() != null && !instance.getUserData().isBlank())
+                ? EksBootstrapUserData.extractClusterName(instance.getUserData()) : Optional.empty();
+    }
+
+    void joinInstance(String clusterName, Instance instance) {
+        Cluster cluster = describeCluster(clusterName);
+        validateInstanceRegion(cluster, instance);
+        clusterManager.joinInstance(cluster, instance);
+        storage.put(cluster.getName(), cluster);
+    }
+
+    void joinInstance(String clusterName, String instanceId) {
+        String region = resolveClusterRegion(describeCluster(clusterName));
+        Instance instance = ec2Service != null ? ec2Service.getInstance(region, instanceId).orElse(null) : null;
+        if (instance == null) {
+            throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + instanceId + "' does not exist", 400);
+        }
+        joinInstance(clusterName, instance);
+    }
+
+    private void validateInstanceRegion(Cluster cluster, Instance instance) {
+        String clusterReg = resolveClusterRegion(cluster);
+        String instReg = instance.getRegion();
+        if (instReg == null && instance.getPlacement() != null && instance.getPlacement().getAvailabilityZone() != null) {
+            String az = instance.getPlacement().getAvailabilityZone();
+            if (az.length() > 1 && Character.isLetter(az.charAt(az.length() - 1))) {
+                instReg = az.substring(0, az.length() - 1);
+            }
+        }
+        if (instReg != null && !instReg.equals(clusterReg)) {
+            throw new AwsException("InvalidParameterException", "Cannot join instance " + instance.getInstanceId()
+                    + " in region " + instReg + " to cluster " + cluster.getName() + " in region " + clusterReg, 400);
+        }
+    }
+
+    List<Instance> getJoinedInstances(String clusterName) {
+        return clusterManager.getJoinedInstances(describeCluster(clusterName));
+    }
+
+    boolean isInstanceJoined(String clusterName, String instanceId) {
+        return clusterManager.isInstanceJoined(describeCluster(clusterName), instanceId);
+    }
+
     public List<String> listClusters() {
         return storage.scan(k -> true).stream()
                 .map(Cluster::getName)
@@ -663,6 +817,9 @@ public class EksService implements TagHandler, ResourceProvider {
         Cluster cluster = storage.get(name)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No cluster found for name: " + name, 404));
+        if (cluster.getAccountId() == null) {
+            cluster.setAccountId(regionResolver.getAccountId());
+        }
 
         // One delete at a time per cluster, so a delete that fails cannot restore the status or
         // state of a cluster another delete is tearing down.
@@ -690,9 +847,11 @@ public class EksService implements TagHandler, ResourceProvider {
             if (addons != null) {
                 addons.deleteClusterAddons(cluster);
             }
-            storage.delete(name);
-            clearAppliedClusterUserData(cluster, name);
-            oidcService.deleteKey(name);
+            synchronized (clustersBeingDeleted) {
+                storage.delete(name);
+                clearAppliedClusterUserData(cluster, name);
+                oidcService.deleteKey(name);
+            }
             return cluster;
         } finally {
             clustersBeingDeleted.remove(cluster);
@@ -1446,20 +1605,46 @@ public class EksService implements TagHandler, ResourceProvider {
     private void startReadinessPoller() {
         poller.scheduleAtFixedRate(() -> {
             try {
-                for (Cluster cluster : allClusters()) {
+                for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+                    Cluster cluster = entry.value();
                     if (cluster.getStatus() == ClusterStatus.CREATING) {
                         if (clusterManager.isReady(cluster)) {
                             LOG.infov("EKS cluster {0} is now ACTIVE", cluster.getName());
                             clusterManager.finalizeCluster(cluster);
                             cluster.setStatus(ClusterStatus.ACTIVE);
                             putCluster(cluster);
+                            restoreJoinedInstancesAsync(entry.accountId(), cluster);
                         }
+                    } else if (cluster.getStatus() == ClusterStatus.ACTIVE && hasPendingJoinedInstances(cluster)) {
+                        restoreJoinedInstancesAsync(entry.accountId(), cluster);
                     }
                 }
             } catch (Exception e) {
                 LOG.error("Error in EKS readiness poller", e);
             }
         }, 2, 3, TimeUnit.SECONDS);
+    }
+
+    private void restoreJoinedInstancesAsync(String accountId, Cluster cluster) {
+        if (cluster == null || cluster.getName() == null || isClusterDeleting(accountId, cluster)) {
+            return;
+        }
+        String key = (accountId != null ? accountId : "default") + "/" + cluster.getName();
+        if (!restoringClusters.add(key)) {
+            return;
+        }
+        CompletableFuture.runAsync(() -> {
+            try {
+                restoreJoinedInstances(accountId, cluster);
+            } finally {
+                restoringClusters.remove(key);
+            }
+        });
+    }
+
+    private boolean hasPendingJoinedInstances(Cluster cluster) {
+        return cluster != null && cluster.getJoinedInstanceIds() != null
+                && cluster.getJoinedInstanceIds().keySet().stream().anyMatch(id -> !clusterManager.isInstanceJoined(cluster, id));
     }
 
     public Optional<Cluster> findClusterByIssuer(String issuer) {

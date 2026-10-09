@@ -16,9 +16,9 @@ import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederati
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
-import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
+import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
@@ -903,9 +903,9 @@ public class IamQueryHandler {
             return Integer.valueOf(raw.trim());
         } catch (NumberFormatException e) {
             throw new AwsException("ValidationError",
-                    "Value '" + raw + "' at '" + Character.toLowerCase(name.charAt(0))
-                            + name.substring(1) + "' failed to satisfy constraint: Member must be "
-                            + "an integer", 400);
+                    "1 validation error detected: Value '" + raw + "' at '"
+                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                            + "' failed to satisfy constraint: Member must be an integer", 400);
         }
     }
 
@@ -2913,7 +2913,8 @@ public class IamQueryHandler {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
             throw new AwsException("ValidationError",
-                    "Value null at '" + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                    "1 validation error detected: Value null at '"
+                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
                             + "' failed to satisfy constraint: Member must not be null", 400);
         }
         return value;

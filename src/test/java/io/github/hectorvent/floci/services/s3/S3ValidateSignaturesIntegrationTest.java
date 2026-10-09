@@ -10,11 +10,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -44,6 +47,29 @@ class S3ValidateSignaturesIntegrationTest {
 
     private static String userAccessKeyId;
     private static String userSecretKey;
+
+    @Test
+    void layerContentLocationCanBeFetchedWithSignatureValidationEnabled() throws Exception {
+        ByteArrayOutputStream archive = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(archive)) {
+            zip.putNextEntry(new ZipEntry("nodejs/index.js"));
+            zip.write("module.exports = {};".getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        String location = given()
+            .contentType("application/json")
+            .body("""
+                    {"Content":{"ZipFile":"%s"}}
+                    """.formatted(Base64.getEncoder().encodeToString(archive.toByteArray())))
+        .when()
+            .post("/2018-10-31/layers/signed-location/versions")
+        .then()
+            .statusCode(201)
+            .body("Content.Location", containsString("X-Amz-Algorithm=AWS4-HMAC-SHA256"))
+            .extract().path("Content.Location");
+
+        given().urlEncodingEnabled(false).when().get(location).then().statusCode(200);
+    }
 
     @Test
     @Order(1)
@@ -205,6 +231,67 @@ class S3ValidateSignaturesIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(204);
+    }
+
+    @Test
+    @Order(30)
+    void headerWithMalformedSigV4IsRejectedWithoutCreatingBucket() {
+        given()
+            .header("Authorization", "X Credential=111122223333/20261001/us-east-1/s3/aws4_request")
+        .when()
+            .put("/routing-check-malformed")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("AuthorizationHeaderMalformed"))
+            .body("Error.Message", equalTo("The authorization header you provided is invalid."));
+
+        given().filter(LOCAL_SIGNER).when().get("/routing-check-malformed").then().statusCode(404);
+    }
+
+    @Test
+    @Order(31)
+    void presignedQueryMissingAlgorithmIsRejectedWithoutCreatingBucket() {
+        given()
+        .when()
+            .put("/routing-check-missing-algo?X-Amz-Credential=111122223333%2F20261001%2Fus-east-1%2Fs3%2Faws4_request")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("AuthorizationQueryParametersError"))
+            .body("Error.Message", equalTo(S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE));
+
+        given().filter(LOCAL_SIGNER).when().get("/routing-check-missing-algo").then().statusCode(404);
+    }
+
+    @Test
+    @Order(32)
+    void headerSignedRequestWithDateOrExpiresQueryParamIsAccepted() {
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .put("/" + BUCKET + "/query-date-test.txt?X-Amz-Date=" + AMZ_DATE + "&X-Amz-Expires=3600")
+        .then()
+            .statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + BUCKET + "/query-date-test.txt")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(33)
+    void sigV4AHeaderIsRejectedWhenSignatureValidationEnabled() {
+        String authSigV4A = "AWS4-ECDSA-P256-SHA256 Credential=test/" + CREDENTIAL_DATE
+                + "/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=30450220abc";
+        given()
+            .header("Authorization", authSigV4A)
+        .when()
+            .get("/" + BUCKET + "/" + KEY)
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>AuthorizationHeaderMalformed</Code>"));
     }
 
     private static void createIamUser(String userName) {

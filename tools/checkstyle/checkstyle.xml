@@ -10,6 +10,22 @@
         <property name="file" value="${config_loc}/suppressions.xml"/>
     </module>
     <module name="TreeWalker">
+        <!-- IntelliJ layout: other imports, javax, java, then static imports. -->
+        <module name="ImportOrder">
+            <property name="groups" value="*,javax,java"/>
+            <property name="ordered" value="true"/>
+            <property name="separated" value="true"/>
+            <property name="option" value="bottom"/>
+            <property name="sortStaticImportsAlphabetically" value="true"/>
+        </module>
+        <!-- ImportOrder otherwise requires a blank line between javax and java.
+             Exempt only that boundary, retaining ordering and other separation checks. -->
+        <module name="SuppressionXpathSingleFilter">
+            <property name="checks" value="ImportOrder"/>
+            <property name="message" value="^'java\..*' should be separated from previous imports\.$"/>
+            <property name="query"
+                      value="//IMPORT[preceding-sibling::IMPORT[1]//IDENT[@text='javax' and not(preceding-sibling::*)]]"/>
+        </module>
         <!-- Reviewers need the concrete type, such as LinkedHashMap versus Map.
              Record pattern components (case Node(var left, var right)) are allowed. -->
         <module name="MatchXpath">

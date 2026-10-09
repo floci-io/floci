@@ -2,14 +2,19 @@ package io.github.hectorvent.floci.services.ssm;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.time.Duration;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -1635,6 +1640,243 @@ class SsmIntegrationTest {
                 { "ParameterFilters": [{ "Key": "Path", "Values": ["dpf"] }] }
                 """, "InvalidFilterValue");
         describeParametersError("{ \"MaxResults\": 51 }", "ValidationException");
+    }
+
+    @Test
+    void describeParametersReturnsKeyIdAllowedPatternTierAndPolicies() {
+        String policy = "{\\\"Type\\\":\\\"Expiration\\\",\\\"Version\\\":\\\"1.0\\\","
+                + "\\\"Attributes\\\":{\\\"Timestamp\\\":\\\"2099-01-01T00:00:00.000Z\\\"}}";
+        putFilterFixture("/attr/secure", "SecureString", ", \"KeyId\": \"alias/custom\", \"AllowedPattern\": \"^v$\","
+                + " \"Tier\": \"Advanced\", \"Policies\": \"[" + policy + "]\"");
+        putFilterFixture("/attr/default-key", "SecureString", "");
+        putFilterFixture("/attr/plain", "String", "");
+
+        String policyText = describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr/secure"] }] }
+                """)
+            .body("Parameters[0].KeyId", equalTo("alias/custom"))
+            .body("Parameters[0].AllowedPattern", equalTo("^v$"))
+            .body("Parameters[0].Tier", equalTo("Advanced"))
+            .body("Parameters[0].Policies", hasSize(1))
+            .body("Parameters[0].Policies[0].PolicyType", equalTo("Expiration"))
+            .body("Parameters[0].Policies[0].PolicyStatus", equalTo("Pending"))
+            .extract().path("Parameters[0].Policies[0].PolicyText");
+        assertEquals("2099-01-01T00:00:00.000Z", JsonPath.from(policyText).getString("Attributes.Timestamp"));
+
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr/default-key"] }] }
+                """)
+            .body("Parameters[0].KeyId", equalTo("alias/aws/ssm"))
+            .body("Parameters[0].Tier", equalTo("Standard"))
+            .body("Parameters[0]", not(hasKey("AllowedPattern")))
+            .body("Parameters[0]", not(hasKey("Policies")));
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr/plain"] }] }
+                """)
+            .body("Parameters[0]", not(hasKey("KeyId")))
+            .body("Parameters[0].Tier", equalTo("Standard"));
+
+        // The stored tier and key, not the defaults, are what the filters see.
+        describeParameters("""
+                { "ParameterFilters": [
+                    { "Key": "Name", "Option": "BeginsWith", "Values": ["/attr/"] },
+                    { "Key": "Tier", "Values": ["Advanced"] }
+                ] }
+                """)
+            .body("Parameters.Name", contains("/attr/secure"));
+        describeParameters("""
+                { "ParameterFilters": [
+                    { "Key": "Name", "Option": "BeginsWith", "Values": ["/attr/"] },
+                    { "Key": "KeyId", "Values": ["alias/custom"] }
+                ] }
+                """)
+            .body("Parameters.Name", contains("/attr/secure"));
+
+        // An overwrite that omits Tier keeps the Advanced tier.
+        putFilterFixture("/attr/secure", "SecureString", ", \"Overwrite\": true");
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr/secure"] }] }
+                """)
+            .body("Parameters[0].Version", equalTo(2))
+            .body("Parameters[0].Tier", equalTo("Advanced"));
+    }
+
+    @Test
+    void putParameterIntelligentTieringResolvesToAdvancedOnlyWhenNeeded() {
+        putFilterFixture("/attr-it/small", "String", ", \"Tier\": \"Intelligent-Tiering\"");
+        putFilterFixture("/attr-it/policy", "String", ", \"Tier\": \"Intelligent-Tiering\", \"Policies\":"
+                + " \"[{\\\"Type\\\":\\\"NoChangeNotification\\\",\\\"Version\\\":\\\"1.0\\\","
+                + "\\\"Attributes\\\":{\\\"After\\\":\\\"30\\\",\\\"Unit\\\":\\\"Days\\\"}}]\"");
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Path", "Values": ["/attr-it"] }] }
+                """)
+            .body("Parameters.find { it.Name == '/attr-it/small' }.Tier", equalTo("Standard"))
+            .body("Parameters.find { it.Name == '/attr-it/policy' }.Tier", equalTo("Advanced"));
+    }
+
+    @Test
+    void putParameterIntelligentTieringCutsOverAbove4096Utf8Bytes() {
+        // An e-acute is one char but two UTF-8 bytes, so the multibyte values sit under 4096 chars.
+        putIntelligentTiering("/attr-it-size/ascii-4096", "a".repeat(4096));
+        putIntelligentTiering("/attr-it-size/ascii-4097", "a".repeat(4097));
+        putIntelligentTiering("/attr-it-size/utf8-4096", "\\u00e9".repeat(2048));
+        putIntelligentTiering("/attr-it-size/utf8-4098", "\\u00e9".repeat(2049));
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Path", "Values": ["/attr-it-size"] }] }
+                """)
+            .body("Parameters.find { it.Name == '/attr-it-size/ascii-4096' }.Tier", equalTo("Standard"))
+            .body("Parameters.find { it.Name == '/attr-it-size/ascii-4097' }.Tier", equalTo("Advanced"))
+            .body("Parameters.find { it.Name == '/attr-it-size/utf8-4096' }.Tier", equalTo("Standard"))
+            .body("Parameters.find { it.Name == '/attr-it-size/utf8-4098' }.Tier", equalTo("Advanced"));
+    }
+
+    @Test
+    void putParameterIntelligentTieringOverwriteKeepsAnAdvancedParameterAdvanced() {
+        putFilterFixture("/attr-it-keep/p", "String", ", \"Tier\": \"Advanced\"");
+        putFilterFixture("/attr-it-keep/p", "String", ", \"Tier\": \"Intelligent-Tiering\", \"Overwrite\": true");
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr-it-keep/p"] }] }
+                """)
+            .body("Parameters[0].Version", equalTo(2))
+            .body("Parameters[0].Tier", equalTo("Advanced"));
+    }
+
+    @Test
+    void putParameterRejectsATierOutsideTheEnumAndStoresNothing() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/attr-bad-tier/p", "Value": "v", "Type": "String", "Tier": "Premium" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("Value 'Premium' at 'tier'"));
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr-bad-tier/p"] }] }
+                """)
+            .body("Parameters", hasSize(0));
+    }
+
+    private void putIntelligentTiering(String name, String jsonEscapedValue) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"Value\": \"" + jsonEscapedValue
+                    + "\", \"Type\": \"String\", \"Tier\": \"Intelligent-Tiering\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void putParameterRejectsAValueOutsideAllowedPattern() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/attr/pattern", "Value": "nope", "Type": "String", "AllowedPattern": "^v$" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ParameterPatternMismatchException"));
+    }
+
+    @Test
+    void putParameterTreatsAnEmptyAllowedPatternAsNoPattern() {
+        putFilterFixture("/attr/empty-pattern", "String", ", \"AllowedPattern\": \"\"");
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr/empty-pattern"] }] }
+                """)
+            .body("Parameters[0].Version", equalTo(1))
+            .body("Parameters[0]", not(hasKey("AllowedPattern")));
+    }
+
+    @Test
+    void putParameterOverwriteKeepsPoliciesUntilNewOrEmptyPoliciesAreSent() {
+        putFilterFixture("/pol/keep", "String", ", \"Tier\": \"Advanced\", \"Policies\":"
+                + " \"[{\\\"Type\\\":\\\"NoChangeNotification\\\",\\\"Version\\\":\\\"1.0\\\","
+                + "\\\"Attributes\\\":{\\\"After\\\":\\\"30\\\",\\\"Unit\\\":\\\"Days\\\"}}]\"");
+        String byName = """
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/pol/keep"] }] }
+                """;
+
+        putFilterFixture("/pol/keep", "String", ", \"Overwrite\": true");
+        describeParameters(byName)
+            .body("Parameters[0].Version", equalTo(2))
+            .body("Parameters[0].Policies.PolicyType", contains("NoChangeNotification"));
+
+        putFilterFixture("/pol/keep", "String", ", \"Overwrite\": true, \"Policies\": \"[]\"");
+        describeParameters(byName)
+            .body("Parameters[0].Version", equalTo(3))
+            .body("Parameters[0]", not(hasKey("Policies")));
+    }
+
+    @Test
+    void putParameterRejectsMalformedAllowedPattern() {
+        putParameterError("""
+                { "Name": "/pol/bad-pattern", "Value": "v", "Type": "String", "AllowedPattern": "[" }
+                """, "InvalidAllowedPatternException");
+    }
+
+    @Test
+    void putParameterBoundsCatastrophicAllowedPatternBacktracking() {
+        // Nested groups defeat the JDK's loop memoization; unbounded, this match runs for hours.
+        String body = "{ \"Name\": \"/pol/redos\", \"Value\": \"" + "a".repeat(40)
+                + "!\", \"Type\": \"String\", \"AllowedPattern\": \"^((a+)+)+$\" }";
+        assertTimeoutPreemptively(Duration.ofSeconds(10),
+                () -> putParameterError(body, "InvalidAllowedPatternException"));
+    }
+
+    @Test
+    void putParameterRejectsAllowedPatternOver1024Chars() {
+        putParameterError("{ \"Name\": \"/pol/long-pattern\", \"Value\": \"a\", \"Type\": \"String\","
+                + " \"AllowedPattern\": \"" + "a".repeat(1025) + "\" }", "ValidationException");
+    }
+
+    @Test
+    void putParameterRejectsPoliciesThatAreNotAJsonArray() {
+        putParameterError("""
+                { "Name": "/pol/bad-policies", "Value": "v", "Type": "String", "Policies": "{}" }
+                """, "ValidationException");
+    }
+
+    @Test
+    void putParameterTreatsEmptyOptionalFieldsAsAbsent() {
+        // Terraform's aws_ssm_parameter sends every optional field, unset ones as "".
+        putFilterFixture("/empty/plain", "String",
+                ", \"AllowedPattern\": \"\", \"Tier\": \"\", \"Policies\": \"\"");
+        putFilterFixture("/empty/secure", "SecureString", ", \"KeyId\": \"\", \"AllowedPattern\": \"\"");
+
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/empty/plain"] }] }
+                """)
+            .body("Parameters[0]", not(hasKey("AllowedPattern")))
+            .body("Parameters[0]", not(hasKey("Policies")))
+            .body("Parameters[0].Tier", equalTo("Standard"));
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/empty/secure"] }] }
+                """)
+            .body("Parameters[0].KeyId", equalTo("alias/aws/ssm"))
+            .body("Parameters[0]", not(hasKey("AllowedPattern")));
+    }
+
+    private void putParameterError(String body, String errorType) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo(errorType));
     }
 
     private void putFilterFixture(String name, String type, String extra) {

@@ -9,10 +9,13 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.function.IntFunction;
 
 /**
  * Utility for allocating free TCP ports for Docker container port bindings.
@@ -87,6 +90,56 @@ public class PortAllocator {
         if (reserved.remove(port)) {
             LOG.debugv("Released port {0}", String.valueOf(port));
         }
+    }
+
+    /**
+     * Allocates a port in the range and hands it to {@code start}, moving on to the next port while
+     * Docker refuses the chosen one as already in use. {@link #allocate} cannot rule that out: its
+     * probe races Docker binding the port, and from inside a container it cannot see a host process
+     * holding one. Refused ports stay reserved until this returns, so no port is tried twice, and are
+     * then released, so each is usable again once its holder goes away. Once {@code start} returns,
+     * the port is the caller's to release; any other failure releases it and propagates.
+     */
+    public <T> T allocateAndStart(int basePort, int maxPort, IntFunction<T> start) {
+        List<Integer> refused = new ArrayList<>();
+        try {
+            while (true) {
+                int port;
+                try {
+                    port = allocate(basePort, maxPort);
+                } catch (RuntimeException e) {
+                    if (refused.isEmpty()) {
+                        throw e;
+                    }
+                    throw new RuntimeException("Docker reports host ports " + refused
+                            + " already in use and no other port in " + basePort + "-" + maxPort + " is free", e);
+                }
+                try {
+                    return start.apply(port);
+                } catch (RuntimeException e) {
+                    if (!isHostPortCollision(e)) {
+                        release(port);
+                        throw e;
+                    }
+                    refused.add(port);
+                    LOG.warnv("Docker reports host port {0} in use; trying another port in {1}-{2}",
+                            String.valueOf(port), String.valueOf(basePort), String.valueOf(maxPort));
+                }
+            }
+        } finally {
+            refused.forEach(this::release);
+        }
+    }
+
+    private static boolean isHostPortCollision(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            String message = cause.getMessage();
+            if (message != null && (message.toLowerCase(Locale.ROOT).contains("port is already allocated")
+                    || message.toLowerCase(Locale.ROOT).contains("address already in use"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

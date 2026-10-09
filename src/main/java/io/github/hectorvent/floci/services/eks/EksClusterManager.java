@@ -9,6 +9,7 @@ import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
@@ -169,6 +170,7 @@ public class EksClusterManager
     private final ContainerLogStreamer logStreamer;
     private final Ec2InstanceTypeCatalog instanceTypeCatalog = new Ec2InstanceTypeCatalog();
     private final Map<String, ClusterNodeRecord> clusterNodeInstances = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Instance>> joinedClusterInstances = new ConcurrentHashMap<>();
     private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
     private final List<Consumer<Instance>> nodeRegistrationListeners = new CopyOnWriteArrayList<>();
     private final Map<String, Cluster> activeClusters = new ConcurrentHashMap<>();
@@ -243,6 +245,16 @@ public class EksClusterManager
                 }
             }
         }
+        for (Map<String, Instance> map : joinedClusterInstances.values()) {
+            for (Instance inst : map.values()) {
+                if (inst != null && inst.getPrivateIpAddress() != null && !inst.getPrivateIpAddress().isBlank()) {
+                    String nodeName = deriveInstanceNodeName(inst, inst.getRegion()).toLowerCase(Locale.ROOT);
+                    if (name.equals(nodeName)) {
+                        return Optional.of(DnsAnswer.records(List.of(inst.getPrivateIpAddress()), DnsAnswer.DEFAULT_TTL_SECONDS));
+                    }
+                }
+            }
+        }
         return Optional.empty();
     }
 
@@ -263,6 +275,13 @@ public class EksClusterManager
             if (inst != null && inst.getPrivateDnsName() != null && !inst.getPrivateDnsName().isBlank()) {
                 if (vpcId.equals(inst.getVpcId())) {
                     rules.add(DnsForwardingRule.system(inst.getPrivateDnsName()));
+                }
+            }
+        }
+        for (Map<String, Instance> map : joinedClusterInstances.values()) {
+            for (Instance inst : map.values()) {
+                if (inst != null && vpcId.equals(inst.getVpcId())) {
+                    rules.add(DnsForwardingRule.system(deriveInstanceNodeName(inst, inst.getRegion())));
                 }
             }
         }
@@ -963,6 +982,8 @@ public class EksClusterManager
 
             pruneLegacyClusterNodes(cluster, containerId);
 
+            registerAllJoinedNodes(cluster, containerId);
+
             LOG.infov("Finalized EKS cluster {0} with CA data extracted", cluster.getName());
         } catch (Exception e) {
             LOG.warnv("Could not extract kubeconfig for cluster {0}: {1}",
@@ -982,7 +1003,7 @@ public class EksClusterManager
                     if (parts.length >= 1 && !parts[0].isBlank()) {
                         String node = parts[0];
                         String readyStatus = parts.length > 1 ? parts[1] : "";
-                        if (!node.equals(expectedNodeName) && !"True".equalsIgnoreCase(readyStatus)) {
+                        if (!node.equals(expectedNodeName) && !isJoinedNode(cluster, node) && !"True".equalsIgnoreCase(readyStatus)) {
                             execInContainerForResult(containerId,
                                     new String[]{"kubectl", "delete", "node", node}, 10);
                             LOG.infov("Removed stale legacy node {0} from EKS cluster {1}", node, cluster.getName());
@@ -1956,7 +1977,8 @@ public class EksClusterManager
         }
         String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
         boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
-        String content = buildRegistriesYaml(config.defaultAccountId(), regions, config.port(), endpoint, tlsUri);
+        String content = buildRegistriesYaml(config.defaultAccountId(), regions,
+                ecrRegistryManager.advertisedPort(), endpoint, tlsUri);
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
@@ -2139,27 +2161,28 @@ public class EksClusterManager
     /**
      * Builds the k3s registries.yaml content. One mirror entry per hostname-style repository URI
      * ({@code <account>.dkr.ecr.<region>.localhost:<port>}) plus one for the path-style form
-     * ({@code localhost:<port>}), all pointing at Floci's in-network data plane. The TLS URI
-     * mode adds the corresponding {@code localhost.floci.io} aliases. k3s supports
-     * no partial wildcards and a {@code "*"} catch-all would also intercept public registries,
-     * so the hostnames are enumerated explicitly.
+     * ({@code localhost:<port>}), all pointing at Floci's in-network data plane. The port is the
+     * one the repository URIs advertise, which differs from the endpoint's port when Floci's
+     * container publishes its port on another host port. The TLS URI mode adds the corresponding
+     * {@code localhost.floci.io} aliases. k3s supports no partial wildcards and a {@code "*"}
+     * catch-all would also intercept public registries, so the hostnames are enumerated explicitly.
      */
-    static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort, String endpoint) {
-        return buildRegistriesYaml(accountId, regions, dataPlanePort, endpoint, false);
+    static String buildRegistriesYaml(String accountId, List<String> regions, int advertisedPort, String endpoint) {
+        return buildRegistriesYaml(accountId, regions, advertisedPort, endpoint, false);
     }
 
-    static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort,
+    static String buildRegistriesYaml(String accountId, List<String> regions, int advertisedPort,
                                      String endpoint, boolean tlsUri) {
         StringBuilder yaml = new StringBuilder("mirrors:\n");
         for (String region : regions) {
-            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + dataPlanePort, endpoint);
+            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + advertisedPort, endpoint);
             if (tlsUri) {
-                appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + dataPlanePort, endpoint);
+                appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + advertisedPort, endpoint);
             }
         }
-        appendMirror(yaml, "localhost:" + dataPlanePort, endpoint);
+        appendMirror(yaml, "localhost:" + advertisedPort, endpoint);
         if (tlsUri) {
-            appendMirror(yaml, "localhost.floci.io:" + dataPlanePort, endpoint);
+            appendMirror(yaml, "localhost.floci.io:" + advertisedPort, endpoint);
         }
         return yaml.toString();
     }
@@ -2468,6 +2491,7 @@ public class EksClusterManager
             programmedClusterRoutes.remove(clusterKey);
         }
         forgetClusterNodeVpcs(clusterKey);
+        joinedClusterInstances.remove(clusterKey);
         ClusterNodeRecord record = clusterNodeInstances.remove(clusterKey);
         Instance nodeInstance = record != null ? record.instance() : null;
         if (metadataServer != null && nodeInstance != null) {
@@ -2820,6 +2844,192 @@ public class EksClusterManager
                 .filter(rec -> region == null || region.equals(rec.region()))
                 .map(ClusterNodeRecord::instance)
                 .toList();
+    }
+
+    private String resolveInstanceRegion(Instance instance, String region) {
+        if (instance != null && instance.getRegion() != null && !instance.getRegion().isBlank()) {
+            return instance.getRegion();
+        }
+        return (region != null && !region.isBlank()) ? region
+                : (regionResolver != null && regionResolver.getDefaultRegion() != null
+                ? regionResolver.getDefaultRegion() : "us-east-1"); // partition-literal: fallback for instance region
+    }
+
+    String deriveInstanceNodeProviderId(Instance instance, String region) {
+        String safeRegion = resolveInstanceRegion(instance, region);
+        String az = (instance != null && instance.getPlacement() != null
+                && instance.getPlacement().getAvailabilityZone() != null)
+                ? instance.getPlacement().getAvailabilityZone() : safeRegion + "a";
+        return "aws:///" + az + "/" + (instance != null && instance.getInstanceId() != null ? instance.getInstanceId() : "i-00000000000000000");
+    }
+
+    String deriveInstanceNodeName(Instance instance, String region) {
+        if (instance != null && instance.getPrivateDnsName() != null && !instance.getPrivateDnsName().isBlank()) {
+            return instance.getPrivateDnsName();
+        }
+        String id = instance != null && instance.getInstanceId() != null ? instance.getInstanceId() : "i-00000000000000000";
+        return id + "." + deriveClusterNodePrivateDnsDomain(resolveInstanceRegion(instance, region));
+    }
+
+    void joinInstance(Cluster cluster, Instance instance) {
+        if (cluster == null || instance == null) {
+            return;
+        }
+        String clusterKey = clusterResourceName(cluster);
+        synchronized (joinedClusterInstances) {
+            for (Map.Entry<String, Map<String, Instance>> entry : joinedClusterInstances.entrySet()) {
+                if (!entry.getKey().equals(clusterKey) && entry.getValue().containsKey(instance.getInstanceId())) {
+                    throw new AwsException("InvalidParameterException", "Instance " + instance.getInstanceId()
+                            + " is already joined to cluster " + entry.getKey(), 400);
+                }
+            }
+            Map<String, Instance> current = joinedClusterInstances.get(clusterKey);
+            if (current != null && current.containsKey(instance.getInstanceId())) {
+                return;
+            }
+        }
+
+        String containerId = cluster.getContainerId();
+        if (containerId != null && !containerId.isBlank()) {
+            try {
+                registerNodeInCluster(cluster, containerId, instance);
+            } catch (Exception e) {
+                String region = instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster);
+                String nodeName = deriveInstanceNodeName(instance, region);
+                try {
+                    execInContainerForResult(containerId,
+                            new String[]{"kubectl", "delete", "node", nodeName, "--ignore-not-found=true"}, 15);
+                } catch (Exception ignored) {
+                    // Node cleanup best effort on join failure
+                }
+                throw e;
+            }
+        }
+
+        synchronized (joinedClusterInstances) {
+            joinedClusterInstances
+                    .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>())
+                    .put(instance.getInstanceId(), instance);
+        }
+        recordJoinedInstanceId(cluster, instance);
+
+        for (Consumer<Instance> listener : nodeRegistrationListeners) {
+            try {
+                listener.accept(instance);
+            } catch (Exception e) {
+                LOG.warnv("Node registration listener failed for joined instance {0} on cluster {1}: {2}",
+                        instance.getInstanceId(), cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    void recordJoinedInstanceId(Cluster cluster, Instance instance) {
+        if (cluster == null || instance == null) {
+            return;
+        }
+        cluster.recordJoinedInstance(instance.getInstanceId(),
+                instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster));
+    }
+
+    List<Instance> getJoinedInstances(Cluster cluster) {
+        if (cluster == null) {
+            return List.of();
+        }
+        Map<String, Instance> map = joinedClusterInstances.get(clusterResourceName(cluster));
+        return map != null ? new ArrayList<>(map.values()) : List.of();
+    }
+
+    boolean isInstanceJoined(Cluster cluster, String instanceId) {
+        if (cluster == null || instanceId == null) {
+            return false;
+        }
+        Map<String, Instance> map = joinedClusterInstances.get(clusterResourceName(cluster));
+        return map != null && map.containsKey(instanceId);
+    }
+
+    boolean isJoinedNode(Cluster cluster, String nodeName) {
+        if (cluster == null || nodeName == null) {
+            return false;
+        }
+        Map<String, Instance> map = joinedClusterInstances.get(clusterResourceName(cluster));
+        if (map == null) {
+            return false;
+        }
+        for (Instance inst : map.values()) {
+            if (nodeName.equals(deriveInstanceNodeName(inst, inst.getRegion()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void registerAllJoinedNodes(Cluster cluster, String containerId) {
+        Map<String, Instance> map = joinedClusterInstances.get(clusterResourceName(cluster));
+        if (map != null) {
+            for (Instance inst : map.values()) {
+                registerNodeInCluster(cluster, containerId, inst);
+            }
+        }
+    }
+
+    private void registerNodeInCluster(Cluster cluster, String containerId, Instance instance) {
+        String region = instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster);
+        String nodeName = deriveInstanceNodeName(instance, region);
+        try {
+            String az = instance.getPlacement() != null && instance.getPlacement().getAvailabilityZone() != null
+                    ? instance.getPlacement().getAvailabilityZone() : region + "a";
+            String providerId = deriveInstanceNodeProviderId(instance, region);
+            String instanceType = instance.getInstanceType() != null ? instance.getInstanceType() : DEFAULT_NODE_INSTANCE_TYPE;
+            String privateIp = instance.getPrivateIpAddress() != null ? instance.getPrivateIpAddress() : "10.0.0.1";
+
+            CatalogInstanceType catType = instanceTypeCatalog.find(instanceType).orElse(null);
+            String cpu = catType != null ? String.valueOf(catType.vcpu) : "2";
+            String memory = catType != null ? catType.memoryMib + "Mi" : "4Gi";
+
+            String rawArch = instance.getArchitecture();
+            String k8sArch = (rawArch != null && (rawArch.toLowerCase(Locale.ROOT).contains("arm64")
+                    || rawArch.toLowerCase(Locale.ROOT).contains("aarch64"))) ? "arm64" : "amd64";
+
+            String nodeJson = String.format(Locale.ROOT,
+                    "{\"apiVersion\":\"v1\",\"kind\":\"Node\",\"metadata\":{\"name\":\"%s\","
+                    + "\"labels\":{\"topology.kubernetes.io/zone\":\"%s\",\"topology.kubernetes.io/region\":\"%s\","
+                    + "\"node.kubernetes.io/instance-type\":\"%s\",\"kubernetes.io/hostname\":\"%s\","
+                    + "\"kubernetes.io/os\":\"linux\",\"kubernetes.io/arch\":\"%s\"}},\"spec\":{\"providerID\":\"%s\"}}",
+                    nodeName, az, region, instanceType, nodeName, k8sArch, providerId);
+
+            ContainerExec.Result applyRes = execInContainerForResult(containerId,
+                    new String[]{"sh", "-c", "echo '" + nodeJson.replace("'", "'\\''") + "' | kubectl apply -f -"}, 15);
+            if (applyRes.exitCode() != 0) {
+                throw new IllegalStateException("Failed to apply node " + nodeName + " to cluster "
+                        + cluster.getName() + ": " + applyRes.stderr());
+            }
+
+            String statusPatch = String.format(Locale.ROOT,
+                    "{\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\","
+                    + "\"reason\":\"KubeletReady\",\"message\":\"kubelet is posting ready status\"}],"
+                    + "\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"%s\"},{\"type\":\"Hostname\",\"address\":\"%s\"}],"
+                    + "\"capacity\":{\"cpu\":\"%s\",\"memory\":\"%s\",\"pods\":\"110\"},"
+                    + "\"allocatable\":{\"cpu\":\"%s\",\"memory\":\"%s\",\"pods\":\"110\"}}}",
+                    privateIp, nodeName, cpu, memory, cpu, memory);
+
+            ContainerExec.Result patchRes = execInContainerForResult(containerId,
+                    new String[]{"kubectl", "patch", "node", nodeName, "--subresource=status", "--type=merge",
+                            "-p", statusPatch}, 15);
+            if (patchRes.exitCode() != 0) {
+                throw new IllegalStateException("Failed to patch status for node " + nodeName + " on cluster "
+                        + cluster.getName() + ": " + patchRes.stderr());
+            }
+
+            LOG.infov("Registered joined instance node {0} ({1}) in cluster {2}",
+                    nodeName, providerId, cluster.getName());
+        } catch (Exception e) {
+            LOG.warnv("Failed to register node for instance {0} in cluster {1}: {2}",
+                    instance.getInstanceId(), cluster.getName(), e.getMessage());
+            if (e instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new RuntimeException(e);
+        }
     }
 
     record ContainerIps(String primaryIp, Set<String> allIps) {}

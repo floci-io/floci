@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
+import io.github.hectorvent.floci.services.s3.PreSignedUrlGenerator;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -44,14 +45,17 @@ public class LambdaLayerController {
     private final ObjectMapper objectMapper;
     private final LambdaLayerService layerService;
     private final RegionResolver regionResolver;
+    private final PreSignedUrlGenerator presignGenerator;
 
     @Inject
     public LambdaLayerController(ObjectMapper objectMapper,
                                  LambdaLayerService layerService,
-                                 RegionResolver regionResolver) {
+                                 RegionResolver regionResolver,
+                                 PreSignedUrlGenerator presignGenerator) {
         this.objectMapper = objectMapper;
         this.layerService = layerService;
         this.regionResolver = regionResolver;
+        this.presignGenerator = presignGenerator;
     }
 
     @POST
@@ -195,13 +199,7 @@ public class LambdaLayerController {
     }
 
     /**
-     * Path-style URL to the archive in Floci's own S3 (a presigned URL in real AWS),
-     * built from the request so it targets the same endpoint the client is talking to.
-     * Segments are percent-encoded directly rather than through {@code UriBuilder.path},
-     * whose template syntax would throw on a layer name containing braces.
-     * Clients fetch this URL unsigned, so an {@code X-Amz-Credential} query steers
-     * Floci's account filter to the layer's owning account; without it a layer owned
-     * by a non-default account resolves the default-account bucket and 404s.
+     * Signed URL to the archive in Floci's own S3, using the layer's owning account.
      */
     private String tasksLocation(LambdaLayerVersion lv, String region, UriInfo uriInfo) {
         String base = uriInfo.getBaseUri().toString();
@@ -211,9 +209,7 @@ public class LambdaLayerController {
         String account = AwsArnUtils.accountOrDefault(lv.getLayerVersionArn(), "000000000000");
         String bucket = LambdaService.tasksBucketName(region);
         String key = LambdaService.layerObjectKey(account, lv.getLayerName(), lv.getVersion());
-        return base + "/" + LambdaService.encodeObjectPath(bucket)
-                + "/" + LambdaService.encodeObjectPath(key)
-                + "?X-Amz-Credential=" + account + "%2F00010101%2F" + region + "%2Fs3%2Faws4_request";
+        return presignGenerator.generatePresignedUrl(base, bucket, key, "GET", 0, region, account);
     }
 
     private ObjectNode buildLayerVersionSummary(LambdaLayerVersion lv) {

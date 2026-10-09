@@ -9,6 +9,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.xerial.snappy.Snappy;
 import org.xerial.snappy.SnappyInputStream;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.firehose.model.BufferingHints;
 import software.amazon.awssdk.services.firehose.model.CompressionFormat;
@@ -25,7 +26,6 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.S3Object;
-import software.amazon.awssdk.core.SdkBytes;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;

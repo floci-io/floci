@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import java.util.Optional;
-
-import jakarta.inject.Inject;
-
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+
+import java.util.Optional;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;

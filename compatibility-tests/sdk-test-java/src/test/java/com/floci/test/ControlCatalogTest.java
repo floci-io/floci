@@ -8,9 +8,9 @@ import software.amazon.awssdk.services.controlcatalog.model.ImplementationFilter
 import software.amazon.awssdk.services.controlcatalog.model.ListControlsResponse;
 import software.amazon.awssdk.services.controlcatalog.model.ResourceNotFoundException;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import java.util.HashSet;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;

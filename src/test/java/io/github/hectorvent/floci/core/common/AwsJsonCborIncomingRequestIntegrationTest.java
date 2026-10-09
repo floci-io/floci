@@ -6,14 +6,13 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.jboss.resteasy.reactive.server.jaxrs.HttpHeadersImpl;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.util.Map;
 import java.util.zip.GZIPOutputStream;
-
-import org.jboss.resteasy.reactive.server.jaxrs.HttpHeadersImpl;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Test;
 
 
 /**

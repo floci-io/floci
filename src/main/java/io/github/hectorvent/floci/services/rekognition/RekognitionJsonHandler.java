@@ -6,6 +6,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+
 import java.util.function.Predicate;
 /**
  * JSON 1.1 handler for Amazon Rekognition API operations.

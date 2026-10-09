@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.memorydb.container;
 
+import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -7,7 +8,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
-import com.github.dockerjava.api.DockerClient;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
+
 import java.net.URI;
 import java.util.List;
 import java.util.Map;

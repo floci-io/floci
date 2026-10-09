@@ -404,6 +404,9 @@ Lambda. floci supports two shapes:
   event and waits for it to `PUT` its `SUCCESS`/`FAILED` result to the response URL. Inline `ZipFile`
   handlers get the `cfn-response` / `cfnresponse` module bundled in (see the Lambda row in
   [Supported Resource Types](#supported-resource-types)), so Solutions-style handlers work unmodified.
+  The event's `StackId` is the id of the stack that contains the resource, the value
+  `Ref AWS::StackId` returns and `DescribeStacks` reports, on `Create`, `Update` and `Delete` alike.
+  In a nested stack it is the nested stack's own id.
 - **CDK Provider framework** — when the `ServiceToken` points at a CDK `framework.onEvent` function,
   floci drives the asynchronous provider protocol: `onEvent` starts the work and `framework.isComplete`
   is polled (via Step Functions [`Retry`](step-functions.md)) until it reports done, at which point the

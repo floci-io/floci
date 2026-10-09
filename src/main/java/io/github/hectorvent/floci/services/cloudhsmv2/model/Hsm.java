@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.cloudhsmv2.model;
 
-import java.time.Instant;
-
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.time.Instant;
 
 /**
  * Represents an HSM instance within a CloudHSM v2 cluster.

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsGeometry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
+
 import java.util.Optional;
 /**
  * Dummy response builder for Amazon Rekognition. Stateless — every action ignores

@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.lakeformation;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lakeformation.model.*;
 import jakarta.enterprise.context.ApplicationScoped;

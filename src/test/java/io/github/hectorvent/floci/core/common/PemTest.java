@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.junit.jupiter.api.Test;
 
 import java.security.PrivateKey;
-
 import java.security.cert.X509Certificate;
 import java.util.List;
 

@@ -257,7 +257,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         String auth = ctx.getHeaderString("Authorization");
-        if (auth == null) {
+        if (auth == null || auth.isBlank()) {
             auth = requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
         }
         if (auth == null) {
@@ -944,7 +944,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return authorizationHeader;
         }
         String credential = queryParameters == null ? null : queryParameters.getFirst("X-Amz-Credential");
-        return credential == null || credential.isBlank() ? null : "Credential=" + credential;
+        if (credential == null || credential.isBlank()) {
+            return null;
+        }
+        // The scheme makes AccountResolver recognise a credential that did not come from the header.
+        return AccountResolver.SIGV4_SCHEME + " Credential=" + credential;
     }
 
     /**

@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.ssm;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.DeadlineCharSequence;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -29,13 +31,16 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.ArrayList;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 @ApplicationScoped
 public class SsmService implements ResourceProvider {
@@ -50,6 +55,10 @@ public class SsmService implements ResourceProvider {
     private static final Set<String> DESCRIBE_PARAMETERS_FILTER_KEYS =
             Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");
     private static final String DEFAULT_SSM_KEY_ID = "alias/aws/ssm";
+    private static final int STANDARD_TIER_MAX_VALUE_BYTES = 4096;
+    private static final Set<String> PARAMETER_TIERS = Set.of("Standard", "Advanced", "Intelligent-Tiering");
+    private static final int MAX_ALLOWED_PATTERN_LENGTH = 1024;
+    private static final long ALLOWED_PATTERN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(1);
     private static final String TAG_KEY_REGEX = "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$";
     private static final Pattern TAG_KEY_PATTERN = Pattern.compile(TAG_KEY_REGEX);
     private static final int MAX_TAG_KEY_LENGTH = 128;
@@ -183,16 +192,21 @@ public class SsmService implements ResourceProvider {
 
     public long putParameter(String name, String value, String type, String description, boolean overwrite,
                              Map<String, String> tags, String region) {
+        return putParameter(name, value, type, description, overwrite, tags, null, null, null, null, region);
+    }
+
+    public long putParameter(String name, String value, String type, String description,
+                             boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
+                             String tier, List<JsonNode> policies, String region) {
+        // Validation reads only the request, so it runs before the lock: an AllowedPattern match can take up
+        // to ALLOWED_PATTERN_TIMEOUT_NANOS and must not stall other SSM writers.
+        if (tier != null && !PARAMETER_TIERS.contains(tier)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + tier + "' at 'tier' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [Standard, Advanced, Intelligent-Tiering]", 400);
+        }
         validateTagKeys(tags);
         rejectReservedName(name);
-        String storageKey = regionKey(region, name);
-        Parameter existing = parameterStore.get(storageKey).orElse(null);
-
-        if (existing != null && !overwrite) {
-            throw new AwsException("ParameterAlreadyExists",
-                    "The parameter already exists. To overwrite this value, set the overwrite option in the request to true.",
-                    400);
-        }
 
         if (overwrite && tags != null && !tags.isEmpty()) {
             throw new AwsException("ValidationException",
@@ -202,11 +216,81 @@ public class SsmService implements ResourceProvider {
                     400);
         }
 
+        // Terraform sends an empty AllowedPattern for every parameter; AWS treats it as no pattern.
+        if (allowedPattern != null && allowedPattern.isEmpty()) {
+            allowedPattern = null;
+        }
+        if (allowedPattern != null) {
+            if (allowedPattern.length() > MAX_ALLOWED_PATTERN_LENGTH) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'allowedPattern' failed to satisfy constraint: "
+                                + "Member must have length less than or equal to " + MAX_ALLOWED_PATTERN_LENGTH, 400);
+            }
+            Pattern pattern;
+            try {
+                pattern = Pattern.compile(allowedPattern);
+            } catch (PatternSyntaxException e) {
+                throw new AwsException("InvalidAllowedPatternException",
+                        "The request doesn't meet the regular expression requirement.", 400);
+            }
+            boolean matches;
+            try {
+                // Both pattern and value come from the caller, so bound the backtracking a pattern can force.
+                matches = pattern.matcher(new DeadlineCharSequence(value,
+                        System.nanoTime() + ALLOWED_PATTERN_TIMEOUT_NANOS, "AllowedPattern timed out")).matches();
+            } catch (IllegalStateException e) {
+                throw new AwsException("InvalidAllowedPatternException",
+                        "AllowedPattern took too long to evaluate against the parameter value.", 400);
+            }
+            if (!matches) {
+                throw new AwsException("ParameterPatternMismatchException",
+                        "Parameter value, cannot be validated against allowedPattern: " + allowedPattern, 400);
+            }
+        }
+
+        // Same monitor as the other synchronized SSM writers: the version read and the write are one step.
+        synchronized (this) {
+            return storeParameter(name, value, type, description, overwrite, tags, keyId, allowedPattern,
+                    tier, policies, region);
+        }
+    }
+
+    private long storeParameter(String name, String value, String type, String description,
+                                boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
+                                String tier, List<JsonNode> policies, String region) {
+        String storageKey = regionKey(region, name);
+        Parameter existing = parameterStore.get(storageKey).orElse(null);
+
+        if (existing != null && !overwrite) {
+            throw new AwsException("ParameterAlreadyExists",
+                    "The parameter already exists. To overwrite this value, set the overwrite option in the request to true.",
+                    400);
+        }
+
         long version = (existing != null) ? existing.getVersion() + 1 : 1;
 
         Parameter parameter = new Parameter(name, value, type != null ? type : "String");
         parameter.setVersion(version);
         parameter.setDescription(description);
+        if ("SecureString".equals(parameter.getType())) {
+            parameter.setKeyId(keyId);
+        }
+        parameter.setAllowedPattern(allowedPattern);
+        // AWS keeps existing policies until new ones, or an empty list, are sent.
+        if (policies == null) {
+            parameter.setPolicies(existing != null ? existing.getPolicies() : null);
+        } else {
+            parameter.setPolicies(policies.isEmpty() ? null : List.copyOf(policies));
+        }
+        if ("Intelligent-Tiering".equals(tier)) {
+            boolean advanced = (existing != null && "Advanced".equals(tierOf(existing)))
+                    || parameter.getPolicies() != null
+                    || value.getBytes(StandardCharsets.UTF_8).length > STANDARD_TIER_MAX_VALUE_BYTES;
+            tier = advanced ? "Advanced" : "Standard";
+        }
+        // AWS never moves an Advanced parameter back to Standard behind an overwrite that omits the tier
+        // or asks for Intelligent-Tiering.
+        parameter.setTier(tier != null ? tier : existing != null ? tierOf(existing) : "Standard");
         parameter.setArn(regionResolver.buildArn("ssm", region, "parameter" + name));
         parameter.setLastModifiedDate(Instant.now());
 
@@ -569,13 +653,24 @@ public class SsmService implements ResourceProvider {
             case "Name" -> parameter.getName();
             case "Type" -> parameter.getType();
             case "DataType" -> parameter.getDataType();
-            // Floci stores neither a tier nor a customer key, so every parameter is Standard and
-            // a SecureString is encrypted with the AWS managed key, as AWS defaults them.
-            case "Tier" -> "Standard";
-            case "KeyId" -> "SecureString".equals(parameter.getType()) ? DEFAULT_SSM_KEY_ID : null;
+            case "Tier" -> tierOf(parameter);
+            case "KeyId" -> keyIdOf(parameter);
             default -> null;
         };
         return actual != null && matchesAny(actual, filter);
+    }
+
+    /** Parameters stored before Floci kept a tier are Standard, as AWS defaults them. */
+    static String tierOf(Parameter parameter) {
+        return parameter.getTier() != null ? parameter.getTier() : "Standard";
+    }
+
+    /** A SecureString put without a KeyId is encrypted with the AWS managed key. */
+    static String keyIdOf(Parameter parameter) {
+        if (!"SecureString".equals(parameter.getType())) {
+            return null;
+        }
+        return parameter.getKeyId() != null ? parameter.getKeyId() : DEFAULT_SSM_KEY_ID;
     }
 
     private static boolean matchesAny(String actual, ParameterStringFilter filter) {

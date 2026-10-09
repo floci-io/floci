@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;

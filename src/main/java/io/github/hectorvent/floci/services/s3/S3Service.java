@@ -113,6 +113,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
     private static final int SSE_C_KEY_BYTES = 32;
+    private static final int DELETE_PREFIX_PAGE_SIZE = 1000;
 
     @FunctionalInterface
     interface LambdaInvoker {
@@ -659,15 +660,12 @@ public class S3Service implements Resettable, ResourceProvider {
         // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
         ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
                 : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
-        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
-        algorithms.addAll(checksums.algorithms());
-        if (computed != null) {
-            algorithms.add(computed);
-        }
-        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(checksums, computed));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
             S3Checksum checksum = null;
             if (computed != null) {
                 checksum = new S3Checksum();
@@ -1915,6 +1913,37 @@ public class S3Service implements Resettable, ResourceProvider {
         synchronized (bucket) {
             checkDeletePrecondition(bucketName, key, ifMatch);
             return deleteObjectLocked(bucket, bucketName, key, versionId, bypassGovernance);
+        }
+    }
+
+    /**
+     * Deletes every object whose key starts with {@code prefix}. The bucket monitor is held across the
+     * listing, the authorization of each key and the deletes, so a concurrent PutObject cannot land
+     * between them and survive. {@code authorizeDelete} runs for every key before the first delete, so
+     * a denial removes nothing.
+     */
+    public int deleteObjectsWithPrefix(String bucketName, String prefix, Consumer<String> authorizeDelete) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            List<String> keys = new ArrayList<>();
+            String continuationToken = null;
+            do {
+                ListObjectsResult page = listObjectsWithPrefixes(
+                        bucketName, prefix, null, DELETE_PREFIX_PAGE_SIZE, continuationToken, null);
+                for (S3Object object : page.objects()) {
+                    keys.add(object.getKey());
+                }
+                continuationToken = page.isTruncated() ? page.nextContinuationToken() : null;
+            } while (continuationToken != null);
+            for (String key : keys) {
+                authorizeDelete.accept(key);
+            }
+            for (String key : keys) {
+                deleteObject(bucketName, key);
+            }
+            return keys.size();
         }
     }
 
@@ -3881,12 +3910,12 @@ public class S3Service implements Resettable, ResourceProvider {
                     sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
         }
         ChecksumAlgorithm algorithm = declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
-        Set<ChecksumAlgorithm> algorithms = EnumSet.of(algorithm);
-        algorithms.addAll(checksums.algorithms());
-        DigestingInputStream digests = new DigestingInputStream(body, algorithms);
+        DigestingInputStream digests = new DigestingInputStream(body,
+                digestAlgorithms(checksums, algorithm));
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
+            verifyChunkedTrailers(body, digests, checksums);
             S3Checksum partChecksum = new S3Checksum();
             partChecksum.setValueFor(algorithm, digests.checksum(algorithm));
             return withMultipartOperationLock(bucket, uploadId, () -> {
@@ -3918,7 +3947,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * with EntityTooLarge once it outgrows the largest array the JDK allocates.
      */
     private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
-        DigestingInputStream digests = new DigestingInputStream(body, checksums.algorithms());
+        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(checksums, null));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[64 * 1024];
         try {
@@ -3930,7 +3959,31 @@ public class S3Service implements Resettable, ResourceProvider {
             throw new UncheckedIOException("Failed to read the upload body", e);
         }
         checksums.verify(digests.md5(), digests::checksum);
+        verifyChunkedTrailers(body, digests, checksums);
         return out.toByteArray();
+    }
+
+    /**
+     * Algorithms hashed as a body is read. A trailing checksum is hashed only when
+     * {@code x-amz-trailer} named it, which is the only trailer line that is checked.
+     */
+    private static Set<ChecksumAlgorithm> digestAlgorithms(UploadChecksums checksums, ChecksumAlgorithm stored) {
+        Set<ChecksumAlgorithm> algorithms = EnumSet.noneOf(ChecksumAlgorithm.class);
+        algorithms.addAll(checksums.algorithms());
+        if (stored != null) {
+            algorithms.add(stored);
+        }
+        if (checksums.trailerAlgorithm() != null) {
+            algorithms.add(checksums.trailerAlgorithm());
+        }
+        return algorithms;
+    }
+
+    private static void verifyChunkedTrailers(InputStream body, DigestingInputStream digests,
+                                              UploadChecksums checksums) {
+        if (body instanceof AwsChunkedInputStream chunked) {
+            checksums.verifyTrailers(chunked, digests::checksum);
+        }
     }
 
     /**

@@ -93,6 +93,13 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         return packageDocument(baseUrl, packagePath(namespace, packageName));
     }
 
+    @Override
+    public boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        return fetchPackageDocument(baseUrl, namespace, packageName).isPresent();
+    }
+
     /** One tarball by its filename, from a backend already made ready by {@link #ensureReady}. */
     public Optional<byte[]> fetchTarball(String baseUrl, String namespace, String packageName, String assetName) {
         HttpRequest request = tarballRequest(baseUrl, namespace, packageName, assetName);

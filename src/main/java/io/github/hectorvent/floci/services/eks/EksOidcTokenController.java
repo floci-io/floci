@@ -1,8 +1,5 @@
 package io.github.hectorvent.floci.services.eks;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
-
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,6 +11,9 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Mints an IRSA service-account token signed by a cluster's OIDC key.

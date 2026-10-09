@@ -7,7 +7,6 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.ConfigurationSet;
 import software.amazon.awssdk.services.ses.model.ConfigurationSetAttribute;
@@ -24,7 +23,6 @@ import software.amazon.awssdk.services.ses.model.TrackingOptionsAlreadyExistsExc
 import software.amazon.awssdk.services.ses.model.TrackingOptionsDoesNotExistException;
 import software.amazon.awssdk.services.ses.model.UpdateConfigurationSetReputationMetricsEnabledRequest;
 import software.amazon.awssdk.services.ses.model.UpdateConfigurationSetTrackingOptionsRequest;
-
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetRequest;

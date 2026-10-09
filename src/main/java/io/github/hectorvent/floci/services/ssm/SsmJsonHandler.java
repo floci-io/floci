@@ -1,5 +1,11 @@
 package io.github.hectorvent.floci.services.ssm;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
@@ -15,11 +21,6 @@ import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmAssociation;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -126,7 +127,26 @@ public class SsmJsonHandler {
             }
         }
 
-        long version = ssmService.putParameter(name, value, type, description, overwrite, tags, region);
+        // Null when the request has no Policies, so an overwrite keeps the existing ones.
+        List<JsonNode> policies = null;
+        String policiesText = optionalText(request, "Policies");
+        if (policiesText != null) {
+            JsonNode parsed;
+            try {
+                parsed = objectMapper.readTree(policiesText);
+            } catch (JsonProcessingException e) {
+                throw new AwsException("ValidationException", "Invalid policies input: " + e.getOriginalMessage(), 400);
+            }
+            if (!parsed.isArray()) {
+                throw new AwsException("ValidationException", "Invalid policies input: expected a JSON array.", 400);
+            }
+            policies = new ArrayList<>();
+            parsed.forEach(policies::add);
+        }
+
+        long version = ssmService.putParameter(name, value, type, description, overwrite, tags,
+                optionalText(request, "KeyId"), optionalText(request, "AllowedPattern"),
+                optionalText(request, "Tier"), policies, region);
 
         return Response.ok(new PutParameterResponse(version)).build();
     }
@@ -315,6 +335,22 @@ public class SsmJsonHandler {
                 node.put("Description", p.getDescription());
             }
             node.put("DataType", p.getDataType());
+            if (SsmService.keyIdOf(p) != null) {
+                node.put("KeyId", SsmService.keyIdOf(p));
+            }
+            if (p.getAllowedPattern() != null) {
+                node.put("AllowedPattern", p.getAllowedPattern());
+            }
+            node.put("Tier", SsmService.tierOf(p));
+            if (p.getPolicies() != null) {
+                ArrayNode policies = node.putArray("Policies");
+                for (JsonNode policy : p.getPolicies()) {
+                    policies.addObject()
+                            .put("PolicyText", policy.toString())
+                            .put("PolicyType", policy.path("Type").asText(null))
+                            .put("PolicyStatus", "Pending");
+                }
+            }
             parametersArray.add(node);
         }
         response.set("Parameters", parametersArray);
@@ -322,6 +358,12 @@ public class SsmJsonHandler {
             response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
+    }
+
+    /** Terraform sends every optional field, unset ones as "", which AWS reads as absent. */
+    private static String optionalText(JsonNode request, String field) {
+        String text = request.path(field).asText("");
+        return text.isEmpty() ? null : text;
     }
 
     private static List<String> textValues(JsonNode values) {

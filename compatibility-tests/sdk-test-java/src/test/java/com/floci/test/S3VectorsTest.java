@@ -5,10 +5,10 @@ import software.amazon.awssdk.core.document.Document;
 import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 import software.amazon.awssdk.services.s3vectors.model.*;
 
-import static org.assertj.core.api.Assertions.*;
-
 import java.util.List;
 import java.util.Map;
+
+import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("S3 Vectors Compatibility Tests")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

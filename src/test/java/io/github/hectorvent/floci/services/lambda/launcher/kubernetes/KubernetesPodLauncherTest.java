@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
+import io.github.hectorvent.floci.services.s3.PreSignedUrlGenerator;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
@@ -81,6 +82,7 @@ class KubernetesPodLauncherTest {
     private LambdaLayerService layerService;
     private KubernetesPodLogStreamer logStreamer;
     private S3Service s3Service;
+    private PreSignedUrlGenerator presignGenerator;
     private KubernetesPodLauncher launcher;
 
     @BeforeEach
@@ -125,12 +127,17 @@ class KubernetesPodLauncherTest {
                 anyString(), anyString(), anyString())).thenReturn(() -> { });
         lenient().when(logStreamer.logStreamName(anyString())).thenReturn("2026/07/25/[$LATEST]test");
         s3Service = mock(S3Service.class);
+        presignGenerator = mock(PreSignedUrlGenerator.class);
+        lenient().when(presignGenerator.generatePresignedUrl(anyString(), anyString(), anyString(),
+                eq("GET"), eq(0), anyString(), anyString())).thenAnswer(invocation ->
+                invocation.getArgument(0) + "/" + invocation.getArgument(1) + "/"
+                        + invocation.getArgument(2) + "?X-Amz-Algorithm=AWS4-HMAC-SHA256");
 
         apiClient = new KubernetesApiClient(
                 URI.create(client.getConfiguration().getMasterUrl()), trustAllHttpClient(), null);
         launcher = new KubernetesPodLauncher(apiClient, config, runtimeApiServerFactory, imageResolver,
                 addressResolver, awsEnv, layerService, new LambdaPodSpecFactory(config),
-                logStreamer, s3Service);
+                logStreamer, s3Service, presignGenerator);
     }
 
     /** The mock server's cert is self-signed and generated per run; trust it, not the JVM default. */
@@ -254,11 +261,14 @@ class KubernetesPodLauncherTest {
 
         ContainerHandle handle = launcher.launch(fn);
 
-        // The init container fetches unauthenticated, so the download URL must carry the
-        // owning account or the object resolves under the default account and 404s.
+        // The init container fetches without an Authorization header. The presigner
+        // must register its temporary credential in the owning account.
         Pod pod = client.pods().inNamespace("default").withName(handle.getContainerId()).get();
         assertThat(pod.getSpec().getInitContainers().getFirst().getCommand().get(2))
-                .contains("snapshots/111122223333/my-fn?X-Amz-Credential=111122223333%2F");
+                .contains("snapshots/111122223333/my-fn?X-Amz-Algorithm=AWS4-HMAC-SHA256");
+        verify(presignGenerator).generatePresignedUrl(eq("http://10.0.0.5:4566"),
+                eq("awslambda-us-east-1-tasks"), anyString(), eq("GET"), eq(0),
+                eq("us-east-1"), eq("111122223333"));
     }
 
     @Test
@@ -285,7 +295,7 @@ class KubernetesPodLauncherTest {
         doThrow(new RuntimeException("kube api down")).when(failingApiClient).deletePod(anyString(), anyString());
         KubernetesPodLauncher failingLauncher = new KubernetesPodLauncher(failingApiClient, config,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
-                new LambdaPodSpecFactory(config), logStreamer, s3Service);
+                new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
         markPodPhaseInBackground("floci-lambda-my-fn-", "Failed");
 
         assertThatThrownBy(() -> failingLauncher.launch(function()))
@@ -435,7 +445,7 @@ class KubernetesPodLauncherTest {
         }).when(flakyApiClient).listPods(anyString(), anyMap());
         KubernetesPodLauncher retryingLauncher = new KubernetesPodLauncher(flakyApiClient, config,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
-                new LambdaPodSpecFactory(config), logStreamer, s3Service);
+                new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
 
         markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
         ContainerHandle handle = retryingLauncher.launch(function());
