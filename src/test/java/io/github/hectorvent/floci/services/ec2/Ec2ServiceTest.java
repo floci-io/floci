@@ -1411,6 +1411,21 @@ class Ec2ServiceTest {
         }
     }
 
+    @Test
+    void endpointFallbackAddressesDoNotReusePinnedAddressesWithLeadingZeros() {
+        EndpointAddressFixture fixture = endpointAddressFixture("2001:db8:1::/64", "172.31.112.0/24");
+        int host = 200 + Math.floorMod(fixture.endpoint().getVpcEndpointId().hashCode(), 50);
+        String pinnedAddress = "172.31.112.0" + host;
+        fixture.service().modifyVpcEndpoint("us-east-1", fixture.endpoint().getVpcEndpointId(),
+                List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), null, null, null,
+                List.of(new VpcEndpointSubnetConfiguration("subnet-00000088", pinnedAddress, null)));
+
+        Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+        assertEquals(pinnedAddress, addresses.get("subnet-00000088"));
+        assertNotEquals("172.31.112." + host, addresses.get("subnet-00000000"));
+        assertEquals(addresses, endpointAddressesBySubnet(fixture.service()));
+    }
+
     private static EndpointAddressFixture endpointAddressFixture(String firstCidr, String secondCidr) {
         AccountAwareStorageBackend<Subnet> subnetStore = AccountAwareStorageBackend.inMemory("000000000000");
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),

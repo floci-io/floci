@@ -5139,7 +5139,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         String region = endpoint.getRegion();
         List<NetworkInterface> result = new ArrayList<>();
         List<NetworkInterface> fallbackInterfaces = new ArrayList<>();
-        Set<String> usedAddresses = new HashSet<>();
+        Set<Long> usedAddresses = new HashSet<>();
         for (String subnetId : endpoint.getSubnetIds()) {
             Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
             if (subnet == null) {
@@ -5177,7 +5177,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (address == null) {
                 fallbackInterfaces.add(ni);
             } else {
-                usedAddresses.add(address);
+                usedAddresses.add(Ipv4Cidrs.addressValue(address));
             }
             result.add(ni);
         }
@@ -5327,13 +5327,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private static String endpointFallbackPrivateIp(VpcEndpoint endpoint, String subnetId,
-                                                   Set<String> usedAddresses) {
+                                                   Set<Long> usedAddresses) {
         int network = Math.floorMod(subnetId.hashCode(), 256);
         int hostOffset = Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
         for (int offset = 0; offset < 256 * 50; offset++) {
             String address = "172.31." + Math.floorMod(network + offset, 256) + "."
                     + (200 + Math.floorMod(hostOffset + offset / 256, 50));
-            if (usedAddresses.add(address)) {
+            if (usedAddresses.add(Ipv4Cidrs.addressValue(address))) {
                 return address;
             }
         }
