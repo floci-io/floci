@@ -1863,6 +1863,10 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack, String region) {
+        return finishCommittedResourceCleanup(stack, region, false);
+    }
+
+    private List<UpdateCleanupFailure> finishCommittedResourceCleanup(Stack stack, String region, boolean deleting) {
         List<UpdateCleanupFailure> failures = new ArrayList<>();
         // Dependents go before what they depend on, as when the stack is deleted: a displaced
         // listener has to go before the displaced target group it still forwards to, or that
@@ -1883,7 +1887,8 @@ public class CloudFormationService implements ResourceProvider {
                         null);
             }
             while (true) {
-                UpdateCleanupResult result = dispatcher.completeUpdate(resource);
+                UpdateCleanupResult result = deleting ? dispatcher.completeDeleteCleanup(resource)
+                        : dispatcher.completeUpdate(resource);
                 if (!result.applicable()) {
                     break;
                 }
@@ -1897,7 +1902,11 @@ public class CloudFormationService implements ResourceProvider {
                                 "DELETE_COMPLETE",
                                 null);
                     }
-                    dispatcher.clearUpdate(resource);
+                    if (deleting) {
+                        dispatcher.clearDeleteCleanup(resource);
+                    } else {
+                        dispatcher.clearUpdate(resource);
+                    }
                     break;
                 }
                 if (result.attempts() < 3) {
@@ -1916,7 +1925,11 @@ public class CloudFormationService implements ResourceProvider {
                         resource.getResourceType(),
                         "DELETE_FAILED",
                         reason);
-                dispatcher.clearUpdate(resource);
+                if (deleting) {
+                    dispatcher.clearDeleteCleanup(resource);
+                } else {
+                    dispatcher.clearUpdate(resource);
+                }
                 break;
             }
         }
@@ -2350,7 +2363,7 @@ public class CloudFormationService implements ResourceProvider {
             // last update left in place. An entity displaced by a replacement whose cleanup phase
             // never ended is named only by the cleanup the resource still carries, so the stack
             // deletes that one too: nothing else ever will.
-            for (UpdateCleanupFailure displacedFailure : finishCommittedResourceCleanup(stack, region)) {
+            for (UpdateCleanupFailure displacedFailure : finishCommittedResourceCleanup(stack, region, true)) {
                 failedResources.add(displacedFailure.logicalId());
             }
             for (StackResource resource : resources) {
