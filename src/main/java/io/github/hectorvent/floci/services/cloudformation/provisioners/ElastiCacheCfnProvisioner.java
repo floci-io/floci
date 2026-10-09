@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
+import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUserGroup;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -17,13 +19,15 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
 /**
- * Provisions AWS::ElastiCache::CacheCluster and SubnetGroup. A cache cluster needs the Memcached
- * service as well as the Redis one, because the two engines keep their clusters in separate stores.
+ * Provisions AWS::ElastiCache::CacheCluster, SubnetGroup, User and UserGroup. A cache cluster needs
+ * the Memcached service as well as the Redis one, because the two engines keep their clusters in
+ * separate stores.
  */
 @ApplicationScoped
 public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
@@ -33,6 +37,8 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String CACHE_CLUSTER = "AWS::ElastiCache::CacheCluster";
     private static final String SUBNET_GROUP = "AWS::ElastiCache::SubnetGroup";
+    private static final String USER = "AWS::ElastiCache::User";
+    private static final String USER_GROUP = "AWS::ElastiCache::UserGroup";
     private static final String SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR = "__FlociCacheSubnetGroupUpdateSnapshot";
     private static final List<String> UNSUPPORTED_CLUSTER_PROPERTIES = List.of("CacheSecurityGroupNames",
             "NotificationTopicArn", "AZMode", "PreferredAvailabilityZones", "LogDeliveryConfigurations",
@@ -53,7 +59,7 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(CACHE_CLUSTER, SUBNET_GROUP);
+        return Set.of(CACHE_CLUSTER, SUBNET_GROUP, USER, USER_GROUP);
     }
 
     @Override
@@ -63,6 +69,8 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         switch (r.getResourceType()) {
             case CACHE_CLUSTER -> provisionCacheCluster(r, props, ctx);
             case SUBNET_GROUP -> provisionSubnetGroup(r, props, ctx);
+            case USER -> provisionUser(r, props, ctx);
+            case USER_GROUP -> provisionUserGroup(r, props, ctx);
             default -> throw new IllegalStateException(
                     "ElastiCacheCfnProvisioner cannot provision " + r.getResourceType());
         }
@@ -297,6 +305,104 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(group.getName());
     }
 
+    private void provisionUser(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String userId = ctx.resolveOptional(props, "UserId");
+        String userName = ctx.resolveOptional(props, "UserName");
+        String engine = ctx.resolveOptional(props, "Engine");
+        if (userId == null || userId.isBlank() || userName == null || userName.isBlank()) {
+            throw new AwsException("ValidationException", "UserId and UserName are required", 400);
+        }
+        String accessString = ctx.resolveOptional(props, "AccessString");
+        UserAuthentication auth = resolveAuthentication(props, ctx);
+        if (!ctx.resolveTags(props, "Tags").isEmpty()) {
+            LOG.warnv("ElastiCache user {0}: Tags are ignored, the emulator does not tag users", userId);
+        }
+
+        ElastiCacheUser user;
+        if (ctx.reusesPriorEntity(userId)) {
+            String currentName = elastiCacheService.getUser(userId).getUserName();
+            if (!userName.equals(currentName)) {
+                throw new AwsException("InvalidParameterValue",
+                        "UserName of user " + userId + " is create-only; use a new UserId to change it", 400);
+            }
+            user = elastiCacheService.modifyUser(userId,
+                    auth != null ? auth.mode() : null,
+                    auth != null ? auth.passwords() : null,
+                    accessString, null, engine);
+        } else {
+            AuthMode mode = auth != null ? auth.mode() : AuthMode.NO_AUTH;
+            user = elastiCacheService.createUser(userId, userName, mode,
+                    auth != null ? auth.passwords() : List.of(), accessString, engine);
+        }
+        r.setPhysicalId(user.getUserId());
+        r.getAttributes().put("Arn", user.getArn());
+        r.getAttributes().put("Status", user.getStatus());
+    }
+
+    private void provisionUserGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String groupId = ctx.resolveOptional(props, "UserGroupId");
+        String engine = ctx.resolveOptional(props, "Engine");
+        if (groupId == null || groupId.isBlank() || engine == null || engine.isBlank()) {
+            throw new AwsException("ValidationException", "UserGroupId and Engine are required", 400);
+        }
+        // The service stores the id in lowercase, so the prior physical id only matches in that form.
+        groupId = groupId.toLowerCase(Locale.ROOT);
+        List<String> userIds = ctx.resolveStringList(props, "UserIds");
+        if (!ctx.resolveTags(props, "Tags").isEmpty()) {
+            LOG.warnv("ElastiCache user group {0}: Tags are ignored, the emulator does not tag user groups", groupId);
+        }
+
+        ElastiCacheUserGroup group;
+        if (ctx.reusesPriorEntity(groupId)) {
+            ElastiCacheUserGroup existing = elastiCacheService.getUserGroup(groupId);
+            boolean engineChanged = !engine.equalsIgnoreCase(existing.getEngine());
+            List<String> toAdd = new ArrayList<>(userIds);
+            toAdd.removeAll(existing.getUserIds());
+            List<String> toRemove = new ArrayList<>(existing.getUserIds());
+            toRemove.removeAll(userIds);
+            group = toAdd.isEmpty() && toRemove.isEmpty() && !engineChanged
+                    ? existing
+                    : elastiCacheService.modifyUserGroup(groupId, toAdd, toRemove, engineChanged ? engine : null);
+        } else {
+            group = elastiCacheService.createUserGroup(groupId, engine, userIds, ctx.region());
+        }
+        r.setPhysicalId(group.getUserGroupId());
+        r.getAttributes().put("Arn", group.getArn());
+        r.getAttributes().put("Status", group.getStatus());
+    }
+
+    private record UserAuthentication(AuthMode mode, List<String> passwords) {}
+
+    /**
+     * AuthenticationMode and the top-level Passwords and NoPasswordRequired members select the same
+     * thing in AWS; passwords given either way mean password authentication.
+     */
+    private UserAuthentication resolveAuthentication(JsonNode props, ProvisionContext ctx) {
+        JsonNode mode = props.has("AuthenticationMode")
+                ? ctx.engine().resolveNode(props.get("AuthenticationMode")) : null;
+        String type = mode != null && mode.hasNonNull("Type") ? mode.get("Type").asText() : null;
+        List<String> passwords = mode != null && mode.has("Passwords")
+                ? ctx.engine().resolveStringList(mode.get("Passwords")) : List.of();
+        if (passwords.isEmpty()) {
+            passwords = ctx.resolveStringList(props, "Passwords");
+        }
+        boolean noPasswordRequired = Boolean.parseBoolean(ctx.resolveOptional(props, "NoPasswordRequired"));
+
+        if (type == null || type.isBlank()) {
+            if (!passwords.isEmpty()) {
+                return new UserAuthentication(AuthMode.PASSWORD, passwords);
+            }
+            return noPasswordRequired ? new UserAuthentication(AuthMode.NO_AUTH, List.of()) : null;
+        }
+        return switch (type.toLowerCase(Locale.ROOT)) {
+            case "password" -> new UserAuthentication(AuthMode.PASSWORD, passwords);
+            case "iam" -> new UserAuthentication(AuthMode.IAM, List.of());
+            case "no-password-required" -> new UserAuthentication(AuthMode.NO_AUTH, List.of());
+            default -> throw new AwsException("ValidationException",
+                    "Invalid AuthenticationMode.Type " + type, 400);
+        };
+    }
+
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         if (resourceType == null || physicalId == null) {
@@ -312,6 +418,10 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
             }, "CacheClusterNotFound");
             case SUBNET_GROUP -> CfnDeletes.safeDelete("ElastiCache subnet group", physicalId,
                     () -> elastiCacheService.deleteCacheSubnetGroup(physicalId), "CacheSubnetGroupNotFoundFault");
+            case USER_GROUP -> CfnDeletes.safeDelete("ElastiCache user group", physicalId,
+                    () -> elastiCacheService.deleteUserGroup(physicalId), "UserGroupNotFound");
+            case USER -> CfnDeletes.safeDelete("ElastiCache user", physicalId,
+                    () -> elastiCacheService.deleteUser(physicalId), "UserNotFoundFault");
             default -> {
             }
         }
