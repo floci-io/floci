@@ -111,6 +111,25 @@ filter pattern) can fail after deletion and trigger restoration. The CFN schema 
 256-character metric namespace, but Floci's Logs API validation currently accepts at most 255:
 passing model validation does not imply provider acceptance.
 
+## Cognito user pool resource servers
+
+`AWS::Cognito::UserPoolResourceServer` returns its `Identifier` for `Ref`. Changing `Identifier`
+or `UserPoolId` replaces the server; changing `Name` or `Scopes` updates it in place. Optional
+`Scopes` or individual scope entries can be omitted by `Fn::If` selecting `AWS::NoValue`.
+The provisioner keeps the pool and identifier together in private replacement bookkeeping,
+so changing only the pool still cleans up the displaced server without changing the `Ref` value.
+
+Replacement rollback and historical cleanup use the shared bounded replacement lifecycle.
+Committed replacements honor `UpdateReplacePolicy: Retain`; failed rollback replacements remain
+owed cleanup while their retry budget remains. Exhausted historical records are abandoned across
+later updates and stack-delete retries. Historical cleanup is address-based and does not provide
+an atomic ownership check against another stack or a direct Cognito API writer reusing the address.
+
+Failed in-place restoration preserves the original name and scopes for a later update retry.
+Deleting the current server keeps this snapshot if deletion fails. An update that skips a server
+with pending restoration can remain in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, blocking another
+update. `ContinueUpdateRollback` remains unsupported.
+
 ## Supported Resource Types
 
 Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
@@ -153,7 +172,7 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
+| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination`, `Archive` (`KmsKeyIdentifier` is ignored) |
 | EventBridge Scheduler | `ScheduleGroup` |
