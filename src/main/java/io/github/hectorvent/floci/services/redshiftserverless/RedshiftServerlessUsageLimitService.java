@@ -138,17 +138,24 @@ public class RedshiftServerlessUsageLimitService implements Resettable {
 
     private UsageLimit require(String usageLimitId, String region) {
         requireText(usageLimitId, "usageLimitId");
-        return usageLimits.get(storageKey(region, usageLimitId))
-                .filter(limit -> isLive(limit, region))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The usage limit " + usageLimitId + " was not found.", 404));
+        UsageLimit limit = usageLimits.get(storageKey(region, usageLimitId)).orElse(null);
+        if (limit != null && !isLive(limit, region)) {
+            usageLimits.delete(storageKey(region, usageLimitId));
+            limit = null;
+        }
+        if (limit == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The usage limit " + usageLimitId + " was not found.", 404);
+        }
+        return limit;
     }
 
     /** The region's limits whose workgroup is still there; any other is deleted as it is found. */
     private List<UsageLimit> live(String region) {
+        Set<String> workgroupArns = serverless.workgroupArns(region);
         return usageLimits.scan(key -> key.startsWith(region + "::")).stream()
                 .filter(limit -> {
-                    if (isLive(limit, region)) {
+                    if (workgroupArns.contains(limit.getResourceArn())) {
                         return true;
                     }
                     usageLimits.delete(storageKey(region, limit.getUsageLimitId()));

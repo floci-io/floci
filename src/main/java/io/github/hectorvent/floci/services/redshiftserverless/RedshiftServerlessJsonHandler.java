@@ -271,22 +271,22 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleCreateUsageLimit(JsonNode request, String region) {
         return usageLimitResponse(usageLimits.createUsageLimit(
-                text(request, "resourceArn"),
-                text(request, "usageType"),
+                optionalText(request, "resourceArn"),
+                optionalText(request, "usageType"),
                 parseLong(request, "amount"),
-                text(request, "period"),
-                text(request, "breachAction"),
+                optionalText(request, "period"),
+                optionalText(request, "breachAction"),
                 region));
     }
 
     private Response handleGetUsageLimit(JsonNode request, String region) {
-        return usageLimitResponse(usageLimits.getUsageLimit(text(request, "usageLimitId"), region));
+        return usageLimitResponse(usageLimits.getUsageLimit(optionalText(request, "usageLimitId"), region));
     }
 
     private Response handleListUsageLimits(JsonNode request, String region) {
         PaginatedResult<UsageLimit> page = usageLimits.listUsageLimits(
-                text(request, "resourceArn"), text(request, "usageType"), region,
-                parseMaxResults(request), text(request, "nextToken"));
+                optionalText(request, "resourceArn"), optionalText(request, "usageType"), region,
+                parseMaxResults(request), optionalText(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("usageLimits");
         page.items().forEach(limit -> items.add(usageLimitNode(limit)));
@@ -298,14 +298,14 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleUpdateUsageLimit(JsonNode request, String region) {
         return usageLimitResponse(usageLimits.updateUsageLimit(
-                text(request, "usageLimitId"),
+                optionalText(request, "usageLimitId"),
                 parseLong(request, "amount"),
-                text(request, "breachAction"),
+                optionalText(request, "breachAction"),
                 region));
     }
 
     private Response handleDeleteUsageLimit(JsonNode request, String region) {
-        return usageLimitResponse(usageLimits.deleteUsageLimit(text(request, "usageLimitId"), region));
+        return usageLimitResponse(usageLimits.deleteUsageLimit(optionalText(request, "usageLimitId"), region));
     }
 
     private Response usageLimitResponse(UsageLimit limit) {
@@ -556,6 +556,18 @@ public class RedshiftServerlessJsonHandler {
         return Instant.ofEpochMilli(Math.round(node.asDouble() * 1000));
     }
 
+    /** A string member: null when missing or null, a validation error when present with any other type. */
+    private String optionalText(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isTextual()) {
+            throw validation(field + " must be a string.");
+        }
+        return node.textValue();
+    }
+
     private Long parseLong(JsonNode request, String field) {
         JsonNode node = request.path(field);
         if (node.isMissingNode() || node.isNull()) {
@@ -572,7 +584,7 @@ public class RedshiftServerlessJsonHandler {
         if (node.isMissingNode() || node.isNull()) {
             return null;
         }
-        if (!node.isNumber()) {
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
             throw validation("maxResults must be an integer.");
         }
         return node.asInt();

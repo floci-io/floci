@@ -38,6 +38,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class RedshiftServerlessService implements Resettable {
@@ -617,6 +618,13 @@ public class RedshiftServerlessService implements Resettable {
 
     public Optional<Workgroup> findWorkgroupByArn(String resourceArn, String region) {
         return workgroupByArn(resourceArn, region);
+    }
+
+    /** ARNs of every workgroup in the Region, for callers that test many resources against them at once. */
+    public Set<String> workgroupArns(String region) {
+        return workgroups.scan(key -> key.startsWith(region + "::")).stream()
+                .map(Workgroup::getWorkgroupArn)
+                .collect(Collectors.toSet());
     }
 
     private Optional<Workgroup> workgroupByArn(String resourceArn, String region) {

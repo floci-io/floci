@@ -11,7 +11,9 @@ import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,6 +30,7 @@ class RedshiftServerlessUsageLimitServiceTest {
     private static final String WORKGROUP_ARN =
             "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/wg-1";
 
+    private final Set<String> liveArns = new HashSet<>();
     private RedshiftServerlessService serverless;
     private RedshiftServerlessUsageLimitService service;
 
@@ -44,6 +47,7 @@ class RedshiftServerlessUsageLimitServiceTest {
                         + invocation.getArgument(1, String.class) + ":" + ACCOUNT_ID + ":"
                         + invocation.getArgument(2, String.class));
         serverless = mock(RedshiftServerlessService.class);
+        when(serverless.workgroupArns(REGION)).thenAnswer(invocation -> new HashSet<>(liveArns));
         liveWorkgroup(WORKGROUP_ARN);
         service = new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, serverless);
     }
@@ -51,7 +55,13 @@ class RedshiftServerlessUsageLimitServiceTest {
     private void liveWorkgroup(String arn) {
         Workgroup workgroup = new Workgroup();
         workgroup.setWorkgroupArn(arn);
+        liveArns.add(arn);
         when(serverless.findWorkgroupByArn(arn, REGION)).thenReturn(Optional.of(workgroup));
+    }
+
+    private void removeWorkgroup(String arn) {
+        liveArns.remove(arn);
+        when(serverless.findWorkgroupByArn(arn, REGION)).thenReturn(Optional.empty());
     }
 
     private UsageLimit create(long amount) {
@@ -106,7 +116,7 @@ class RedshiftServerlessUsageLimitServiceTest {
     @Test
     void createRejectsAnUnknownWorkgroup() {
         String missing = "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/absent";
-        when(serverless.findWorkgroupByArn(missing, REGION)).thenReturn(Optional.empty());
+        removeWorkgroup(missing);
 
         assertEquals("ResourceNotFoundException", errorCode(() ->
                 service.createUsageLimit(missing, "serverless-compute", 1L, null, null, REGION)));
@@ -205,9 +215,37 @@ class RedshiftServerlessUsageLimitServiceTest {
     }
 
     @Test
+    void listStillPagesAfterTheLimitBehindTheTokenIsDeleted() {
+        String second = "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/wg-2";
+        liveWorkgroup(second);
+        create(1);
+        service.createUsageLimit(second, "serverless-compute", 2L, null, null, REGION);
+
+        PaginatedResult<UsageLimit> first = service.listUsageLimits(null, null, REGION, 1, null);
+        service.deleteUsageLimit(first.items().get(0).getUsageLimitId(), REGION);
+
+        PaginatedResult<UsageLimit> rest = service.listUsageLimits(null, null, REGION, 1, first.nextToken());
+        assertEquals(1, rest.items().size());
+        assertTrue(rest.nextToken() == null);
+    }
+
+    @Test
+    void getRemovesTheRecordOfADeletedWorkgroup() {
+        UsageLimit limit = create(1);
+        removeWorkgroup(WORKGROUP_ARN);
+        assertEquals("ResourceNotFoundException",
+                errorCode(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION)));
+
+        // The same ARN is live again, which only a record that survived the Get could answer for.
+        liveWorkgroup(WORKGROUP_ARN);
+        assertEquals("ResourceNotFoundException",
+                errorCode(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION)));
+    }
+
+    @Test
     void aLimitDisappearsWithItsWorkgroup() {
         UsageLimit limit = create(1);
-        when(serverless.findWorkgroupByArn(WORKGROUP_ARN, REGION)).thenReturn(Optional.empty());
+        removeWorkgroup(WORKGROUP_ARN);
 
         assertEquals("ResourceNotFoundException",
                 errorCode(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION)));

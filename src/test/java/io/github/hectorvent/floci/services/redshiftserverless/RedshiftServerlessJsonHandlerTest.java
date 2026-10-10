@@ -123,6 +123,41 @@ class RedshiftServerlessJsonHandlerTest {
     }
 
     @Test
+    void usageLimitMembersOfTheWrongTypeAreRejectedNotIgnored() {
+        create("typed-ns");
+        String workgroupArn = body(handler.handle("CreateWorkgroup",
+                parse("{\"workgroupName\":\"typed-wg\",\"namespaceName\":\"typed-ns\"}"), REGION))
+                .get("workgroup").get("workgroupArn").textValue();
+        String base = "\"resourceArn\":\"" + workgroupArn + "\",\"usageType\":\"serverless-compute\",\"amount\":5";
+        assertEquals(400, handler.handle("CreateUsageLimit", parse("{" + base + ",\"period\":3}"), REGION).getStatus());
+        assertEquals(400, handler.handle("CreateUsageLimit", parse("{" + base + ",\"breachAction\":true}"),
+                REGION).getStatus());
+        assertEquals(400, handler.handle("CreateUsageLimit", parse(
+                "{\"resourceArn\":7,\"usageType\":\"serverless-compute\",\"amount\":5}"), REGION).getStatus());
+        // Nothing was stored by the rejected creates.
+        assertEquals(0, body(handler.handle("ListUsageLimits", parse("{}"), REGION)).get("usageLimits").size());
+
+        String id = body(handler.handle("CreateUsageLimit", parse("{" + base + "}"), REGION))
+                .get("usageLimit").get("usageLimitId").textValue();
+        assertEquals(400, handler.handle("UpdateUsageLimit",
+                parse("{\"usageLimitId\":\"" + id + "\",\"breachAction\":1}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"resourceArn\":7}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"usageType\":7}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"nextToken\":7}"), REGION).getStatus());
+        assertEquals(400, handler.handle("GetUsageLimit", parse("{\"usageLimitId\":7}"), REGION).getStatus());
+        assertEquals("log", body(handler.handle("GetUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
+                REGION)).get("usageLimit").get("breachAction").textValue());
+    }
+
+    @Test
+    void maxResultsMustBeAnIntegerThatFitsAnInt() {
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"maxResults\":1.5}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"maxResults\":3000000000}"), REGION).getStatus());
+        assertEquals(400, handler.handle("ListUsageLimits", parse("{\"maxResults\":\"1\"}"), REGION).getStatus());
+        assertEquals(200, handler.handle("ListUsageLimits", parse("{\"maxResults\":1}"), REGION).getStatus());
+    }
+
+    @Test
     void usageLimitAmountMustBeAnInteger() {
         assertEquals(400, handler.handle("CreateUsageLimit", parse(
                 "{\"resourceArn\":\"arn\",\"usageType\":\"serverless-compute\",\"amount\":\"60\"}"),
