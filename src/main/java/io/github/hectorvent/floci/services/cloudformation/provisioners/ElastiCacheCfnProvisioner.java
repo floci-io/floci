@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
@@ -13,6 +15,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -26,9 +29,11 @@ import java.util.Set;
 public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final String CACHE_CLUSTER = "AWS::ElastiCache::CacheCluster";
     private static final String SUBNET_GROUP = "AWS::ElastiCache::SubnetGroup";
+    private static final String SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR = "__FlociCacheSubnetGroupUpdateSnapshot";
     private static final List<String> UNSUPPORTED_CLUSTER_PROPERTIES = List.of("CacheSecurityGroupNames",
             "NotificationTopicArn", "AZMode", "PreferredAvailabilityZones", "LogDeliveryConfigurations",
             "SnapshotArns", "SnapshotName");
@@ -53,6 +58,7 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        r.getAttributes().remove(SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR);
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
             case CACHE_CLUSTER -> provisionCacheCluster(r, props, ctx);
@@ -75,16 +81,34 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        if ("UPDATE_COMPLETE".equals(resource.getStatus())) {
+            resource.getAttributes().remove(SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR);
+        }
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        if (SUBNET_GROUP.equals(resource.getResourceType())) {
+            String rawSnapshot = resource.getAttributes().remove(SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR);
+            if (rawSnapshot != null) {
+                try {
+                    SubnetGroupSnapshot snapshot = MAPPER.readValue(rawSnapshot, SubnetGroupSnapshot.class);
+                    elastiCacheService.modifyCacheSubnetGroup(snapshot.name(), snapshot.description(),
+                            snapshot.subnetIds(), snapshot.tags());
+                    return true;
+                } catch (Exception e) {
+                    LOG.errorv("Could not restore subnet group {0} after failed update: {1}",
+                            resource.getPhysicalId(), e.getMessage());
+                }
+            }
+        }
         return ReplacementCleanup.rollback(resource, this::delete);
     }
 
@@ -93,7 +117,15 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         if (engine == null || engine.isBlank()) {
             throw new AwsException("ValidationException", "Engine is required", 400);
         }
+        String nodeType = ctx.resolveOptional(props, "CacheNodeType");
+        if (nodeType == null || nodeType.isBlank()) {
+            throw new AwsException("ValidationException", "CacheNodeType is required", 400);
+        }
         String explicitName = ctx.resolveOptional(props, "ClusterName");
+        if (explicitName != null && explicitName.length() > CLUSTER_ID_MAX_LENGTH) {
+            throw new AwsException("ValidationException",
+                    "ClusterName exceeds maximum length of " + CLUSTER_ID_MAX_LENGTH, 400);
+        }
         String subnetGroup = ctx.resolveOptional(props, "CacheSubnetGroupName");
         Integer port = optionalInt(ctx.resolveOptional(props, "Port"));
 
@@ -189,6 +221,10 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void putEndpointAttributes(StackResource r, CacheCluster cluster) {
+        r.getAttributes().remove("RedisEndpoint.Address");
+        r.getAttributes().remove("RedisEndpoint.Port");
+        r.getAttributes().remove("ConfigurationEndpoint.Address");
+        r.getAttributes().remove("ConfigurationEndpoint.Port");
         Endpoint endpoint = cluster.getConfigurationEndpoint();
         if (endpoint == null) {
             return;
@@ -221,12 +257,30 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionSubnetGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
         String explicitName = ctx.resolveOptional(props, "CacheSubnetGroupName");
+        if (explicitName != null && explicitName.length() > SUBNET_GROUP_NAME_MAX_LENGTH) {
+            throw new AwsException("ValidationException",
+                    "CacheSubnetGroupName exceeds maximum length of " + SUBNET_GROUP_NAME_MAX_LENGTH, 400);
+        }
         String id = ctx.stablePhysicalName(explicitName, r.getLogicalId(), SUBNET_GROUP_NAME_MAX_LENGTH, true);
         String description = ctx.resolveOptional(props, "Description");
         List<String> subnetIds = ctx.resolveStringList(props, "SubnetIds");
 
         CacheSubnetGroup group;
         if (ctx.reusesPriorEntity(id)) {
+            List<CacheSubnetGroup> existing = elastiCacheService.describeCacheSubnetGroups(id);
+            if (!existing.isEmpty()) {
+                CacheSubnetGroup prior = existing.getFirst();
+                SubnetGroupSnapshot snapshot = new SubnetGroupSnapshot(
+                        prior.getName(),
+                        prior.getDescription(),
+                        new ArrayList<>(prior.getSubnetAvailabilityZones().keySet()),
+                        prior.getTags());
+                try {
+                    r.getAttributes().put(SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR, MAPPER.writeValueAsString(snapshot));
+                } catch (JsonProcessingException e) {
+                    LOG.errorv("Could not snapshot subnet group {0} before update: {1}", id, e.getMessage());
+                }
+            }
             group = elastiCacheService.modifyCacheSubnetGroup(id, description, subnetIds,
                     ctx.resolveTags(props, "Tags"));
         } else {
@@ -259,4 +313,7 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     private static Integer optionalInt(String raw) {
         return raw == null || raw.isBlank() ? null : Integer.valueOf(raw);
     }
+
+    private record SubnetGroupSnapshot(String name, String description, List<String> subnetIds,
+                                       Map<String, String> tags) {}
 }

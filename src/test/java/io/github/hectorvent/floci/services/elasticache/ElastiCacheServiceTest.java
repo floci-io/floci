@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
@@ -2105,8 +2106,7 @@ class ElastiCacheServiceTest {
 
     @Test
     void aKnownCacheSubnetGroupIsAcceptedAndReported() {
-        io.github.hectorvent.floci.services.ec2.model.Subnet subnet =
-                new io.github.hectorvent.floci.services.ec2.model.Subnet();
+        Subnet subnet = new Subnet();
         subnet.setSubnetId("subnet-1");
         subnet.setVpcId("vpc-1");
         subnet.setAvailabilityZone("us-east-1a");
@@ -2119,6 +2119,58 @@ class ElastiCacheServiceTest {
                 "us-east-1", Map.of()));
 
         assertEquals("real-group", cluster.getCacheSubnetGroupName());
+    }
+
+    @Test
+    void deleteCacheSubnetGroupInUseByClusterThrows() {
+        Subnet subnet = new Subnet();
+        subnet.setSubnetId("subnet-1");
+        subnet.setVpcId("vpc-1");
+        subnet.setAvailabilityZone("us-east-1a");
+        when(ec2Service.describeSubnets(anyString(), any(), any())).thenReturn(List.of(subnet));
+        service.createCacheSubnetGroup("used-group", "d", List.of("subnet-1"), Map.of());
+
+        service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                "sng-cluster", "redis", null, null, 1, null, AuthMode.NO_AUTH, null, null,
+                "used-group", null, null, null, null, null, null, null, null,
+                "us-east-1", Map.of()));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteCacheSubnetGroup("used-group"));
+        assertEquals("CacheSubnetGroupInUseFault", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void deleteCacheSubnetGroupInUseByReplicationGroupThrows() {
+        Subnet subnet = new Subnet();
+        subnet.setSubnetId("subnet-1");
+        subnet.setVpcId("vpc-1");
+        subnet.setAvailabilityZone("us-east-1a");
+        when(ec2Service.describeSubnets(anyString(), any(), any())).thenReturn(List.of(subnet));
+        service.createCacheSubnetGroup("rg-used-group", "d", List.of("subnet-1"), Map.of());
+
+        service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
+                "rg-cluster", "desc", AuthMode.NO_AUTH, null, "us-east-1", null, null, null,
+                null, "rg-used-group", null, null, null, null, null, null, null,
+                ReplicationGroupSettings.defaults(), Map.of(), null));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteCacheSubnetGroup("rg-used-group"));
+        assertEquals("CacheSubnetGroupInUseFault", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void deleteCacheSubnetGroupNotInUseSucceeds() {
+        Subnet subnet = new Subnet();
+        subnet.setSubnetId("subnet-1");
+        subnet.setVpcId("vpc-1");
+        subnet.setAvailabilityZone("us-east-1a");
+        when(ec2Service.describeSubnets(anyString(), any(), any())).thenReturn(List.of(subnet));
+        service.createCacheSubnetGroup("free-group", "d", List.of("subnet-1"), Map.of());
+
+        service.deleteCacheSubnetGroup("free-group");
+
+        assertThrows(AwsException.class, () -> service.describeCacheSubnetGroups("free-group"));
     }
 
     @Test

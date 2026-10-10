@@ -2220,6 +2220,16 @@ public class ElastiCacheService implements ResourceProvider {
                 throw new AwsException("CacheSubnetGroupNotFoundFault",
                         "Cache Subnet Group " + name + " does not exist.", 400);
             }
+            boolean inUse = cacheClusters.scan(k -> true).stream()
+                            .anyMatch(c -> name.equals(c.getCacheSubnetGroupName()))
+                    || memcachedClusters.scan(k -> true).stream()
+                            .anyMatch(c -> name.equals(c.getCacheSubnetGroupName()))
+                    || groups.scan(k -> true).stream()
+                            .anyMatch(g -> name.equals(g.getCacheSubnetGroupName()));
+            if (inUse) {
+                throw new AwsException("CacheSubnetGroupInUseFault",
+                        "The requested cache subnet group is currently in use.", 400);
+            }
             subnetGroups.delete(name);
         }
         LOG.infov("Deleted cache subnet group {0}", name);

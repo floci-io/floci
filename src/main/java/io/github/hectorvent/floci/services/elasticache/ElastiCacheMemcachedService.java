@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheCont
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheClusterStatus;
+import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -45,6 +46,7 @@ public class ElastiCacheMemcachedService {
      */
     private final StorageBackend<String, CacheCluster> redisClusters;
     private final StorageBackend<String, ReplicationGroup> groups;
+    private final StorageBackend<String, CacheSubnetGroup> subnetGroups;
     private final ElastiCacheMemcachedContainerManager containerManager;
     private final EmulatorConfig config;
     /** Shared with {@link ElastiCacheService}: one namespace, one set of in-flight claims. */
@@ -68,6 +70,8 @@ public class ElastiCacheMemcachedService {
                 new TypeReference<Map<String, CacheCluster>>() {});
         this.groups = storageFactory.create("elasticache", "elasticache-groups.json",
                 new TypeReference<Map<String, ReplicationGroup>>() {});
+        this.subnetGroups = storageFactory.create("elasticache", "elasticache-subnet-groups.json",
+                new TypeReference<Map<String, CacheSubnetGroup>>() {});
     }
 
     /**
@@ -87,6 +91,7 @@ public class ElastiCacheMemcachedService {
                     "The request cannot be processed because it would exceed the allowed number "
                             + "of cache nodes in a single cluster.", 400);
         }
+        requireCacheSubnetGroup(request.cacheSubnetGroupName());
         // Claimed before the store checks rather than after, because no create here or in
         // ElastiCacheService persists its record until its container has started: a store check
         // that passes is no promise the id is still free by the time this one writes. The claim
@@ -100,6 +105,16 @@ public class ElastiCacheMemcachedService {
             return provisionCacheCluster(request);
         } finally {
             provisioningIds.release(clusterId);
+        }
+    }
+
+    private void requireCacheSubnetGroup(String name) {
+        if (name == null || name.isBlank()) {
+            return;
+        }
+        if (subnetGroups.get(name).isEmpty()) {
+            throw new AwsException("CacheSubnetGroupNotFoundFault",
+                    "Cache subnet group " + name + " not found.", 400);
         }
     }
 
@@ -144,6 +159,7 @@ public class ElastiCacheMemcachedService {
                 && !request.preferredAvailabilityZone().isBlank()
                 ? request.preferredAvailabilityZone() : regionResolver.getRegion() + "a");
         cluster.setArn(regionResolver.buildArn("elasticache", request.region(), "cluster:" + clusterId));
+        cluster.setTags(request.tags());
         if (handle != null) {
             cluster.setContainerId(handle.getContainerId());
             cluster.setContainerHost(handle.getHost());

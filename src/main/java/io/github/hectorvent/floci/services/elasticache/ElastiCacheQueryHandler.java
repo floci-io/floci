@@ -782,9 +782,12 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                     }
                     tags = cluster.getTags();
                 } else if (service.listMemberCacheClusters(arn[6]).isEmpty()) {
-                    // Memcached clusters and replication group members carry no tags, but they do
-                    // exist. Only an id no source knows is a not-found.
-                    memcachedService.getCacheCluster(arn[6]);
+                    CacheCluster mcCluster = memcachedService.getCacheCluster(arn[6]);
+                    if (mcCluster.getArn() != null && !mcCluster.getArn().equalsIgnoreCase(resourceName)) {
+                        throw new AwsException("CacheClusterNotFound",
+                                "Cache cluster " + arn[6] + " not found.", 404);
+                    }
+                    tags = mcCluster.getTags();
                 }
             }
             if ("subnetgroup".equals(arn[5])) {

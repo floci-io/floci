@@ -4,11 +4,13 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheClusterStatus;
+import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -38,6 +40,7 @@ class ElastiCacheMemcachedServiceTest {
     private ElastiCacheMemcachedService service;
     private ElastiCacheMemcachedContainerManager containerManager;
     private ElastiCacheProvisioningIds provisioningIds;
+    private AccountAwareStorageBackend<CacheSubnetGroup> subnetGroups;
 
     @BeforeEach
     void setUp() {
@@ -53,7 +56,9 @@ class ElastiCacheMemcachedServiceTest {
         when(ecConfig.defaultMemcachedImage()).thenReturn("memcached:1.6");
         when(config.hostname()).thenReturn(Optional.of("localhost"));
 
+        subnetGroups = AccountAwareStorageBackend.inMemory("000000000000");
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        when(storageFactory.create(eq("elasticache"), eq("elasticache-subnet-groups.json"), any())).thenAnswer(inv -> subnetGroups);
         when(containerManager.tryStart(anyString(), anyString(), any()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "cluster", "localhost", 11211));
 
@@ -73,6 +78,10 @@ class ElastiCacheMemcachedServiceTest {
 
     @Test
     void createClusterStoresWhatTheRequestSetForTheDescribe() {
+        CacheSubnetGroup subnetGroup = new CacheSubnetGroup();
+        subnetGroup.setName("my-subnets");
+        subnetGroups.put("my-subnets", subnetGroup);
+
         service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
                 "sized", "memcached", null, "cache.m5.large", 3, null, null, null,
                 "default.memcached1.6", "my-subnets", null, null, null, "us-east-1c",
@@ -87,6 +96,33 @@ class ElastiCacheMemcachedServiceTest {
         assertEquals(List.of("sg-1", "sg-2"), stored.getSecurityGroupIds());
         assertEquals("us-east-1c", stored.getPreferredAvailabilityZone());
         assertEquals("arn:aws:elasticache:us-east-1:000000000000:cluster:sized", stored.getArn());
+    }
+
+    @Test
+    void createClusterWithNonexistentSubnetGroupThrows() {
+        ElastiCacheService.CreateCacheClusterRequest req = new ElastiCacheService.CreateCacheClusterRequest(
+                "missing-subnets", "memcached", null, null, null, null, null, null,
+                null, "nonexistent-subnets", null, null, null, null, null, null, null, null,
+                "us-east-1", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCacheCluster(req));
+        assertEquals("CacheSubnetGroupNotFoundFault", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createClusterPreservesTags() {
+        Map<String, String> tags = Map.of("env", "prod", "team", "backend");
+        ElastiCacheService.CreateCacheClusterRequest req = new ElastiCacheService.CreateCacheClusterRequest(
+                "tagged-cluster", "memcached", null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null, null,
+                "us-east-1", tags);
+
+        CacheCluster created = service.createCacheCluster(req);
+        assertEquals(tags, created.getTags());
+
+        CacheCluster stored = service.getCacheCluster("tagged-cluster");
+        assertEquals(tags, stored.getTags());
     }
 
     @Test
