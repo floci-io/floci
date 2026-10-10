@@ -1385,6 +1385,11 @@ public class LambdaService implements ResourceProvider {
         boolean hasEventSourceArn = request.containsKey("EventSourceArn") && request.get("EventSourceArn") != null;
         boolean isSelfManagedKafka = hasKafkaSource || hasTopics;
 
+        // The SourceAccessConfigurations cap applies to every source type, not only self-managed Kafka
+        if (request.get("SourceAccessConfigurations") instanceof List<?> accessToCap) {
+            validateMaxItems(accessToCap, "sourceAccessConfigurations", MAX_SOURCE_ACCESS_CONFIGURATIONS);
+        }
+
         String eventSourceArn;
         String resolvedRegion;
         Map<String, Object> selfManagedEventSource = null;
@@ -1457,7 +1462,6 @@ public class LambdaService implements ResourceProvider {
                         throw new AwsException("InvalidParameterValueException",
                                 "SourceAccessConfigurations must be a list", 400);
                     }
-                    validateMaxItems(accessList, "sourceAccessConfigurations", MAX_SOURCE_ACCESS_CONFIGURATIONS);
                     List<Map<String, Object>> typedAccess = new ArrayList<>();
                     for (Object item : accessList) {
                         if (!(item instanceof Map<?, ?> m)) {
@@ -2735,11 +2739,7 @@ public class LambdaService implements ResourceProvider {
         if (!(requireListOrNull(value, field) instanceof List<?> list)) {
             return;
         }
-        if (list.size() > maxItems) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + maxItems, 400);
-        }
+        validateMaxItems(list, field, maxItems);
         for (Object item : list) {
             validateEnum(item, field + ".member", allowed);
         }
@@ -2762,11 +2762,7 @@ public class LambdaService implements ResourceProvider {
         if (!(requireListOrNull(value, field) instanceof List<?> list)) {
             return;
         }
-        if (list.size() > maxItems) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + maxItems, 400);
-        }
+        validateMaxItems(list, field, maxItems);
         for (Object item : list) {
             validatePattern(item, field + ".member", pattern);
         }
@@ -2782,8 +2778,13 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
-    /** Topics: at most MAX_TOPICS entries, each at most MAX_TOPIC_LENGTH characters matching TOPIC_PATTERN. */
+    /** Topics: at most MAX_TOPICS entries, each 1 to MAX_TOPIC_LENGTH characters matching TOPIC_PATTERN. */
     private static void validateTopicConstraints(List<?> topics) {
+        for (Object topic : topics) {
+            if (topic instanceof String s) {
+                validateNonEmpty(s, "topics.member", false);
+            }
+        }
         validateArnList(topics, "topics", TOPIC_PATTERN, MAX_TOPICS);
         for (Object topic : topics) {
             validateMaxLength(topic, "topics.member", MAX_TOPIC_LENGTH);

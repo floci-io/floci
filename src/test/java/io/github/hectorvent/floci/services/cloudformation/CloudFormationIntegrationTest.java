@@ -5433,7 +5433,7 @@ class CloudFormationIntegrationTest {
                     "FunctionName": { "Ref": "MyFunction" },
                     "Enabled": true,
                     "BatchSize": 100,
-                    "Topics": ["orders-topic", "events-topic"],
+                    "Topics": ["orders-topic"],
                     "SelfManagedEventSource": {
                       "Endpoints": {
                         "KAFKA_BOOTSTRAP_SERVERS": ["kafka-broker-1:9092", "kafka-broker-2:9092"]
@@ -5511,9 +5511,8 @@ class CloudFormationIntegrationTest {
 
         // Verify Topics
         JsonNode topics = esmNode.path("Topics");
-        assertTrue(topics.isArray() && topics.size() == 2);
+        assertTrue(topics.isArray() && topics.size() == 1);
         assertEquals("orders-topic", topics.get(0).asText());
-        assertEquals("events-topic", topics.get(1).asText());
 
         // Verify SelfManagedEventSource
         JsonNode smes = esmNode.path("SelfManagedEventSource");
