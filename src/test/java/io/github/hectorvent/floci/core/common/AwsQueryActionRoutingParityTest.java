@@ -64,6 +64,7 @@ class AwsQueryActionRoutingParityTest {
             new QueryHandler("iam", HANDLERS_ROOT + "iam/IamQueryHandler.java"),
             new QueryHandler("sns", HANDLERS_ROOT + "sns/SnsQueryHandler.java"),
             new QueryHandler("elasticache", HANDLERS_ROOT + "elasticache/ElastiCacheQueryHandler.java"),
+            new QueryHandler("elasticache", HANDLERS_ROOT + "elasticache/ElastiCacheServerlessQueryHandler.java"),
             new QueryHandler("rds", HANDLERS_ROOT + "rds/RdsQueryHandler.java"),
             new QueryHandler("rds", HANDLERS_ROOT + "docdb/DocDbQueryHandler.java"),
             new QueryHandler("rds", HANDLERS_ROOT + "neptune/NeptuneQueryHandler.java"),

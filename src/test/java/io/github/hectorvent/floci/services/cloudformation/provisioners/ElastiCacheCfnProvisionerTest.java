@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheClusterStatus;
 import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
+import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUserGroup;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -19,6 +21,7 @@ import org.mockito.ArgumentCaptor;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -254,6 +257,131 @@ class ElastiCacheCfnProvisionerTest {
     }
 
     @Test
+    void userWithPasswordAuthenticationModeSetsArnAndStatus() throws Exception {
+        ElastiCacheUser user = new ElastiCacheUser("app", "app", AuthMode.PASSWORD, List.of("pw-0123456789abcd"),
+                "on ~* +@all", "redis", "active", Instant.now());
+        user.setArn("arn:aws:elasticache:us-east-1:000000000000:user:app");
+        when(cache.createUser(eq("app"), eq("app"), eq(AuthMode.PASSWORD), eq(List.of("pw-0123456789abcd")),
+                eq("on ~* +@all"), eq("redis"))).thenReturn(user);
+        StackResource r = resource("AWS::ElastiCache::User", "AppUser");
+
+        provisioner.provision(r, props("""
+                {"UserId":"app","UserName":"app","Engine":"redis","AccessString":"on ~* +@all",
+                 "AuthenticationMode":{"Type":"password","Passwords":["pw-0123456789abcd"]}}
+                """), ctx(null));
+
+        assertEquals("app", r.getPhysicalId());
+        assertEquals("arn:aws:elasticache:us-east-1:000000000000:user:app", r.getAttributes().get("Arn"));
+        assertEquals("active", r.getAttributes().get("Status"));
+    }
+
+    @Test
+    void userWithNoPasswordRequiredUsesNoAuth() throws Exception {
+        ElastiCacheUser user = new ElastiCacheUser("d", "default", AuthMode.NO_AUTH, List.of(), "off -@all",
+                "redis", "active", Instant.now());
+        when(cache.createUser(eq("d"), eq("default"), eq(AuthMode.NO_AUTH), any(), eq("off -@all"), eq("redis")))
+                .thenReturn(user);
+        StackResource r = resource("AWS::ElastiCache::User", "Default");
+
+        provisioner.provision(r, props("""
+                {"UserId":"d","UserName":"default","Engine":"redis","AccessString":"off -@all",
+                 "NoPasswordRequired":true}
+                """), ctx(null));
+
+        assertEquals("d", r.getPhysicalId());
+    }
+
+    @Test
+    void userRequiresUserIdAndUserName() throws Exception {
+        StackResource r = resource("AWS::ElastiCache::User", "Bad");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("{\"Engine\":\"redis\"}"), ctx(null)));
+    }
+
+    @Test
+    void userGroupSetsArnAndStatus() throws Exception {
+        ElastiCacheUserGroup group = new ElastiCacheUserGroup();
+        group.setUserGroupId("team");
+        group.setArn("arn:aws:elasticache:us-east-1:000000000000:usergroup:team");
+        group.setStatus("active");
+        when(cache.createUserGroup("team", "redis", List.of("d", "app"), "us-east-1")).thenReturn(group);
+        StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
+
+        provisioner.provision(r, props("""
+                {"UserGroupId":"team","Engine":"redis","UserIds":["d","app"]}
+                """), ctx(null));
+
+        assertEquals("team", r.getPhysicalId());
+        assertEquals("arn:aws:elasticache:us-east-1:000000000000:usergroup:team", r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void userGroupUpdateAppliesMembershipDelta() throws Exception {
+        ElastiCacheUserGroup existing = new ElastiCacheUserGroup();
+        existing.setUserGroupId("team");
+        existing.setEngine("redis");
+        existing.setUserIds(new LinkedHashSet<>(List.of("d", "old")));
+        existing.setArn("arn");
+        existing.setStatus("active");
+        when(cache.getUserGroup("team")).thenReturn(existing);
+        when(cache.modifyUserGroup(eq("team"), eq(List.of("new")), eq(List.of("old")), any())).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
+
+        provisioner.provision(r, props("""
+                {"UserGroupId":"team","Engine":"redis","UserIds":["d","new"]}
+                """), ctx("team"));
+
+        verify(cache, never()).createUserGroup(any(), any(), any(), any());
+        verify(cache).modifyUserGroup(eq("team"), eq(List.of("new")), eq(List.of("old")), any());
+    }
+
+    @Test
+    void userNameChangeIsRejectedBecauseItIsCreateOnly() throws Exception {
+        ElastiCacheUser existing = new ElastiCacheUser("app", "old-name", AuthMode.NO_AUTH, List.of(), "on ~* +@all",
+                "redis", "active", Instant.now());
+        when(cache.getUser("app")).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::User", "AppUser");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r,
+                props("{\"UserId\":\"app\",\"UserName\":\"new-name\",\"Engine\":\"redis\"}"), ctx("app")));
+        verify(cache, never()).modifyUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userGroupEngineChangeIsAppliedInPlace() throws Exception {
+        ElastiCacheUserGroup existing = new ElastiCacheUserGroup();
+        existing.setUserGroupId("team");
+        existing.setEngine("redis");
+        existing.setArn("arn");
+        existing.setStatus("active");
+        when(cache.getUserGroup("team")).thenReturn(existing);
+        when(cache.modifyUserGroup(eq("team"), eq(List.of()), eq(List.of()), eq("valkey"))).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
+
+        provisioner.provision(r, props("{\"UserGroupId\":\"team\",\"Engine\":\"valkey\",\"UserIds\":[]}"), ctx("team"));
+
+        verify(cache).modifyUserGroup("team", List.of(), List.of(), "valkey");
+        verify(cache, never()).createUserGroup(any(), any(), any(), any());
+    }
+
+    @Test
+    void mixedCaseUserGroupIdIsReusedOnUpdateThroughItsLowercaseForm() throws Exception {
+        ElastiCacheUserGroup existing = new ElastiCacheUserGroup();
+        existing.setUserGroupId("myusers");
+        existing.setEngine("redis");
+        existing.setArn("arn");
+        existing.setStatus("active");
+        when(cache.getUserGroup("myusers")).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
+
+        provisioner.provision(r, props("{\"UserGroupId\":\"MyUsers\",\"Engine\":\"redis\",\"UserIds\":[]}"),
+                ctx("myusers"));
+
+        verify(cache, never()).createUserGroup(any(), any(), any(), any());
+        assertEquals("myusers", r.getPhysicalId());
+    }
+
+    @Test
     void transitEncryptionDoesNotTurnOnIamAuthentication() throws Exception {
         when(cache.createCacheCluster(any())).thenReturn(new CacheCluster("tls", CacheClusterStatus.AVAILABLE,
                 "redis", "7.1", new Endpoint("localhost", 6400), Instant.now()));
@@ -380,15 +508,31 @@ class ElastiCacheCfnProvisionerTest {
     }
 
     @Test
-    void deleteToleratesAlreadyDeletedButPropagatesOtherFailures() {
-        doThrow(new AwsException("CacheSubnetGroupNotFoundFault", "gone", 400))
-                .when(cache).deleteCacheSubnetGroup("gone");
-        provisioner.delete("AWS::ElastiCache::SubnetGroup", "gone", "us-east-1");
+    void renamedUserGroupReplacesAndDeletesTheOldOne() throws Exception {
+        ElastiCacheUserGroup created = new ElastiCacheUserGroup();
+        created.setUserGroupId("new-team");
+        created.setArn("arn");
+        created.setStatus("active");
+        when(cache.createUserGroup("new-team", "redis", List.of(), "us-east-1")).thenReturn(created);
+        StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
 
-        doThrow(new AwsException("CacheSubnetGroupInUse", "busy", 400))
-                .when(cache).deleteCacheSubnetGroup("busy");
+        provisioner.provision(r, props("{\"UserGroupId\":\"new-team\",\"Engine\":\"redis\",\"UserIds\":[]}"), ctx("old-team"));
+
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        provisioner.completeUpdate(r);
+        verify(cache).deleteUserGroup("old-team");
+    }
+
+    @Test
+    void deleteToleratesAlreadyDeletedButPropagatesOtherFailures() {
+        doThrow(new AwsException("UserNotFoundFault", "gone", 404))
+                .when(cache).deleteUser("gone");
+        provisioner.delete("AWS::ElastiCache::User", "gone", "us-east-1");
+
+        doThrow(new AwsException("InvalidUserGroupState", "busy", 400))
+                .when(cache).deleteUserGroup("busy");
         assertThrows(AwsException.class,
-                () -> provisioner.delete("AWS::ElastiCache::SubnetGroup", "busy", "us-east-1"));
+                () -> provisioner.delete("AWS::ElastiCache::UserGroup", "busy", "us-east-1"));
     }
 
     @Test
