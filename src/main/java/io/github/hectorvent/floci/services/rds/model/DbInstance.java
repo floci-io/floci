@@ -67,6 +67,7 @@ public class DbInstance {
     private String masterUserSecretStatus;
     private String masterUserSecretKmsKeyId;
     private Map<String, String> tags = new LinkedHashMap<>();
+    private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private Instant createdAt;
     private int proxyPort;
     // Read replication links, kept on both ends the way DescribeDBInstances reports them: a
@@ -244,6 +245,11 @@ public class DbInstance {
     public boolean hasReadReplicaSource() {
         return readReplicaSourceDbInstanceIdentifier != null
                 && !readReplicaSourceDbInstanceIdentifier.isBlank();
+    }
+
+    public List<DbRoleAssociation> getAssociatedRoles() { return associatedRoles; }
+    public void setAssociatedRoles(List<DbRoleAssociation> associatedRoles) {
+        this.associatedRoles = associatedRoles != null ? new ArrayList<>(associatedRoles) : new ArrayList<>();
     }
 
     public Map<String, String> getTags() { return tags; }

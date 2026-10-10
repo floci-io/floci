@@ -67,6 +67,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBClusterEndpoints` | List a cluster's built-in writer and reader endpoints and its custom endpoints, with the four documented filters |
 | `ModifyDBClusterEndpoint` | Change a custom endpoint's type or member list |
 | `DeleteDBClusterEndpoint` | Delete a custom endpoint |
+| `AddRoleToDBCluster` | Associate an IAM role with a cluster, optionally for a feature; see [IAM role associations](#iam-role-associations) |
+| `RemoveRoleFromDBCluster` | Remove a role from a cluster |
+| `AddRoleToDBInstance` | Associate an IAM role with an instance for a feature |
+| `RemoveRoleFromDBInstance` | Remove a role from an instance |
 | `AddSourceIdentifierToSubscription` | Add a source id to a subscription |
 | `RemoveSourceIdentifierFromSubscription` | Remove a source id from a subscription |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
@@ -559,6 +563,26 @@ Custom endpoints are modelled, not routed: a custom endpoint reports the cluster
 (read from the cluster each time, so it follows a restart onto another proxy port), so it is
 reachable, but connections through it go where the cluster endpoint sends them rather than being
 spread across the chosen members.
+
+## IAM role associations
+
+`AddRoleToDBCluster` and `AddRoleToDBInstance` associate an IAM role with an available cluster or
+instance, and `DescribeDBClusters` / `DescribeDBInstances` report it in `AssociatedRoles` with status
+`ACTIVE` straight away. `CreateDBCluster` accepts `AssociatedRoles` too, and a list that names a role or
+a feature twice refuses the create before any cluster exists.
+
+`FeatureName` (such as `s3Import`, `s3Export` or `Lambda`) is optional for a cluster and required for an
+instance. A role or a feature is associated at most once per cluster or instance
+(`DBClusterRoleAlreadyExists` / `DBInstanceRoleAlreadyExists`). `RemoveRoleFromDBCluster` removes the
+role, matching the feature name when one is given, and `RemoveRoleFromDBInstance` removes the role for
+the feature named; an association that does not exist is `DBClusterRoleNotFound` /
+`DBInstanceRoleNotFound`. A stopped cluster or instance refuses both (`InvalidDBClusterStateFault` /
+`InvalidDBInstanceState`).
+
+Associations are recorded, not exercised: Floci does not check the role in IAM, does not check the
+feature name against the engine, and does not hand the role's credentials to the database, so an
+`aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
+associations, and snapshots, restores and read replicas start without any.
 
 ## Point in time restore
 

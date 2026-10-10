@@ -18,14 +18,21 @@ import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.DBCluster;
+import software.amazon.awssdk.services.rds.model.DBClusterAssociatedRole;
 import software.amazon.awssdk.services.rds.model.DBClusterEndpoint;
+import software.amazon.awssdk.services.rds.model.DBClusterRole;
 import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
 import software.amazon.awssdk.services.rds.model.DBInstance;
+import software.amazon.awssdk.services.rds.model.DBInstanceRole;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DBSnapshot;
 import software.amazon.awssdk.services.rds.model.DbClusterEndpointAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbClusterEndpointNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbClusterRoleAlreadyExistsException;
+import software.amazon.awssdk.services.rds.model.DbClusterRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbInstanceRoleAlreadyExistsException;
+import software.amazon.awssdk.services.rds.model.DbInstanceRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
@@ -745,6 +752,61 @@ class RdsControlPlaneTest {
             }
             deleteDbInstance(rds, readerName);
             deleteDbInstance(rds, writerName);
+            try {
+                rds.deleteDBCluster(b -> b.dbClusterIdentifier(clusterName).skipFinalSnapshot(true));
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
+            }
+        }
+    }
+
+    @Test
+    void sdkRoundTripsIamRoleAssociations() {
+        String clusterName = TestFixtures.uniqueName("rds-roles-cluster");
+        String instanceName = TestFixtures.uniqueName("rds-roles-db");
+        String s3Role = "arn:aws:iam::000000000000:role/rds-s3-import";
+        String lambdaRole = "arn:aws:iam::000000000000:role/rds-lambda";
+        try {
+            CreateDbClusterResponse created = rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("roles-secret")
+                    .associatedRoles(DBClusterAssociatedRole.builder().roleArn(s3Role).featureName("s3Import").build()));
+            assertThat(created.dbCluster().associatedRoles())
+                    .extracting(DBClusterRole::roleArn, DBClusterRole::featureName, DBClusterRole::status)
+                    .containsExactly(tuple(s3Role, "s3Import", "ACTIVE"));
+
+            rds.addRoleToDBCluster(b -> b.dbClusterIdentifier(clusterName).roleArn(lambdaRole));
+            assertThat(rds.describeDBClusters(b -> b.dbClusterIdentifier(clusterName))
+                    .dbClusters().get(0).associatedRoles())
+                    .extracting(DBClusterRole::roleArn)
+                    .containsExactly(s3Role, lambdaRole);
+            assertThatThrownBy(() -> rds.addRoleToDBCluster(b -> b.dbClusterIdentifier(clusterName).roleArn(s3Role)))
+                    .isInstanceOf(DbClusterRoleAlreadyExistsException.class);
+
+            rds.removeRoleFromDBCluster(b -> b.dbClusterIdentifier(clusterName).roleArn(s3Role));
+            assertThatThrownBy(() -> rds.removeRoleFromDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName).roleArn(s3Role)))
+                    .isInstanceOf(DbClusterRoleNotFoundException.class);
+
+            createDbInstance(rds, instanceName, "roles-secret");
+            rds.addRoleToDBInstance(b -> b.dbInstanceIdentifier(instanceName).roleArn(s3Role).featureName("s3Import"));
+            assertThat(rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0).associatedRoles())
+                    .extracting(DBInstanceRole::roleArn, DBInstanceRole::featureName, DBInstanceRole::status)
+                    .containsExactly(tuple(s3Role, "s3Import", "ACTIVE"));
+            assertThatThrownBy(() -> rds.addRoleToDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).roleArn(lambdaRole).featureName("s3Import")))
+                    .isInstanceOf(DbInstanceRoleAlreadyExistsException.class);
+
+            rds.removeRoleFromDBInstance(b -> b.dbInstanceIdentifier(instanceName).roleArn(s3Role).featureName("s3Import"));
+            assertThatThrownBy(() -> rds.removeRoleFromDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).roleArn(s3Role).featureName("s3Import")))
+                    .isInstanceOf(DbInstanceRoleNotFoundException.class);
+        } finally {
+            deleteDbInstance(rds, instanceName);
             try {
                 rds.deleteDBCluster(b -> b.dbClusterIdentifier(clusterName).skipFinalSnapshot(true));
             } catch (Exception e) {

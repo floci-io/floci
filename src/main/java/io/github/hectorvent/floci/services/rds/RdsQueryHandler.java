@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.EventSubscription;
@@ -102,6 +103,10 @@ public class RdsQueryHandler {
                 case "DescribeDBClusterEndpoints" -> handleDescribeDbClusterEndpoints(params, region);
                 case "ModifyDBClusterEndpoint" -> handleModifyDbClusterEndpoint(params, region);
                 case "DeleteDBClusterEndpoint" -> handleDeleteDbClusterEndpoint(params, region);
+                case "AddRoleToDBCluster" -> handleAddRoleToDbCluster(params, region);
+                case "RemoveRoleFromDBCluster" -> handleRemoveRoleFromDbCluster(params, region);
+                case "AddRoleToDBInstance" -> handleAddRoleToDbInstance(params, region);
+                case "RemoveRoleFromDBInstance" -> handleRemoveRoleFromDbInstance(params, region);
                 case "AddSourceIdentifierToSubscription" ->
                         handleAddSourceIdentifierToSubscription(params, region);
                 case "RemoveSourceIdentifierFromSubscription" ->
@@ -351,6 +356,49 @@ public class RdsQueryHandler {
                 params.getFirst("SubscriptionName"));
         return Response.ok(AwsQueryResponse.envelope("DeleteEventSubscription", AwsNamespaces.RDS,
                 new XmlBuilder().raw(eventSubscriptionXml(subscription)).build())).build();
+    }
+
+    private Response handleAddRoleToDbCluster(MultivaluedMap<String, String> params, String region) {
+        service.addRoleToDbCluster(region, params.getFirst("DBClusterIdentifier"),
+                params.getFirst("RoleArn"), params.getFirst("FeatureName"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AddRoleToDBCluster", AwsNamespaces.RDS)).build();
+    }
+
+    private Response handleRemoveRoleFromDbCluster(MultivaluedMap<String, String> params, String region) {
+        service.removeRoleFromDbCluster(region, params.getFirst("DBClusterIdentifier"),
+                params.getFirst("RoleArn"), params.getFirst("FeatureName"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RemoveRoleFromDBCluster", AwsNamespaces.RDS)).build();
+    }
+
+    private Response handleAddRoleToDbInstance(MultivaluedMap<String, String> params, String region) {
+        service.addRoleToDbInstance(region, params.getFirst("DBInstanceIdentifier"),
+                params.getFirst("RoleArn"), params.getFirst("FeatureName"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AddRoleToDBInstance", AwsNamespaces.RDS)).build();
+    }
+
+    private Response handleRemoveRoleFromDbInstance(MultivaluedMap<String, String> params, String region) {
+        service.removeRoleFromDbInstance(region, params.getFirst("DBInstanceIdentifier"),
+                params.getFirst("RoleArn"), params.getFirst("FeatureName"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RemoveRoleFromDBInstance", AwsNamespaces.RDS)).build();
+    }
+
+    /**
+     * The {@code AssociatedRoles} a {@code CreateDBCluster} request names. botocore and the Java SDK
+     * send the model's member name ({@code AssociatedRoles.DBClusterAssociatedRole.N.RoleArn});
+     * {@code .member.N} is read too, as the other RDS lists accept it.
+     */
+    private static List<DbRoleAssociation> parseAssociatedRoles(MultivaluedMap<String, String> params) {
+        List<DbRoleAssociation> roles = new ArrayList<>();
+        for (String prefix : List.of("AssociatedRoles.DBClusterAssociatedRole", "AssociatedRoles.member")) {
+            for (int i = 1; ; i++) {
+                String roleArn = params.getFirst(prefix + "." + i + ".RoleArn");
+                if (roleArn == null) {
+                    break;
+                }
+                roles.add(new DbRoleAssociation(roleArn, params.getFirst(prefix + "." + i + ".FeatureName")));
+            }
+        }
+        return roles;
     }
 
     private Response handleCreateDbClusterEndpoint(MultivaluedMap<String, String> params, String region) {
@@ -1006,6 +1054,8 @@ public class RdsQueryHandler {
         }
 
         try {
+            List<DbRoleAssociation> associatedRoles = parseAssociatedRoles(params);
+            service.validateClusterRoleAssociations(id, associatedRoles);
             Double serverlessV2Min = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MinCapacity");
             Double serverlessV2Max = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MaxCapacity");
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
@@ -1039,6 +1089,9 @@ public class RdsQueryHandler {
                             serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                             manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
                             requestedPort);
+            }
+            for (DbRoleAssociation role : associatedRoles) {
+                cluster = service.addRoleToDbCluster(region, id, role.getRoleArn(), role.getFeatureName());
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
@@ -2580,6 +2633,7 @@ public class RdsQueryHandler {
             xml.elem("DBClusterIdentifier", i.getDbClusterIdentifier());
         }
         xml.raw(readReplicaXml(i));
+        writeAssociatedRoles(xml, i.getAssociatedRoles(), "DBInstanceRole");
         xml.start("TagList");
         writeTags(xml, i.getTags());
         xml.end("TagList");
@@ -2789,7 +2843,21 @@ public class RdsQueryHandler {
             }
         }
         xml.end("DBClusterMembers");
+        writeAssociatedRoles(xml, c.getAssociatedRoles(), "DBClusterRole");
         return xml.build();
+    }
+
+    /** {@code AssociatedRoles}, each entry named as the model names it for the resource. */
+    private static void writeAssociatedRoles(XmlBuilder xml, List<DbRoleAssociation> roles, String elementName) {
+        xml.start("AssociatedRoles");
+        for (DbRoleAssociation role : roles) {
+            xml.start(elementName).elem("RoleArn", role.getRoleArn());
+            if (role.getFeatureName() != null) {
+                xml.elem("FeatureName", role.getFeatureName());
+            }
+            xml.elem("Status", role.getStatus()).end(elementName);
+        }
+        xml.end("AssociatedRoles");
     }
 
     private String paramGroupXml(DbParameterGroup g) {

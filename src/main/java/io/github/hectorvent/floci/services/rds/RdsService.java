@@ -48,6 +48,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.EventSubscription;
@@ -74,6 +75,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -9321,6 +9323,153 @@ public class RdsService implements Resettable, ResourceProvider {
         return eventSubscriptions.get(eventSubscriptionKey(region, subscriptionName))
                 .orElseThrow(() -> new AwsException("SubscriptionNotFound",
                         "Subscription " + subscriptionName + " not found.", 404));
+    }
+
+    // ── IAM role associations ─────────────────────────────────────────────────
+
+    /**
+     * Associates an IAM role with a DB cluster. A cluster names each role once, and each feature
+     * once: a second role for a feature that already has one is refused, as is the same role
+     * twice. The role is {@code ACTIVE} at once and is not looked up in IAM.
+     */
+    public synchronized DbCluster addRoleToDbCluster(String region, String clusterId, String roleArn,
+                                                     String featureName) {
+        requireParameter(clusterId, "DBClusterIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        String feature = blankToNull(featureName);
+        for (DbRoleAssociation existing : cluster.getAssociatedRoles()) {
+            if (existing.getRoleArn().equals(roleArn)) {
+                throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + roleArn
+                        + " is already associated with DB cluster " + clusterId + ".", 400);
+            }
+            if (feature != null && feature.equals(existing.getFeatureName())) {
+                throw new AwsException("DBClusterRoleAlreadyExists", "Feature " + feature
+                        + " is already associated with role " + existing.getRoleArn() + " on DB cluster "
+                        + clusterId + ".", 400);
+            }
+        }
+        cluster.getAssociatedRoles().add(new DbRoleAssociation(roleArn, feature));
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        LOG.infov("Role {0} associated with DB cluster {1}", roleArn, clusterId);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Removes a role from a DB cluster. When a feature name is given, the role must be associated
+     * for that feature.
+     */
+    public synchronized DbCluster removeRoleFromDbCluster(String region, String clusterId, String roleArn,
+                                                          String featureName) {
+        requireParameter(clusterId, "DBClusterIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        String feature = blankToNull(featureName);
+        boolean removed = cluster.getAssociatedRoles().removeIf(existing -> existing.getRoleArn().equals(roleArn)
+                && (feature == null || feature.equals(existing.getFeatureName())));
+        if (!removed) {
+            throw new AwsException("DBClusterRoleNotFound", "Role ARN " + roleArn
+                    + (feature == null ? "" : " for feature " + feature)
+                    + " is not associated with DB cluster " + clusterId + ".", 404);
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        LOG.infov("Role {0} disassociated from DB cluster {1}", roleArn, clusterId);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Associates an IAM role with a DB instance for one feature. The role and the feature are each
+     * associated at most once, so either one already present is refused.
+     */
+    public synchronized DbInstance addRoleToDbInstance(String region, String instanceId, String roleArn,
+                                                       String featureName) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        requireParameter(featureName, "FeatureName");
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        requireAvailableInstance(instance, instanceId);
+        for (DbRoleAssociation existing : instance.getAssociatedRoles()) {
+            if (existing.getRoleArn().equals(roleArn) || featureName.equals(existing.getFeatureName())) {
+                throw new AwsException("DBInstanceRoleAlreadyExists", "Role ARN " + existing.getRoleArn()
+                        + " is already associated with DB instance " + instanceId + " for feature "
+                        + existing.getFeatureName() + ".", 400);
+            }
+        }
+        instance.getAssociatedRoles().add(new DbRoleAssociation(roleArn, featureName));
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
+        LOG.infov("Role {0} associated with DB instance {1} for feature {2}", roleArn, instanceId, featureName);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    /** Removes a role from a DB instance; the role must be associated for the feature named. */
+    public synchronized DbInstance removeRoleFromDbInstance(String region, String instanceId, String roleArn,
+                                                            String featureName) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        requireParameter(featureName, "FeatureName");
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        requireAvailableInstance(instance, instanceId);
+        boolean removed = instance.getAssociatedRoles().removeIf(existing -> existing.getRoleArn().equals(roleArn)
+                && featureName.equals(existing.getFeatureName()));
+        if (!removed) {
+            throw new AwsException("DBInstanceRoleNotFound", "Role ARN " + roleArn
+                    + " is not associated with DB instance " + instanceId + " for feature " + featureName + ".", 404);
+        }
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
+        LOG.infov("Role {0} disassociated from DB instance {1}", roleArn, instanceId);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    /**
+     * Checks the roles a {@code CreateDBCluster} request names before the cluster exists, by the
+     * rules {@link #addRoleToDbCluster} applies one at a time, so a list that would be refused part
+     * way through refuses the create instead of leaving a cluster with half its roles.
+     */
+    public void validateClusterRoleAssociations(String clusterId, List<DbRoleAssociation> roles) {
+        Set<String> roleArns = new HashSet<>();
+        Set<String> features = new HashSet<>();
+        for (DbRoleAssociation role : roles) {
+            requireParameter(role.getRoleArn(), "AssociatedRoles.RoleArn");
+            if (!roleArns.add(role.getRoleArn())) {
+                throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + role.getRoleArn()
+                        + " is named more than once for DB cluster " + clusterId + ".", 400);
+            }
+            String feature = blankToNull(role.getFeatureName());
+            if (feature != null && !features.add(feature)) {
+                throw new AwsException("DBClusterRoleAlreadyExists", "Feature " + feature
+                        + " is named more than once for DB cluster " + clusterId + ".", 400);
+            }
+        }
+    }
+
+    private static String blankToNull(String value) {
+        return isBlank(value) ? null : value;
+    }
+
+    private static void requireParameter(String value, String name) {
+        if (isBlank(value)) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter " + name + ".", 400);
+        }
+    }
+
+    private static void requireAvailableCluster(DbCluster cluster, String clusterId) {
+        if (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBClusterStateFault",
+                    "DB cluster " + clusterId + " is not in available state.", 400);
+        }
+    }
+
+    private static void requireAvailableInstance(DbInstance instance, String instanceId) {
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + instanceId + " is not in available state.", 400);
+        }
     }
 
     // ── Cluster endpoints ─────────────────────────────────────────────────────
