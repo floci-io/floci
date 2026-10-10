@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -36,7 +37,6 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1050,13 +1050,7 @@ class CognitoIntegrationTest {
                 .body("__type", equalTo("NotAuthorizedException"))
                 .body("message", equalTo("Contact administrator to reset password."));
 
-        given()
-                .queryParam("email", email)
-                .when()
-                .get("/_aws/ses")
-                .then()
-                .statusCode(200)
-                .body("messages", hasSize(0));
+        assertEquals(0, SesMailbox.messagesTo(email).size());
     }
 
     @Test
@@ -3492,16 +3486,7 @@ class CognitoIntegrationTest {
     }
 
     private static String fetchLatestSesVerificationCode(String recipient) throws Exception {
-        String response = given()
-                .queryParam("email", recipient)
-                .when()
-                .get("/_aws/ses")
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString();
-        JsonNode payload = OBJECT_MAPPER.readTree(response);
-        String body = payload.path("messages").get(0).path("Body").path("text_part").asText();
+        String body = SesMailbox.messagesTo(recipient).get(0).path("Body").path("text_part").asText();
         Matcher matcher = SIX_DIGIT_CODE.matcher(body);
         assertTrue(matcher.find(), "verification code email should contain a 6-digit code");
         return matcher.group(1);

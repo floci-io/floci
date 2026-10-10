@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -1246,10 +1247,8 @@ class CognitoManagedLoginIntegrationTest {
         return matcher.group(1);
     }
 
-    private static JsonNode emailsTo(String email) throws Exception {
-        String body = given().queryParam("email", email).when().get("/_aws/ses")
-                .then().statusCode(200).extract().asString();
-        return MAPPER.readTree(body).path("messages");
+    private static JsonNode emailsTo(String email) {
+        return SesMailbox.messagesTo(email);
     }
 
     private static String differentCode(String code) {

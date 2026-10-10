@@ -316,10 +316,17 @@ class CognitoVerifyUserAttributeTest {
     }
 
     private static String fetchLatestSesVerificationCode(String recipient) throws Exception {
-        URI uri = TestFixtures.endpoint()
-                .resolve("/_aws/ses?email=" + URLEncoder.encode(recipient, StandardCharsets.UTF_8));
-        JsonNode messages = getInspectionMessages(uri);
-        return extractVerificationCode(messages.get(0).path("Body").path("text_part").asText());
+        // The mailbox's email parameter filters by message source, so the message sent to the
+        // recipient is picked out of the full list.
+        JsonNode messages = getInspectionMessages(TestFixtures.endpoint().resolve("/_aws/ses"));
+        for (JsonNode message : messages) {
+            for (JsonNode to : message.path("Destination").path("ToAddresses")) {
+                if (recipient.equals(to.asText())) {
+                    return extractVerificationCode(message.path("Body").path("text_part").asText());
+                }
+            }
+        }
+        throw new AssertionError("SES should have received a verification email for " + recipient);
     }
 
     private static String fetchLatestSnsVerificationCode(String phoneNumber) throws Exception {
