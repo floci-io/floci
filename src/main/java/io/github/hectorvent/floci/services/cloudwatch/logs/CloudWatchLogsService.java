@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -41,12 +42,14 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 
 import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.invalid;
 
 @ApplicationScoped
-public class CloudWatchLogsService implements ResourceProvider {
+public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchLogsService.class);
     private static final int MAX_REGEX_FILTERS_PER_LOG_GROUP = 5;
@@ -66,6 +69,8 @@ public class CloudWatchLogsService implements ResourceProvider {
     private final StorageBackend<String, LogGroup> groupStore;
     private final StorageBackend<String, LogStream> streamStore;
     private final StorageBackend<String, LogEvent> eventStore;
+    private final Map<String, LogEventIndex> eventIndexes = new ConcurrentHashMap<>();
+    private volatile boolean resetting;
     private final StorageBackend<String, SubscriptionFilter> subscriptionFilterStore;
     private final StorageBackend<String, MetricFilter> metricFilterStore;
     private final StorageBackend<String, ResourcePolicy> resourcePolicyStore;
@@ -224,6 +229,32 @@ public class CloudWatchLogsService implements ResourceProvider {
         this.logGroupDeleted = logGroupDeleted;
     }
 
+    /** Each reset hook empties every index and marks it stale; the next write refills from the store. */
+    @Override
+    public void beforeReset() {
+        resetting = true;
+        clearEveryIndex();
+    }
+
+    @Override
+    public void clear() {
+        clearEveryIndex();
+    }
+
+    @Override
+    public void afterReset() {
+        clearEveryIndex();
+        resetting = false;
+    }
+
+    private void clearEveryIndex() {
+        for (LogEventIndex index : eventIndexes.values()) {
+            synchronized (index) {
+                index.clear();
+            }
+        }
+    }
+
     // ──────────────────────────── Log Groups ────────────────────────────
 
     public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags, String region) {
@@ -293,22 +324,26 @@ public class CloudWatchLogsService implements ResourceProvider {
                         400);
             }
 
-            // Cascade: delete all streams, events and filters before removing the group.
+            // Cascade: delete the group's streams, events and filters; each record's own group decides.
             String streamPrefix = streamKeyPrefix(region, name);
             List<String> streamKeys = streamStore.keys().stream()
                     .filter(k -> k.startsWith(streamPrefix))
                     .toList();
             for (String sk : streamKeys) {
-                LogStream stream = streamStore.get(sk).orElse(null);
+                LogStream stream = streamStore.get(sk)
+                        .filter(ofGroup(name, LogStream::getLogGroupName)).orElse(null);
                 if (stream != null) {
-                    deleteEventsForStream(region, name, stream.getLogStreamName());
-                    streamStore.delete(sk);
+                    deleteStreamAndEvents(region, name, stream.getLogStreamName(), sk);
                 }
             }
             metricFilterStore.keys().stream().filter(k -> k.startsWith(streamPrefix))
+                    .filter(k -> metricFilterStore.get(k)
+                            .filter(ofGroup(name, MetricFilter::getLogGroupName)).isPresent())
                     .toList().forEach(metricFilterStore::delete);
             String subscriptionPrefix = subscriptionFilterKeyPrefix(region, name);
             subscriptionFilterStore.keys().stream().filter(k -> k.startsWith(subscriptionPrefix))
+                    .filter(k -> subscriptionFilterStore.get(k)
+                            .filter(ofGroup(name, SubscriptionFilter::getLogGroupName)).isPresent())
                     .toList().forEach(subscriptionFilterStore::delete);
             groupStore.delete(key);
             LOG.infov("Deleted log group: {0}", name);
@@ -459,11 +494,11 @@ public class CloudWatchLogsService implements ResourceProvider {
     public void deleteLogStream(String groupName, String streamName, String region) {
         String streamKey = streamKey(region, groupName, streamName);
         streamStore.get(streamKey)
+                .filter(ofGroup(groupName, LogStream::getLogGroupName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log stream does not exist: " + streamName, 400));
 
-        deleteEventsForStream(region, groupName, streamName);
-        streamStore.delete(streamKey);
+        deleteStreamAndEvents(region, groupName, streamName, streamKey);
         LOG.infov("Deleted log stream: {0}/{1}", groupName, streamName);
     }
 
@@ -510,7 +545,7 @@ public class CloudWatchLogsService implements ResourceProvider {
         }
 
         String storagePrefix = streamKeyPrefix(region, groupName);
-        List<LogStream> result = streamStore.scan(k -> {
+        List<LogStream> result = new ArrayList<>(streamStore.scan(k -> {
             if (!k.startsWith(storagePrefix)) {
                 return false;
             }
@@ -519,7 +554,7 @@ public class CloudWatchLogsService implements ResourceProvider {
             }
             String streamName = k.substring(storagePrefix.length());
             return streamName.startsWith(prefix);
-        });
+        }).stream().filter(ofGroup(groupName, LogStream::getLogGroupName)).toList());
         // Streams that never received events have no lastEventTimestamp; sort them oldest,
         // with the name as tie-break so the order stays deterministic.
         Comparator<LogStream> base = byLastEventTime
@@ -616,7 +651,8 @@ public class CloudWatchLogsService implements ResourceProvider {
             String accountId, String groupName, String streamName,
             List<Map<String, Object>> events, String region) {
         String streamKey = streamKey(region, groupName, streamName);
-        LogStream stream = getForAccount(streamStore, accountId, streamKey)
+        getForAccount(streamStore, accountId, streamKey)
+                .filter(ofGroup(groupName, LogStream::getLogGroupName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log stream does not exist: " + streamName, 400));
 
@@ -646,25 +682,43 @@ public class CloudWatchLogsService implements ResourceProvider {
             if (minTs == null || ts < minTs) { minTs = ts; }
             if (maxTs == null || ts > maxTs) { maxTs = ts; }
         }
-        putAllForAccount(eventStore, accountId, logEvents);
-
-        evictEventsPastRetention(accountId, region, groupName, now);
-        evictEventsBeyondCapacity(accountId);
-
-        // Update stream metadata
-        if (minTs != null) {
-            if (stream.getFirstEventTimestamp() == null || minTs < stream.getFirstEventTimestamp()) {
-                stream.setFirstEventTimestamp(minTs);
-            }
-        }
-        if (maxTs != null) {
-            stream.setLastEventTimestamp(maxTs);
-        }
-        stream.setLastIngestionTime(now);
-        stream.setStoredBytes(stream.getStoredBytes() + totalBytes);
         String nextToken = UUID.randomUUID().toString();
-        stream.setUploadSequenceToken(nextToken);
-        putForAccount(streamStore, accountId, streamKey, stream);
+        LogEventIndex index = eventIndex(indexAccount(accountId));
+        synchronized (index) {
+            // Again under the lock: DeleteLogStream removes the stream and its events while holding it,
+            // and the stream's metadata is written here too, so a put can't bring a deleted stream back.
+            LogStream stream = getForAccount(streamStore, accountId, streamKey)
+                    .filter(ofGroup(groupName, LogStream::getLogGroupName))
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The specified log stream does not exist: " + streamName, 400));
+            boolean done = false;
+            try {
+                refillIfStale(index, accountId);
+                putAllForAccount(eventStore, accountId, logEvents);
+                String group = streamKeyPrefix(region, groupName);
+                logEvents.forEach((key, event) -> index.add(key, group, event));
+                evictEventsPastRetention(accountId, index, region, groupName, now);
+                evictEventsBeyondCapacity(accountId, index);
+                done = true;
+            } finally {
+                if (!done || resetting) {
+                    index.markStale();
+                }
+            }
+
+            if (minTs != null) {
+                if (stream.getFirstEventTimestamp() == null || minTs < stream.getFirstEventTimestamp()) {
+                    stream.setFirstEventTimestamp(minTs);
+                }
+            }
+            if (maxTs != null) {
+                stream.setLastEventTimestamp(maxTs);
+            }
+            stream.setLastIngestionTime(now);
+            stream.setStoredBytes(stream.getStoredBytes() + totalBytes);
+            stream.setUploadSequenceToken(nextToken);
+            putForAccount(streamStore, accountId, streamKey, stream);
+        }
 
         if (logEventsIngested != null && !stored.isEmpty()) {
             logEventsIngested.fire(new LogEventsIngested(accountId, region, groupName, streamName, List.copyOf(stored)));
@@ -677,7 +731,8 @@ public class CloudWatchLogsService implements ResourceProvider {
      * background; doing it on ingest keeps the on-disk store from growing past what a
      * {@code PutRetentionPolicy} promised.
      */
-    private void evictEventsPastRetention(String accountId, String region, String groupName, long now) {
+    private void evictEventsPastRetention(String accountId, LogEventIndex index, String region, String groupName,
+                                          long now) {
         Integer retentionInDays = getForAccount(groupStore, accountId, groupKey(region, groupName))
                 .map(LogGroup::getRetentionInDays)
                 .orElse(null);
@@ -685,16 +740,9 @@ public class CloudWatchLogsService implements ResourceProvider {
             return;
         }
         long cutoff = now - retentionInDays * 86_400_000L;
-        String groupPrefix = region + "::" + groupName + "::";
-        for (String key : List.copyOf(keysForAccount(eventStore, accountId))) {
-            if (!key.startsWith(groupPrefix)) {
-                continue;
-            }
-            boolean expired = getForAccount(eventStore, accountId, key)
-                    .map(event -> event.getTimestamp() < cutoff).orElse(false);
-            if (expired) {
-                deleteForAccount(eventStore, accountId, key);
-            }
+        for (String key : index.olderThan(streamKeyPrefix(region, groupName), cutoff)) {
+            deleteForAccount(eventStore, accountId, key);
+            index.remove(key);
         }
     }
 
@@ -705,26 +753,73 @@ public class CloudWatchLogsService implements ResourceProvider {
      * only on the compaction interval, but without a ceiling a chatty function would still grow
      * every snapshot without bound.
      * <p>
-     * The ceiling is best-effort rather than atomic: this method is not synchronized, so two
-     * concurrent PutLogEvents calls for the same account can each scan and evict independently and
-     * briefly overshoot the cap. The next ingest corrects the drift, which mirrors how CloudWatch
-     * Logs itself deletes expired events lazily rather than at an exact boundary.
+     * The oldest events come from the account's {@link LogEventIndex}, so an ingest at the
+     * ceiling costs a few index operations rather than a sort of the whole store.
      */
-    private void evictEventsBeyondCapacity(String accountId) {
-        List<String> keys = List.copyOf(keysForAccount(eventStore, accountId));
-        int excess = keys.size() - maxStoredEvents;
+    private void evictEventsBeyondCapacity(String accountId, LogEventIndex index) {
+        int excess = index.size() - maxStoredEvents;
         if (excess <= 0) {
             return;
         }
-        List<Map.Entry<String, LogEvent>> oldestFirst = new ArrayList<>(keys.size());
-        for (String key : keys) {
-            getForAccount(eventStore, accountId, key).ifPresent(event -> oldestFirst.add(Map.entry(key, event)));
-        }
-        oldestFirst.sort(Map.Entry.comparingByValue(EVENT_ORDER));
-        for (Map.Entry<String, LogEvent> entry : oldestFirst.subList(0, Math.min(excess, oldestFirst.size()))) {
-            deleteForAccount(eventStore, accountId, entry.getKey());
+        for (String key : index.oldest(excess)) {
+            deleteForAccount(eventStore, accountId, key);
+            index.remove(key);
         }
         LOG.debugv("Evicted {0} oldest log event(s) to stay within the {1}-event store ceiling", excess, maxStoredEvents);
+    }
+
+    /** The account's event index; every write to the account's events holds its monitor. */
+    LogEventIndex eventIndex(String account) {
+        return eventIndexes.computeIfAbsent(account, a -> new LogEventIndex());
+    }
+
+    /** Refills a stale index from the store. The caller holds the index's monitor. */
+    private void refillIfStale(LogEventIndex index, String accountId) {
+        if (!index.isStale()) {
+            return;
+        }
+        index.startRefill();
+        List<String> orphans = new ArrayList<>();
+        for (String key : keysForAccount(eventStore, accountId)) {
+            String group = groupOfEventKey(accountId, key);
+            if (group == null) {
+                orphans.add(key);
+                continue;
+            }
+            getForAccount(eventStore, accountId, key).ifPresent(event -> index.add(key, group, event));
+        }
+        // An event whose stream is gone, as an older Floci could leave from a put racing a delete. AWS
+        // deletes a stream's events with it, and with no stream there is no telling its group.
+        for (String key : orphans) {
+            deleteForAccount(eventStore, accountId, key);
+        }
+        index.markFilled();
+    }
+
+    /** The group an event key was written under, found by its stream; null when no such stream exists. */
+    private String groupOfEventKey(String accountId, String key) {
+        int afterRegion = key.indexOf("::") + 2;
+        int beforeId = key.lastIndexOf("::");
+        int beforeTimestamp = key.lastIndexOf("::", beforeId - 1);
+        String region = key.substring(0, afterRegion - 2);
+        for (int split = key.lastIndexOf("::", beforeTimestamp - 1); split >= afterRegion;
+             split = key.lastIndexOf("::", split - 1)) {
+            String group = key.substring(afterRegion, split);
+            String stream = key.substring(split + 2, beforeTimestamp);
+            if (getForAccount(streamStore, accountId, streamKey(region, group, stream))
+                    .filter(ofGroup(group, LogStream::getLogGroupName)).isPresent()) {
+                return streamKeyPrefix(region, group);
+            }
+        }
+        return null;
+    }
+
+    /** The partition {@code accountId} writes to, or the request's when null; "" for a plain store. */
+    private String indexAccount(String accountId) {
+        if (eventStore instanceof AccountAwareStorageBackend<?> aware) {
+            return accountId != null ? accountId : aware.accountId();
+        }
+        return "";
     }
 
     private <V> Optional<V> getForAccount(
@@ -1261,16 +1356,42 @@ public class CloudWatchLogsService implements ResourceProvider {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private void deleteEventsForStream(String region, String groupName, String streamName) {
+    /**
+     * The record and its events go in one hold of the index lock, record first, so a put sees either
+     * the stream with its events or neither, and a stream recreated under the same name cannot write
+     * until the old one's events are gone.
+     */
+    private void deleteStreamAndEvents(String region, String groupName, String streamName, String streamKey) {
         String eventPrefix = eventKeyPrefix(region, groupName, streamName);
-        List<String> keys = eventStore.keys().stream()
-                .filter(k -> k.startsWith(eventPrefix))
-                .toList();
-        keys.forEach(eventStore::delete);
+        LogEventIndex index = eventIndex(indexAccount(null));
+        synchronized (index) {
+            boolean done = false;
+            try {
+                streamStore.delete(streamKey);
+                List<String> keys = eventStore.keys().stream()
+                        .filter(k -> LogEventIndex.isOfStream(k, eventPrefix))
+                        .toList();
+                keys.forEach(eventStore::delete);
+                keys.forEach(index::remove);
+                done = true;
+            } finally {
+                if (!done || resetting) {
+                    index.markStale();
+                }
+            }
+        }
     }
 
     public String buildArn(String groupName, String region) {
         return regionResolver.buildArn("logs", region, "log-group:" + groupName);
+    }
+
+    /** Whether a record found by key is the group's; keys are not escaped. Null counts as the caller's. */
+    private static <T> Predicate<T> ofGroup(String groupName, Function<T, String> groupOf) {
+        return found -> {
+            String recorded = groupOf.apply(found);
+            return recorded == null || recorded.equals(groupName);
+        };
     }
 
     private static String groupKeyPrefix(String region) {
