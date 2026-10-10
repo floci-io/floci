@@ -277,6 +277,41 @@ class S3PresignedPostIntegrationTest {
     }
 
     @Test
+    @Order(31)
+    void presignedPostRejectsContentBelowMinimumLength() {
+        String key = "uploads/too-small.txt";
+        // 5 bytes, below the min content-length-range of 10 bytes
+        String fileContent = "12345";
+
+        String policy = buildPolicy(BUCKET, key, "text/plain", 10, 20);
+        String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
+
+        given()
+            .multiPart("key", key)
+            .multiPart("Content-Type", "text/plain")
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", "AKIAIOSFODNN7EXAMPLE/20260330/us-east-1/s3/aws4_request")
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-signature", "dummysignature")
+            .multiPart("file", "too-small.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(hasXPath("/Error/Code", equalTo("EntityTooSmall")))
+            .body(hasXPath("/Error/Message", equalTo(
+                    "Your proposed upload is smaller than the minimum allowed size")));
+
+        given()
+        .when()
+            .head("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
     @Order(40)
     void presignedPostRequiresKeyField() {
         given()
