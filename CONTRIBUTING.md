@@ -349,7 +349,10 @@ DNS suffix; a literal that really is partition-invariant goes in
 The partition catalog itself (`src/main/resources/aws/partitions.json`: ids, DNS suffixes,
 regions, opt-in flags, global endpoints) is generated from botocore's published data by
 `make aws-data-sync` and checked by `make aws-data-check` in CI; never hand-edit it. Bump
-`tools/aws/requirements.txt` when regenerating from a newer botocore.
+`tools/aws/requirements.txt` when regenerating from a newer botocore. The same target
+regenerates the IAM managed-policy catalog (`src/main/resources/iam/managed-polic*`) from the
+`local/aws/iam-dataset` checkout; without that checkout, as in CI, `make aws-data-check` only
+verifies the catalog's shape.
 
 ## Reporting Security Issues
 

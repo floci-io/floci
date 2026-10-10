@@ -7,8 +7,9 @@ name: Partition Literals
 # literal in a new file fails, growth in an existing file fails, and a drop fails until
 # the baseline is regenerated so the remaining count stays exact. The second job checks
 # that the vendored AWS data (src/main/resources/aws/*.json) still matches what tools/aws/
-# produces from the pinned botocore release. Python-only,
-# so both are fast and independent of the Java build job.
+# produces from the pinned botocore release, and that the IAM managed-policy catalog keeps its
+# generated shape (its iam-dataset source lives only in local/aws, so CI checks shape, not
+# drift). Python-only, so both are fast and independent of the Java build job.
 
 on:
   pull_request:
@@ -20,6 +21,8 @@ on:
       - 'tools/slr/**'
       - 'src/main/resources/iam/service-linked-roles.tsv'
       - 'src/main/resources/iam/managed-policy-documents.json'
+      - 'src/main/resources/iam/managed-policies.yaml'
+      - 'src/main/resources/iam/managed-policy-versions.json'
       - 'Makefile'
       - '.github/workflows/partition-literals.yml'
   push:
@@ -33,6 +36,8 @@ on:
       - 'tools/slr/**'
       - 'src/main/resources/iam/service-linked-roles.tsv'
       - 'src/main/resources/iam/managed-policy-documents.json'
+      - 'src/main/resources/iam/managed-policies.yaml'
+      - 'src/main/resources/iam/managed-policy-versions.json'
       - 'Makefile'
       - '.github/workflows/partition-literals.yml'
 

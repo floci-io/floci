@@ -904,7 +904,7 @@ Floci seeds a catalog of commonly-used AWS managed policies at startup. These ar
 **Other execution roles**
 `AmazonS3ObjectLambdaExecutionRolePolicy` · `CloudWatchLambdaInsightsExecutionRolePolicy` · `CloudWatchLambdaApplicationSignalsExecutionRolePolicy` · `AWSConfigRulesExecutionRole` · `AWSMSKReplicatorExecutionRole` · `AWS-SSM-DiagnosisAutomation-ExecutionRolePolicy` · `AWS-SSM-RemediationAutomation-ExecutionRolePolicy` · `AmazonSageMakerGeospatialExecutionRole` · `AmazonSageMakerCanvasEMRServerlessExecutionRolePolicy` · `SageMakerStudioBedrockFunctionExecutionRolePolicy` · `SageMakerStudioDomainExecutionRolePolicy` · `SageMakerStudioQueryExecutionRolePolicy` · `AmazonDataZoneDomainExecutionRolePolicy` · `AmazonBedrockAgentCoreMemoryBedrockModelInferenceExecutionRolePolicy` · `AWSPartnerCentralSellingResourceSnapshotJobExecutionRolePolicy`
 
-Every catalog entry carries the real policy document of its current default version, generated from the public [iam-dataset](https://github.com/iann0036/iam-dataset), so `GetPolicyVersion` returns the same statements a real account would and enforcement mode evaluates them faithfully.
+Every catalog entry carries the real policy document of its current default version, generated from the public [iam-dataset](https://github.com/iann0036/iam-dataset), so `GetPolicyVersion` returns the same statements a real account would and enforcement mode evaluates them faithfully. The catalog, its documents and its version data are regenerated from that dataset with `make aws-data-sync` (`tools/aws/regen_managed_policies.py`).
 
 ### Version numbers
 

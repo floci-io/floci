@@ -197,10 +197,11 @@ slr-audit: ## Print the service-linked role table, marking names that are not de
 slr-test: ## Run the service-linked role tooling's unit tests
 	$(PYTHON) -m pytest tools/slr -q
 
-aws-data-sync: ## Regenerate src/main/resources/aws/*.json from botocore, the CDK and Terraform (commit the result)
+aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
 	$(PYTHON) tools/aws/regen_partitions.py
 	$(PYTHON) tools/aws/regen_region_facts.py
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
+	$(PYTHON) tools/aws/regen_managed_policies.py
 
 aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
@@ -219,6 +220,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		echo ""; \
 		echo "error: src/main/resources/aws/dynamodb-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_managed_policies.py --check || { \
+		echo ""; \
+		echo "error: the IAM managed-policy catalog (src/main/resources/iam/managed-polic*) is out of date or malformed."; \
+		echo "       Run 'make aws-data-sync' with local/aws checked out and commit the result."; \
 		exit 1; \
 	}
 
