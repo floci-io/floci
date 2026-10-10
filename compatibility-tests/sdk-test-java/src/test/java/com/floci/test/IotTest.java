@@ -423,6 +423,13 @@ class IotTest {
             assertThat(plain.attributes()).containsOnly(Map.entry("provider", provider + "1"));
             for (ThingDocument thing : all) {
                 assertThat(thing.thingId()).isNotBlank();
+                // A thing whose client id never connected, in the shape AWS reports it.
+                assertThat(thing.connectivity().clientId()).isEqualTo(thing.thingName());
+                assertThat(thing.connectivity().connected()).isFalse();
+                assertThat(thing.connectivity().timestamp()).isZero();
+                assertThat(thing.connectivity().disconnectReason()).isNull();
+                assertThat(thing.connectivity().keepAliveDuration()).isNull();
+                assertThat(thing.connectivity().cleanSession()).isNull();
             }
 
             awaitSearch("attributes.provider:" + provider + "1", prefix, "a", "b");
@@ -435,6 +442,7 @@ class IotTest {
             awaitSearch("thingName:" + prefix + "* AND NOT attributes.provider:" + provider + "1", prefix, "c");
             awaitSearch("attributes.provider:" + provider + "?", prefix, "a", "b", "c");
             awaitSearch("thingGroupNames:" + group, prefix, "a");
+            awaitSearch("connectivity.connected:false AND thingName:" + prefix + "*", prefix, "a", "b", "c");
 
             Set<String> paged = new TreeSet<>();
             String nextToken = null;

@@ -98,7 +98,7 @@ public class IotFleetIndexingController {
     @Path("/indices/search")
     public Response searchIndex(@Context HttpHeaders headers, String body) {
         IotService.Page<ObjectNode> page = fleetIndexingService.searchIndex(IotRequestBody.read(objectMapper, body),
-                regionResolver.resolveRegion(headers));
+                regionResolver.getAccountId(), regionResolver.resolveRegion(headers));
         ObjectNode response = objectMapper.createObjectNode();
         response.putArray("things").addAll(page.items());
         if (page.nextToken() != null) {
