@@ -152,14 +152,29 @@ class ElastiCacheServerlessServiceTest {
     }
 
     @Test
-    void replaceTagsDrivesTagsToExactlyTheGivenSet() {
-        service.createServerlessCache(create("tagged", "valkey", null));
-        service.replaceTags("tagged", Map.of("a", "1", "b", "2"));
-        assertEquals(Map.of("a", "1", "b", "2"), service.getServerlessCache("tagged").getTags());
-        service.replaceTags("tagged", Map.of("b", "3"));
-        assertEquals(Map.of("b", "3"), service.getServerlessCache("tagged").getTags());
-        service.replaceTags("tagged", Map.of());
-        assertTrue(service.getServerlessCache("tagged").getTags().isEmpty());
+    void deleteIsRetryableAfterBackingWasAlreadyRemoved() {
+        ServerlessCache cache = service.createServerlessCache(create("cache", "valkey", "team"));
+        runtime.deleteServerlessBacking(cache.getBackingCacheClusterId());
+        service.deleteServerlessCache("cache");
+        error("ServerlessCacheNotFoundFault", () -> service.getServerlessCache("cache"));
+        runtime.deleteUserGroup("team");
+    }
+
+    @Test
+    void listingSurvivesACacheWhoseBackingIsMissing() {
+        ServerlessCache broken = service.createServerlessCache(create("broken", "valkey", null));
+        service.createServerlessCache(create("healthy", "valkey", null));
+        runtime.deleteServerlessBacking(broken.getBackingCacheClusterId());
+        assertEquals(2, service.describeServerlessCaches(null).size());
+    }
+
+    @Test
+    void resetReleasesBackingClustersAndUserGroupAttachments() {
+        ServerlessCache cache = service.createServerlessCache(create("cache", "valkey", "team"));
+        service.clear();
+        assertTrue(service.describeServerlessCaches(null).isEmpty());
+        error("CacheClusterNotFound", () -> runtime.deleteServerlessBacking(cache.getBackingCacheClusterId()));
+        runtime.deleteUserGroup("team");
     }
 
     @Test

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.elasticache.model.ServerlessCache.Dat
 import io.github.hectorvent.floci.services.elasticache.model.ServerlessCache.EcpuPerSecond;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.List;
@@ -25,6 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
 public class ElastiCacheServerlessService implements Resettable {
+    private static final Logger LOG = Logger.getLogger(ElastiCacheServerlessService.class);
+
     private final AccountAwareStorageBackend<ServerlessCache> caches;
     private final RegionResolver resolver;
     private final ElastiCacheService runtime;
@@ -150,7 +153,7 @@ public class ElastiCacheServerlessService implements Resettable {
             return List.of(getServerlessCache(name));
         }
         return caches.scan(key -> key.startsWith(resolver.getRegion() + "/")).stream()
-                .map(cache -> getServerlessCache(cache.getServerlessCacheName())).toList();
+                .map(this::currentOrStored).toList();
     }
 
     public ServerlessCache modifyServerlessCache(ModifyServerlessCacheRequest request) {
@@ -218,20 +221,6 @@ public class ElastiCacheServerlessService implements Resettable {
         }
     }
 
-    /** Drives the tags to exactly the given set, the way CloudFormation reconciles a resource on update. */
-    public ServerlessCache replaceTags(String name, Map<String, String> tags) {
-        if (tags != null && tags.size() > 50) {
-            throw new AwsException("TagQuotaPerResourceExceeded", "At most 50 tags are supported.", 400);
-        }
-        String normalized = normalizedName(name);
-        synchronized (lockFor(normalized)) {
-            ServerlessCache updated = copy(requireCache(normalized));
-            updated.setTags(tags);
-            caches.put(key(normalized), updated);
-            return current(updated);
-        }
-    }
-
     public ServerlessCache deleteServerlessCache(String name) {
         return deleteServerlessCache(name, null);
     }
@@ -243,7 +232,15 @@ public class ElastiCacheServerlessService implements Resettable {
         String normalized = normalizedName(name);
         synchronized (lockFor(normalized)) {
             ServerlessCache cache = requireCache(normalized);
-            deleteBacking(cache.getEngine(), cache.getBackingCacheClusterId());
+            try {
+                deleteBacking(cache.getEngine(), cache.getBackingCacheClusterId());
+            } catch (AwsException e) {
+                if (!"CacheClusterNotFound".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                LOG.warnv("Backing cluster {0} of serverless cache {1} is already gone, finishing the delete",
+                        cache.getBackingCacheClusterId(), normalized);
+            }
             if (cache.getUserGroupId() != null) {
                 groups.detachServerlessCache(cache.getUserGroupId(), key(normalized));
             }
@@ -271,6 +268,16 @@ public class ElastiCacheServerlessService implements Resettable {
         snapshot.setReaderEndpoint(backing.getConfigurationEndpoint());
         snapshot.setStatus(backing.getCacheClusterStatus().wireName());
         return snapshot;
+    }
+
+    private ServerlessCache currentOrStored(ServerlessCache cache) {
+        try {
+            return current(cache);
+        } catch (AwsException e) {
+            LOG.warnv("Serverless cache {0} has no backing cluster, listing its stored state: {1}",
+                    cache.getServerlessCacheName(), e.getMessage());
+            return copy(cache);
+        }
     }
 
     private ServerlessCache requireCache(String name) {
@@ -360,6 +367,18 @@ public class ElastiCacheServerlessService implements Resettable {
 
     @Override
     public void clear() {
+        for (ServerlessCache cache : caches.scanAllAccounts()) {
+            try {
+                deleteBacking(cache.getEngine(), cache.getBackingCacheClusterId());
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not release backing cluster {0} of serverless cache {1} on reset",
+                        cache.getBackingCacheClusterId(), cache.getServerlessCacheName());
+            }
+            if (cache.getUserGroupId() != null) {
+                groups.detachServerlessCache(cache.getUserGroupId(),
+                        cache.getRegion() + "/" + cache.getServerlessCacheName());
+            }
+        }
         caches.clear();
     }
 
