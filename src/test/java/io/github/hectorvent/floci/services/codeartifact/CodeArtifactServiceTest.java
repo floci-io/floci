@@ -54,6 +54,7 @@ class CodeArtifactServiceTest {
     private CodeArtifactService service;
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
+    private AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore;
     private VerdaccioSidecarClient verdaccioClient;
     private ReposiliteSidecarClient reposiliteClient;
     private PypiserverSidecarClient pypiserverClient;
@@ -64,8 +65,7 @@ class CodeArtifactServiceTest {
         repoStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
-        AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore =
-                AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        packageOriginConfigStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
 
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -1294,6 +1294,80 @@ class CodeArtifactServiceTest {
         PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
                 "ns", "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
         assertEquals("Published", published.packageVersion().getStatus());
+    }
+
+    /**
+     * Namespace {@code "a::b"} + package {@code "c"} and namespace {@code "a"} + package
+     * {@code "b::c"} are two different, independently valid package coordinates, {@code ::} is not
+     * one of the characters namespace/package names reject, so a storage key that joined them with
+     * a plain {@code ::} delimiter without escaping would see the two as the same package and let
+     * one's origin configuration answer for the other's.
+     */
+    @Test
+    void putPackageOriginConfigurationDoesNotCollideAcrossTheNamespacePackageBoundary() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a::b", "c", "BLOCK", "ALLOW");
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a", "b::c", "ALLOW", "BLOCK");
+
+        CodeArtifactService.PackageDescription first = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "a::b", "c");
+        CodeArtifactService.PackageDescription second = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "a", "b::c");
+        assertEquals("BLOCK", first.publishRestriction());
+        assertEquals("ALLOW", first.upstreamRestriction());
+        assertEquals("ALLOW", second.publishRestriction());
+        assertEquals("BLOCK", second.upstreamRestriction());
+    }
+
+    /**
+     * Same coordinate-boundary collision as above, but for published version content rather than
+     * origin configuration: without escaping, the second publish's bytes would be stored under the
+     * same key as the first's, so one package's asset would overwrite or answer for the other's.
+     */
+    @Test
+    void publishPackageVersionDoesNotCollideAcrossTheNamespacePackageBoundary() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] firstContent = "first-package".getBytes(StandardCharsets.UTF_8);
+        byte[] secondContent = "second-package".getBytes(StandardCharsets.UTF_8);
+
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "a::b", "c", "1.0.0", "a.txt",
+                sha256Hex(firstContent), "false", firstContent);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "a", "b::c", "1.0.0", "a.txt",
+                sha256Hex(secondContent), "false", secondContent);
+
+        PackageVersionAssetResult first = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
+                "a::b", "c", "1.0.0", "a.txt", null);
+        PackageVersionAssetResult second = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
+                "a", "b::c", "1.0.0", "a.txt", null);
+        assertEquals("first-package", new String(first.asset().getContent(), StandardCharsets.UTF_8));
+        assertEquals("second-package", new String(second.asset().getContent(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * A build before escaping existed stored namespace/package segments raw, so one could already
+     * contain a literal backslash followed by {@code c}, the exact two characters escaping a colon
+     * now produces. If escaping used {@code \} as its own introducer, that old raw record would
+     * become indistinguishable from the new escaped key of a completely different namespace
+     * ("a:b" instead of "a\cb"). Escaping uses {@code #} instead, a character namespace/package
+     * tokens can never contain (AWS's own wire pattern forbids it the same as Floci's), so the new
+     * coordinate's escaped key can never equal that old raw one.
+     */
+    @Test
+    void newEscapedKeysNeverCollideWithAPreExistingRawKeyThatHappenedToContainABackslash() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String legacyRawKey = REGION + "::dom::repo::generic::a\\cb::x";
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, legacyRawKey, new PackageOriginConfig("BLOCK", "BLOCK"));
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a:b", "x", "ALLOW", "ALLOW");
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "a:b", "x");
+        assertEquals("ALLOW", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
     }
 
     @Test
