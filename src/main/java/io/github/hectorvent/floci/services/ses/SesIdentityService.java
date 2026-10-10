@@ -702,7 +702,7 @@ public class SesIdentityService {
 
         boolean present = true;
         for (String token : identity.getDkimTokens()) {
-            if (!hasExpectedDkimRecord(identity, token)) {
+            if (!hasExpectedDkimRecord(identity.getIdentity(), token)) {
                 present = false;
                 break;
             }
@@ -711,8 +711,8 @@ public class SesIdentityService {
         return present;
     }
 
-    private boolean hasExpectedDkimRecord(Identity identity, String token) {
-        String expectedName = normalizeDnsName(token + "._domainkey." + identity.getIdentity());
+    private boolean hasExpectedDkimRecord(String domain, String token) {
+        String expectedName = normalizeDnsName(token + "._domainkey." + domain);
         String expectedValue = normalizeDnsName(token + "." + DKIM_SIGNING_HOSTED_ZONE);
         for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
             for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
