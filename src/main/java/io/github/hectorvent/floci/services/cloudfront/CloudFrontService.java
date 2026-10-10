@@ -1293,6 +1293,13 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     // ── CloudFront Functions ──────────────────────────────────────────────────
 
     public synchronized CloudFrontFunction createFunction(CloudFrontFunction fn) {
+        // The bare name holds the DEVELOPMENT stage, and the LIVE stage of releases before
+        // stage-aware keys.
+        if (functionStore.get(fn.getName()).isPresent()
+                || functionStore.get(functionKey(fn.getName(), "LIVE")).isPresent()) {
+            throw new AwsException("FunctionAlreadyExists",
+                    "A function with the same name already exists in this AWS account.", 409);
+        }
         fn.setStage("DEVELOPMENT");
         fn.setStatus("UNPUBLISHED");
         fn.setEtag(UUID.randomUUID().toString());
