@@ -457,6 +457,20 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         return table(call(scope, "UpdateTable", body).path("TableDescription"));
     }
 
+    @Override
+    public TimeToLive timeToLive(Scope scope, String tableName) {
+        JsonNode description = call(scope, "DescribeTimeToLive", body(tableName)).path("TimeToLiveDescription");
+        return new TimeToLive("ENABLED".equals(text(description, "TimeToLiveStatus")),
+                text(description, "AttributeName"));
+    }
+
+    @Override
+    public void updateTimeToLive(Scope scope, String tableName, String attributeName, boolean enabled) {
+        ObjectNode body = body(tableName);
+        body.putObject("TimeToLiveSpecification").put("AttributeName", attributeName).put("Enabled", enabled);
+        call(scope, "UpdateTimeToLive", body);
+    }
+
     private TableDefinition table(JsonNode description) {
         TableDefinition table = aws.convertValue(description, TableDefinition.class);
         JsonNode spec = description.path("StreamSpecification");
