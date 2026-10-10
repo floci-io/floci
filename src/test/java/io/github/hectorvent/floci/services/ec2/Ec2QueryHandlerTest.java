@@ -97,7 +97,7 @@ class Ec2QueryHandlerTest {
         Ec2Service service = mock(Ec2Service.class);
         Vpc vpc = new Vpc();
         vpc.setVpcId("vpc-test");
-        when(service.createVpc("us-east-1", "10.38.0.0/16", false, false)).thenReturn(vpc);
+        when(service.createVpc("us-east-1", "10.38.0.0/16", false, false, null)).thenReturn(vpc);
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("CidrBlock", "10.38.0.0/16");
         params.putSingle("TagSpecification.1.ResourceType", "vpc");
