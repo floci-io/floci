@@ -74,8 +74,10 @@ Universal targets (`arn:aws:scheduler:::aws-sdk:<service>:<action>`) deliver `sn
 `sqs:sendMessage`, `redshiftdata:executeStatement` and `redshiftdata:batchExecuteStatement`; any
 other action fails when the schedule fires. The Redshift Data targets take the Data API request
 as `Input` (PascalCase) and run the SQL against a provisioned cluster (`ClusterIdentifier`) or a
-Serverless workgroup (`WorkgroupName`). The SQL runs on its own thread, so a slow statement does not
-delay other schedules. Delivery succeeds once the Data API accepts the request;
+Serverless workgroup (`WorkgroupName`). The SQL runs on the shared bounded Data API worker pool, so a slow statement does not
+delay other schedules. Pool saturation rejects admission and follows Scheduler retries.
+`WithEvent=true` emits a terminal EventBridge event in the schedule account and region,
+with the target role ARN as `principal`. Delivery succeeds once the Data API accepts the request;
 a SQL error is recorded on the statement and does not trigger Scheduler retries, while a request
 the Data API rejects (an unknown cluster, a malformed request) is retried like any failed
 delivery. When `redshift` or `redshift-data` is disabled the target fails with

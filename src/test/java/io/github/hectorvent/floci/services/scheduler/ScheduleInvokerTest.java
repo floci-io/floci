@@ -66,7 +66,6 @@ class ScheduleInvokerTest {
     private EcsService ecsService;
     private StepFunctionsService stepFunctionsService;
     private RedshiftDataService redshiftDataService;
-    private final List<Runnable> submittedStatements = new ArrayList<>();
     private ScheduleInvoker invoker;
 
     @BeforeEach
@@ -86,10 +85,9 @@ class ScheduleInvokerTest {
         when(config.baseUrl()).thenReturn("http://localhost:4566");
         ServiceRegistry serviceRegistry = mock(ServiceRegistry.class);
         when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(redshiftEnabled && redshiftDataEnabled);
-        // Queue instead of run, so a test can see that the invoker returns before the SQL runs.
         return new ScheduleInvoker(sqsService, lambdaService, snsService,
                 eventBridgeService, ecsService, stepFunctionsService, redshiftDataService,
-                new ObjectMapper(), config, serviceRegistry, submittedStatements::add);
+                new ObjectMapper(), config, serviceRegistry);
     }
 
     /** Delivers one occurrence of a schedule in {@code region} whose target is {@code target}. */
@@ -385,7 +383,7 @@ class ScheduleInvokerTest {
         invoke(target, "eu-west-1");
 
         ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
-        verify(redshiftDataService).submitStatement(request.capture(), eq("eu-west-1"));
+        verify(redshiftDataService).executeStatement(request.capture(), eq("eu-west-1"), eq("arn:aws:iam::000000000000:role/x"));
         assertEquals("select 1", request.getValue().path("Sql").asText());
         assertEquals("analytics", request.getValue().path("ClusterIdentifier").asText());
     }
@@ -400,7 +398,7 @@ class ScheduleInvokerTest {
         invoke(target, "us-east-1");
 
         ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
-        verify(redshiftDataService).submitStatement(request.capture(), eq("us-east-1"));
+        verify(redshiftDataService).executeStatement(request.capture(), eq("us-east-1"), eq("arn:aws:iam::000000000000:role/x"));
         assertEquals("wg-1", request.getValue().path("WorkgroupName").asText());
         assertTrue(request.getValue().path("ClusterIdentifier").isMissingNode());
     }
@@ -416,7 +414,7 @@ class ScheduleInvokerTest {
         invoke(target, "us-east-1");
 
         ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
-        verify(redshiftDataService).submitBatch(request.capture(), eq("us-east-1"));
+        verify(redshiftDataService).batchExecuteStatement(request.capture(), eq("us-east-1"), eq("arn:aws:iam::000000000000:role/x"));
         assertEquals(2, request.getValue().path("Sqls").size());
     }
 
@@ -426,42 +424,21 @@ class ScheduleInvokerTest {
         target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
         target.setRoleArn("arn:aws:iam::000000000000:role/x");
         target.setInput("{\"Sql\":\"select 1\"}");
-        when(redshiftDataService.submitStatement(any(JsonNode.class), anyString()))
+        when(redshiftDataService.executeStatement(any(JsonNode.class), anyString(), anyString()))
                 .thenThrow(new AwsException("ValidationException", "no cluster", 400));
 
         assertThrows(AwsException.class, () -> invoke(target, "us-east-1"));
-        assertTrue(submittedStatements.isEmpty());
     }
 
     @Test
-    void universalRedshiftDataRunsTheStatementOffTheCallingThread() {
+    void universalRedshiftDataDelegatesToSharedAdmission() {
         Target target = new Target();
         target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
         target.setRoleArn("arn:aws:iam::000000000000:role/x");
         target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\",\"Sql\":\"select 1\"}");
-        Runnable statement = mock(Runnable.class);
-        when(redshiftDataService.submitStatement(any(JsonNode.class), anyString())).thenReturn(statement);
-
         invoke(target, "us-east-1");
-
-        verifyNoInteractions(statement);
-        assertEquals(1, submittedStatements.size());
-        submittedStatements.get(0).run();
-        verify(statement).run();
-    }
-
-    @Test
-    void universalRedshiftDataFailedStatementDoesNotEscapeTheExecutor() {
-        Target target = new Target();
-        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
-        target.setRoleArn("arn:aws:iam::000000000000:role/x");
-        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\",\"Sql\":\"select 1\"}");
-        when(redshiftDataService.submitStatement(any(JsonNode.class), anyString()))
-                .thenReturn(() -> { throw new IllegalStateException("boom"); });
-
-        invoke(target, "us-east-1");
-
-        submittedStatements.get(0).run();
+        verify(redshiftDataService).executeStatement(any(JsonNode.class), eq("us-east-1"),
+                eq("arn:aws:iam::000000000000:role/x"));
     }
 
     @ParameterizedTest

@@ -65,8 +65,16 @@ class StepFunctionsRedshiftDataDockerIntegrationTest {
                       "Type": "Task",
                       "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
                       "Arguments": {"Id": "{% $states.input.Id %}"},
-                      "End": true
-                    }
+                      "Output": "{% $states.result %}",
+                      "Next": "Check"
+                    },
+                    "Check": {
+                      "Type": "Choice",
+                      "Choices": [{"Condition": "{% $states.input.Status = 'FINISHED' or $states.input.Status = 'FAILED' or $states.input.Status = 'ABORTED' %}", "Next": "Done"}],
+                      "Default": "Wait"
+                    },
+                    "Wait": {"Type": "Wait", "Seconds": 1, "Next": "Describe"},
+                    "Done": {"Type": "Succeed"}
                   }
                 }
                 """.replace("CLUSTER", CLUSTER_ID);
@@ -95,8 +103,16 @@ class StepFunctionsRedshiftDataDockerIntegrationTest {
                       "Type": "Task",
                       "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
                       "Arguments": {"Id": "{% $states.input.Id %}"},
-                      "End": true
-                    }
+                      "Output": "{% $states.result %}",
+                      "Next": "Check"
+                    },
+                    "Check": {
+                      "Type": "Choice",
+                      "Choices": [{"Condition": "{% $states.input.Status = 'FINISHED' or $states.input.Status = 'FAILED' or $states.input.Status = 'ABORTED' %}", "Next": "Done"}],
+                      "Default": "Wait"
+                    },
+                    "Wait": {"Type": "Wait", "Seconds": 1, "Next": "Describe"},
+                    "Done": {"Type": "Succeed"}
                   }
                 }
                 """.replace("CLUSTER", CLUSTER_ID);

@@ -222,6 +222,9 @@ floci:
     redshift-data:
       enabled: true
       result-ttl-hours: 24
+      max-concurrent-statements: 10
+      queue-capacity: 100
+      shutdown-timeout-seconds: 10
     redshift-serverless:
       enabled: true
     neptune:

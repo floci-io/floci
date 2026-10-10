@@ -486,6 +486,9 @@ floci:
     redshift-data:
       enabled: true
       result-ttl-hours: 24
+      max-concurrent-statements: ${FLOCI_SERVICES_REDSHIFT_DATA_MAX_CONCURRENT_STATEMENTS:10}
+      queue-capacity: ${FLOCI_SERVICES_REDSHIFT_DATA_QUEUE_CAPACITY:100}
+      shutdown-timeout-seconds: ${FLOCI_SERVICES_REDSHIFT_DATA_SHUTDOWN_TIMEOUT_SECONDS:10}
     redshift-serverless:
       enabled: true
     neptune:

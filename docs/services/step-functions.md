@@ -500,6 +500,12 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
 
+Redshift Data API execution returns a statement `Id` before SQL completes. Follow the
+`executeStatement` task with `describeStatement`, a Choice on `Status`, and a Wait state
+before polling again. Read results only after `FINISHED`; route `FAILED` and `ABORTED`
+to the workflow's failure path. `WithEvent=true` can also route the terminal status
+through EventBridge.
+
 Scheduler create and update tasks accept `StartDate` and `EndDate` as RFC 3339 strings, including
 offsets and fractional seconds. The direct Scheduler API continues to use numeric epoch seconds.
 Structured JSON values supplied as `Target.Input` are serialized once to the Scheduler API's string

@@ -28,7 +28,13 @@ class RedshiftDataStatementStore {
     private static final Logger LOG = Logger.getLogger(RedshiftDataStatementStore.class);
 
     @RegisterForReflection
-    enum Status { PICKED, STARTED, FINISHED, FAILED, ABORTED }
+    enum Status {
+        SUBMITTED, PICKED, STARTED, FINISHED, FAILED, ABORTED;
+
+        boolean isTerminal() {
+            return this == FINISHED || this == FAILED || this == ABORTED;
+        }
+    }
 
     // Statements live in the configured storage backend like every other service's state
     // (memory mode by default, so they are still lost on restart as documented). The TTL
@@ -56,6 +62,16 @@ class RedshiftDataStatementStore {
 
     @PostConstruct
     void start() {
+        for (AccountAwareStorageBackend.AccountEntry<StoredStatement> entry
+                : statements.scanAllAccountEntries(k -> true)) {
+            StoredStatement interrupted = entry.value().snapshot();
+            if (interrupted.status != null && !interrupted.status.isTerminal()) {
+                interrupted.status = Status.FAILED;
+                interrupted.error = "Execution interrupted by emulator restart";
+                interrupted.updatedAt = Instant.now(clock);
+                statements.putForAccount(entry.accountId(), entry.key(), interrupted);
+            }
+        }
         sweeper = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "redshift-data-statement-sweep");
             t.setDaemon(true);
@@ -72,15 +88,31 @@ class RedshiftDataStatementStore {
     }
 
     void put(StoredStatement statement) {
-        statements.put(statement.id, statement);
+        statements.put(statement.id, statement.snapshot());
+    }
+
+    void putForAccount(String accountId, StoredStatement statement) {
+        statements.putForAccount(accountId, statement.id, statement.snapshot());
+    }
+
+    void deleteForAccount(String accountId, String id) {
+        statements.deleteForAccount(accountId, id);
+    }
+
+    Instant expiresAt(Instant createdAt) {
+        return createdAt.plus(ttl);
     }
 
     StoredStatement get(String id) {
-        return statements.get(id).orElse(null);
+        return statements.get(id).map(StoredStatement::snapshot).orElse(null);
+    }
+
+    StoredStatement getForAccount(String accountId, String id) {
+        return statements.getForAccount(accountId, id).map(StoredStatement::snapshot).orElse(null);
     }
 
     List<StoredStatement> values() {
-        return statements.scan(k -> true);
+        return statements.scan(k -> true).stream().map(StoredStatement::snapshot).toList();
     }
 
     void clear() {
@@ -93,7 +125,8 @@ class RedshiftDataStatementStore {
         // and deletes per account rather than through the current-account view.
         for (AccountAwareStorageBackend.AccountEntry<StoredStatement> entry
                 : statements.scanAllAccountEntries(k -> true)) {
-            if (entry.value().createdAt.isBefore(cutoff)) {
+            if (entry.value().status != null && entry.value().status.isTerminal()
+                    && entry.value().createdAt.isBefore(cutoff)) {
                 statements.deleteForAccount(entry.accountId(), entry.key());
             }
         }
@@ -132,5 +165,43 @@ class RedshiftDataStatementStore {
         ArrayNode columnMetadata;
         List<ArrayNode> rows;
         List<StoredStatement> subStatements;
+        String accountId;
+        String region;
+        String resourceArn;
+        String principal;
+        boolean withEvent;
+        Instant expiresAt;
+
+        StoredStatement snapshot() {
+            StoredStatement copy = new StoredStatement();
+            copy.id = id;
+            copy.sql = sql;
+            copy.sqls = sqls == null ? null : List.copyOf(sqls);
+            copy.batch = batch;
+            copy.statementName = statementName;
+            copy.clusterIdentifier = clusterIdentifier;
+            copy.workgroupName = workgroupName;
+            copy.database = database;
+            copy.dbUser = dbUser;
+            copy.resultFormat = resultFormat;
+            copy.status = status;
+            copy.error = error;
+            copy.createdAt = createdAt;
+            copy.updatedAt = updatedAt;
+            copy.durationNanos = durationNanos;
+            copy.hasResultSet = hasResultSet;
+            copy.resultRows = resultRows;
+            copy.resultSize = resultSize;
+            copy.columnMetadata = columnMetadata == null ? null : columnMetadata.deepCopy();
+            copy.rows = rows == null ? null : rows.stream().map(ArrayNode::deepCopy).toList();
+            copy.subStatements = subStatements == null ? null : subStatements.stream().map(StoredStatement::snapshot).toList();
+            copy.accountId = accountId;
+            copy.region = region;
+            copy.resourceArn = resourceArn;
+            copy.principal = principal;
+            copy.withEvent = withEvent;
+            copy.expiresAt = expiresAt;
+            return copy;
+        }
     }
 }
