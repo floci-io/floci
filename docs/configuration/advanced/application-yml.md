@@ -104,7 +104,7 @@ floci:
     spoof-aws-endpoints: false
 
   auth:
-    validate-signatures: false               # Set to true to verify S3 SigV4 signatures (header, presigned URL, presigned POST)
+    validate-signatures: false               # Set to true to verify SigV4 signatures for every service (S3: header, presigned URL, presigned POST; others: header)
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
 
   tls:

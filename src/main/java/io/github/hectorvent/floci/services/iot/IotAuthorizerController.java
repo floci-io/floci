@@ -1,13 +1,8 @@
 package io.github.hectorvent.floci.services.iot;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iot.model.IotAuthorizer;
 import jakarta.inject.Inject;
@@ -40,7 +35,6 @@ public class IotAuthorizerController {
     private final IotCustomAuthorizer customAuthorizer;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
-    private final ObjectReader strictReader;
 
     @Inject
     public IotAuthorizerController(IotAuthorizerService authorizerService, IotCustomAuthorizer customAuthorizer,
@@ -49,7 +43,6 @@ public class IotAuthorizerController {
         this.customAuthorizer = customAuthorizer;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
-        this.strictReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
 
     @POST
@@ -57,7 +50,8 @@ public class IotAuthorizerController {
     public Response createAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName,
                                      String body) {
         return Response.ok(nameAndArn(authorizerService.createAuthorizer(
-                authorizerName, readJson(body), regionResolver.resolveRegion(headers)))).build();
+                authorizerName, IotRequestBody.read(objectMapper, body), regionResolver.resolveRegion(headers))))
+                .build();
     }
 
     @GET
@@ -71,7 +65,8 @@ public class IotAuthorizerController {
     public Response updateAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName,
                                      String body) {
         return Response.ok(nameAndArn(authorizerService.updateAuthorizer(
-                authorizerName, readJson(body), regionResolver.resolveRegion(headers)))).build();
+                authorizerName, IotRequestBody.read(objectMapper, body), regionResolver.resolveRegion(headers))))
+                .build();
     }
 
     @DELETE
@@ -86,8 +81,8 @@ public class IotAuthorizerController {
     @Path("/authorizer/{authorizerName}/test")
     public Response testInvokeAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName,
                                          String body) {
-        return Response.ok(customAuthorizer.testInvoke(authorizerName, readJson(body), regionResolver.resolveRegion(headers)))
-                .build();
+        return Response.ok(customAuthorizer.testInvoke(authorizerName, IotRequestBody.read(objectMapper, body),
+                regionResolver.resolveRegion(headers))).build();
     }
 
     @GET
@@ -110,7 +105,8 @@ public class IotAuthorizerController {
     @Path("/default-authorizer")
     public Response setDefaultAuthorizer(@Context HttpHeaders headers, String body) {
         return Response.ok(nameAndArn(authorizerService.setDefaultAuthorizer(
-                readJson(body).path("authorizerName").asText(null), regionResolver.resolveRegion(headers)))).build();
+                IotRequestBody.read(objectMapper, body).path("authorizerName").asText(null),
+                regionResolver.resolveRegion(headers)))).build();
     }
 
     @GET
@@ -149,13 +145,5 @@ public class IotAuthorizerController {
         description.put("tokenKeyName", authorizer.getTokenKeyName());
         description.set("tokenSigningPublicKeys", objectMapper.valueToTree(authorizer.getTokenSigningPublicKeys()));
         return Response.ok(response).build();
-    }
-
-    private JsonNode readJson(String body) {
-        try {
-            return strictReader.readTree(body == null || body.isBlank() ? "{}" : body);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
-        }
     }
 }

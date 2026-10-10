@@ -167,18 +167,23 @@ bucket in one account and reads it from another (see [S3](../services/s3.md#glob
 
 ## Signature Validation
 
-Outside S3, Floci does not perform general SigV4 validation for `Authorization` headers. Only the access key ID matters for account resolution, so the secret access key can be any non-empty string.
+By default Floci does not verify SigV4 signatures. Only the access key ID matters for account resolution, so the secret access key can be any non-empty string.
 
-`FLOCI_AUTH_VALIDATE_SIGNATURES` applies only to S3. It verifies the SigV4 signature of every signed S3 request (`Authorization` header, presigned URL and presigned POST) without evaluating bucket policies, and leaves unsigned requests alone (see [S3 Signature Verification](../services/s3.md#signature-verification)). It does not authenticate other services or protect IAM and STS account routing. To verify S3 signatures:
+`FLOCI_AUTH_VALIDATE_SIGNATURES` verifies the SigV4 signature of every signed request, for every service, without evaluating any policy, and leaves unsigned requests alone:
+
+- **S3** verifies every placement (`Authorization` header, presigned URL and presigned POST); see [S3 Signature Verification](../services/s3.md#signature-verification).
+- **Every other service** verifies the `Authorization` header. The canonical request is rebuilt from the request as it arrived, with the path encoded the way AWS signers encode it outside S3 and the body's own SHA-256 as the payload hash. A refusal comes back in the protocol the request used, with the Query and REST-XML name first (Route 53, CloudFront and S3 Control answer in XML) and the JSON, CBOR and REST-JSON name second: `SignatureDoesNotMatch` or `InvalidSignatureException` for a signature that does not verify or is more than 15 minutes from server time, `InvalidClientTokenId` or `UnrecognizedClientException` for an access key Floci does not know, and `IncompleteSignature` or `IncompleteSignatureException` for an `Authorization` header missing a part. Presigned query-string signatures and SigV4a are not verified outside S3, and API Gateway `execute-api` requests keep their own [IAM authorization](../services/api-gateway.md#iam-authorization).
+
+To verify signatures:
 
 ```bash
 FLOCI_AUTH_VALIDATE_SIGNATURES=true
 FLOCI_AUTH_PRESIGN_SECRET=your-secret   # for pre-signed URL verification
 ```
 
-With `FLOCI_AUTH_VALIDATE_SIGNATURES` or `FLOCI_SERVICES_S3_ENFORCE_AUTH` enabled, header-signed S3 requests using a synthetic 12-digit account key fail with `403 InvalidAccessKeyId`, while presigned POSTs using that key fail with `403 SignatureDoesNotMatch`. Sign S3 requests with `test`/`test` or credentials created through Floci IAM or STS (including the session token for STS credentials). For multi-account S3 access, use IAM or STS credentials for the target account; `test`/`test` routes to `FLOCI_DEFAULT_ACCOUNT_ID` (see [S3 Signature Verification](../services/s3.md#signature-verification)).
+Once it is on, every signed request must use credentials Floci can verify: `test`/`test`, or credentials created through Floci IAM or STS (including the session token for STS credentials). A synthetic 12-digit account key fails on every service, with `403 InvalidAccessKeyId` from S3 header-signed requests, `403 SignatureDoesNotMatch` from S3 presigned POSTs, and `403 InvalidClientTokenId` or `403 UnrecognizedClientException` elsewhere. For multi-account access, use IAM or STS credentials for the target account; `test`/`test` routes to `FLOCI_DEFAULT_ACCOUNT_ID`. The same applies to workloads Floci launches: a container started without a role, such as a Lambda function with no execution role, is given placeholder credentials that do not verify, so give it a role.
 
-When `validate-signatures` is `false` (the default), S3 signatures are verified only under `FLOCI_SERVICES_S3_ENFORCE_AUTH`. Account routing remains AKID-based regardless of this setting.
+When `validate-signatures` is `false` (the default), S3 signatures are verified only under `FLOCI_SERVICES_S3_ENFORCE_AUTH`, and no other service verifies them. Account routing remains AKID-based regardless of this setting.
 
 ## Persistence and Account Isolation
 
@@ -190,4 +195,4 @@ Storage keys are namespaced per account at the persistence layer. When using `pe
 |---|---|---|
 | `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Account ID used when the AKID does not resolve directly or through a stored credential |
 | `FLOCI_DEFAULT_REGION` | `us-east-1` | Region used when not derivable from the `Authorization` header |
-| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Verify S3 SigV4 signatures without evaluating bucket policies |
+| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Verify the SigV4 signature of every signed request, for every service, without evaluating policies |

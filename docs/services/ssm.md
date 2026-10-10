@@ -18,6 +18,7 @@
 | `GetParameterHistory` | List all versions of a parameter |
 | `DescribeParameters` | List parameters with optional filters |
 | `LabelParameterVersion` | Attach a label to a specific version |
+| `UnlabelParameterVersion` | Remove labels from a specific version |
 | `AddTagsToResource` | Tag a parameter |
 | `ListTagsForResource` | List tags on a parameter |
 | `RemoveTagsFromResource` | Remove tags from a parameter |

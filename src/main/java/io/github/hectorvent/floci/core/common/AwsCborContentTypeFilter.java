@@ -18,6 +18,10 @@ public class AwsCborContentTypeFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext ctx) {
+        // The header is this filter's own record of what it replaced. A client could send it too,
+        // and every reader (the protocol claim, the CBOR error encoding, SigV4 verification of a
+        // signed Content-Type) would then trust a value the client chose, so it never gets through.
+        ctx.getHeaders().keySet().removeIf(name -> name.equalsIgnoreCase(ORIGINAL_CONTENT_TYPE_HEADER));
         String contentType = ctx.getHeaderString("Content-Type");
         if (contentType != null && contentType.startsWith(AWS_CBOR_1_1_MEDIA_TYPE)) {
             normalize(ctx, contentType);

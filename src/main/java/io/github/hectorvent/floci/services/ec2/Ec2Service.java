@@ -5138,6 +5138,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         String region = endpoint.getRegion();
         List<NetworkInterface> result = new ArrayList<>();
+        List<NetworkInterface> fallbackInterfaces = new ArrayList<>();
+        Set<Long> usedAddresses = new HashSet<>();
         for (String subnetId : endpoint.getSubnetIds()) {
             Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
             if (subnet == null) {
@@ -5170,8 +5172,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .ifPresent(sg -> group.setGroupName(sg.getGroupName()));
                 ni.getGroups().add(group);
             }
-            ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
+            String address = endpointPrivateIp(subnet, endpoint, subnetId);
+            ni.setPrivateIpAddress(address);
+            if (address == null) {
+                fallbackInterfaces.add(ni);
+            } else {
+                usedAddresses.add(Ipv4Cidrs.addressValue(address));
+            }
             result.add(ni);
+        }
+        // Reserve real addresses first and resolve collisions in subnet order, independent of request order.
+        fallbackInterfaces.sort(Comparator.comparing(NetworkInterface::getSubnetId));
+        for (NetworkInterface ni : fallbackInterfaces) {
+            ni.setPrivateIpAddress(endpointFallbackPrivateIp(endpoint, ni.getSubnetId(), usedAddresses));
         }
         return result;
     }
@@ -5305,27 +5318,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         String cidr = subnet.getCidrBlock();
-        String baseIp = cidr != null ? cidr.split("/")[0] : "172.31.0.0";
-        String[] parts = baseIp.split("\\.");
-        // A subnet's CidrBlock is not guaranteed to be dotted IPv4. CreateSubnet stores
-        // whatever it is given without validating the family, and an IPv6-only subnet has
-        // no IPv4 CIDR at all, so this can be "2001:db8::" or anything else -- one element,
-        // and parts[1] then throws. That used to surface only on the flow-log scheduler;
-        // DescribeVpcEndpoints now derives interfaces on the request path, which would turn
-        // an odd subnet into a failed EC2 response rather than a degraded address.
-        // Falls back to the same default the null case already uses, so "no usable IPv4"
-        // has one behaviour rather than two.
-        int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
-        if (parts.length < 4) {
-            // The third octet comes from the SUBNET, not a constant. On the IPv4 path each
-            // subnet supplies its own distinct network, and that is the only thing making
-            // one endpoint's interfaces distinct -- the host octet is derived from the
-            // endpoint and is therefore the same for all of them. A constant fallback threw
-            // that away and gave every non-IPv4 subnet on an endpoint the same address,
-            // trading a crash for a silent collision.
-            return "172.31." + Math.floorMod(subnetId.hashCode(), 256) + "." + host;
+        if (!Ipv4Cidrs.isIpv4(cidr)) {
+            return null;
         }
+        String[] parts = cidr.split("/")[0].split("\\.");
+        int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
         return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
+    }
+
+    private static String endpointFallbackPrivateIp(VpcEndpoint endpoint, String subnetId,
+                                                   Set<Long> usedAddresses) {
+        int network = Math.floorMod(subnetId.hashCode(), 256);
+        int hostOffset = Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
+        for (int offset = 0; offset < 256 * 50; offset++) {
+            String address = "172.31." + Math.floorMod(network + offset, 256) + "."
+                    + (200 + Math.floorMod(hostOffset + offset / 256, 50));
+            if (usedAddresses.add(Ipv4Cidrs.addressValue(address))) {
+                return address;
+            }
+        }
+        throw new AwsException("InsufficientFreeAddressesInSubnet",
+                "No unused fallback IPv4 address is available for endpoint " + endpoint.getVpcEndpointId(), 400);
     }
 
     private VpcEndpoint getRequiredVpcEndpoint(String region, String endpointId) {

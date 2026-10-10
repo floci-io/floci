@@ -23,15 +23,19 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.RETURNS_DEFAULTS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -139,11 +143,13 @@ class CloudFormationServiceRollbackTest {
         for (StackResource resource : new StackResource[] {role, logGroup, alreadyDeleted, adopted, owned}) {
             stack.getResources().put(resource.getLogicalId(), resource);
         }
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
         assertEquals("DELETE_COMPLETE", stack.getStatus());
+        verify(provisioner).completeDeleteCleanup(role);
+        verify(provisioner, never()).completeUpdate(any());
         verify(provisioner).delete(role, REGION);
         verify(provisioner).delete(logGroup, REGION);
         verify(provisioner).delete(owned, REGION);
@@ -165,7 +171,7 @@ class CloudFormationServiceRollbackTest {
 
         StackResource bucket = resource("Bucket", "leak-probe-bucket", "AWS::S3::Bucket", "UPDATE_FAILED");
         stack.getResources().put(bucket.getLogicalId(), bucket);
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
         doThrow(new AwsException("BucketNotEmpty", "The bucket you tried to delete is not empty", 409))
                 .when(provisioner).delete(eq(bucket), eq(REGION));
 
@@ -224,7 +230,7 @@ class CloudFormationServiceRollbackTest {
         for (StackResource resource : new StackResource[] {listener, firstQueue, secondQueue, targetGroup}) {
             stack.getResources().put(resource.getLogicalId(), resource);
         }
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
@@ -261,7 +267,7 @@ class CloudFormationServiceRollbackTest {
         for (StackResource resource : new StackResource[] {listener, firstQueue, secondQueue, targetGroup}) {
             stack.getResources().put(resource.getLogicalId(), resource);
         }
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
@@ -295,7 +301,7 @@ class CloudFormationServiceRollbackTest {
         for (StackResource resource : new StackResource[] {consumer, partner, firstQueue, secondQueue}) {
             stack.getResources().put(resource.getLogicalId(), resource);
         }
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
@@ -331,7 +337,7 @@ class CloudFormationServiceRollbackTest {
         StackResource secondQueue = resource("SecondQueue", "second-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
         stack.getResources().put(firstQueue.getLogicalId(), firstQueue);
         stack.getResources().put(secondQueue.getLogicalId(), secondQueue);
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
 
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread deleter = new Thread(null, () -> {
@@ -350,6 +356,72 @@ class CloudFormationServiceRollbackTest {
         deletes.verify(provisioner).delete(chain[0], REGION);
         deletes.verify(provisioner).delete(chain[chainLength - 1], REGION);
         deletes.verify(provisioner).delete(firstQueue, REGION);
+    }
+
+    @Test
+    void failedStackDeletePreservesRollbackMetadataUntilTheResourceDeleteSucceeds() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-keeps-rollback-state");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_FAILED");
+        StackResource resource = resource("Stateful", "current-id", "AWS::Test::Stateful", "UPDATE_FAILED");
+        resource.getAttributes().put("rollbackSnapshot", "original-configuration");
+        resource.getAttributes().put("cleanupPending", "true");
+        stack.getResources().put(resource.getLogicalId(), resource);
+
+        CfnResourceDispatcher cleanupDispatcher = mock(CfnResourceDispatcher.class, invocation ->
+                switch (invocation.getMethod().getName()) {
+                    case "updateCleanupPhysicalId" -> resource.getAttributes().containsKey("cleanupPending")
+                            ? "displaced-id" : null;
+                    case "completeUpdate" -> {
+                        resource.getAttributes().remove("rollbackSnapshot");
+                        yield new UpdateCleanupResult(true, true, "displaced-id", 0, null);
+                    }
+                    case "completeDeleteCleanup" -> resource.getAttributes().containsKey("cleanupPending")
+                            ? new UpdateCleanupResult(true, true, "displaced-id", 0, null)
+                            : UpdateCleanupResult.notApplicable();
+                    case "clearUpdate" -> {
+                        resource.getAttributes().remove("rollbackSnapshot");
+                        resource.getAttributes().remove("cleanupPending");
+                        yield null;
+                    }
+                    case "clearDeleteCleanup" -> {
+                        resource.getAttributes().remove("cleanupPending");
+                        yield null;
+                    }
+                    default -> RETURNS_DEFAULTS.answer(invocation);
+                });
+        AtomicInteger attempts = new AtomicInteger();
+        doAnswer(invocation -> {
+            if (attempts.incrementAndGet() == 1) {
+                throw new AwsException("ServiceUnavailable", "temporary current-resource deletion failure", 503);
+            }
+            assertEquals("original-configuration", resource.getAttributes().get("rollbackSnapshot"));
+            resource.getAttributes().remove("rollbackSnapshot");
+            return null;
+        }).when(cleanupDispatcher).delete(resource, REGION);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.defaultAccountId()).thenReturn(ACCOUNT);
+        CloudFormationService deleteService = new CloudFormationService(cleanupDispatcher, mock(S3Service.class),
+                mock(SsmService.class), mock(CfnDynamicReferences.class), new ObjectMapper(), config,
+                mock(RegionResolver.class), Clock.systemUTC(), new InMemoryStorageFactory());
+
+        assertThrows(IllegalStateException.class, () -> deleteService.deleteStackResources(stack, REGION, ACCOUNT));
+        assertEquals("DELETE_FAILED", stack.getStatus());
+        assertEquals("DELETE_FAILED", resource.getStatus());
+        assertEquals("original-configuration", resource.getAttributes().get("rollbackSnapshot"));
+        assertNull(resource.getAttributes().get("cleanupPending"));
+        assertTrue(stack.getEvents().stream().anyMatch(event -> "Stateful".equals(event.getLogicalResourceId())
+                && "displaced-id".equals(event.getPhysicalResourceId())
+                && "DELETE_COMPLETE".equals(event.getResourceStatus())));
+
+        deleteService.deleteStackResources(stack, REGION, ACCOUNT);
+
+        assertEquals(2, attempts.get());
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+        assertEquals("DELETE_COMPLETE", resource.getStatus());
+        assertNull(resource.getAttributes().get("rollbackSnapshot"));
     }
 
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {

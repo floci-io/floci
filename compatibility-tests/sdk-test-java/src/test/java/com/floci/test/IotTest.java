@@ -41,6 +41,8 @@ import software.amazon.awssdk.services.iot.model.DescribeDomainConfigurationRequ
 import software.amazon.awssdk.services.iot.model.DescribeDomainConfigurationResponse;
 import software.amazon.awssdk.services.iot.model.DescribeEndpointRequest;
 import software.amazon.awssdk.services.iot.model.DescribeEndpointResponse;
+import software.amazon.awssdk.services.iot.model.DescribeIndexRequest;
+import software.amazon.awssdk.services.iot.model.DescribeIndexResponse;
 import software.amazon.awssdk.services.iot.model.DescribeJobRequest;
 import software.amazon.awssdk.services.iot.model.DescribeThingRequest;
 import software.amazon.awssdk.services.iot.model.DescribeThingResponse;
@@ -48,15 +50,20 @@ import software.amazon.awssdk.services.iot.model.DescribeThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.DescribeThingTypeResponse;
 import software.amazon.awssdk.services.iot.model.DetachPolicyRequest;
 import software.amazon.awssdk.services.iot.model.DetachThingPrincipalRequest;
+import software.amazon.awssdk.services.iot.model.DeviceDefenderIndexingMode;
 import software.amazon.awssdk.services.iot.model.DisableTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.DomainConfigurationStatus;
 import software.amazon.awssdk.services.iot.model.DomainConfigurationSummary;
 import software.amazon.awssdk.services.iot.model.DomainType;
 import software.amazon.awssdk.services.iot.model.EnableTopicRuleRequest;
+import software.amazon.awssdk.services.iot.model.Field;
+import software.amazon.awssdk.services.iot.model.GetIndexingConfigurationRequest;
+import software.amazon.awssdk.services.iot.model.GetIndexingConfigurationResponse;
 import software.amazon.awssdk.services.iot.model.GetPolicyRequest;
 import software.amazon.awssdk.services.iot.model.GetPolicyResponse;
 import software.amazon.awssdk.services.iot.model.GetTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.GetTopicRuleResponse;
+import software.amazon.awssdk.services.iot.model.IndexStatus;
 import software.amazon.awssdk.services.iot.model.InvalidRequestException;
 import software.amazon.awssdk.services.iot.model.ListCertificatesRequest;
 import software.amazon.awssdk.services.iot.model.ListCertificatesResponse;
@@ -77,6 +84,7 @@ import software.amazon.awssdk.services.iot.model.ListThingsRequest;
 import software.amazon.awssdk.services.iot.model.ListThingsResponse;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesRequest;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesResponse;
+import software.amazon.awssdk.services.iot.model.NamedShadowIndexingMode;
 import software.amazon.awssdk.services.iot.model.RemoveThingFromThingGroupRequest;
 import software.amazon.awssdk.services.iot.model.ResourceAlreadyExistsException;
 import software.amazon.awssdk.services.iot.model.ResourceNotFoundException;
@@ -85,13 +93,19 @@ import software.amazon.awssdk.services.iot.model.ServiceType;
 import software.amazon.awssdk.services.iot.model.SqsAction;
 import software.amazon.awssdk.services.iot.model.Tag;
 import software.amazon.awssdk.services.iot.model.TagResourceRequest;
+import software.amazon.awssdk.services.iot.model.ThingConnectivityIndexingMode;
+import software.amazon.awssdk.services.iot.model.ThingGroupIndexingConfiguration;
+import software.amazon.awssdk.services.iot.model.ThingGroupIndexingMode;
 import software.amazon.awssdk.services.iot.model.ThingGroupProperties;
+import software.amazon.awssdk.services.iot.model.ThingIndexingConfiguration;
+import software.amazon.awssdk.services.iot.model.ThingIndexingMode;
 import software.amazon.awssdk.services.iot.model.ThingTypeProperties;
 import software.amazon.awssdk.services.iot.model.TopicRulePayload;
 import software.amazon.awssdk.services.iot.model.UntagResourceRequest;
 import software.amazon.awssdk.services.iot.model.UpdateCertificateRequest;
 import software.amazon.awssdk.services.iot.model.UpdateDomainConfigurationRequest;
 import software.amazon.awssdk.services.iot.model.UpdateDomainConfigurationResponse;
+import software.amazon.awssdk.services.iot.model.UpdateIndexingConfigurationRequest;
 import software.amazon.awssdk.services.iot.model.UpdateThingRequest;
 import software.amazon.awssdk.services.iot.model.UpdateThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.VersionConflictException;
@@ -259,6 +273,99 @@ class IotTest {
                 .domainConfigurationName(name)
                 .build()))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void fleetIndexingConfiguration() {
+        GetIndexingConfigurationResponse prior =
+                iot.getIndexingConfiguration(GetIndexingConfigurationRequest.builder().build());
+        try {
+            iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(ThingIndexingConfiguration.builder()
+                            .thingIndexingMode(ThingIndexingMode.REGISTRY)
+                            .thingConnectivityIndexingMode(ThingConnectivityIndexingMode.STATUS)
+                            .build())
+                    .thingGroupIndexingConfiguration(ThingGroupIndexingConfiguration.builder()
+                            .thingGroupIndexingMode(ThingGroupIndexingMode.ON)
+                            .build())
+                    .build());
+
+            GetIndexingConfigurationResponse enabled =
+                    iot.getIndexingConfiguration(GetIndexingConfigurationRequest.builder().build());
+            ThingIndexingConfiguration thing = enabled.thingIndexingConfiguration();
+            assertThat(thing.thingIndexingMode()).isEqualTo(ThingIndexingMode.REGISTRY);
+            assertThat(thing.thingConnectivityIndexingMode()).isEqualTo(ThingConnectivityIndexingMode.STATUS);
+            assertThat(thing.deviceDefenderIndexingMode()).isEqualTo(DeviceDefenderIndexingMode.OFF);
+            assertThat(thing.namedShadowIndexingMode()).isEqualTo(NamedShadowIndexingMode.OFF);
+            assertThat(thing.managedFields())
+                    .extracting(field -> field.name() + ":" + field.typeAsString())
+                    .containsExactlyInAnyOrder(
+                            "thingName:String", "thingId:String", "registry.version:Number",
+                            "registry.thingTypeName:String", "registry.thingGroupNames:String",
+                            "connectivity.connected:Boolean", "connectivity.timestamp:Number",
+                            "connectivity.disconnectReason:String", "connectivity.clientId:String",
+                            "connectivity.cleanSession:Boolean", "connectivity.keepAliveDuration:Number",
+                            "connectivity.sessionExpiry:Number", "connectivity.version:Number");
+            assertThat(thing.filter().namedShadowNames()).isEmpty();
+            assertThat(enabled.thingGroupIndexingConfiguration().thingGroupIndexingMode())
+                    .isEqualTo(ThingGroupIndexingMode.ON);
+            assertThat(enabled.thingGroupIndexingConfiguration().managedFields())
+                    .extracting(Field::name)
+                    .containsExactlyInAnyOrder("parentGroupNames", "description", "version", "thingGroupName",
+                            "thingGroupId");
+
+            DescribeIndexResponse things = iot.describeIndex(DescribeIndexRequest.builder()
+                    .indexName("AWS_Things")
+                    .build());
+            assertThat(things.schema()).isEqualTo("REGISTRY_AND_CONNECTIVITY_STATUS");
+            assertIndexStatus(things.indexStatus());
+            DescribeIndexResponse groups = iot.describeIndex(DescribeIndexRequest.builder()
+                    .indexName("AWS_ThingGroups")
+                    .build());
+            assertThat(groups.schema()).isEqualTo("REGISTRY");
+            assertIndexStatus(groups.indexStatus());
+
+            assertThatThrownBy(() -> iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(ThingIndexingConfiguration.builder()
+                            .thingIndexingMode(ThingIndexingMode.REGISTRY_AND_SHADOW)
+                            .namedShadowIndexingMode(NamedShadowIndexingMode.ON)
+                            .build())
+                    .build()))
+                    .isInstanceOf(InvalidRequestException.class)
+                    .hasMessageContaining("NamedShadowNames Filter must not be empty for enabling NamedShadowIndexingMode");
+
+            iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(ThingIndexingConfiguration.builder()
+                            .thingIndexingMode(ThingIndexingMode.OFF)
+                            .build())
+                    .build());
+            assertThatThrownBy(() -> iot.describeIndex(DescribeIndexRequest.builder().indexName("AWS_Things").build()))
+                    .isInstanceOf(ResourceNotFoundException.class)
+                    .hasMessageContaining("Index AWS_Things does not exist");
+            GetIndexingConfigurationResponse thingOff =
+                    iot.getIndexingConfiguration(GetIndexingConfigurationRequest.builder().build());
+            assertThat(thingOff.thingIndexingConfiguration().thingIndexingMode()).isEqualTo(ThingIndexingMode.OFF);
+            assertThat(thingOff.thingIndexingConfiguration().thingConnectivityIndexingMode())
+                    .isEqualTo(ThingConnectivityIndexingMode.OFF);
+            assertThat(thingOff.thingIndexingConfiguration().managedFields()).isEmpty();
+            assertThat(thingOff.thingGroupIndexingConfiguration().thingGroupIndexingMode())
+                    .isEqualTo(ThingGroupIndexingMode.ON);
+        } finally {
+            // Indexing is account wide on AWS: put back whatever the account had before this test.
+            iot.updateIndexingConfiguration(UpdateIndexingConfigurationRequest.builder()
+                    .thingIndexingConfiguration(prior.thingIndexingConfiguration())
+                    .thingGroupIndexingConfiguration(prior.thingGroupIndexingConfiguration())
+                    .build());
+        }
+    }
+
+    private static void assertIndexStatus(IndexStatus status) {
+        if (TestFixtures.isRealAws()) {
+            // AWS builds the index in the background after a mode change; Floci has it ready at once.
+            assertThat(status).isIn(IndexStatus.ACTIVE, IndexStatus.BUILDING, IndexStatus.REBUILDING);
+        } else {
+            assertThat(status).isEqualTo(IndexStatus.ACTIVE);
+        }
     }
 
     @Test

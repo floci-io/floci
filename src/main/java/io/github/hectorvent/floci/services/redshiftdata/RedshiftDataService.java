@@ -67,6 +67,23 @@ public class RedshiftDataService implements Resettable {
     // ── ExecuteStatement ────────────────────────────────────────────────────
 
     public ObjectNode executeStatement(JsonNode request, String region) {
+        PendingStatement pending = prepareStatement(request, region);
+        pending.run().run();
+        return executeResponse(pending.statement());
+    }
+
+    /**
+     * Validates and resolves the request on the calling thread, so a rejected request throws here,
+     * and returns the SQL run for the caller to schedule. The statement is stored as {@code STARTED}
+     * first, as AWS does, so DescribeStatement can see it while the run is in flight.
+     */
+    public Runnable submitStatement(JsonNode request, String region) {
+        PendingStatement pending = prepareStatement(request, region);
+        store.put(pending.statement());
+        return pending.run();
+    }
+
+    private PendingStatement prepareStatement(JsonNode request, String region) {
         String sql = requiredText(request, "Sql");
         rejectMultiStatement(sql);
         Map<String, String> parameters = RedshiftDataSqlParameters.parseParameters(request, "Parameters");
@@ -82,10 +99,13 @@ public class RedshiftDataService implements Resettable {
         stored.database = target.database();
         stored.resultFormat = request.path("ResultFormat").asText("JSON");
 
-        runStatement(stored, target, sql, parameters);
-        store.put(stored);
-        return executeResponse(stored);
+        return new PendingStatement(stored, () -> {
+            runStatement(stored, target, sql, parameters);
+            store.put(stored);
+        });
     }
+
+    private record PendingStatement(RedshiftDataStatementStore.StoredStatement statement, Runnable run) { }
 
     private void runStatement(RedshiftDataStatementStore.StoredStatement stored,
                               RedshiftDataResourceResolver.DatabaseTarget target,
@@ -316,6 +336,19 @@ public class RedshiftDataService implements Resettable {
     // ── BatchExecuteStatement ──────────────────────────────────────────────
 
     public ObjectNode batchExecuteStatement(JsonNode request, String region) {
+        PendingStatement pending = prepareBatch(request, region);
+        pending.run().run();
+        return executeResponse(pending.statement());
+    }
+
+    /** Batch counterpart of {@link #submitStatement}. */
+    public Runnable submitBatch(JsonNode request, String region) {
+        PendingStatement pending = prepareBatch(request, region);
+        store.put(pending.statement());
+        return pending.run();
+    }
+
+    private PendingStatement prepareBatch(JsonNode request, String region) {
         JsonNode sqlsNode = request.get("Sqls");
         if (sqlsNode == null || !sqlsNode.isArray() || sqlsNode.isEmpty()) {
             throw new AwsException("ValidationException", "Sqls must be a non-empty array of SQL statements.", 400);
@@ -338,6 +371,11 @@ public class RedshiftDataService implements Resettable {
         parent.resultFormat = request.path("ResultFormat").asText("JSON");
         parent.subStatements = new ArrayList<>();
 
+        return new PendingStatement(parent, () -> runBatch(parent, sqls, target));
+    }
+
+    private void runBatch(RedshiftDataStatementStore.StoredStatement parent, List<String> sqls,
+                          RedshiftDataResourceResolver.DatabaseTarget target) {
         long totalDuration = 0;
         try (Connection connection = connectionFactory.open(target)) {
             BackendSql batchBackend = new RedshiftDataBackendSql(connection);
@@ -411,7 +449,6 @@ public class RedshiftDataService implements Resettable {
         parent.durationNanos = totalDuration;
         parent.updatedAt = Instant.now();
         store.put(parent);
-        return executeResponse(parent);
     }
 
     // ── ListStatements ─────────────────────────────────────────────────────
