@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.iot.IotMqttBrokerService.Connectivity;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.Field;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.GeoLocation;
@@ -23,6 +24,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -33,6 +35,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class IotFleetIndexingServiceTest {
 
@@ -72,13 +76,15 @@ class IotFleetIndexingServiceTest {
             new Field("thingGroupName", "String"),
             new Field("thingGroupId", "String"));
 
+    private static final String ACCOUNT = IotServiceTestSupport.ACCOUNT;
     private static final String CONNECTIVITY_NOT_ENABLED = "Query includes one or more constraints for Connectivity "
             + "attribute, but Connectivity indexing is not enabled for AWS_Things index";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final IotServiceTestSupport iot = new IotServiceTestSupport(REGION, null);
+    private final IotMqttBrokerService broker = mock(IotMqttBrokerService.class);
     private final IotFleetIndexingService service =
-            new IotFleetIndexingService(new InMemoryStorage<>(), iot.service);
+            new IotFleetIndexingService(new InMemoryStorage<>(), iot.service, broker);
 
     private JsonNode json(String text) {
         try {
@@ -719,7 +725,7 @@ class IotFleetIndexingServiceTest {
     }
 
     private IotService.Page<ObjectNode> search(ObjectNode request) {
-        return service.searchIndex(request, REGION);
+        return service.searchIndex(request, ACCOUNT, REGION);
     }
 
     private List<String> names(String queryString) {
@@ -837,22 +843,28 @@ class IotFleetIndexingServiceTest {
     }
 
     @Test
-    void connectivityFieldsAreRefusedLikeShadowAndDeviceDefenderFields() {
+    void connectivityReportsTheBrokerStateOfTheCallersAccountAndRegion() {
         fleet("{\"thingIndexingMode\": \"REGISTRY\", \"thingConnectivityIndexingMode\": \"STATUS\"}");
+        when(broker.connectivity(ACCOUNT, REGION, "alpha-1")).thenReturn(Optional.of(
+                new Connectivity(true, 1_700_000_000_000L, null, 30, true)));
+        when(broker.connectivity(ACCOUNT, REGION, "alpha-2")).thenReturn(Optional.of(
+                new Connectivity(false, 1_700_000_100_000L, "CLIENT_INITIATED_DISCONNECT", 60, false)));
 
-        assertUnsupported("connectivity.connected:true", "the field connectivity.connected");
-        assertUnsupported("connectivity.clientId:alpha-1", "the field connectivity.clientId");
-        assertUnsupported("connectivity.disconnectReason:CONNECTION_LOST", "the field connectivity.disconnectReason");
-        assertUnsupported("thingName:gamma OR connectivity.connected:false", "the field connectivity.connected");
-    }
-
-    @Test
-    void documentsCarryNoConnectivityWhileConnectivityIsIndexed() {
-        fleet("{\"thingIndexingMode\": \"REGISTRY\", \"thingConnectivityIndexingMode\": \"STATUS\"}");
-
-        assertFalse(document("alpha-1").has("connectivity"));
-        assertEquals(json("{\"thingName\": \"gamma\", \"thingId\": \""
-                + iot.service.describeThing("gamma", REGION).getThingId() + "\"}"), document("gamma"));
+        assertEquals(List.of("alpha-1"), names("connectivity.connected:true"));
+        assertEquals(List.of("alpha-2", "beta-1", "gamma"), names("connectivity.connected:FALSE"));
+        assertEquals(List.of("alpha-2"), names("connectivity.disconnectReason:client_initiated_disconnect"));
+        assertEquals(List.of("beta-1"), names("connectivity.clientId:beta-1"));
+        assertEquals(json("""
+            {"connected": true, "timestamp": 1700000000000, "keepAliveDuration": 30, "cleanSession": true,
+             "clientId": "alpha-1"}
+            """), document("alpha-1").get("connectivity"));
+        assertEquals(json("""
+            {"connected": false, "timestamp": 1700000100000, "disconnectReason": "CLIENT_INITIATED_DISCONNECT",
+             "keepAliveDuration": 60, "cleanSession": false, "clientId": "alpha-2"}
+            """), document("alpha-2").get("connectivity"));
+        assertEquals(json("""
+            {"clientId": "beta-1", "connected": false, "timestamp": 0}
+            """), document("beta-1").get("connectivity"));
     }
 
     @Test
@@ -920,7 +932,6 @@ class IotFleetIndexingServiceTest {
         assertUnsupported("shadow.reported.x:1", "the field shadow.reported.x");
         assertUnsupported("deviceDefender.violationCount:1", "the field deviceDefender.violationCount");
         assertUnsupported("connectivity.timestamp:0", "the field connectivity.timestamp");
-        assertUnsupported("connectivity.connected:true", "the field connectivity.connected");
     }
 
     @Test
@@ -1301,7 +1312,7 @@ class IotFleetIndexingServiceTest {
 
     private void assertSearchBodyFails(String body, String message) {
         AwsException failure = assertThrows(AwsException.class,
-                () -> service.searchIndex(json(body), REGION), body);
+                () -> service.searchIndex(json(body), ACCOUNT, REGION), body);
         assertEquals("SerializationException", failure.getErrorCode(), body);
         assertEquals(400, failure.getHttpStatus(), body);
         assertEquals(message, failure.getMessage(), body);
@@ -1317,12 +1328,12 @@ class IotFleetIndexingServiceTest {
         iot.service.createThing("alpha-9", Map.of("provider", "acme"), null, "eu-west-1");
 
         assertEquals(List.of("alpha-1", "alpha-2"), names("attributes.provider:acme"));
-        assertThrows(AwsException.class, () -> service.searchIndex(query("*"), "eu-west-1"));
+        assertThrows(AwsException.class, () -> service.searchIndex(query("*"), ACCOUNT, "eu-west-1"));
 
         service.updateIndexingConfiguration(json("""
             {"thingIndexingConfiguration": {"thingIndexingMode": "REGISTRY"}}
             """), "eu-west-1");
-        List<ObjectNode> other = service.searchIndex(query("attributes.provider:acme"), "eu-west-1").items();
+        List<ObjectNode> other = service.searchIndex(query("attributes.provider:acme"), ACCOUNT, "eu-west-1").items();
         assertEquals(1, other.size());
         assertEquals("alpha-9", other.get(0).path("thingName").asText());
     }

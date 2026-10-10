@@ -509,6 +509,102 @@ class IotMqttBrokerServiceTest {
     }
 
     /**
+     * Fleet indexing connectivity is per account and region: a plaintext session counts in the
+     * default account, so switching that default stands in for a second account. Account A's
+     * recorded disconnect survives a session of the same client id in account B, while B's session
+     * is live and after it ends.
+     */
+    @Test
+    void connectivityHistoryOfAClientIdIsKeptPerAccountAndRegion() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> disconnectInA = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("device-1", disconnectInA, new AtomicReference<>()), false);
+        disconnectInA.get().handle(null);
+
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        AtomicReference<Handler<Void>> closeInB = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("device-1", new AtomicReference<>(), closeInB), false);
+
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().connected());
+        closeInB.get().handle(null);
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertEquals("CONNECTION_LOST",
+                broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("111111111111", "eu-west-1", "device-1").isEmpty());
+    }
+
+    /**
+     * A client id names one broker session across accounts and regions: a connection in account B
+     * displaces account A's live session of the same client id, which then reports
+     * DUPLICATE_CLIENTID, also after the displaced connection's close arrives.
+     */
+    @Test
+    void aSessionDisplacedByTheSameClientIdInAnotherAccountReportsDuplicateClientId() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> closeInA = new AtomicReference<>();
+        MqttEndpoint inA = endpointCapturing("device-1", new AtomicReference<>(), closeInA);
+        broker.handleEndpoint(inA, false);
+
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        broker.handleEndpoint(endpointCapturing("device-1", new AtomicReference<>(), new AtomicReference<>()), false);
+
+        verify(inA).close();
+        assertFalse(broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().connected());
+        assertEquals("DUPLICATE_CLIENTID",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        closeInA.get().handle(null);
+        assertEquals("DUPLICATE_CLIENTID",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().connected());
+    }
+
+    /**
+     * DeleteConnection ends the session with API_INITIATED_DISCONNECT, the reason AWS gives a
+     * disconnect through that API, also after the close it causes reaches the broker.
+     */
+    @Test
+    void deleteConnectionEndsTheSessionWithApiInitiatedDisconnect() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> close = new AtomicReference<>();
+        MqttEndpoint endpoint = endpointCapturing("device-1", new AtomicReference<>(), close);
+        broker.handleEndpoint(endpoint, false);
+
+        assertTrue(broker.disconnectClient("device-1", false));
+
+        verify(endpoint).close();
+        IotMqttBrokerService.Connectivity ended =
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow();
+        assertFalse(ended.connected());
+        assertEquals("API_INITIATED_DISCONNECT", ended.disconnectReason());
+        close.get().handle(null);
+        assertEquals("API_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertFalse(broker.disconnectClient("device-1", false));
+    }
+
+    private static MqttEndpoint endpointCapturing(String clientId, AtomicReference<Handler<Void>> disconnect,
+                                                  AtomicReference<Handler<Void>> close) {
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn(clientId);
+        when(endpoint.isConnected()).thenReturn(true);
+        when(endpoint.disconnectHandler(any())).thenAnswer(invocation -> {
+            disconnect.set(invocation.getArgument(0));
+            return endpoint;
+        });
+        when(endpoint.closeHandler(any())).thenAnswer(invocation -> {
+            close.set(invocation.getArgument(0));
+            return endpoint;
+        });
+        return endpoint;
+    }
+
+    /**
      * Two publishes from two connections, the first one's rule action held on a latch: the second
      * publish is fanned out, so its rules were handed over, yet they start only once the first
      * publish's rules finished.

@@ -125,7 +125,7 @@ Status: configuration and a bounded SearchIndex subset.
 - `AND`, `OR` and `NOT` in upper case, their forms `&&`, `||` and `!`, a leading `-` for negation, and parentheses.
 - Precedence as measured on AWS: `NOT` binds tightest, then `AND`, then `OR`. Whitespace is an `AND` that binds looser than `OR`, so `a OR b c` means `(a OR b) AND c`.
 
-The fields are `thingName`, `thingId`, `thingTypeName`, `thingGroupNames` (direct memberships) and `attributes.<name>`.
+The fields are `thingName`, `thingId`, `thingTypeName`, `thingGroupNames` (direct memberships), `attributes.<name>`, `connectivity.connected`, `connectivity.clientId` and `connectivity.disconnectReason`.
 
 Errors follow AWS, with AWS's messages. The body and member types are checked first, then the member constraints, then the index, then the query, then `nextToken`:
 
@@ -143,22 +143,31 @@ Syntax AWS accepts but Floci does not evaluate is refused with `InvalidQueryExce
 - comparisons (`>`, `<`, `>=`, `<=`)
 - free text terms without a field, including lower case `and`, `or` and `not`
 - field grouping (`field:(a OR b)`)
-- every `connectivity.*`, `shadow.*` and `deviceDefender.*` field once its indexing is on. While that indexing is off the answer is AWS's `InvalidRequestException` above.
+- every `shadow.*` and `deviceDefender.*` field, and the `connectivity.*` fields Floci does not index (`timestamp`, `keepAliveDuration`, `cleanSession`, `sessionExpiry`, `version`), once its indexing is on. While that indexing is off the answer is AWS's `InvalidRequestException` above.
 
 Searching `AWS_ThingGroups` is refused with `InvalidRequestException` and `Floci does not support searching AWS_ThingGroups` while that index is enabled. While it is disabled the answer is AWS's `ResourceNotFoundException`.
 
 Results:
 
 - A thing has `thingName` and `thingId`, and `thingTypeName`, `thingGroupNames` and `attributes` only when it has them. `shadow` and `deviceDefender` are never returned: Floci keeps no indexed shadow document.
-- `connectivity` is never returned either. AWS adds it while `thingConnectivityIndexingMode` is `STATUS`, where a thing that never connected shows `connected` `false` and `timestamp` `0`.
 - Things come in thing name order. AWS does not specify an order.
 - `maxResults` and `nextToken` page the results. Without `maxResults` every match comes in one page. The token marks the last thing returned, so the next page continues after it even when things before it were deleted, as on AWS. A token continues only the request that issued it: the same `queryString`, and `indexName` and `queryVersion` sent the same way, since an omitted member differs from its explicit default. `maxResults` may change between pages.
 - An index answers at once: a thing is searchable as soon as it is created, where AWS takes a few seconds.
+
+`connectivity` is returned while `thingConnectivityIndexingMode` is `STATUS`. It reports the embedded MQTT broker session whose client id is the thing name:
+
+- Connected: `connected` `true`, `timestamp` (the connect time in epoch milliseconds), `keepAliveDuration`, `cleanSession` and `clientId`.
+- After the session ended: `connected` `false`, `timestamp` (the disconnect time), `disconnectReason`, `keepAliveDuration`, `cleanSession` and `clientId`. The reason is `CLIENT_INITIATED_DISCONNECT` after an MQTT DISCONNECT packet, `API_INITIATED_DISCONNECT` after `DeleteConnection`, `DUPLICATE_CLIENTID` when a new connection with the same client id displaced the session, and `CONNECTION_LOST` for any other end.
+- Never connected: `{"clientId": "<thingName>", "connected": false, "timestamp": 0}`.
+- A plaintext session, including MQTT over WebSocket, counts in the default account and region, as the broker's shadow topics do. A session on the TLS listener counts in the account and region of its device certificate.
+- A client id names one broker session across accounts and regions: a connection with the client id of a live session in another account or region displaces it, and the displaced one then reports `DUPLICATE_CLIENTID`.
+- The state is in memory only. A restart loses it, and a state reset forgets how sessions ended; a live session stays connected.
 
 Current limitations:
 
 - `ListIndices` and the statistics and aggregation APIs (`GetStatistics`, `GetCardinality`, `GetPercentiles`, `GetBucketsAggregation`) are not modeled yet.
 - `customFields` types are not applied to search: attribute values are matched as strings.
+- `connectivity.sessionExpiry` and the socket information of `filter.connectivity.includeSocketInformation` are not reported.
 - `managedFields` and `customFields` sent in the thing group configuration are checked (the custom fields for their types only) but not stored: `GetIndexingConfiguration` reports the managed fields the mode selects and no custom fields.
 
 ## MQTT Broker

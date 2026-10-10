@@ -15,15 +15,15 @@ import java.util.regex.Pattern;
  * The part of the AWS IoT fleet indexing query language Floci evaluates, parsed into a predicate
  * over a thing's index document. Precedence is the one measured on AWS: NOT binds tightest, then
  * AND, then OR, and whitespace is an AND looser than OR, so {@code a OR b c} is
- * {@code (a OR b) AND c}. Values match case-insensitively, field names exactly. Floci evaluates the
- * registry fields and attributes; connectivity, shadow and Device Defender fields are refused, with
- * AWS's error while their indexing is off. Syntax AWS accepts but Floci does not evaluate is refused
- * rather than matching nothing. A query is checked in the order measured on AWS: syntax, then the
- * 12-term limit, then fields and values, the first such error in the query winning.
+ * {@code (a OR b) AND c}. Values match case-insensitively, field names exactly. Syntax AWS accepts
+ * but Floci does not evaluate is refused rather than matching nothing. A query is checked in the
+ * order measured on AWS: syntax, then the 12-term limit, then fields and values, the first such
+ * error in the query winning.
  */
 final class IotFleetIndexQuery {
 
-    private static final Set<String> FIELDS = Set.of("thingName", "thingId", "thingTypeName", "thingGroupNames");
+    private static final Set<String> FIELDS = Set.of("thingName", "thingId", "thingTypeName", "thingGroupNames",
+            "connectivity.connected", "connectivity.clientId", "connectivity.disconnectReason");
     private static final String ATTRIBUTES = "attributes.";
     private static final Set<String> OPERATORS = Set.of("AND", "OR", "NOT", "-", ")");
     private static final Pattern COMPARISON = Pattern.compile("[<>]");
@@ -235,11 +235,11 @@ final class IotFleetIndexQuery {
     }
 
     /**
-     * A registry field or attribute passes. One under connectivity, shadow or Device Defender first
-     * needs that indexing on, with AWS's error: a classic shadow field needs REGISTRY_AND_SHADOW, a
-     * named shadow field needs named shadow indexing and a shadow in its filter (otherwise an invalid
-     * field name, as on AWS). Floci then refuses it, since it indexes none of them. Anything else is
-     * the invalid field name AWS reports.
+     * A field Floci indexes passes. One under connectivity, shadow or Device Defender first needs
+     * that indexing on, with AWS's error: a classic shadow field needs REGISTRY_AND_SHADOW, a named
+     * shadow field needs named shadow indexing and a shadow in its filter (otherwise an invalid field
+     * name, as on AWS). Floci then refuses those it does not index. Anything else is the invalid
+     * field name AWS reports.
      */
     private void checkField(String field) {
         if (field.startsWith(ATTRIBUTES) && field.length() > ATTRIBUTES.length()) {

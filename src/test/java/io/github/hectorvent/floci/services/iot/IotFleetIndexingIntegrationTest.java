@@ -341,28 +341,24 @@ class IotFleetIndexingIntegrationTest {
             .statusCode(200)
             .body("$", aMapWithSize(1))
             .body("things", hasSize(1))
-            .body("things[0]", aMapWithSize(5))
+            .body("things[0]", aMapWithSize(6))
             .body("things[0].thingName", equalTo("search-a"))
             .body("things[0].thingId", not(emptyOrNullString()))
             .body("things[0].thingTypeName", equalTo("search-sensor"))
             .body("things[0].thingGroupNames", contains("search-north"))
             .body("things[0].attributes.provider", equalTo("Acme"))
             .body("things[0].attributes.site", equalTo("north"))
-            .body("things[0]", not(hasKey("connectivity")));
+            .body("things[0].connectivity", aMapWithSize(3))
+            .body("things[0].connectivity.clientId", equalTo("search-a"))
+            .body("things[0].connectivity.connected", equalTo(false))
+            .body("things[0].connectivity.timestamp", equalTo(0));
         search(auth, """
             {"queryString": "thingName:search-c", "queryVersion": "2017-09-30", "indexName": "AWS_Things"}
             """)
             .statusCode(200)
-            .body("things[0]", aMapWithSize(2))
+            .body("things[0]", aMapWithSize(3))
             .body("things[0].thingName", equalTo("search-c"))
-            .body("things[0]", not(hasKey("connectivity")));
-        search(auth, """
-            {"queryString": "connectivity.connected:true"}
-            """)
-            .statusCode(400)
-            .body("__type", equalTo("InvalidQueryException"))
-            .body("message", equalTo("Floci does not support the field connectivity.connected in fleet index "
-                    + "queries, query string: connectivity.connected:true"));
+            .body("things[0]", hasKey("connectivity"));
 
         String nextToken = search(auth, """
             {"queryString": "thingName:search-*", "maxResults": 2}
