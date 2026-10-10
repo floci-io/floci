@@ -331,66 +331,11 @@ public class ApplicationAutoScalingJsonHandler {
     }
 
     private TargetTrackingConfiguration parseTargetTracking(JsonNode node) {
-        if (node == null || node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        TargetTrackingConfiguration config = new TargetTrackingConfiguration();
-        if (node.hasNonNull("TargetValue")) {
-            config.setTargetValue(node.get("TargetValue").asDouble());
-        }
-        JsonNode predefined = node.path("PredefinedMetricSpecification");
-        if (predefined.isObject()) {
-            PredefinedMetricSpecification spec = new PredefinedMetricSpecification();
-            spec.setPredefinedMetricType(text(predefined, "PredefinedMetricType"));
-            spec.setResourceLabel(text(predefined, "ResourceLabel"));
-            config.setPredefinedMetricSpecification(spec);
-        }
-        JsonNode customized = node.path("CustomizedMetricSpecification");
-        if (customized.isObject()) {
-            config.setCustomizedMetricSpecification(
-                    objectMapper.convertValue(customized, new com.fasterxml.jackson.core.type.TypeReference<>() {}));
-        }
-        if (node.hasNonNull("DisableScaleIn")) {
-            config.setDisableScaleIn(node.get("DisableScaleIn").asBoolean());
-        }
-        if (node.hasNonNull("ScaleInCooldown")) {
-            config.setScaleInCooldown(node.get("ScaleInCooldown").asInt());
-        }
-        if (node.hasNonNull("ScaleOutCooldown")) {
-            config.setScaleOutCooldown(node.get("ScaleOutCooldown").asInt());
-        }
-        return config;
+        return ScalingConfigurationParser.parseTargetTracking(node, objectMapper);
     }
 
     private StepScalingConfiguration parseStepScaling(JsonNode node) {
-        if (node == null || node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        StepScalingConfiguration config = new StepScalingConfiguration();
-        config.setAdjustmentType(text(node, "AdjustmentType"));
-        config.setMetricAggregationType(text(node, "MetricAggregationType"));
-        if (node.hasNonNull("Cooldown")) {
-            config.setCooldown(node.get("Cooldown").asInt());
-        }
-        if (node.hasNonNull("MinAdjustmentMagnitude")) {
-            config.setMinAdjustmentMagnitude(node.get("MinAdjustmentMagnitude").asInt());
-        }
-        List<StepAdjustment> steps = new ArrayList<>();
-        for (JsonNode stepNode : node.path("StepAdjustments")) {
-            StepAdjustment step = new StepAdjustment();
-            if (stepNode.hasNonNull("MetricIntervalLowerBound")) {
-                step.setMetricIntervalLowerBound(stepNode.get("MetricIntervalLowerBound").asDouble());
-            }
-            if (stepNode.hasNonNull("MetricIntervalUpperBound")) {
-                step.setMetricIntervalUpperBound(stepNode.get("MetricIntervalUpperBound").asDouble());
-            }
-            if (stepNode.hasNonNull("ScalingAdjustment")) {
-                step.setScalingAdjustment(stepNode.get("ScalingAdjustment").asInt());
-            }
-            steps.add(step);
-        }
-        config.setStepAdjustments(steps);
-        return config;
+        return ScalingConfigurationParser.parseStepScaling(node);
     }
 
     private Map<String, String> parseTags(JsonNode node) {
