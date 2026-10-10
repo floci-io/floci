@@ -20,6 +20,7 @@
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
         <wire.version>6.4.7</wire.version>
+        <aws.sdk.version>2.55.11</aws.sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -328,7 +329,7 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>elasticache</artifactId>
-            <version>2.55.11</version>
+            <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -344,6 +345,18 @@
         <dependency>
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>rds</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+            <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>

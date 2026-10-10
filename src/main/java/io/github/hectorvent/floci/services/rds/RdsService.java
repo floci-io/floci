@@ -724,6 +724,8 @@ public class RdsService implements Resettable, ResourceProvider {
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
+        String effectiveSecretKmsKeyId = manageMasterUserPassword
+                ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
         int proxyPort = reserveProxyPort(requestedPort);
@@ -826,7 +828,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
         if (manageMasterUserPassword) {
-            attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId);
+            attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
         }
 
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
@@ -2467,6 +2469,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     // The secret's ARN names its own account and region, neither of which a
                     // startup backfill has a request context to infer.
                     secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
+                    backfillManagedSecretKey(instance, regionFromArn(instance.getDbInstanceArn()));
                 } catch (RuntimeException e) {
                     LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
                 }
@@ -2478,6 +2481,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
                 try {
                     secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
+                    backfillManagedSecretKey(cluster, regionFromArn(cluster.getDbClusterArn()));
                 } catch (RuntimeException e) {
                     LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
                 }
@@ -2528,7 +2532,55 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {
+    private void backfillManagedSecretKey(DbInstance instance, String region) {
+        if (instance.getMasterUserSecretArn() != null && instance.getMasterUserSecretKmsKeyId() == null) {
+            String keyId = recoverManagedSecretKey(instance.getMasterUserSecretArn(), region);
+            if (keyId != null) {
+                instance.setMasterUserSecretKmsKeyId(keyId);
+                putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()), region,
+                        instance.getDbInstanceIdentifier(), instance);
+            }
+        }
+    }
+
+    private void backfillManagedSecretKey(DbCluster cluster, String region) {
+        if (cluster.getMasterUserSecretArn() != null && cluster.getMasterUserSecretKmsKeyId() == null) {
+            String keyId = recoverManagedSecretKey(cluster.getMasterUserSecretArn(), region);
+            if (keyId != null) {
+                cluster.setMasterUserSecretKmsKeyId(keyId);
+                putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()), region,
+                        cluster.getDbClusterIdentifier(), cluster);
+            }
+        }
+    }
+
+    private String recoverManagedSecretKey(String secretArn, String region) {
+        if (secretsManagerService == null || kmsService == null) {
+            return null;
+        }
+        try {
+            Secret secret = secretsManagerService.describeSecret(secretArn, region);
+            String keyId = secret.getKmsKeyId();
+            return keyId != null ? keyId : kmsService.describeKeyForAccount("alias/aws/secretsmanager",
+                    region, accountIdFromArn(secretArn)).getArn();
+        } catch (RuntimeException e) {
+            // Old metadata remains readable if its secret or key is temporarily unavailable.
+            LOG.debugv(e, "Could not recover the managed key for secret {0}", secretArn);
+            return null;
+        }
+    }
+
+    private String resolveManagedSecretKmsKeyId(String kmsKeyId, String region) {
+        if (secretsManagerService == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ManageMasterUserPassword requires Secrets Manager support.", 400);
+        }
+        return kmsKeyId != null ? kmsKeyId
+                : kmsService.describeKey("alias/aws/secretsmanager", region).getArn();
+    }
+
+    private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId,
+                                               String effectiveKmsKeyId) {
         if (secretsManagerService == null) {
             throw new AwsException("InvalidParameterCombination",
                     "ManageMasterUserPassword requires Secrets Manager support.", 400);
@@ -2550,7 +2602,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 region);
         instance.setMasterUserSecretArn(secret.getArn());
         instance.setMasterUserSecretStatus("active");
-        instance.setMasterUserSecretKmsKeyId(kmsKeyId);
+        instance.setMasterUserSecretKmsKeyId(effectiveKmsKeyId);
     }
 
     private static String managedMasterSecretString(DbInstance instance) {
@@ -2570,7 +2622,8 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private void attachManagedMasterUserSecret(DbCluster cluster, String region, String kmsKeyId) {
+    private void attachManagedMasterUserSecret(DbCluster cluster, String region, String kmsKeyId,
+                                               String effectiveKmsKeyId) {
         if (secretsManagerService == null) {
             throw new AwsException("InvalidParameterCombination",
                     "ManageMasterUserPassword requires Secrets Manager support.", 400);
@@ -2592,7 +2645,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 region);
         cluster.setMasterUserSecretArn(secret.getArn());
         cluster.setMasterUserSecretStatus("active");
-        cluster.setMasterUserSecretKmsKeyId(kmsKeyId);
+        cluster.setMasterUserSecretKmsKeyId(effectiveKmsKeyId);
     }
 
     /**
@@ -2663,7 +2716,8 @@ public class RdsService implements Resettable, ResourceProvider {
     public DbInstance getDbInstance(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         return Optional.ofNullable(findInstanceForScope(
-                currentAccountId(), effectiveRegion, id)).orElseThrow(() ->
+                currentAccountId(), effectiveRegion, id))
+                .orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "DB instance " + id + " not found.", 404));
     }
@@ -3969,6 +4023,8 @@ public class RdsService implements Resettable, ResourceProvider {
         PlacementResolution placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
 
         boolean mock = config.services().rds().mock();
+        String effectiveSecretKmsKeyId = manageMasterUserPassword
+                ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
         int proxyPort = reserveProxyPort(requestedPort);
@@ -4014,7 +4070,7 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setDbClusterArn(clusterArn);
 
         if (manageMasterUserPassword) {
-            attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId);
+            attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
         }
 
         try {
@@ -4321,7 +4377,8 @@ public class RdsService implements Resettable, ResourceProvider {
     public DbCluster getDbCluster(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         return Optional.ofNullable(findClusterForScope(
-                currentAccountId(), effectiveRegion, id)).orElseThrow(() ->
+                currentAccountId(), effectiveRegion, id))
+                .orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "DB cluster " + id + " not found.", 404));
     }
@@ -4409,6 +4466,9 @@ public class RdsService implements Resettable, ResourceProvider {
             effectiveAutoPauseSeconds = validateServerlessV2ScalingConfiguration(
                     effectiveMinCapacity, effectiveMaxCapacity, requestedOrExistingAutoPause);
         }
+        String effectiveSecretKmsKeyId = Boolean.TRUE.equals(manageMasterUserPassword)
+                && cluster.getMasterUserSecretArn() == null
+                ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         boolean passwordRotated = false;
         if (newPassword != null && !newPassword.isBlank()) {
             String oldPassword = cluster.getMasterPassword();
@@ -4432,7 +4492,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (cluster.getMasterPassword() == null || cluster.getMasterPassword().isBlank()) {
                 cluster.setMasterPassword(generatedMasterPassword());
             }
-            attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId);
+            attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
         } else if (Boolean.FALSE.equals(manageMasterUserPassword) && cluster.getMasterUserSecretArn() != null) {
             detachManagedMasterUserSecret(cluster, effectiveRegion);
         } else if (cluster.getMasterUserSecretArn() != null
