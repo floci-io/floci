@@ -30,7 +30,8 @@ class SesIdentityAttributesV2IntegrationTest {
         .when()
             .post("/v2/email/identities")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .body("DkimAttributes.SigningHostedZone", equalTo("dkim.amazonses.com"));
 
         // With no MAIL FROM domain configured, AWS keeps the MailFromAttributes
         // block carrying only BehaviorOnMxFailure and omits the inner
@@ -41,6 +42,7 @@ class SesIdentityAttributesV2IntegrationTest {
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
             .statusCode(200)
+            .body("DkimAttributes.SigningHostedZone", equalTo("dkim.amazonses.com"))
             .body("MailFromAttributes.BehaviorOnMxFailure", equalTo("USE_DEFAULT_VALUE"))
             .body("MailFromAttributes.MailFromDomain", nullValue())
             .body("MailFromAttributes.MailFromDomainStatus", nullValue());

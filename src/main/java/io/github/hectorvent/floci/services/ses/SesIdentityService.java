@@ -703,7 +703,7 @@ public class SesIdentityService implements SesTaggable {
 
         boolean present = true;
         for (String token : identity.getDkimTokens()) {
-            if (!hasExpectedDkimRecord(identity.getIdentity(), token)) {
+            if (!hasExpectedDkimRecord(identity, token)) {
                 present = false;
                 break;
             }
@@ -712,9 +712,9 @@ public class SesIdentityService implements SesTaggable {
         return present;
     }
 
-    private boolean hasExpectedDkimRecord(String domain, String token) {
-        String expectedName = normalizeDnsName(token + "._domainkey." + domain);
-        String expectedValue = normalizeDnsName(token + ".dkim.amazonses.com");
+    private boolean hasExpectedDkimRecord(Identity identity, String token) {
+        String expectedName = normalizeDnsName(token + "._domainkey." + identity.getIdentity());
+        String expectedValue = normalizeDnsName(token + "." + identity.getDkimSigningHostedZone());
         for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
             for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
                     Integer.MAX_VALUE)) {
@@ -762,7 +762,8 @@ public class SesIdentityService implements SesTaggable {
                 .map(this::normalizeDnsName)
                 .sorted()
                 .toList();
-        return region + "::" + normalizeDnsName(identity.getIdentity()) + "::" + String.join(",", normalizedTokens);
+        return region + "::" + normalizeDnsName(identity.getIdentity()) + "::"
+                + normalizeDnsName(identity.getDkimSigningHostedZone()) + "::" + String.join(",", normalizedTokens);
     }
 
     private record DkimLookupCacheEntry(boolean present, Instant expiresAt) {}
