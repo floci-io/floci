@@ -1,0 +1,543 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_iam_action_resources.py",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json",
+    "retrieved": "2026-10-10",
+    "note": "make iam-action-resources-verify checks every entry against AWS."
+  },
+  "actionResources": {
+    "AcceptDelegationRequest": [
+      "delegation-request"
+    ],
+    "AddClientIDToOpenIDConnectProvider": [
+      "oidc-provider"
+    ],
+    "AddRoleToInstanceProfile": [
+      "instance-profile"
+    ],
+    "AddUserToGroup": [
+      "group"
+    ],
+    "AssociateDelegationRequest": [
+      "delegation-request"
+    ],
+    "AttachGroupPolicy": [
+      "group"
+    ],
+    "AttachRolePolicy": [
+      "role"
+    ],
+    "AttachUserPolicy": [
+      "user"
+    ],
+    "ChangePassword": [
+      "user"
+    ],
+    "CreateAccessKey": [
+      "user"
+    ],
+    "CreateAccountAlias": [],
+    "CreateDelegationRequest": [
+      "delegation-request"
+    ],
+    "CreateGroup": [
+      "group"
+    ],
+    "CreateInstanceProfile": [
+      "instance-profile"
+    ],
+    "CreateLoginProfile": [
+      "user"
+    ],
+    "CreateOpenIDConnectProvider": [
+      "oidc-provider"
+    ],
+    "CreatePolicy": [
+      "policy"
+    ],
+    "CreatePolicyVersion": [
+      "policy"
+    ],
+    "CreateRole": [
+      "role"
+    ],
+    "CreateSAMLProvider": [
+      "saml-provider"
+    ],
+    "CreateServiceLinkedRole": [
+      "role"
+    ],
+    "CreateServiceSpecificCredential": [
+      "user"
+    ],
+    "CreateUser": [
+      "user"
+    ],
+    "CreateVirtualMFADevice": [
+      "mfa"
+    ],
+    "DeactivateMFADevice": [
+      "user"
+    ],
+    "DeleteAccessKey": [
+      "user"
+    ],
+    "DeleteAccountAlias": [],
+    "DeleteAccountPasswordPolicy": [],
+    "DeleteCloudFrontPublicKey": [],
+    "DeleteGroup": [
+      "group"
+    ],
+    "DeleteGroupPolicy": [
+      "group"
+    ],
+    "DeleteInstanceProfile": [
+      "instance-profile"
+    ],
+    "DeleteLoginProfile": [
+      "user"
+    ],
+    "DeleteOpenIDConnectProvider": [
+      "oidc-provider"
+    ],
+    "DeletePolicy": [
+      "policy"
+    ],
+    "DeletePolicyVersion": [
+      "policy"
+    ],
+    "DeleteRole": [
+      "role"
+    ],
+    "DeleteRolePermissionsBoundary": [
+      "role"
+    ],
+    "DeleteRolePolicy": [
+      "role"
+    ],
+    "DeleteSAMLProvider": [
+      "saml-provider"
+    ],
+    "DeleteSSHPublicKey": [
+      "user"
+    ],
+    "DeleteServerCertificate": [
+      "server-certificate"
+    ],
+    "DeleteServiceLinkedRole": [
+      "role"
+    ],
+    "DeleteServiceSpecificCredential": [
+      "user"
+    ],
+    "DeleteSigningCertificate": [
+      "user"
+    ],
+    "DeleteUser": [
+      "user"
+    ],
+    "DeleteUserPermissionsBoundary": [
+      "user"
+    ],
+    "DeleteUserPolicy": [
+      "user"
+    ],
+    "DeleteVirtualMFADevice": [
+      "mfa",
+      "sms-mfa"
+    ],
+    "DetachGroupPolicy": [
+      "group"
+    ],
+    "DetachRolePolicy": [
+      "role"
+    ],
+    "DetachUserPolicy": [
+      "user"
+    ],
+    "DisableOrganizationsRootCredentialsManagement": [],
+    "DisableOrganizationsRootSessions": [],
+    "DisableOutboundWebIdentityFederation": [],
+    "EnableMFADevice": [
+      "user"
+    ],
+    "EnableOrganizationsRootCredentialsManagement": [],
+    "EnableOrganizationsRootSessions": [],
+    "EnableOutboundWebIdentityFederation": [],
+    "GenerateCredentialReport": [],
+    "GenerateOrganizationsAccessReport": [
+      "access-report"
+    ],
+    "GenerateServiceLastAccessedDetails": [
+      "group",
+      "policy",
+      "role",
+      "user"
+    ],
+    "GetAccessKeyLastUsed": [
+      "user"
+    ],
+    "GetAccountAuthorizationDetails": [],
+    "GetAccountEmailAddress": [],
+    "GetAccountName": [],
+    "GetAccountPasswordPolicy": [],
+    "GetAccountProperties": [],
+    "GetAccountSummary": [],
+    "GetCloudFrontPublicKey": [],
+    "GetContextKeysForCustomPolicy": [],
+    "GetContextKeysForPrincipalPolicy": [
+      "group",
+      "role",
+      "user"
+    ],
+    "GetCredentialReport": [],
+    "GetDelegationRequest": [
+      "delegation-request"
+    ],
+    "GetGroup": [
+      "group"
+    ],
+    "GetGroupPolicy": [
+      "group"
+    ],
+    "GetHumanReadableSummary": [
+      "delegation-request"
+    ],
+    "GetInstanceProfile": [
+      "instance-profile"
+    ],
+    "GetLoginProfile": [
+      "user"
+    ],
+    "GetMFADevice": [
+      "user"
+    ],
+    "GetOpenIDConnectProvider": [
+      "oidc-provider"
+    ],
+    "GetOrganizationsAccessReport": [],
+    "GetOutboundWebIdentityFederationInfo": [],
+    "GetPolicy": [
+      "policy"
+    ],
+    "GetPolicyVersion": [
+      "policy"
+    ],
+    "GetRole": [
+      "role"
+    ],
+    "GetRolePolicy": [
+      "role"
+    ],
+    "GetRoleTemplateVersion": [
+      "role-template"
+    ],
+    "GetSAMLProvider": [
+      "saml-provider"
+    ],
+    "GetSSHPublicKey": [
+      "user"
+    ],
+    "GetServerCertificate": [
+      "server-certificate"
+    ],
+    "GetServiceLastAccessedDetails": [],
+    "GetServiceLastAccessedDetailsWithEntities": [],
+    "GetServiceLinkedRoleDeletionStatus": [
+      "role"
+    ],
+    "GetUser": [
+      "user"
+    ],
+    "GetUserPolicy": [
+      "user"
+    ],
+    "ListAccessKeys": [
+      "user"
+    ],
+    "ListAccountAliases": [],
+    "ListAttachedGroupPolicies": [
+      "group"
+    ],
+    "ListAttachedRolePolicies": [
+      "role"
+    ],
+    "ListAttachedUserPolicies": [
+      "user"
+    ],
+    "ListCloudFrontPublicKeys": [],
+    "ListDelegationRequests": [],
+    "ListEntitiesForPolicy": [
+      "policy"
+    ],
+    "ListGroupPolicies": [
+      "group"
+    ],
+    "ListGroups": [],
+    "ListGroupsForUser": [
+      "user"
+    ],
+    "ListInstanceProfileTags": [
+      "instance-profile"
+    ],
+    "ListInstanceProfiles": [],
+    "ListInstanceProfilesForRole": [
+      "role"
+    ],
+    "ListMFADeviceTags": [
+      "mfa"
+    ],
+    "ListMFADevices": [
+      "user"
+    ],
+    "ListOpenIDConnectProviderTags": [
+      "oidc-provider"
+    ],
+    "ListOpenIDConnectProviders": [],
+    "ListOrganizationsFeatures": [],
+    "ListPolicies": [],
+    "ListPoliciesGrantingServiceAccess": [
+      "group",
+      "role",
+      "user"
+    ],
+    "ListPolicyTags": [
+      "policy"
+    ],
+    "ListPolicyVersions": [
+      "policy"
+    ],
+    "ListRolePolicies": [
+      "role"
+    ],
+    "ListRoleTags": [
+      "role"
+    ],
+    "ListRoles": [],
+    "ListSAMLProviderTags": [
+      "saml-provider"
+    ],
+    "ListSAMLProviders": [],
+    "ListSSHPublicKeys": [
+      "user"
+    ],
+    "ListSTSRegionalEndpointsStatus": [],
+    "ListServerCertificateTags": [
+      "server-certificate"
+    ],
+    "ListServerCertificates": [],
+    "ListServiceSpecificCredentials": [
+      "user"
+    ],
+    "ListSigningCertificates": [
+      "user"
+    ],
+    "ListUserPolicies": [
+      "user"
+    ],
+    "ListUserTags": [
+      "user"
+    ],
+    "ListUsers": [],
+    "ListVirtualMFADevices": [],
+    "PassRole": [
+      "role"
+    ],
+    "PutAccountProperties": [],
+    "PutGroupPolicy": [
+      "group"
+    ],
+    "PutRolePermissionsBoundary": [
+      "role"
+    ],
+    "PutRolePolicy": [
+      "role"
+    ],
+    "PutUserPermissionsBoundary": [
+      "user"
+    ],
+    "PutUserPolicy": [
+      "user"
+    ],
+    "RejectDelegationRequest": [
+      "delegation-request"
+    ],
+    "RemoveClientIDFromOpenIDConnectProvider": [
+      "oidc-provider"
+    ],
+    "RemoveRoleFromInstanceProfile": [
+      "instance-profile"
+    ],
+    "RemoveUserFromGroup": [
+      "group"
+    ],
+    "ResetServiceSpecificCredential": [
+      "user"
+    ],
+    "ResyncMFADevice": [
+      "user"
+    ],
+    "SendDelegationToken": [
+      "delegation-request"
+    ],
+    "SetDefaultPolicyVersion": [
+      "policy"
+    ],
+    "SetSTSRegionalEndpointStatus": [],
+    "SetSecurityTokenServicePreferences": [],
+    "SimulateCustomPolicy": [],
+    "SimulatePrincipalPolicy": [
+      "group",
+      "role",
+      "user"
+    ],
+    "TagInstanceProfile": [
+      "instance-profile"
+    ],
+    "TagMFADevice": [
+      "mfa"
+    ],
+    "TagOpenIDConnectProvider": [
+      "oidc-provider"
+    ],
+    "TagPolicy": [
+      "policy"
+    ],
+    "TagRole": [
+      "role"
+    ],
+    "TagSAMLProvider": [
+      "saml-provider"
+    ],
+    "TagServerCertificate": [
+      "server-certificate"
+    ],
+    "TagUser": [
+      "user"
+    ],
+    "UntagInstanceProfile": [
+      "instance-profile"
+    ],
+    "UntagMFADevice": [
+      "mfa"
+    ],
+    "UntagOpenIDConnectProvider": [
+      "oidc-provider"
+    ],
+    "UntagPolicy": [
+      "policy"
+    ],
+    "UntagRole": [
+      "role"
+    ],
+    "UntagSAMLProvider": [
+      "saml-provider"
+    ],
+    "UntagServerCertificate": [
+      "server-certificate"
+    ],
+    "UntagUser": [
+      "user"
+    ],
+    "UpdateAccessKey": [
+      "user"
+    ],
+    "UpdateAccountEmailAddress": [],
+    "UpdateAccountName": [],
+    "UpdateAccountPasswordPolicy": [],
+    "UpdateAssumeRolePolicy": [
+      "role"
+    ],
+    "UpdateCloudFrontPublicKey": [],
+    "UpdateGroup": [
+      "group"
+    ],
+    "UpdateLoginProfile": [
+      "user"
+    ],
+    "UpdateOpenIDConnectProviderThumbprint": [
+      "oidc-provider"
+    ],
+    "UpdateRole": [
+      "role"
+    ],
+    "UpdateRoleDescription": [
+      "role"
+    ],
+    "UpdateSAMLProvider": [
+      "saml-provider"
+    ],
+    "UpdateSSHPublicKey": [
+      "user"
+    ],
+    "UpdateServerCertificate": [
+      "server-certificate"
+    ],
+    "UpdateServiceSpecificCredential": [
+      "user"
+    ],
+    "UpdateSigningCertificate": [
+      "user"
+    ],
+    "UpdateUser": [
+      "user"
+    ],
+    "UploadCloudFrontPublicKey": [],
+    "UploadSSHPublicKey": [
+      "user"
+    ],
+    "UploadServerCertificate": [
+      "server-certificate"
+    ],
+    "UploadSigningCertificate": [
+      "user"
+    ]
+  },
+  "resourceArnFormats": {
+    "access-report": [
+      "arn:${Partition}:iam::${Account}:access-report/${EntityPath}"
+    ],
+    "assumed-role": [
+      "arn:${Partition}:iam::${Account}:assumed-role/${RoleName}/${RoleSessionName}"
+    ],
+    "delegation-request": [
+      "arn:${Partition}:iam::${Account}:delegation-request/${DelegationRequestId}"
+    ],
+    "federated-user": [
+      "arn:${Partition}:iam::${Account}:federated-user/${UserName}"
+    ],
+    "group": [
+      "arn:${Partition}:iam::${Account}:group/${GroupNameWithPath}"
+    ],
+    "instance-profile": [
+      "arn:${Partition}:iam::${Account}:instance-profile/${InstanceProfileNameWithPath}"
+    ],
+    "mfa": [
+      "arn:${Partition}:iam::${Account}:mfa/${MfaTokenIdWithPath}"
+    ],
+    "oidc-provider": [
+      "arn:${Partition}:iam::${Account}:oidc-provider/${OidcProviderName}"
+    ],
+    "policy": [
+      "arn:${Partition}:iam::${Account}:policy/${PolicyNameWithPath}"
+    ],
+    "role": [
+      "arn:${Partition}:iam::${Account}:role/${RoleNameWithPath}"
+    ],
+    "role-template": [
+      "arn:${Partition}:iam::aws:role-template/${AWSServicePrincipal}/${RoleTemplateName}:${RoleTemplateMajorVersion}"
+    ],
+    "saml-provider": [
+      "arn:${Partition}:iam::${Account}:saml-provider/${SamlProviderName}"
+    ],
+    "server-certificate": [
+      "arn:${Partition}:iam::${Account}:server-certificate/${CertificateNameWithPath}"
+    ],
+    "sms-mfa": [
+      "arn:${Partition}:iam::${Account}:sms-mfa/${MfaTokenIdWithPath}"
+    ],
+    "user": [
+      "arn:${Partition}:iam::${Account}:user/${UserNameWithPath}"
+    ]
+  }
+}

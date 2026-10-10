@@ -1,0 +1,68 @@
+name: IAM Data Drift
+
+# Checks the two vendored files that come from AWS's live service reference rather than from a
+# pinned dependency: the IAM service namespace list, and the map of which resource each IAM action
+# is authorized against. That needs the live service reference index, so unlike every other check here it can
+# fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
+# retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
+#
+# Two triggers, for two different failures:
+#
+#   - On a pull request that touches either vendored file or its generator, which is where a
+#     hand-typed or mistyped entry would enter the repository. A pull request that does not touch
+#     them cannot introduce one, so it does not run and cannot be failed by an outage.
+#   - Weekly, because both files also go stale without anyone touching them: AWS ships services
+#     and actions, and occasionally retires them. Tying the only upstream check to pull request
+#     activity would mean a quiet month is a month with no drift detection at all.
+#
+# An entry AWS has *added* since the last sync is reported without failing: a new namespace makes
+# the service-last-accessed report incomplete rather than wrong, and a new action or resource type
+# leaves that action evaluated against `*`, which is where it was before any of this existed. The
+# fix for a real failure is to run the matching sync target and commit the result.
+#
+# The offline shape check is hermetic and runs per pull request inside the "Vendored AWS data in
+# sync" job in partition-literals.yml instead.
+
+on:
+  pull_request:
+    paths:
+      - 'src/main/resources/aws/iam-service-namespaces.json'
+      - 'src/main/resources/aws/iam-action-resources.json'
+      - 'tools/aws/regen_service_namespaces.py'
+      - 'tools/aws/test_regen_service_namespaces.py'
+      - 'tools/aws/regen_iam_action_resources.py'
+      - 'tools/aws/test_regen_iam_action_resources.py'
+      - '.github/workflows/iam-data-drift.yml'
+  schedule:
+    # Mondays at 06:00 UTC, before the working week rather than during it.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# One job, and one step that runs both verifies. They are kept in a single Makefile target rather
+# than two steps because sequential steps stop at the first failure: while the namespace list was
+# stale, the action resource check never ran at all, so the half that was still fine went
+# unreported. The target runs both regardless and fails afterwards, naming which file drifted.
+jobs:
+  iam-data-drift:
+    name: Vendored IAM data still matches upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      # No dependency install: the generators are deliberately stdlib-only, and this job runs no
+      # tests. The pinned botocore the sibling workflow needs is for the partition generator.
+      - name: Check every vendored IAM file still matches upstream
+        run: make iam-data-verify
