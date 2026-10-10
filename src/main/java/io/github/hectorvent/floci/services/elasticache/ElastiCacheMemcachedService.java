@@ -138,46 +138,67 @@ public class ElastiCacheMemcachedService {
         // so the cluster is created and reaches 'available' even when no Docker daemon is
         // reachable. Only connecting to the cache needs the container.
         ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, request.region());
+        try {
+            String endpointHost = resolveEndpointHost(handle);
+            int endpointPort = handle != null ? handle.getPort() : BACKEND_PORT;
+            Endpoint endpoint = new Endpoint(endpointHost, endpointPort);
 
-        String endpointHost = resolveEndpointHost(handle);
-        int endpointPort = handle != null ? handle.getPort() : BACKEND_PORT;
-        Endpoint endpoint = new Endpoint(endpointHost, endpointPort);
+            CacheCluster cluster = new CacheCluster(
+                    clusterId, CacheClusterStatus.AVAILABLE, ENGINE, ENGINE_VERSION,
+                    endpoint, Instant.now());
+            // What terraform's aws_elasticache_cluster reads back: anything the request set and the
+            // describe omitted would be a diff no apply can settle.
+            cluster.setNumCacheNodes(request.numCacheNodes() != null ? request.numCacheNodes() : 1);
+            cluster.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
+                    ? request.cacheNodeType() : DEFAULT_CACHE_NODE_TYPE);
+            cluster.setCacheParameterGroupName(request.cacheParameterGroupName());
+            cluster.setCacheSubnetGroupName(request.cacheSubnetGroupName());
+            cluster.setNetworkType(request.networkType() != null && !request.networkType().isBlank()
+                    ? request.networkType() : "ipv4");
+            cluster.setSecurityGroupIds(request.securityGroupIds() != null
+                    ? new ArrayList<>(request.securityGroupIds()) : null);
+            cluster.setPreferredAvailabilityZone(request.preferredAvailabilityZone() != null
+                    && !request.preferredAvailabilityZone().isBlank()
+                    ? request.preferredAvailabilityZone() : regionResolver.getRegion() + "a");
+            cluster.setArn(regionResolver.buildArn("elasticache", request.region(), "cluster:" + clusterId));
+            cluster.setTags(request.tags());
+            if (handle != null) {
+                cluster.setContainerId(handle.getContainerId());
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+            } else {
+                LOG.warnv("Memcached cluster {0} created without a backing container: no Docker daemon "
+                        + "is reachable. Metadata operations work; connections to the cache do not "
+                        + "until a daemon appears.", clusterId);
+            }
+            cluster.setRegion(request.region());
+            cluster.setServerlessCacheName(cacheName);
+            cluster.setOwnerAccountId(accountId);
 
-        CacheCluster cluster = new CacheCluster(
-                clusterId, CacheClusterStatus.AVAILABLE, ENGINE, ENGINE_VERSION,
-                endpoint, Instant.now());
-        // What terraform's aws_elasticache_cluster reads back: anything the request set and the
-        // describe omitted would be a diff no apply can settle.
-        cluster.setNumCacheNodes(request.numCacheNodes() != null ? request.numCacheNodes() : 1);
-        cluster.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
-                ? request.cacheNodeType() : DEFAULT_CACHE_NODE_TYPE);
-        cluster.setCacheParameterGroupName(request.cacheParameterGroupName());
-        cluster.setCacheSubnetGroupName(request.cacheSubnetGroupName());
-        cluster.setNetworkType(request.networkType() != null && !request.networkType().isBlank()
-                ? request.networkType() : "ipv4");
-        cluster.setSecurityGroupIds(request.securityGroupIds() != null
-                ? new ArrayList<>(request.securityGroupIds()) : null);
-        cluster.setPreferredAvailabilityZone(request.preferredAvailabilityZone() != null
-                && !request.preferredAvailabilityZone().isBlank()
-                ? request.preferredAvailabilityZone() : regionResolver.getRegion() + "a");
-        cluster.setArn(regionResolver.buildArn("elasticache", request.region(), "cluster:" + clusterId));
-        cluster.setTags(request.tags());
-        if (handle != null) {
-            cluster.setContainerId(handle.getContainerId());
-            cluster.setContainerHost(handle.getHost());
-            cluster.setContainerPort(handle.getPort());
-        } else {
-            LOG.warnv("Memcached cluster {0} created without a backing container: no Docker daemon "
-                    + "is reachable. Metadata operations work; connections to the cache do not "
-                    + "until a daemon appears.", clusterId);
+            putRuntimeCluster(cluster);
+            LOG.infov("Memcached cluster {0} created, endpoint={1}:{2}", clusterId, endpointHost, endpointPort);
+            return cluster;
+        } catch (RuntimeException e) {
+            LOG.warnv("Memcached cluster {0} provisioning failed, rolling back: {1}", clusterId, e.getMessage());
+            rollbackCacheCluster(clusterId, handle, accountId);
+            throw e;
         }
-        cluster.setRegion(request.region());
-        cluster.setServerlessCacheName(cacheName);
-        cluster.setOwnerAccountId(accountId);
+    }
 
-        clusters.put(clusterId, cluster);
-        LOG.infov("Memcached cluster {0} created, endpoint={1}:{2}", clusterId, endpointHost, endpointPort);
-        return cluster;
+    private void rollbackCacheCluster(String clusterId, ElastiCacheContainerHandle handle, String accountId) {
+        try {
+            if (handle != null) {
+                containerManager.stop(handle);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Error stopping container for Memcached cluster {0}: {1}", clusterId, e.getMessage());
+        } finally {
+            if (accountId == null) {
+                clusters.delete(clusterId);
+            } else {
+                clusters.deleteForAccount(accountId, clusterId);
+            }
+        }
     }
 
     /**
@@ -357,7 +378,7 @@ public class ElastiCacheMemcachedService {
         synchronized (lockFor(clusterId)) {
             CacheCluster cluster = clusters.get(clusterId)
                     .filter(record -> internal || record.getServerlessCacheName() == null).orElseThrow(() ->
-                            new AwsException("CacheClusterNotFound", "Cache cluster not found.", 404));
+                            new AwsException("CacheClusterNotFound", "Cache cluster " + clusterId + " not found.", 404));
 
             cluster.setCacheClusterStatus(CacheClusterStatus.DELETING);
             clusters.put(clusterId, cluster);

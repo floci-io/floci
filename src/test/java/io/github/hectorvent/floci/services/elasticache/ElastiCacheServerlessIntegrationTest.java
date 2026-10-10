@@ -22,7 +22,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestProfile(ServerlessTestProfile.class)
@@ -239,5 +244,27 @@ class ElastiCacheServerlessIntegrationTest {
             }
         }
         throw new IOException("Connection closed before reply terminator");
+    }
+
+    @Test
+    void createServerlessCacheWithTagValueMissingKeyReturnsInvalidParameterValue() {
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20261010/us-east-1/elasticache/aws4_request")
+                .formParam("Action", "CreateServerlessCache")
+                .formParam("ServerlessCacheName", "tag-fail-cache")
+                .formParam("Engine", "valkey")
+                .formParam("Tags.Tag.1.Value", "malformed-value")
+                .when()
+                .post(endpoint)
+                .then()
+                .statusCode(400)
+                .body(containsString("InvalidParameterValue"))
+                .body(containsString("Tag key cannot be null or empty"));
+
+        try (ElastiCacheClient client = client()) {
+            assertThrows(ServerlessCacheNotFoundException.class,
+                    () -> client.describeServerlessCaches(r -> r.serverlessCacheName("tag-fail-cache")));
+        }
     }
 }

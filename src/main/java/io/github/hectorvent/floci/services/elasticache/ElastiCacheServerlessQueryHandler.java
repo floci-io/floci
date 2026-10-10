@@ -154,10 +154,17 @@ public class ElastiCacheServerlessQueryHandler {
         Map<String, String> result = new LinkedHashMap<>();
         for (int index = 1; ; index++) {
             String key = params.getFirst("Tags.Tag." + index + ".Key");
-            if (key == null) {
+            String value = params.getFirst("Tags.Tag." + index + ".Value");
+            if (key == null && value == null) {
+                key = params.getFirst("Tags.member." + index + ".Key");
+                value = params.getFirst("Tags.member." + index + ".Value");
+            }
+            if (key == null && value == null) {
                 break;
             }
-            String value = params.getFirst("Tags.Tag." + index + ".Value");
+            if (key == null || key.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "Tag key cannot be null or empty.", 400);
+            }
             result.put(key, value == null ? "" : value);
         }
         return result;

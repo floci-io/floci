@@ -143,7 +143,7 @@ class ElastiCacheServerlessServiceTest {
         assertEquals("updated", updated.getDescription());
         assertEquals(List.of("sg-new"), updated.getSecurityGroupIds());
         error("ServerlessCacheAlreadyExistsFault", () -> service.createServerlessCache(create("cache", "valkey", "team")));
-        assertEquals(List.of("cache"), List.copyOf(runtime.getUserGroup("team").getServerlessCacheEngines().keySet()));
+        assertEquals(List.of("us-east-1/cache"), List.copyOf(runtime.getUserGroup("team").getServerlessCacheEngines().keySet()));
         service.deleteServerlessCache("cache");
         assertTrue(service.describeServerlessCaches(null).isEmpty());
         runtime.deleteUserGroup("team");
@@ -268,7 +268,7 @@ class ElastiCacheServerlessServiceTest {
         complete.countDown();
         assertEquals("race", first.get(10, TimeUnit.SECONDS).getServerlessCacheName());
         assertEquals("ServerlessCacheAlreadyExistsFault", second.get(10, TimeUnit.SECONDS));
-        assertEquals(List.of("race"), List.copyOf(runtime.getUserGroup("team").getServerlessCacheEngines().keySet()));
+        assertEquals(List.of("us-east-1/race"), List.copyOf(runtime.getUserGroup("team").getServerlessCacheEngines().keySet()));
     }
 
     @Test
@@ -312,7 +312,7 @@ class ElastiCacheServerlessServiceTest {
         verify(proxies).startProxy(eq(restored.getBackingCacheClusterId()), any(), anyInt(), anyString(), anyInt(),
                 validator.capture(), eq("persistent"));
         assertTrue(validator.getValue().validatePassword("member", "secret"));
-        assertEquals(List.of("persistent"), List.copyOf(reloadedRuntime.getUserGroup("persisted-team").getServerlessCacheEngines().keySet()));
+        assertEquals(List.of("us-east-1/persistent"), List.copyOf(reloadedRuntime.getUserGroup("persisted-team").getServerlessCacheEngines().keySet()));
         reloaded.deleteServerlessCache("persistent");
         reloadedRuntime.deleteUserGroup("persisted-team");
         ServerlessCache replacement = reloaded.createServerlessCache(create("reused", "valkey", null));
@@ -381,5 +381,39 @@ class ElastiCacheServerlessServiceTest {
         when(access.storageMode(anyString())).thenReturn("persistent");
         when(access.storageFlushInterval(anyString())).thenReturn(60_000L);
         return new StorageFactory(persistenceConfig, access);
+    }
+
+    @Test
+    void modifyingUserGroupWithDifferentCasePreservesAssociation() {
+        service.createServerlessCache(create("case-cache", "valkey", "team"));
+        service.modifyServerlessCache(modify("case-cache", "TEAM", null));
+        ServerlessCache cache = service.getServerlessCache("case-cache");
+        assertEquals("team", cache.getUserGroupId());
+
+        // Deleting the user group should still fail because it is in use by case-cache
+        error("InvalidUserGroupState", () -> runtime.deleteUserGroup("team"));
+
+        service.deleteServerlessCache("case-cache");
+        assertNotNull(runtime.deleteUserGroup("team"));
+    }
+
+    @Test
+    void sameNamedServerlessCachesInDifferentRegionsMaintainIndependentGroupTracking() {
+        context.setRegion("us-east-1");
+        service.createServerlessCache(create("multi-cache", "valkey", "team"));
+
+        context.setRegion("eu-west-1");
+        service.createServerlessCache(create("multi-cache", "valkey", "team"));
+
+        // Delete cache in eu-west-1
+        service.deleteServerlessCache("multi-cache");
+
+        // The user group should still be associated with the us-east-1 cache
+        error("InvalidUserGroupState", () -> runtime.deleteUserGroup("team"));
+
+        context.setRegion("us-east-1");
+        service.deleteServerlessCache("multi-cache");
+
+        assertNotNull(runtime.deleteUserGroup("team"));
     }
 }

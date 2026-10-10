@@ -69,8 +69,10 @@ public class ElastiCacheServerlessService implements Resettable {
         if (request.tags() != null && request.tags().size() > 50) {
             throw new AwsException("TagQuotaPerResourceExceeded", "At most 50 tags are supported.", 400);
         }
+        String rawGroup = request.userGroupId();
+        String group = normalizedUserGroupId(rawGroup);
         String region = resolver.getRegion();
-        validateGroup(request.userGroupId(), engine, region);
+        validateGroup(group, engine, region);
         runtime.validateServerlessDependencies(request.subnetIds(), request.securityGroupIds(), request.kmsKeyId(), region);
         synchronized (lockFor(name)) {
             if (caches.get(key(name)).isPresent()) {
@@ -79,8 +81,8 @@ public class ElastiCacheServerlessService implements Resettable {
             boolean attached = false;
             CacheCluster backing = null;
             try {
-                if (request.userGroupId() != null) {
-                    groups.attachServerlessCache(request.userGroupId(), name, engine);
+                if (group != null) {
+                    groups.attachServerlessCache(group, key(name), engine);
                     attached = true;
                 }
                 String runtimeId = "serverless-" + UUID.randomUUID();
@@ -90,7 +92,7 @@ public class ElastiCacheServerlessService implements Resettable {
                 String account = resolver.getAccountId();
                 backing = "memcached".equals(engine)
                         ? memcached.createServerlessBacking(backingRequest, name, account)
-                        : runtime.createServerlessBacking(backingRequest, name, account, request.userGroupId());
+                        : runtime.createServerlessBacking(backingRequest, name, account, group);
                 ServerlessCache cache = new ServerlessCache();
                 cache.setServerlessCacheName(name);
                 cache.setEngine(engine);
@@ -107,7 +109,7 @@ public class ElastiCacheServerlessService implements Resettable {
                 cache.setBackingCacheClusterId(runtimeId);
                 cache.setSubnetIds(request.subnetIds());
                 cache.setSecurityGroupIds(request.securityGroupIds());
-                cache.setUserGroupId(request.userGroupId());
+                cache.setUserGroupId(group);
                 cache.setKmsKeyId(request.kmsKeyId());
                 cache.setCacheUsageLimits(request.cacheUsageLimits());
                 cache.setSnapshotRetentionLimit(request.snapshotRetentionLimit() == null ? 0 : request.snapshotRetentionLimit());
@@ -126,7 +128,7 @@ public class ElastiCacheServerlessService implements Resettable {
                 }
                 if (attached) {
                     try {
-                        groups.detachServerlessCache(request.userGroupId(), name);
+                        groups.detachServerlessCache(group, key(name));
                     } catch (RuntimeException cleanupFailure) {
                         exception.addSuppressed(cleanupFailure);
                     }
@@ -169,11 +171,11 @@ public class ElastiCacheServerlessService implements Resettable {
             }
             ServerlessCache updated = copy(previous);
             String group = Boolean.TRUE.equals(request.removeUserGroup()) ? null
-                    : request.userGroupId() == null ? previous.getUserGroupId() : request.userGroupId();
+                    : request.userGroupId() == null ? previous.getUserGroupId() : normalizedUserGroupId(request.userGroupId());
             validateGroup(group, previous.getEngine(), previous.getRegion());
             boolean changedGroup = !Objects.equals(group, previous.getUserGroupId());
             if (changedGroup && group != null) {
-                groups.attachServerlessCache(group, name, previous.getEngine());
+                groups.attachServerlessCache(group, key(name), previous.getEngine());
             }
             try {
                 if (changedGroup && !"memcached".equals(previous.getEngine())) {
@@ -201,7 +203,7 @@ public class ElastiCacheServerlessService implements Resettable {
                     try {
                         runtime.updateServerlessUserGroup(previous.getBackingCacheClusterId(), previous.getAccountId(), previous.getUserGroupId());
                         if (group != null) {
-                            groups.detachServerlessCache(group, name);
+                            groups.detachServerlessCache(group, key(name));
                         }
                     } catch (RuntimeException rollbackFailure) {
                         exception.addSuppressed(rollbackFailure);
@@ -210,7 +212,7 @@ public class ElastiCacheServerlessService implements Resettable {
                 throw exception;
             }
             if (changedGroup && previous.getUserGroupId() != null) {
-                groups.detachServerlessCache(previous.getUserGroupId(), name);
+                groups.detachServerlessCache(previous.getUserGroupId(), key(name));
             }
             return current(updated);
         }
@@ -243,7 +245,7 @@ public class ElastiCacheServerlessService implements Resettable {
             ServerlessCache cache = requireCache(normalized);
             deleteBacking(cache.getEngine(), cache.getBackingCacheClusterId());
             if (cache.getUserGroupId() != null) {
-                groups.detachServerlessCache(cache.getUserGroupId(), normalized);
+                groups.detachServerlessCache(cache.getUserGroupId(), key(normalized));
             }
             caches.delete(key(normalized));
             ServerlessCache deleted = copy(cache);
@@ -299,6 +301,10 @@ public class ElastiCacheServerlessService implements Resettable {
             throw invalid("ServerlessCacheName must contain 1 to 40 letters, digits and hyphens and begin with a letter.");
         }
         return name.toLowerCase(Locale.ROOT);
+    }
+
+    private static String normalizedUserGroupId(String userGroupId) {
+        return userGroupId == null ? null : userGroupId.toLowerCase(Locale.ROOT);
     }
 
     private static String normalizedEngine(String engine) {

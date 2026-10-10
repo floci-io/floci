@@ -236,8 +236,10 @@ public class ElastiCacheContainerManager {
         if (handle == null) {
             return;
         }
-        activeContainers.remove(handle.getGroupId());
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+        ElastiCacheContainerHandle existing = activeContainers.remove(handle.getGroupId());
+        Closeable logStream = handle.getLogStream() != null ? handle.getLogStream()
+                : (existing != null ? existing.getLogStream() : null);
+        lifecycleManager.stopAndRemove(handle.getContainerId(), logStream);
     }
 
     /**

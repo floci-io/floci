@@ -401,7 +401,10 @@ public class ElastiCacheQueryHandler {
             xml.elem("member", replicationGroupId);
         }
         xml.end("ReplicationGroups");
-        xml.raw(memberListXml("ServerlessCaches", g.getServerlessCacheEngines().keySet()));
+        xml.raw(memberListXml("ServerlessCaches", g.getServerlessCacheEngines().keySet().stream()
+                .map(key -> key.contains("/") ? key.substring(key.indexOf('/') + 1) : key)
+                .distinct()
+                .toList()));
         xml.elem("ARN", g.getArn());
         return xml.build();
     }
