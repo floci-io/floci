@@ -896,6 +896,45 @@ class CloudFrontCfnProvisionerTest {
     }
 
     @Test
+    void functionWithoutRuntimeIsAValidationError() throws Exception {
+        StackResource r = resource(FUNCTION);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, json("""
+                {"Name": "my-function", "FunctionCode": "code", "FunctionConfig": {"Comment": "example"}}
+                """), distributionCtx(null)));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals(FUNCTION + " requires FunctionConfig.Runtime", e.getMessage());
+        verify(cloudFront, never()).createFunction(any());
+    }
+
+    @Test
+    void functionWithAnAutoPublishThatIsNotABooleanIsAValidationError() throws Exception {
+        StackResource r = resource(FUNCTION);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, json("""
+                {"Name": "my-function", "AutoPublish": "yes", "FunctionCode": "code",
+                 "FunctionConfig": {"Comment": "example", "Runtime": "cloudfront-js-2.0"}}
+                """), distributionCtx(null)));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals(FUNCTION + " AutoPublish must be a boolean", e.getMessage());
+        verify(cloudFront, never()).createFunction(any());
+    }
+
+    @Test
+    void deleteOfAFunctionAlreadyGoneStillDropsItsTags() {
+        when(cloudFront.describeFunction("my-function", null)).thenThrow(
+                new AwsException("NoSuchFunctionExists", "The specified function does not exist.", 404));
+        when(cloudFront.listTagsForResource(FUNCTION_ARN)).thenReturn(Map.of("Env", "test"));
+
+        provisioner.delete(FUNCTION, FUNCTION_ARN, REGION);
+
+        verify(cloudFront, never()).deleteFunction(any(), any());
+        verify(cloudFront).untagResource(FUNCTION_ARN, List.of("Env"));
+    }
+
+    @Test
     void deletesFunctionWithItsEtagAndRemovesItsTags() {
         when(cloudFront.describeFunction("my-function", null)).thenReturn(function("my-function", ETAG));
         when(cloudFront.listTagsForResource(FUNCTION_ARN)).thenReturn(Map.of("Env", "test"));

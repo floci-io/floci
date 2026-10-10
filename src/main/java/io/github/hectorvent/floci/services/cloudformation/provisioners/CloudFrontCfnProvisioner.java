@@ -294,13 +294,17 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         String name = requireText(FUNCTION, "Name", props, ctx);
         String code = requireText(FUNCTION, "FunctionCode", props, ctx);
         JsonNode config = requireConfig(FUNCTION, "FunctionConfig", props, ctx);
-        boolean autoPublish = "true".equalsIgnoreCase(resolvedText("AutoPublish", props, ctx));
+        String runtime = text(config, "Runtime");
+        if (runtime == null || runtime.isBlank()) {
+            throw new AwsException("ValidationError", FUNCTION + " requires FunctionConfig.Runtime", 400);
+        }
+        boolean autoPublish = autoPublish(props, ctx);
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         CloudFrontFunction fn = new CloudFrontFunction();
         fn.setName(name);
         fn.setFunctionCode(code);
         fn.setComment(text(config, "Comment"));
-        fn.setRuntime(text(config, "Runtime"));
+        fn.setRuntime(runtime);
 
         String arn = cloudFrontService.arn("function/" + name);
         CloudFrontFunction prior = arn.equals(ctx.priorPhysicalId())
@@ -332,6 +336,18 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Stage", autoPublish ? "LIVE" : "DEVELOPMENT");
     }
 
+    /** False when absent. Any value other than true or false is rejected before the service is called. */
+    private static boolean autoPublish(JsonNode props, ProvisionContext ctx) {
+        String value = resolvedText("AutoPublish", props, ctx);
+        if (value == null || "false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        throw new AwsException("ValidationError", FUNCTION + " AutoPublish must be a boolean", 400);
+    }
+
     private CloudFrontFunction developmentFunction(String arn) {
         return cloudFrontService.describeFunction(functionName(arn), null);
     }
@@ -350,15 +366,19 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /** Deletes the function and the tags kept under its ARN, which the service delete leaves. */
+    /**
+     * Deletes the function, then the tags kept under its ARN, which the service delete leaves. The
+     * tags are dropped even when the function was already deleted outside the stack, so a later
+     * function with the same name does not get them.
+     */
     private void deleteFunction(String arn) {
-        CfnDeletes.safeDelete("function", arn, () -> {
-            cloudFrontService.deleteFunction(functionName(arn), developmentFunction(arn).getEtag());
-            List<String> tagKeys = List.copyOf(cloudFrontService.listTagsForResource(arn).keySet());
-            if (!tagKeys.isEmpty()) {
-                cloudFrontService.untagResource(arn, tagKeys);
-            }
-        }, NO_SUCH_FUNCTION);
+        CfnDeletes.safeDelete("function", arn,
+                () -> cloudFrontService.deleteFunction(functionName(arn), developmentFunction(arn).getEtag()),
+                NO_SUCH_FUNCTION);
+        List<String> tagKeys = List.copyOf(cloudFrontService.listTagsForResource(arn).keySet());
+        if (!tagKeys.isEmpty()) {
+            cloudFrontService.untagResource(arn, tagKeys);
+        }
     }
 
     private static void expose(StackResource r, String id, Instant lastModifiedTime) {
