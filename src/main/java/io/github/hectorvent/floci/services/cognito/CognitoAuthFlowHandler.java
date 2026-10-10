@@ -683,9 +683,12 @@ final class CognitoAuthFlowHandler {
         }
         CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
                 clientMetadata, "TokenGeneration_RefreshTokens", List.of());
+        Instant authTime = service.refreshTokenAuthTime(parts);
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
-        auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
+        auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid,
+                authTime));
+        auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid,
+                authTime));
         auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
         auth.put("TokenType", "Bearer");
         Map<String, Object> result = new HashMap<>();

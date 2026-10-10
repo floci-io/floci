@@ -11,6 +11,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -92,14 +93,17 @@ public class CognitoManagedLoginService {
     }
 
     private String openSession(UserPoolClient client, CognitoUser user) {
+        Instant signedInAt = clock.instant();
         return stateStore.putSession(new CognitoManagedLoginSession(
-                client.getUserPoolId(), user.getUsername(), clock.instant().plus(SESSION_LIFETIME)));
+                client.getUserPoolId(), user.getUsername(), signedInAt, signedInAt.plus(SESSION_LIFETIME)));
     }
 
     /**
      * Issues an authorization code to the user of the browser's session, or nothing when there is
      * no session for the client's pool. Every pool's session travels in the same cookie on Floci's
-     * own host, so a session of one pool must never sign its user in to another.
+     * own host, so a session of one pool must never sign its user in to another. The code keeps the
+     * session's sign-in time, so its tokens carry the {@code auth_time} of the sign-in, not of this
+     * request.
      *
      * @param grantedScopes the scopes the authorization request was granted, which the code keeps
      */
@@ -116,7 +120,7 @@ public class CognitoManagedLoginService {
         }
         CognitoAuthorizationCode code = new CognitoAuthorizationCode(client.getUserPoolId(), client.getClientId(),
                 session.get().username(), redirectUri, grantedScopes, nonce, codeChallenge,
-                clock.instant().plus(AUTHORIZATION_CODE_LIFETIME));
+                session.get().authTime(), clock.instant().plus(AUTHORIZATION_CODE_LIFETIME));
         return Optional.of(stateStore.putAuthorizationCode(code));
     }
 
