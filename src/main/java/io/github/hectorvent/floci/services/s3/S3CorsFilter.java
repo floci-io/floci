@@ -48,6 +48,9 @@ public class S3CorsFilter implements ContainerResponseFilter {
         // putSingle replaces any value already set by a resource method or earlier filter,
         // preventing duplicate Access-Control-Allow-Origin / Expose-Headers entries.
         headers.putSingle("Access-Control-Allow-Origin", cors.allowedOrigin());
+        if (!"*".equals(cors.allowedOrigin())) {
+            headers.putSingle("Access-Control-Allow-Credentials", "true");
+        }
 
         // Merge "Origin" into Vary without duplicating it; Vary may already carry other
         // tokens (e.g. "Accept-Encoding") added by the JAX-RS runtime or other filters.
