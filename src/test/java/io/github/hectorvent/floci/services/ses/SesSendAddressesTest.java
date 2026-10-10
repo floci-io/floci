@@ -45,4 +45,11 @@ class SesSendAddressesTest {
         assertEquals(List.of(" user@[IPv6:2001:db8::1]"),
                 SesSendAddresses.splitAddressList("team: user@[IPv6:2001:db8::1];"));
     }
+
+    @Test
+    void lastUnquotedAngleSkipsQuotedLessThan() {
+        assertEquals(8, SesSendAddresses.lastUnquotedAngle("Display <\"a<b\"@example.com>"));
+        assertEquals(-1, SesSendAddresses.lastUnquotedAngle("\"a<b\"@example.com"));
+        assertEquals(-1, SesSendAddresses.lastUnquotedAngle("a@example.com"));
+    }
 }

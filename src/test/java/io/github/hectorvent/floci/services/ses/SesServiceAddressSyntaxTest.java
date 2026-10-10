@@ -32,10 +32,13 @@ class SesServiceAddressSyntaxTest {
             new EmailContent.Simple("Subject", "body", null, List.of());
 
     private SesService service;
+    private SesSentEmailService sentEmails;
 
     @BeforeEach
     void setUp() {
-        service = SesServiceTestBuilder.create().build();
+        SesServiceTestBuilder builder = SesServiceTestBuilder.create();
+        service = builder.build();
+        sentEmails = builder.sentEmailService();
     }
 
     @Test
@@ -169,12 +172,34 @@ class SesServiceAddressSyntaxTest {
         assertEquals(LOCAL_CONTROL, results.get(1).getError());
         assertEquals(BulkEmailEntryResult.Status.INVALID_PARAMETER, results.get(2).getStatus());
         assertEquals(MISSING_FINAL_DOMAIN, results.get(2).getError());
+        assertEquals(1, sentEmails.countInRegion(REGION), "only the successful entry is recorded");
     }
 
-    private static void assertRejects(String message, Executable send) {
+    @Test
+    void bulkSend_malformedReplyToFailsEveryEntry() {
+        List<BulkEmailEntryResult> results = service.sendBulkEmail(SendBulkEmailRequest.builder()
+                .source(SENDER)
+                .replyToAddresses(List.of(NO_AT))
+                .defaultContent(new EmailContent.InlineTemplate("Subject", "body", null, null, List.of()))
+                .entries(List.of(
+                        new BulkEmailEntry(List.of(TO), null, null, null, null, null),
+                        new BulkEmailEntry(List.of(TO), null, null, null, null, null)))
+                .region(REGION)
+                .build());
+
+        for (BulkEmailEntryResult result : results) {
+            assertEquals(BulkEmailEntryResult.Status.INVALID_PARAMETER, result.getStatus());
+            assertEquals(MISSING_FINAL_DOMAIN, result.getError());
+        }
+        assertEquals(0, sentEmails.countInRegion(REGION), "no entry is recorded");
+    }
+
+    private void assertRejects(String message, Executable send) {
+        long recorded = sentEmails.countInRegion(REGION);
         AwsException e = assertThrows(AwsException.class, send);
         assertEquals("InvalidParameterValue", e.getErrorCode());
         assertEquals(message, e.getMessage());
+        assertEquals(recorded, sentEmails.countInRegion(REGION), "a rejected send must not be recorded");
     }
 
     private static SendEmailRequest.Builder request(String source) {

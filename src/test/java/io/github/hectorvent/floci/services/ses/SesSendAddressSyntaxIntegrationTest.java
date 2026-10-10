@@ -207,4 +207,66 @@ class SesSendAddressSyntaxIntegrationTest {
             .body("__type", equalTo("BadRequestException"))
             .body("message", equalTo("Invalid email address<sender.example.com>."));
     }
+
+    @Test
+    void v2SendEmail_newlineInQuotedLocalPart_returnsInvalidEmailAddress() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH)
+            .body("""
+                {
+                    "FromEmailAddress": "\\"a\\nb\\"@example.com",
+                    "Destination": {"ToAddresses": ["%s"]},
+                    "Content": {"Simple": {"Subject": {"Data": "s"}, "Body": {"Text": {"Data": "b"}}}}
+                }
+                """.formatted(TO))
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Invalid email address \"a\nb\"@example.com."));
+    }
+
+    @Test
+    void v2SendBulkEmail_malformedFeedbackForwarding_rejectsTheRequest() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH)
+            .body("""
+                {
+                    "FromEmailAddress": "sender@example.com",
+                    "FeedbackForwardingEmailAddress": "bounce.example.com",
+                    "DefaultContent": {"Template": {
+                        "TemplateContent": {"Subject": "s", "Text": "b"},
+                        "TemplateData": "{}"}},
+                    "BulkEmailEntries": [{"Destination": {"ToAddresses": ["%s"]}}]
+                }
+                """.formatted(TO))
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Invalid email address<bounce.example.com>."));
+    }
+
+    @Test
+    void v1SendBulkTemplatedEmail_malformedReturnPath_rejectsTheRequest() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParam("Source", "sender@example.com")
+            .formParam("ReturnPath", "bounce@")
+            .formParam("Template", "address-syntax-missing")
+            .formParam("DefaultTemplateData", "{}")
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", TO)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+            .body("ErrorResponse.Error.Message", equalTo("Invalid email address<bounce@>."));
+    }
 }

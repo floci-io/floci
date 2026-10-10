@@ -14,7 +14,8 @@ import java.util.List;
  * strict {@code InternetAddress} check, which scans the addr-spec once from the left, and only
  * the four AWS was seen to return are reproduced: a control, whitespace or non-ASCII character in
  * the local part, a missing {@code @}, an empty domain, and such a character in the domain. A
- * display name or a comment may hold any character, and a quoted local part is not inspected.
+ * display name or a comment may hold any character, and a quoted local part is not inspected
+ * except for a CR or LF, which AWS rejects with its own wording even before whitespace.
  * Of the raw headers, only From and To were probed, so only those are checked. The v2 controller
  * remaps the code to BadRequestException.
  */
@@ -34,24 +35,26 @@ final class SesAddressSyntax {
     }
 
     /**
-     * Checks a bulk sender. A bulk send words a malformed or over-long sender as an invalid address,
-     * echoing the sender as given, and reports it before a missing stored template (probe-confirmed;
-     * an over-long display-name sender is assumed to be measured as on a single send). The v1
-     * handler and the v2 controller call it as soon as the sender is read, ahead of the template
-     * lookup they perform.
+     * Checks a bulk sender or return path (v2 FeedbackForwardingEmailAddress). A bulk send words a
+     * malformed or over-long one as an invalid address for the whole request, echoing it as given,
+     * and reports it before a missing stored template (probe-confirmed; an over-long display-name
+     * address is assumed to be measured as on a single send). The v1 handler and the v2 controller
+     * call it as soon as the address is read, ahead of the template lookup they perform.
      */
-    static void requireBulkSender(String source) {
-        if (violation(source) != null || SesAddressLength.exceedsLimit(source)) {
-            throw new AwsException("InvalidParameterValue", "Invalid email address<" + source + ">.", 400);
+    static void requireBulkAddress(String address) {
+        if (violation(address) != null || SesAddressLength.exceedsLimit(address)) {
+            throw new AwsException("InvalidParameterValue", "Invalid email address<" + address + ">.", 400);
         }
     }
 
     /**
-     * Checks the To, Cc and Bcc of one bulk entry. AWS reports a malformed entry recipient as that
-     * entry's status, not as a request error (probe-confirmed).
+     * Checks the To, Cc and Bcc of one bulk entry, then the request's Reply-To. AWS reports a
+     * malformed entry recipient as that entry's status, and a malformed Reply-To as the status of
+     * every entry, not as a request error (probe-confirmed).
      */
-    static void requireBulkDestination(BulkEmailEntry entry) {
-        for (List<String> addresses : Arrays.asList(entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses())) {
+    static void requireBulkDestination(BulkEmailEntry entry, List<String> replyToAddresses) {
+        for (List<String> addresses : Arrays.asList(entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses(),
+                replyToAddresses)) {
             if (addresses != null) {
                 addresses.forEach(SesAddressSyntax::require);
             }
@@ -83,7 +86,9 @@ final class SesAddressSyntax {
             } else if (c == '"') {
                 quoted = !quoted;
             } else if (quoted) {
-                continue;
+                if (c == '\r' || c == '\n') {
+                    return "Invalid email address " + address + ".";
+                }
             } else if (c == '@') {
                 break;
             } else if (isControlOrWhitespace(c)) {
@@ -111,7 +116,7 @@ final class SesAddressSyntax {
 
     private static String addrSpec(String mailbox) {
         String withoutComments = withoutComments(mailbox).trim();
-        int open = withoutComments.lastIndexOf('<');
+        int open = SesSendAddresses.lastUnquotedAngle(withoutComments);
         if (open >= 0 && withoutComments.endsWith(">")) {
             return withoutComments.substring(open + 1, withoutComments.length() - 1).trim();
         }

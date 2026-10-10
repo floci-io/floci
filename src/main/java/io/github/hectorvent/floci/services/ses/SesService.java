@@ -1571,7 +1571,7 @@ public class SesService {
         List<BulkEmailEntryResult> results = new ArrayList<>(request.entries().size());
         for (BulkEmailEntry entry : request.entries()) {
             try {
-                SesAddressSyntax.requireBulkDestination(entry);
+                SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses());
                 JsonNode merged = mergeTemplateData(template.templateData(), entry.replacementTemplateData());
                 List<MessageTag> mergedTags = mergeEmailTags(request.defaultEmailTags(), entry.replacementEmailTags());
                 List<MessageHeader> mergedHeaders = mergeHeaders(template.headers(), entry.replacementHeaders());
@@ -1594,7 +1594,8 @@ public class SesService {
                         .build();
                 // SesAddressLength is not applied to entries: an over-long bulk destination did not
                 // fail the length check ahead of sender verification (probe-confirmed; the
-                // verified-sender case is unprobed). The bulk sender is checked by requireBulkSender.
+                // verified-sender case is unprobed). The bulk sender and return path are checked
+                // by requireBulkAddress.
                 String messageId = sendSimpleEmail(entryRequest, rendered, validateEnvelope(entryRequest));
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {

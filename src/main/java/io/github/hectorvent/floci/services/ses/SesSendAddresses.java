@@ -96,6 +96,26 @@ final class SesSendAddresses {
         return addresses;
     }
 
+    /**
+     * The index of the last {@code <} outside a quoted string, so a quoted local part holding a
+     * {@code <} is not mistaken for the start of the angle-bracketed address; -1 when there is none.
+     */
+    static int lastUnquotedAngle(String mailbox) {
+        int open = -1;
+        boolean quoted = false;
+        for (int i = 0; i < mailbox.length(); i++) {
+            char c = mailbox.charAt(i);
+            if (quoted && c == '\\') {
+                i++;
+            } else if (c == '"') {
+                quoted = !quoted;
+            } else if (!quoted && c == '<') {
+                open = i;
+            }
+        }
+        return open;
+    }
+
     private static void forEachRecipient(SendEmailRequest request, Consumer<String> check) {
         forEach(request.toAddresses(), check);
         forEach(request.ccAddresses(), check);

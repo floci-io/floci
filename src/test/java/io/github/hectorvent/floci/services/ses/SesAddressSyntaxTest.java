@@ -104,6 +104,20 @@ class SesAddressSyntaxTest {
     }
 
     @Test
+    void newlineInsideAQuotedLocalPartIsAnInvalidAddress() {
+        for (String local : new String[] {"\"a\nb\"", "\"a\r\nb\"", "\"a\rb\"", "\"a\r\n b\""}) {
+            String address = local + "@example.com";
+            assertEquals("Invalid email address " + address + ".", SesAddressSyntax.violation(address));
+        }
+    }
+
+    @Test
+    void lessThanInsideAQuotedLocalPartIsNotTheAngleBracket() {
+        assertNull(SesAddressSyntax.violation("Display <\"a<b\"@example.com>"));
+        assertEquals(DOMAIN_CONTROL, SesAddressSyntax.violation("Display <\"a<b\"@例え.jp>"));
+    }
+
+    @Test
     void requireThrowsInvalidParameterValue() {
         AwsException e = assertThrows(AwsException.class, () -> SesAddressSyntax.require("sender@"));
 

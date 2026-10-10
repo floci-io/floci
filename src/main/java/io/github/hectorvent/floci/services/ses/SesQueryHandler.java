@@ -756,7 +756,8 @@ public class SesQueryHandler {
                     "Account sending is disabled.", 400);
         }
         String source = getParam(params, "Source");
-        SesAddressSyntax.requireBulkSender(source);
+        SesAddressSyntax.requireBulkAddress(source);
+        SesAddressSyntax.requireBulkAddress(getParam(params, "ReturnPath"));
         List<String> replyToAddresses = extractMembers(params, "ReplyToAddresses");
         String templateName = getParam(params, "Template");
         String templateArn = getParam(params, "TemplateArn");

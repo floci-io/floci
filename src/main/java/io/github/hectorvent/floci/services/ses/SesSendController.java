@@ -243,10 +243,11 @@ public class SesSendController {
                 throw new AwsException("BadRequestException",
                         "FromEmailAddress is required.", 400);
             }
-            SesAddressSyntax.requireBulkSender(fromEmailAddress);
+            SesAddressSyntax.requireBulkAddress(fromEmailAddress);
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
             String feedbackForwardingAddress =
                     request.path("FeedbackForwardingEmailAddress").asText(null);
+            SesAddressSyntax.requireBulkAddress(feedbackForwardingAddress);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
 

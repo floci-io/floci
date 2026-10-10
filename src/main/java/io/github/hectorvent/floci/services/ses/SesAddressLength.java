@@ -54,7 +54,7 @@ final class SesAddressLength {
             return null;
         }
         String trimmed = address.trim();
-        int open = trimmed.lastIndexOf('<');
+        int open = SesSendAddresses.lastUnquotedAngle(trimmed);
         if (open < 0 || !trimmed.endsWith(">")) {
             return trimmed;
         }
