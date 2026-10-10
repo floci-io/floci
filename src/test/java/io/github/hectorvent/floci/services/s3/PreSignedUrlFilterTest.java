@@ -202,6 +202,23 @@ class PreSignedUrlFilterTest {
     }
 
     @Test
+    void requiresIfRangeSignedWhenRangeIsSigned() {
+        assertEquals(
+                List.of("if-range"),
+                PreSignedUrlFilter.unsignedHeadersRequiringSignature(
+                        Set.of("host", "Range", "If-Range"), "host;range"));
+        assertEquals(
+                List.of(),
+                PreSignedUrlFilter.unsignedHeadersRequiringSignature(
+                        Set.of("host", "range", "if-range"), "host;range;if-range"));
+        assertEquals(
+                List.of(),
+                PreSignedUrlFilter.unsignedHeadersRequiringSignature(
+                        Set.of("host", "range", "if-range"), "host"),
+                "an unsigned Range leaves If-Range unsigned too");
+    }
+
+    @Test
     void ignoresHeadersOutsideChecksumFamily() {
         assertEquals(
                 List.of(),

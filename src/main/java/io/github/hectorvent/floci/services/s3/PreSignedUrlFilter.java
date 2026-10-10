@@ -360,7 +360,9 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
         return requestHeaderNames.stream()
                 .map(name -> name.toLowerCase(Locale.ROOT))
-                .filter(name -> CHECKSUM_HEADERS_REQUIRING_SIGNATURE.contains(name) || name.startsWith("x-amz-meta-"))
+                .filter(name -> CHECKSUM_HEADERS_REQUIRING_SIGNATURE.contains(name) || name.startsWith("x-amz-meta-")
+                        // A signed Range makes S3 require the If-Range that qualifies it to be signed too.
+                        || ("if-range".equals(name) && normalizedSignedHeaders.contains("range")))
                 .filter(name -> !normalizedSignedHeaders.contains(name))
                 .distinct()
                 .sorted()

@@ -268,6 +268,22 @@ class CloudFrontOriginRequestBuilderTest {
     }
 
     @Test
+    void aRangeReadReachesTheOriginWhateverThePolicy() {
+        Forwarding nothing = Forwarding.policies(null, null, false);
+        for (String method : List.of("GET", "HEAD")) {
+            OriginRequest read = build(viewer(method, null, "Range", "bytes=0-99", "If-Range", "\"v1\""), nothing);
+            assertEquals("bytes=0-99", value(read, "Range"), method);
+            assertEquals("\"v1\"", value(read, "If-Range"), method);
+        }
+
+        OriginRequest post = build(viewer("POST", null, "Range", "bytes=0-99"), nothing);
+        assertNull(value(post, "Range"), "a write follows the forwarding settings");
+
+        assertNull(value(build(viewer("GET", null, "If-Range", "\"v1\""), nothing), "If-Range"),
+                "an If-Range without a Range qualifies nothing");
+    }
+
+    @Test
     void hopByHopAndCloudFrontOwnedHeadersAreNeverForwarded() {
         OriginRequest request = build(viewer("POST", null,
                 "Connection", "keep-alive, X-Hop",

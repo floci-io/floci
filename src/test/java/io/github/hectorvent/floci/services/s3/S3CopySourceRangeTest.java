@@ -95,7 +95,8 @@ class S3CopySourceRangeTest {
     void aRangeSkipsToAnOffsetPastTwoGibibytes() throws IOException {
         CopySourceRange range = new CopySourceRange(2_500_000_000L, 2_500_000_015L);
 
-        byte[] data = new CopyRangeInputStream(patternStream(3L * 1024 * 1024 * 1024), range).readAllBytes();
+        byte[] data = new ByteRangeInputStream(patternStream(3L * 1024 * 1024 * 1024), range.first(), range.length())
+                .readAllBytes();
 
         assertEquals(16, data.length);
         for (int i = 0; i < data.length; i++) {
@@ -119,8 +120,7 @@ class S3CopySourceRangeTest {
 
         byte[] data;
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            data = new CopyRangeInputStream(Channels.newInputStream(channel),
-                    new CopySourceRange(offset, offset + written.length - 1)).readAllBytes();
+            data = new ByteRangeInputStream(Channels.newInputStream(channel), offset, written.length).readAllBytes();
         }
 
         assertArrayEquals(written, data);
@@ -129,9 +129,9 @@ class S3CopySourceRangeTest {
     @Test
     void aRangeFailsWhenTheSourceEndsBeforeIt() {
         assertThrows(IOException.class,
-                () -> new CopyRangeInputStream(patternStream(10), new CopySourceRange(5, 14)).readAllBytes());
+                () -> new ByteRangeInputStream(patternStream(10), 5, 10).readAllBytes());
         assertThrows(IOException.class,
-                () -> new CopyRangeInputStream(patternStream(10), new CopySourceRange(12, 14)).readAllBytes(),
+                () -> new ByteRangeInputStream(patternStream(10), 12, 3).readAllBytes(),
                 "a source that ends before the range starts");
     }
 
@@ -139,7 +139,7 @@ class S3CopySourceRangeTest {
     void aRangeEndsAfterItsLastByteWhateverTheReadSize() throws IOException {
         CopySourceRange range = new CopySourceRange(3, 1002);
         for (int readSize : List.of(1, 7, 1000, 4096)) {
-            try (InputStream in = new CopyRangeInputStream(patternStream(5000), range)) {
+            try (InputStream in = new ByteRangeInputStream(patternStream(5000), range.first(), range.length())) {
                 ByteArrayOutputStream copied = new ByteArrayOutputStream();
                 byte[] buffer = new byte[readSize];
                 for (int read = in.read(buffer); read >= 0; read = in.read(buffer)) {

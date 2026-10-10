@@ -13,6 +13,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,6 +63,12 @@ class CloudFrontS3DiskOriginServingTest {
             given().header("Host", dist.getDomainName()).when().head("/video.bin")
                     .then().statusCode(200)
                     .header("Content-Length", equalTo(Integer.toString(body.length)));
+            // A range from the middle of the object file.
+            Response part = given().header("Host", dist.getDomainName())
+                    .header("Range", "bytes=1048576-1048675").when().get("/video.bin");
+            assertEquals(206, part.statusCode());
+            assertEquals("bytes 1048576-1048675/" + body.length, part.header("Content-Range"));
+            assertArrayEquals(Arrays.copyOfRange(body, 1048576, 1048676), part.asByteArray());
             // The single-page-app fallback serves its error page through the same stream.
             given().header("Host", dist.getDomainName()).when().get("/missing/route")
                     .then().statusCode(200)
