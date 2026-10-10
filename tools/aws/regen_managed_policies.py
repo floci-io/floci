@@ -75,8 +75,9 @@ HEADER = """\
 # id and updateDate come from the same dataset (the "version" and "updatedate" fields of
 # aws/managed_policies.json); createDate comes from the "Creation time" published on each
 # policy's page of the AWS managed policy reference,
-# https://docs.aws.amazon.com/aws-managed-policy/latest/reference/, which is minute-precise,
-# and falls back to the dataset's date for policies that no longer have a page. Only the
+# https://docs.aws.amazon.com/aws-managed-policy/latest/reference/, which is minute-precise.
+# A policy that entered the catalog on v1 takes the dataset's date instead, which is then its
+# creation date too. A policy past v1 whose page cannot be read has no createDate. Only the
 # default version's document is bundled, so superseded version ids resolve to NoSuchEntity.
 #
 # Names and paths derive from the public AWS managed policy list, via

@@ -1,8 +1,8 @@
 {
   "AIDevOpsAgentAccessPolicy": {
-    "defaultVersionId": "v10",
+    "defaultVersionId": "v11",
     "createDate": "2026-03-26T03:42:00Z",
-    "updateDate": "2026-08-12T23:07:09Z"
+    "updateDate": "2026-09-24T20:57:09Z"
   },
   "AIDevOpsAgentActionsPolicy": {
     "defaultVersionId": "v2",
@@ -120,9 +120,9 @@
     "updateDate": "2021-09-30T23:29:53Z"
   },
   "AWSAccountSettingsManagementRole": {
-    "defaultVersionId": "v9",
+    "defaultVersionId": "v11",
     "createDate": "2025-12-11T17:49:00Z",
-    "updateDate": "2026-09-01T15:17:07Z"
+    "updateDate": "2026-09-30T19:27:08Z"
   },
   "AWSAccountUsageReportAccess": {
     "defaultVersionId": "v1",
@@ -420,9 +420,9 @@
     "updateDate": "2026-02-12T18:00:59Z"
   },
   "AWSArtifactComplianceInquiriesFullAccess": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2026-06-30T19:27:00Z",
-    "updateDate": "2026-07-23T20:12:25Z"
+    "updateDate": "2026-09-30T22:47:08Z"
   },
   "AWSArtifactComplianceInquiriesReadOnlyAccess": {
     "defaultVersionId": "v1",
@@ -595,9 +595,14 @@
     "updateDate": "2026-02-12T18:01:18Z"
   },
   "AWSBillingConductorReadOnlyAccess": {
-    "defaultVersionId": "v4",
+    "defaultVersionId": "v5",
     "createDate": "2022-04-13T18:02:00Z",
-    "updateDate": "2026-02-12T17:57:37Z"
+    "updateDate": "2026-09-21T18:17:07Z"
+  },
+  "AWSBillingConductorRolePolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-09-21T19:07:08Z",
+    "updateDate": "2026-09-21T19:07:08Z"
   },
   "AWSBillingReadOnlyAccess": {
     "defaultVersionId": "v28",
@@ -814,6 +819,11 @@
     "createDate": "2021-04-27T13:30:52Z",
     "updateDate": "2021-04-27T13:30:52Z"
   },
+  "AWSCloudWatchOmniServiceRolePolicy": {
+    "defaultVersionId": "v2",
+    "createDate": "2026-09-22T05:37:00Z",
+    "updateDate": "2026-09-24T17:47:08Z"
+  },
   "AWSCodeArtifactAdminAccess": {
     "defaultVersionId": "v1",
     "createDate": "2020-06-16T23:53:23Z",
@@ -974,9 +984,9 @@
     "updateDate": "2019-05-13T21:33:30Z"
   },
   "AWSConfigServiceRolePolicy": {
-    "defaultVersionId": "v95",
+    "defaultVersionId": "v96",
     "createDate": "2018-05-30T23:31:00Z",
-    "updateDate": "2026-08-27T22:07:08Z"
+    "updateDate": "2026-09-23T21:07:09Z"
   },
   "AWSConfigThirdPartyServiceRolePolicy": {
     "defaultVersionId": "v1",
@@ -2093,6 +2103,11 @@
     "createDate": "2015-02-06T18:40:47Z",
     "updateDate": "2015-02-06T18:40:47Z"
   },
+  "AWSLambdaInvokeWebFunctionEndpointAccess": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-01T16:47:07Z",
+    "updateDate": "2026-10-01T16:47:07Z"
+  },
   "AWSLambdaKinesisExecutionRole": {
     "defaultVersionId": "v2",
     "createDate": "2015-04-09T15:14:00Z",
@@ -2194,9 +2209,9 @@
     "updateDate": "2024-03-25T21:36:08Z"
   },
   "AWSManagedAccountManagementAccess": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2026-07-20T19:57:12Z",
-    "updateDate": "2026-07-20T19:57:12Z"
+    "updateDate": "2026-10-01T19:07:08Z"
   },
   "AWSManagedAccountUserEntitlementAccess": {
     "defaultVersionId": "v1",
@@ -2249,9 +2264,9 @@
     "updateDate": "2025-01-08T21:22:06Z"
   },
   "AWSManagedSettingsAdminAccess": {
-    "defaultVersionId": "v7",
+    "defaultVersionId": "v8",
     "createDate": "2026-07-22T01:27:00Z",
-    "updateDate": "2026-09-01T00:37:08Z"
+    "updateDate": "2026-09-30T22:27:07Z"
   },
   "AWSManagedSettingsReadOnlyAccess": {
     "defaultVersionId": "v3",
@@ -2504,9 +2519,9 @@
     "updateDate": "2026-07-14T22:42:17Z"
   },
   "AWSObservabilityAdminTelemetryEnablementServiceRolePolicy": {
-    "defaultVersionId": "v15",
+    "defaultVersionId": "v16",
     "createDate": "2025-08-01T18:04:00Z",
-    "updateDate": "2026-09-11T00:37:07Z"
+    "updateDate": "2026-10-05T22:17:07Z"
   },
   "AWSOrganizationsFullAccess": {
     "defaultVersionId": "v9",
@@ -2539,9 +2554,9 @@
     "updateDate": "2026-02-12T18:01:26Z"
   },
   "AWSPCSServiceRolePolicy": {
-    "defaultVersionId": "v9",
+    "defaultVersionId": "v10",
     "createDate": "2024-08-27T16:01:00Z",
-    "updateDate": "2026-02-12T18:01:59Z"
+    "updateDate": "2026-09-30T18:07:08Z"
   },
   "AWSPanoramaApplianceRolePolicy": {
     "defaultVersionId": "v1",
@@ -2979,9 +2994,9 @@
     "updateDate": "2023-11-14T16:43:41Z"
   },
   "AWSResourceExplorerServiceRolePolicy": {
-    "defaultVersionId": "v55",
+    "defaultVersionId": "v57",
     "createDate": "2022-10-25T20:35:00Z",
-    "updateDate": "2026-09-14T23:37:08Z"
+    "updateDate": "2026-10-08T14:07:07Z"
   },
   "AWSResourceGroupsReadOnlyAccess": {
     "defaultVersionId": "v2",
@@ -3093,15 +3108,20 @@
     "createDate": "2025-11-05T20:04:00Z",
     "updateDate": "2026-06-02T20:42:11Z"
   },
+  "AWSSecurityAgentContinuousPentestPolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-05T16:27:08Z",
+    "updateDate": "2026-10-05T16:27:08Z"
+  },
   "AWSSecurityAgentServiceRolePolicy": {
     "defaultVersionId": "v1",
     "createDate": "2026-06-11T23:42:19Z",
     "updateDate": "2026-06-11T23:42:19Z"
   },
   "AWSSecurityAgentWebAppPolicy": {
-    "defaultVersionId": "v7",
+    "defaultVersionId": "v9",
     "createDate": "2026-02-05T23:19:00Z",
-    "updateDate": "2026-09-18T17:17:08Z"
+    "updateDate": "2026-10-06T17:27:07Z"
   },
   "AWSSecurityHubFullAccess": {
     "defaultVersionId": "v9",
@@ -3139,9 +3159,9 @@
     "updateDate": "2026-04-22T16:12:08Z"
   },
   "AWSSecurityIncidentResponseReadOnlyAccess": {
-    "defaultVersionId": "v4",
+    "defaultVersionId": "v5",
     "createDate": "2024-12-01T23:06:00Z",
-    "updateDate": "2026-04-22T16:12:20Z"
+    "updateDate": "2026-10-01T21:07:07Z"
   },
   "AWSSecurityIncidentResponseServiceRolePolicy": {
     "defaultVersionId": "v12",
@@ -3209,9 +3229,9 @@
     "updateDate": "2026-02-12T18:03:10Z"
   },
   "AWSServiceRoleForAWSTransformCustom": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2026-03-25T02:57:00Z",
-    "updateDate": "2026-05-05T19:42:14Z"
+    "updateDate": "2026-10-06T18:47:08Z"
   },
   "AWSServiceRoleForAmazonEKSNodegroup": {
     "defaultVersionId": "v11",
@@ -3304,9 +3324,9 @@
     "updateDate": "2023-03-10T00:51:25Z"
   },
   "AWSServiceRolePolicyForBackupRestoreTesting": {
-    "defaultVersionId": "v3",
+    "defaultVersionId": "v4",
     "createDate": "2023-11-10T23:37:00Z",
-    "updateDate": "2026-03-18T22:12:13Z"
+    "updateDate": "2026-09-25T01:57:07Z"
   },
   "AWSServiceRolePolicyForWorkspacesInstances": {
     "defaultVersionId": "v4",
@@ -3518,6 +3538,11 @@
     "createDate": "2020-08-27T17:54:51Z",
     "updateDate": "2020-08-27T17:54:51Z"
   },
+  "AWSTransferServiceRolePolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-09-22T17:07:07Z",
+    "updateDate": "2026-09-22T17:07:07Z"
+  },
   "AWSTransformApplicationDeploymentPolicy": {
     "defaultVersionId": "v10",
     "createDate": "2025-08-28T06:34:00Z",
@@ -3554,9 +3579,9 @@
     "updateDate": "2026-09-02T21:27:07Z"
   },
   "AWSTransformLandingZoneAgentPolicy": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2026-08-06T15:12:00Z",
-    "updateDate": "2026-09-01T10:27:08Z"
+    "updateDate": "2026-10-06T07:37:08Z"
   },
   "AWSTransformNetworkMigrationAgentPolicy": {
     "defaultVersionId": "v2",
@@ -3684,9 +3709,9 @@
     "updateDate": "2026-09-15T18:37:08Z"
   },
   "AWSWellArchitectedAgentResourceScanningServiceRolePolicy": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v4",
     "createDate": "2026-08-04T17:27:00Z",
-    "updateDate": "2026-08-13T00:27:19Z"
+    "updateDate": "2026-10-08T19:37:08Z"
   },
   "AWSWellArchitectedDiscoveryServiceRolePolicy": {
     "defaultVersionId": "v1",
@@ -3739,9 +3764,9 @@
     "updateDate": "2025-07-01T19:07:07Z"
   },
   "AWS_ConfigRole": {
-    "defaultVersionId": "v72",
+    "defaultVersionId": "v73",
     "createDate": "2020-09-15T20:30:00Z",
-    "updateDate": "2026-08-27T22:07:08Z"
+    "updateDate": "2026-09-23T21:07:08Z"
   },
   "AWSrePostPrivateCloudWatchAccess": {
     "defaultVersionId": "v1",
@@ -3759,9 +3784,9 @@
     "updateDate": "2026-06-29T19:12:30Z"
   },
   "AccountManagementFromVercel": {
-    "defaultVersionId": "v4",
+    "defaultVersionId": "v5",
     "createDate": "2025-12-11T16:34:00Z",
-    "updateDate": "2026-05-07T18:57:18Z"
+    "updateDate": "2026-10-08T13:47:08Z"
   },
   "AdministratorAccess": {
     "defaultVersionId": "v1",
@@ -3869,9 +3894,9 @@
     "updateDate": "2026-09-03T16:57:06Z"
   },
   "AmazonApplicationRecoveryControllerRegionSwitchPlanExecutionPolicy": {
-    "defaultVersionId": "v4",
+    "defaultVersionId": "v5",
     "createDate": "2025-11-03T19:34:00Z",
-    "updateDate": "2026-03-05T19:27:12Z"
+    "updateDate": "2026-10-02T18:57:08Z"
   },
   "AmazonAthenaFullAccess": {
     "defaultVersionId": "v15",
@@ -4058,21 +4083,6 @@
     "createDate": "2017-02-28T23:42:06Z",
     "updateDate": "2017-02-28T23:42:06Z"
   },
-  "AmazonCloudWatchEvidentlyFullAccess": {
-    "defaultVersionId": "v1",
-    "createDate": "2021-11-29T15:10:14Z",
-    "updateDate": "2021-11-29T15:10:14Z"
-  },
-  "AmazonCloudWatchEvidentlyReadOnlyAccess": {
-    "defaultVersionId": "v1",
-    "createDate": "2021-11-29T15:08:38Z",
-    "updateDate": "2021-11-29T15:08:38Z"
-  },
-  "AmazonCloudWatchEvidentlyServiceRolePolicy": {
-    "defaultVersionId": "v1",
-    "createDate": "2022-09-13T17:25:36Z",
-    "updateDate": "2022-09-13T17:25:36Z"
-  },
   "AmazonCloudWatchRUMFullAccess": {
     "defaultVersionId": "v1",
     "createDate": "2021-11-29T15:46:12Z",
@@ -4189,14 +4199,14 @@
     "updateDate": "2024-06-19T15:15:33Z"
   },
   "AmazonConnectServiceLinkedRolePolicy": {
-    "defaultVersionId": "v55",
+    "defaultVersionId": "v56",
     "createDate": "2018-09-07T00:21:00Z",
-    "updateDate": "2026-05-27T21:57:16Z"
+    "updateDate": "2026-10-02T23:27:08Z"
   },
   "AmazonConnectSynchronizationServiceRolePolicy": {
-    "defaultVersionId": "v5",
+    "defaultVersionId": "v6",
     "createDate": "2023-10-27T22:38:00Z",
-    "updateDate": "2025-11-21T20:19:09Z"
+    "updateDate": "2026-10-06T17:57:08Z"
   },
   "AmazonConnectVoiceIDFullAccess": {
     "defaultVersionId": "v1",
@@ -4498,6 +4508,11 @@
     "createDate": "2025-03-24T17:37:00Z",
     "updateDate": "2026-02-12T17:57:51Z"
   },
+  "AmazonECSInfrastructureRoleForGatewayHostSharedALB": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-09-25T21:17:07Z",
+    "updateDate": "2026-09-25T21:17:07Z"
+  },
   "AmazonECSInfrastructureRolePolicyForLoadBalancers": {
     "defaultVersionId": "v6",
     "createDate": "2025-07-17T16:37:00Z",
@@ -4519,9 +4534,9 @@
     "updateDate": "2026-02-12T18:02:34Z"
   },
   "AmazonECSInfrastructureRolePolicyForVpcLattice": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2024-11-15T20:02:55Z",
-    "updateDate": "2024-11-15T20:02:55Z"
+    "updateDate": "2026-09-29T15:57:07Z"
   },
   "AmazonECSInfrastructureRoleforExpressGatewayServices": {
     "defaultVersionId": "v6",
@@ -4629,9 +4644,9 @@
     "updateDate": "2024-10-14T21:12:40Z"
   },
   "AmazonEKSServiceRolePolicy": {
-    "defaultVersionId": "v27",
+    "defaultVersionId": "v28",
     "createDate": "2020-02-21T20:10:00Z",
-    "updateDate": "2026-08-21T17:17:09Z"
+    "updateDate": "2026-10-01T16:27:08Z"
   },
   "AmazonEKSVPCResourceController": {
     "defaultVersionId": "v1",
@@ -4854,9 +4869,9 @@
     "updateDate": "2022-12-01T17:04:03Z"
   },
   "AmazonEventBridgeReadOnlyAccess": {
-    "defaultVersionId": "v6",
+    "defaultVersionId": "v7",
     "createDate": "2019-07-11T13:59:00Z",
-    "updateDate": "2022-12-01T17:02:48Z"
+    "updateDate": "2026-09-24T21:37:08Z"
   },
   "AmazonEventBridgeSchedulerFullAccess": {
     "defaultVersionId": "v4",
@@ -4964,9 +4979,9 @@
     "updateDate": "2022-11-08T23:10:33Z"
   },
   "AmazonGuardDutyFullAccess_v2": {
-    "defaultVersionId": "v6",
+    "defaultVersionId": "v7",
     "createDate": "2025-06-04T20:22:00Z",
-    "updateDate": "2026-02-12T17:59:55Z"
+    "updateDate": "2026-09-28T21:37:07Z"
   },
   "AmazonGuardDutyMalwareProtectionServiceRolePolicy": {
     "defaultVersionId": "v2",
@@ -5784,9 +5799,9 @@
     "updateDate": "2015-02-06T18:40:57Z"
   },
   "AmazonRoute53FullAccess": {
-    "defaultVersionId": "v7",
+    "defaultVersionId": "v8",
     "createDate": "2015-02-06T18:40:00Z",
-    "updateDate": "2026-02-12T18:00:40Z"
+    "updateDate": "2026-10-08T20:17:07Z"
   },
   "AmazonRoute53GlobalResolverFullAccess": {
     "defaultVersionId": "v1",
@@ -6489,19 +6504,19 @@
     "updateDate": "2024-11-14T19:09:39Z"
   },
   "AnthropicFullAccess": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2026-04-01T04:57:00Z",
-    "updateDate": "2026-04-01T22:42:19Z"
+    "updateDate": "2026-09-25T20:17:08Z"
   },
   "AnthropicLimitedAccess": {
-    "defaultVersionId": "v6",
+    "defaultVersionId": "v8",
     "createDate": "2026-04-01T04:57:00Z",
-    "updateDate": "2026-06-12T16:57:32Z"
+    "updateDate": "2026-10-02T16:37:08Z"
   },
   "AnthropicReadOnlyAccess": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v4",
     "createDate": "2026-04-01T04:57:00Z",
-    "updateDate": "2026-04-01T22:42:18Z"
+    "updateDate": "2026-10-02T16:37:08Z"
   },
   "AnthropicSelfHostedEnvironmentAccess": {
     "defaultVersionId": "v1",
@@ -6794,9 +6809,9 @@
     "updateDate": "2022-11-27T13:23:49Z"
   },
   "CloudWatchFullAccessV2": {
-    "defaultVersionId": "v16",
+    "defaultVersionId": "v17",
     "createDate": "2023-08-01T11:32:00Z",
-    "updateDate": "2026-06-08T13:27:16Z"
+    "updateDate": "2026-09-22T16:57:08Z"
   },
   "CloudWatchInternetMonitorFullAccess": {
     "defaultVersionId": "v1",
@@ -6863,6 +6878,26 @@
     "createDate": "2023-12-21T18:53:00Z",
     "updateDate": "2026-08-25T13:27:18Z"
   },
+  "CloudWatchOmniAWSIntegrationPolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-09-22T04:07:08Z",
+    "updateDate": "2026-09-22T04:07:08Z"
+  },
+  "CloudWatchOmniDomainAccessPolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-09-22T01:47:08Z",
+    "updateDate": "2026-09-22T01:47:08Z"
+  },
+  "CloudWatchOmniModelInferencePolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-09-22T01:47:08Z",
+    "updateDate": "2026-09-22T01:47:08Z"
+  },
+  "CloudWatchOmniSpaceAccessPolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-09-22T01:47:07Z",
+    "updateDate": "2026-09-22T01:47:07Z"
+  },
   "CloudWatchOpenSearchDashboardAccess": {
     "defaultVersionId": "v3",
     "createDate": "2024-12-01T21:06:00Z",
@@ -6874,9 +6909,9 @@
     "updateDate": "2026-02-12T17:59:00Z"
   },
   "CloudWatchReadOnlyAccess": {
-    "defaultVersionId": "v24",
+    "defaultVersionId": "v25",
     "createDate": "2015-02-06T18:40:00Z",
-    "updateDate": "2026-02-12T18:01:50Z"
+    "updateDate": "2026-09-22T16:57:07Z"
   },
   "CloudWatchSyntheticsFullAccess": {
     "defaultVersionId": "v14",
@@ -6934,14 +6969,14 @@
     "updateDate": "2023-01-12T04:17:34Z"
   },
   "ConsoleFullAccessFromVercel": {
-    "defaultVersionId": "v4",
-    "createDate": "2025-12-11T16:49:00Z",
-    "updateDate": "2026-04-09T18:57:11Z"
-  },
-  "ConsoleViewOnlyAccessFromVercel": {
     "defaultVersionId": "v5",
     "createDate": "2025-12-11T16:49:00Z",
-    "updateDate": "2026-04-09T18:27:08Z"
+    "updateDate": "2026-10-08T14:27:08Z"
+  },
+  "ConsoleViewOnlyAccessFromVercel": {
+    "defaultVersionId": "v6",
+    "createDate": "2025-12-11T16:49:00Z",
+    "updateDate": "2026-10-08T13:47:07Z"
   },
   "CostOptimizationHubAdminAccess": {
     "defaultVersionId": "v4",
@@ -7138,6 +7173,11 @@
     "createDate": "2020-11-25T18:08:00Z",
     "updateDate": "2021-02-05T21:02:54Z"
   },
+  "EndUserMessagingServiceRolePolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-09-29T19:37:07Z",
+    "updateDate": "2026-09-29T19:37:07Z"
+  },
   "FMSServiceRolePolicy": {
     "defaultVersionId": "v37",
     "createDate": "2018-03-28T23:01:00Z",
@@ -7149,9 +7189,9 @@
     "updateDate": "2018-11-28T10:40:24Z"
   },
   "FinOpsAgentAgentPolicy": {
-    "defaultVersionId": "v3",
+    "defaultVersionId": "v5",
     "createDate": "2026-06-03T19:57:00Z",
-    "updateDate": "2026-09-01T16:27:06Z"
+    "updateDate": "2026-10-02T18:27:07Z"
   },
   "FinOpsAgentOperatorPolicy": {
     "defaultVersionId": "v1",
@@ -7254,9 +7294,9 @@
     "updateDate": "2023-12-13T21:20:21Z"
   },
   "IVSReadOnlyAccess": {
-    "defaultVersionId": "v6",
+    "defaultVersionId": "v7",
     "createDate": "2023-12-05T18:00:00Z",
-    "updateDate": "2026-02-12T18:03:11Z"
+    "updateDate": "2026-09-25T19:47:08Z"
   },
   "IVSRecordToS3": {
     "defaultVersionId": "v1",
@@ -7374,9 +7414,9 @@
     "updateDate": "2026-07-09T14:42:15Z"
   },
   "NetworkSecurityDirectorServiceLinkedRolePolicy": {
-    "defaultVersionId": "v6",
+    "defaultVersionId": "v7",
     "createDate": "2025-06-13T20:07:00Z",
-    "updateDate": "2026-02-12T17:57:54Z"
+    "updateDate": "2026-09-24T18:17:08Z"
   },
   "NetworkSecurityManagerServiceRolePolicy": {
     "defaultVersionId": "v1",
@@ -7539,9 +7579,9 @@
     "updateDate": "2026-06-10T18:57:15Z"
   },
   "ReadOnlyAccess": {
-    "defaultVersionId": "v189",
+    "defaultVersionId": "v190",
     "createDate": "2015-02-06T18:39:00Z",
-    "updateDate": "2026-09-15T18:47:08Z"
+    "updateDate": "2026-09-24T17:37:08Z"
   },
   "ResourceGroupsServiceRolePolicy": {
     "defaultVersionId": "v1",
@@ -7604,14 +7644,14 @@
     "updateDate": "2026-08-26T22:47:07Z"
   },
   "SageMakerStudioAdminIAMDefaultExecutionPolicy": {
-    "defaultVersionId": "v24",
+    "defaultVersionId": "v25",
     "createDate": "2025-08-18T17:19:00Z",
-    "updateDate": "2026-07-14T18:57:22Z"
+    "updateDate": "2026-10-08T18:57:07Z"
   },
   "SageMakerStudioAdminIAMPermissiveExecutionPolicy": {
-    "defaultVersionId": "v21",
+    "defaultVersionId": "v22",
     "createDate": "2025-08-18T17:19:00Z",
-    "updateDate": "2026-07-14T18:57:27Z"
+    "updateDate": "2026-10-08T18:57:08Z"
   },
   "SageMakerStudioAdminProjectUserRolePolicy": {
     "defaultVersionId": "v6",
@@ -7689,9 +7729,9 @@
     "updateDate": "2026-02-12T18:00:59Z"
   },
   "SageMakerStudioProjectProvisioningRolePolicy": {
-    "defaultVersionId": "v82",
+    "defaultVersionId": "v83",
     "createDate": "2024-11-20T21:58:00Z",
-    "updateDate": "2026-08-24T20:37:11Z"
+    "updateDate": "2026-09-22T21:57:07Z"
   },
   "SageMakerStudioProjectRoleMachineLearningPolicy": {
     "defaultVersionId": "v44",
@@ -7719,14 +7759,14 @@
     "updateDate": "2026-03-31T21:12:16Z"
   },
   "SageMakerStudioUserIAMDefaultExecutionPolicy": {
-    "defaultVersionId": "v29",
+    "defaultVersionId": "v30",
     "createDate": "2025-08-18T17:19:00Z",
-    "updateDate": "2026-08-13T18:37:16Z"
+    "updateDate": "2026-10-08T15:17:08Z"
   },
   "SageMakerStudioUserIAMPermissiveExecutionPolicy": {
-    "defaultVersionId": "v24",
+    "defaultVersionId": "v25",
     "createDate": "2025-08-18T17:19:00Z",
-    "updateDate": "2026-08-13T18:37:09Z"
+    "updateDate": "2026-10-08T17:57:08Z"
   },
   "SecretsManagerReadWrite": {
     "defaultVersionId": "v6",
@@ -7744,9 +7784,9 @@
     "updateDate": "2026-02-12T18:01:23Z"
   },
   "SecurityAudit": {
-    "defaultVersionId": "v93",
+    "defaultVersionId": "v94",
     "createDate": "2015-02-06T18:41:00Z",
-    "updateDate": "2026-09-09T19:47:07Z"
+    "updateDate": "2026-09-30T20:27:08Z"
   },
   "SecurityLakeResourceManagementServiceRolePolicy": {
     "defaultVersionId": "v7",
@@ -7849,9 +7889,9 @@
     "updateDate": "2023-03-30T02:45:07Z"
   },
   "ViewOnlyAccess": {
-    "defaultVersionId": "v45",
+    "defaultVersionId": "v46",
     "createDate": "2016-11-10T17:20:00Z",
-    "updateDate": "2026-04-22T18:12:21Z"
+    "updateDate": "2026-09-30T20:27:08Z"
   },
   "WAFLoggingServiceRolePolicy": {
     "defaultVersionId": "v2",
@@ -7869,9 +7909,9 @@
     "updateDate": "2026-05-20T18:12:21Z"
   },
   "WellArchitectedAgentResourceScanning": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2026-07-16T20:27:15Z",
-    "updateDate": "2026-07-16T20:27:15Z"
+    "updateDate": "2026-09-30T18:37:07Z"
   },
   "WellArchitectedConsoleFullAccess": {
     "defaultVersionId": "v2",
