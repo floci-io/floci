@@ -6225,6 +6225,50 @@ class RdsServiceTest {
         assertTrue(rawProxies.get(accountId + "/app-proxy").isEmpty());
     }
 
+    @ParameterizedTest
+    @CsvSource({"xx-nowhere-9,123456789012,aws-cn", "xx-nowhere-9,222222222222,aws-cn",
+            "cn-north-1,222222222222,aws-cn", "us-east-1,222222222222,aws"})
+    void restoredProxyTargetGroupUsesDeploymentPartitionAndSavedOwner(
+            String region, String accountId, String partition) {
+        when(config.services().rds().mock()).thenReturn(true);
+        RegionResolver startupResolver = new RegionResolver("cn-north-1", "123456789012");
+        InMemoryStorage<String, DbProxy> rawProxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> rawGroups = new InMemoryStorage<>();
+        AccountAwareStorageBackend<DbProxy> proxies =
+                new AccountAwareStorageBackend<>(rawProxies, null, "123456789012");
+        AccountAwareStorageBackend<DbProxyTargetGroup> groups =
+                new AccountAwareStorageBackend<>(rawGroups, null, "123456789012");
+        DbProxy proxy = persistedProxy("app-proxy", region, accountId, "current", 5432);
+        proxy.setDbProxyArn("arn:" + partition + ":rds:" + region + ":" + accountId + ":db-proxy:prx-current");
+        proxies.putForAccount(accountId, region + "::app-proxy", proxy);
+        RdsService startup = proxyStoreService(startupResolver, config, proxies, groups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        startup.restorePersistedRuntime();
+
+        DbProxyTargetGroup restored = groups.getForAccount(accountId, region + "::app-proxy").orElseThrow();
+        String arn = restored.getTargetGroupArn();
+        assertTrue(arn.startsWith("arn:" + partition + ":rds:" + region + ":" + accountId + ":target-group:"), arn);
+        RdsService reader = proxyStoreService(new RegionResolver("cn-north-1", accountId), config,
+                new AccountAwareStorageBackend<>(rawProxies, null, accountId),
+                new AccountAwareStorageBackend<>(rawGroups, null, accountId),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        assertSame(restored, reader.describeDbProxyTargetGroups("app-proxy", "default", region).iterator().next());
+        reader.addTagsToResource(arn, Map.of("env", "restored"), region);
+        assertEquals(Map.of("env", "restored"), reader.listTagsForResource(arn, region));
+        String foreignPartition = partition.equals("aws") ? "aws-cn" : "aws";
+        String wrongArn = arn.replace("arn:" + partition + ":", "arn:" + foreignPartition + ":");
+        assertThrows(AwsException.class, () -> reader.addTagsToResource(wrongArn, Map.of("env", "wrong"), region));
+        assertThrows(AwsException.class, () -> reader.listTagsForResource(wrongArn, region));
+        assertThrows(AwsException.class, () -> reader.removeTagsFromResource(wrongArn, List.of("env"), region));
+        assertEquals(Map.of("env", "restored"), reader.listTagsForResource(arn, region));
+        reader.removeTagsFromResource(arn, List.of("env"), region);
+        assertEquals(Map.of(), reader.listTagsForResource(arn, region));
+        startup.restorePersistedRuntime();
+        assertEquals(arn, groups.getForAccount(accountId, region + "::app-proxy")
+                .orElseThrow().getTargetGroupArn());
+    }
+
     @Test
     void proxyRestoreUsesRegionalLegacyGenerationDeterministically() {
         when(config.services().rds().mock()).thenReturn(true);

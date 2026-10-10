@@ -7106,7 +7106,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         try {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(targetGroup.getTargetGroupArn());
-            return AwsRegions.partitionFor(region).equals(arn.partition())
+            return regionResolver.partitionForRegion(region).equals(arn.partition())
                     && "rds".equals(arn.service())
                     && Objects.equals(accountId, arn.accountId())
                     && Objects.equals(region, arn.region())
@@ -8020,9 +8020,8 @@ public class RdsService implements Resettable, ResourceProvider {
         targetGroup = new DbProxyTargetGroup();
         targetGroup.setDbProxyName(proxy.getDbProxyName());
         targetGroup.setTargetGroupName("default");
-        targetGroup.setTargetGroupArn(AwsArnUtils.Arn.of("rds",
-                region,
-                accountId, "target-group:prx-tg-" + randomResourceSuffix()).toString());
+        targetGroup.setTargetGroupArn(regionResolver.buildArn("rds", region,
+                accountId, "target-group:prx-tg-" + randomResourceSuffix()));
         targetGroup.setDefaultTargetGroup(true);
         targetGroup.setCreatedAt(now);
         targetGroup.setUpdatedAt(now);
@@ -8590,7 +8589,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String resourceType, String resourceId) {
         try {
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-            return AwsRegions.partitionFor(region).equals(parsed.partition())
+            return regionResolver.partitionForRegion(region).equals(parsed.partition())
                     && "rds".equals(parsed.service())
                     && Objects.equals(accountId, parsed.accountId())
                     && Objects.equals(region, parsed.region())
@@ -9336,8 +9335,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         String resource = "es:" + name;
         String legacyArn = AwsArnUtils.Arn.of("rds", region, accountId, resource).toString();
-        String expectedArn = new AwsArnUtils.Arn(regionResolver.partitionForRegion(region),
-                "rds", region, accountId, resource).toString();
+        String expectedArn = regionResolver.buildArn("rds", region, accountId, resource);
         // Earlier versions minted custom-region subscriptions with the catalog's fallback
         // partition. Repair only that exact legacy identity, preserving its stored owner.
         if (legacyArn.equals(subscription.getEventSubscriptionArn()) && !legacyArn.equals(expectedArn)) {
