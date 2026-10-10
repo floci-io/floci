@@ -14,10 +14,15 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.security.interfaces.RSAPublicKey;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -31,6 +36,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -44,6 +50,7 @@ class StsQueryHandlerTest {
             Pattern.compile("<SessionToken>([^<]+)</SessionToken>");
 
     private static final Pattern ARN = Pattern.compile("<Arn>([^<]+)</Arn>");
+    private static final Pattern EXPIRATION = Pattern.compile("<Expiration>([^<]+)</Expiration>");
 
     private static StsQueryHandler newHandler() {
         IamRole role = new IamRole();
@@ -67,6 +74,10 @@ class StsQueryHandlerTest {
     }
 
     private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver) {
+        return newHandler(iamService, regionResolver, Clock.systemUTC());
+    }
+
+    private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver, Clock clock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -84,7 +95,8 @@ class StsQueryHandlerTest {
                 mock(WebIdentityTokenVerifier.class),
                 mock(OidcIssuerKeyLookup.class),
                 mock(SAMLProviderService.class),
-                mock(SAMLTrustPolicyEvaluator.class));
+                mock(SAMLTrustPolicyEvaluator.class),
+                clock);
     }
 
     @Test
@@ -539,6 +551,42 @@ class StsQueryHandlerTest {
         assertEquals(200, response.getStatus());
         String body = (String) response.getEntity();
         assertTrue(body.contains("<AssumedRoleId>AROAKX9OBMP2TSQJZ48H:my-session</AssumedRoleId>"), body);
+    }
+
+    /**
+     * Smithy's date-time format carries at most millisecond precision and asks serializers to truncate
+     * anything finer, so the XML drops the sub-millisecond digits while the session keeps the full instant.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "2026-10-05T05:47:29.777826302Z, 2026-10-05T05:47:29.777Z",
+            "2026-10-05T05:47:29.010000000Z, 2026-10-05T05:47:29.010Z",
+            "2026-10-05T05:47:29.000999999Z, 2026-10-05T05:47:29Z",
+            "2026-10-05T05:47:29Z, 2026-10-05T05:47:29Z"
+    })
+    void assumeRoleWritesExpirationAtMillisecondPrecision(String expiresAt, String expected) {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        Instant expiration = Instant.parse(expiresAt);
+        Clock clock = Clock.fixed(expiration.minusSeconds(900), ZoneOffset.UTC);
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000000"), clock);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", role.getArn());
+        params.putSingle("RoleSessionName", "s");
+        params.putSingle("DurationSeconds", "900");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        assertEquals(expected, extract(EXPIRATION, (String) response.getEntity()));
+        ArgumentCaptor<Instant> sessionExpiration = ArgumentCaptor.forClass(Instant.class);
+        verify(iamService).registerSession(anyString(), anyString(), anyString(), eq(role.getArn()),
+                sessionExpiration.capture(), isNull(), eq("000000000000"), eq("s"), anyString());
+        assertEquals(expiration, sessionExpiration.getValue());
     }
 
     private static String extract(Pattern pattern, String body) {

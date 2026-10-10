@@ -26,8 +26,10 @@ import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
 import java.security.interfaces.RSAPublicKey;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -55,6 +57,7 @@ public class StsQueryHandler {
     private final OidcIssuerKeyLookup oidcIssuerKeys;
     private final SAMLProviderService samlProviderService;
     private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
+    private final Clock clock;
 
     /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
     private final SecureRandom secureRandom = new SecureRandom();
@@ -73,6 +76,18 @@ public class StsQueryHandler {
                            OidcIssuerKeyLookup oidcIssuerKeys,
                            SAMLProviderService samlProviderService,
                            SAMLTrustPolicyEvaluator samlTrustEvaluator) {
+        this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
+                tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, Clock.systemUTC());
+    }
+
+    StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
+                    EmulatorConfig config, AssumeRolePolicyEvaluator trustPolicyEvaluator,
+                    WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
+                    WebIdentityTokenVerifier tokenVerifier,
+                    OidcIssuerKeyLookup oidcIssuerKeys,
+                    SAMLProviderService samlProviderService,
+                    SAMLTrustPolicyEvaluator samlTrustEvaluator,
+                    Clock clock) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
         this.regionResolver = regionResolver;
@@ -83,6 +98,7 @@ public class StsQueryHandler {
         this.oidcIssuerKeys = oidcIssuerKeys;
         this.samlProviderService = samlProviderService;
         this.samlTrustEvaluator = samlTrustEvaluator;
+        this.clock = clock;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -117,7 +133,7 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
+        Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String roleName = roleArn != null && roleArn.contains("/")
                 ? roleArn.substring(roleArn.lastIndexOf('/') + 1)
@@ -238,7 +254,7 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
+        Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
         // No role ARN: the credentials route back to the caller's account and act as the caller.
@@ -286,7 +302,7 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
+        Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
@@ -454,7 +470,7 @@ public class StsQueryHandler {
                 new AwsException("InvalidIdentityToken", "The SAML provider is not trusted.", 400));
         SAMLAssertionVerifier.Verified verified;
         try {
-            verified = SAMLAssertionVerifier.verify(getParam(params, "SAMLAssertion"), provider, Instant.now());
+            verified = SAMLAssertionVerifier.verify(getParam(params, "SAMLAssertion"), provider, clock.instant());
         } catch (SAMLAssertionVerifier.InvalidAssertionException e) {
             throw new AwsException("InvalidIdentityToken", e.awsMessage(), 400);
         }
@@ -482,8 +498,8 @@ public class StsQueryHandler {
         if (sessionName.length() > 64) {
             sessionName = sessionName.substring(0, 64);
         }
-        Instant requestedExpiration = Instant.now().plusSeconds(durationSeconds);
-        Instant roleExpiration = Instant.now().plusSeconds(role.getMaxSessionDuration());
+        Instant requestedExpiration = clock.instant().plusSeconds(durationSeconds);
+        Instant roleExpiration = clock.instant().plusSeconds(role.getMaxSessionDuration());
         Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
         if (roleExpiration.isBefore(expiration)) {
             expiration = roleExpiration;
@@ -528,7 +544,7 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        Instant expiration = Instant.now().plusSeconds(durationSeconds);
+        Instant expiration = clock.instant().plusSeconds(durationSeconds);
         String accountId = regionResolver.getAccountId();
         String federatedUserId = accountId + ":" + name;
         String federatedUserArn = regionResolver.buildGlobalArn("sts", accountId, "federated-user/" + name);
@@ -632,7 +648,7 @@ public class StsQueryHandler {
     }
 
     private String isoDate(Instant instant) {
-        return DateTimeFormatter.ISO_INSTANT.format(instant);
+        return DateTimeFormatter.ISO_INSTANT.format(instant.truncatedTo(ChronoUnit.MILLIS));
     }
 
     private static String randomId(int length) {

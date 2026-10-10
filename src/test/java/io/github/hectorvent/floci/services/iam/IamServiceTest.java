@@ -30,6 +30,8 @@ import org.mockito.Mockito;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -2681,6 +2683,33 @@ class IamServiceTest {
         assertTrue(csv.startsWith("user,arn,user_creation_time,password_enabled,"),
                 "expected the documented column header, got: " + csv);
         assertTrue(csv.contains("<root_account>,arn:aws:iam::"), "expected a root account row, got: " + csv);
+    }
+
+    /**
+     * The User Guide's example report writes every timestamp as 2014-10-15T16:31:25+00:00: whole
+     * seconds and a numeric offset, never a nanosecond fraction or a trailing Z.
+     */
+    @Test
+    void credentialReportWritesTimestampsInTheDocumentedForm() {
+        IamUser user = iamService.createUser("cred-report-time-user", "/");
+        iamService.createLoginProfile("cred-report-time-user", "Sup3r-Secret!", false);
+        AccessKey key = iamService.createAccessKey("cred-report-time-user");
+        Instant passwordChanged = iamService.getLoginProfile("cred-report-time-user").getPasswordLastChanged();
+        iamService.generateCredentialReport();
+
+        String csv = new String(Base64.getDecoder().decode(iamService.getCredentialReport().base64Content()));
+        String[] fields = csv.lines().filter(line -> line.startsWith("cred-report-time-user,")).findFirst()
+                .orElseThrow(() -> new AssertionError("no row for cred-report-time-user in: " + csv))
+                .split(",", -1);
+
+        assertReportTime(user.getCreateDate(), fields[2], "user_creation_time");
+        assertReportTime(passwordChanged, fields[5], "password_last_changed");
+        assertReportTime(key.getCreateDate(), fields[9], "access_key_1_last_rotated");
+    }
+
+    private static void assertReportTime(Instant stored, String field, String column) {
+        assertTrue(field.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00"), column + ": " + field);
+        assertEquals(stored.truncatedTo(ChronoUnit.SECONDS), OffsetDateTime.parse(field).toInstant(), column);
     }
 
     @Test

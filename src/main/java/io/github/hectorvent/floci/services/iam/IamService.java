@@ -236,6 +236,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** The creation half of a long-term API key's alias. */
     private static final DateTimeFormatter CREDENTIAL_ALIAS_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
+    /** The credential report's timestamps, as in the User Guide's example rows: 2014-10-15T16:31:25+00:00. */
+    private static final DateTimeFormatter CREDENTIAL_REPORT_TIME =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssxxx").withZone(ZoneOffset.UTC);
     /** AWS General Reference, IAM service quotas: "SSH Public keys per user", not adjustable. */
     private static final int MAX_SSH_PUBLIC_KEYS_PER_USER = 5;
     /** publicKeyIdType is 20 to 128 of [\w]+, and AWS's own examples use the APKA prefix. */
@@ -5358,6 +5361,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private String isoDate(Instant instant) {
-        return instant == null ? "" : DateTimeFormatter.ISO_INSTANT.format(instant);
+        return instant == null ? "" : CREDENTIAL_REPORT_TIME.format(instant);
     }
 }
