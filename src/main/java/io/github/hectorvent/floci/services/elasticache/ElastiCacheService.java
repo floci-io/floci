@@ -1246,7 +1246,7 @@ public class ElastiCacheService implements ResourceProvider {
         if (request.preferredMaintenanceWindow() != null && !request.preferredMaintenanceWindow().isBlank()) {
             BackupWindows.parseMaintenanceWindow(request.preferredMaintenanceWindow());
         }
-        requireCacheSubnetGroup(request.cacheSubnetGroupName());
+        requireCacheSubnetGroup(subnetGroups, request.cacheSubnetGroupName());
         String parameterGroupReservation = reserveParameterGroup(request.cacheParameterGroupName());
         try {
             if (cacheClusterIdTaken(clusterId)) {
@@ -1285,7 +1285,7 @@ public class ElastiCacheService implements ResourceProvider {
      * <p>{@code CreateReplicationGroup} does not make this check, so a replication group can
      * still be created against a subnet group that is not there.
      */
-    private void requireCacheSubnetGroup(String name) {
+    static void requireCacheSubnetGroup(StorageBackend<String, CacheSubnetGroup> subnetGroups, String name) {
         if (name == null || name.isBlank()) {
             return;
         }
@@ -2227,7 +2227,7 @@ public class ElastiCacheService implements ResourceProvider {
                     || groups.scan(k -> true).stream()
                             .anyMatch(g -> name.equals(g.getCacheSubnetGroupName()));
             if (inUse) {
-                throw new AwsException("CacheSubnetGroupInUseFault",
+                throw new AwsException("CacheSubnetGroupInUse",
                         "The requested cache subnet group is currently in use.", 400);
             }
             subnetGroups.delete(name);

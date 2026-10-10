@@ -91,7 +91,7 @@ public class ElastiCacheMemcachedService {
                     "The request cannot be processed because it would exceed the allowed number "
                             + "of cache nodes in a single cluster.", 400);
         }
-        requireCacheSubnetGroup(request.cacheSubnetGroupName());
+        ElastiCacheService.requireCacheSubnetGroup(subnetGroups, request.cacheSubnetGroupName());
         // Claimed before the store checks rather than after, because no create here or in
         // ElastiCacheService persists its record until its container has started: a store check
         // that passes is no promise the id is still free by the time this one writes. The claim
@@ -105,16 +105,6 @@ public class ElastiCacheMemcachedService {
             return provisionCacheCluster(request);
         } finally {
             provisioningIds.release(clusterId);
-        }
-    }
-
-    private void requireCacheSubnetGroup(String name) {
-        if (name == null || name.isBlank()) {
-            return;
-        }
-        if (subnetGroups.get(name).isEmpty()) {
-            throw new AwsException("CacheSubnetGroupNotFoundFault",
-                    "Cache subnet group " + name + " not found.", 400);
         }
     }
 

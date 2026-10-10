@@ -114,9 +114,26 @@ class ElastiCacheCfnProvisionerTest {
     void missingCacheNodeTypeIsRejected() throws Exception {
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
         assertThrows(AwsException.class, () -> provisioner.provision(r,
-                props("{\"Engine\":\"redis\"}"), ctx(null)));
+                props("{\"Engine\":\"redis\",\"NumCacheNodes\":1}"), ctx(null)));
         verify(cache, never()).createCacheCluster(any());
         verify(memcached, never()).createCacheCluster(any());
+    }
+
+    @Test
+    void missingNumCacheNodesIsRejected() throws Exception {
+        StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+        assertThrows(AwsException.class, () -> provisioner.provision(r,
+                props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\"}"), ctx(null)));
+        verify(cache, never()).createCacheCluster(any());
+        verify(memcached, never()).createCacheCluster(any());
+    }
+
+    @Test
+    void missingSubnetGroupDescriptionIsRejected() throws Exception {
+        StackResource r = resource("AWS::ElastiCache::SubnetGroup", "Sng");
+        assertThrows(AwsException.class, () -> provisioner.provision(r,
+                props("{\"CacheSubnetGroupName\":\"my-sng\",\"SubnetIds\":[\"s-1\"]}"), ctx(null)));
+        verify(cache, never()).createCacheSubnetGroup(any(), any(), any(), any());
     }
 
     @Test
@@ -124,7 +141,7 @@ class ElastiCacheCfnProvisionerTest {
         String longName = "c".repeat(51);
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
         assertThrows(AwsException.class, () -> provisioner.provision(r,
-                props("{\"ClusterName\":\"" + longName + "\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\"}"),
+                props("{\"ClusterName\":\"" + longName + "\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"),
                 ctx(null)));
         verify(cache, never()).createCacheCluster(any());
     }
@@ -148,7 +165,7 @@ class ElastiCacheCfnProvisionerTest {
         });
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "MyCluster");
 
-        provisioner.provision(r, props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\"}"), ctx(null));
+        provisioner.provision(r, props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx(null));
 
         assertEquals(r.getPhysicalId().toLowerCase(), r.getPhysicalId());
         assertEquals(true, r.getPhysicalId().length() <= 50);
@@ -161,7 +178,7 @@ class ElastiCacheCfnProvisionerTest {
         when(cache.findCacheClusters("app-cache")).thenReturn(List.of(existing));
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
-        provisioner.provision(r, props("{\"ClusterName\":\"app-cache\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\"}"),
+        provisioner.provision(r, props("{\"ClusterName\":\"app-cache\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"),
                 ctx("app-cache"));
 
         verify(cache, never()).createCacheCluster(any());
@@ -176,7 +193,7 @@ class ElastiCacheCfnProvisionerTest {
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
         assertThrows(AwsException.class, () -> provisioner.provision(r,
-                props("{\"ClusterName\":\"app-cache\",\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\"}"), ctx("app-cache")));
+                props("{\"ClusterName\":\"app-cache\",\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("app-cache")));
     }
 
     @Test
@@ -191,7 +208,7 @@ class ElastiCacheCfnProvisionerTest {
         });
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
-        provisioner.provision(r, props("{\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\"}"), ctx("old-id"));
+        provisioner.provision(r, props("{\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("old-id"));
 
         assertNotEquals("old-id", r.getPhysicalId());
         assertEquals("6401", r.getAttributes().get("RedisEndpoint.Port"));
@@ -242,7 +259,7 @@ class ElastiCacheCfnProvisionerTest {
                 "redis", "7.1", new Endpoint("localhost", 6400), Instant.now()));
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Tls");
 
-        provisioner.provision(r, props("{\"ClusterName\":\"tls\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"TransitEncryptionEnabled\":true}"),
+        provisioner.provision(r, props("{\"ClusterName\":\"tls\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1,\"TransitEncryptionEnabled\":true}"),
                 ctx(null));
 
         ArgumentCaptor<ElastiCacheService.CreateCacheClusterRequest> request =
@@ -259,7 +276,7 @@ class ElastiCacheCfnProvisionerTest {
         when(memcached.getCacheCluster("mc")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Mc");
 
-        provisioner.provision(r, props("{\"ClusterName\":\"mc\",\"Engine\":\"memcached\",\"CacheNodeType\":\"cache.t3.micro\",\"NetworkType\":\"ipv4\"}"),
+        provisioner.provision(r, props("{\"ClusterName\":\"mc\",\"Engine\":\"memcached\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1,\"NetworkType\":\"ipv4\"}"),
                 ctx("mc"));
 
         verify(memcached, never()).createCacheCluster(any());
@@ -279,7 +296,7 @@ class ElastiCacheCfnProvisionerTest {
         });
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
-        provisioner.provision(r, props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\"}"), ctx("old-id"));
+        provisioner.provision(r, props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("old-id"));
 
         assertNotEquals("old-id", r.getPhysicalId());
         verify(cache).createCacheCluster(any());
@@ -340,7 +357,7 @@ class ElastiCacheCfnProvisionerTest {
                 "redis", "7.1", new Endpoint("localhost", 6402), Instant.now()));
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
-        provisioner.provision(r, props("{\"ClusterName\":\"app-cache\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\"}"), ctx("app-cache"));
+        provisioner.provision(r, props("{\"ClusterName\":\"app-cache\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("app-cache"));
 
         verify(cache).createCacheCluster(any());
         assertEquals("6402", r.getAttributes().get("RedisEndpoint.Port"));
@@ -368,7 +385,7 @@ class ElastiCacheCfnProvisionerTest {
                 .when(cache).deleteCacheSubnetGroup("gone");
         provisioner.delete("AWS::ElastiCache::SubnetGroup", "gone", "us-east-1");
 
-        doThrow(new AwsException("CacheSubnetGroupInUseFault", "busy", 400))
+        doThrow(new AwsException("CacheSubnetGroupInUse", "busy", 400))
                 .when(cache).deleteCacheSubnetGroup("busy");
         assertThrows(AwsException.class,
                 () -> provisioner.delete("AWS::ElastiCache::SubnetGroup", "busy", "us-east-1"));

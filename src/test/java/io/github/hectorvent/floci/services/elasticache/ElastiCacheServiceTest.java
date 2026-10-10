@@ -2136,7 +2136,7 @@ class ElastiCacheServiceTest {
                 "us-east-1", Map.of()));
 
         AwsException ex = assertThrows(AwsException.class, () -> service.deleteCacheSubnetGroup("used-group"));
-        assertEquals("CacheSubnetGroupInUseFault", ex.getErrorCode());
+        assertEquals("CacheSubnetGroupInUse", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -2155,7 +2155,7 @@ class ElastiCacheServiceTest {
                 ReplicationGroupSettings.defaults(), Map.of(), null));
 
         AwsException ex = assertThrows(AwsException.class, () -> service.deleteCacheSubnetGroup("rg-used-group"));
-        assertEquals("CacheSubnetGroupInUseFault", ex.getErrorCode());
+        assertEquals("CacheSubnetGroupInUse", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 

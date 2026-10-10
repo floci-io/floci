@@ -121,6 +121,10 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         if (nodeType == null || nodeType.isBlank()) {
             throw new AwsException("ValidationException", "CacheNodeType is required", 400);
         }
+        String explicitNodes = ctx.resolveOptional(props, "NumCacheNodes");
+        if (explicitNodes == null || explicitNodes.isBlank()) {
+            throw new AwsException("ValidationException", "NumCacheNodes is required", 400);
+        }
         String explicitName = ctx.resolveOptional(props, "ClusterName");
         if (explicitName != null && explicitName.length() > CLUSTER_ID_MAX_LENGTH) {
             throw new AwsException("ValidationException",
@@ -256,13 +260,16 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionSubnetGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String description = ctx.resolveOptional(props, "Description");
+        if (description == null || description.isBlank()) {
+            throw new AwsException("ValidationException", "Description is required", 400);
+        }
         String explicitName = ctx.resolveOptional(props, "CacheSubnetGroupName");
         if (explicitName != null && explicitName.length() > SUBNET_GROUP_NAME_MAX_LENGTH) {
             throw new AwsException("ValidationException",
                     "CacheSubnetGroupName exceeds maximum length of " + SUBNET_GROUP_NAME_MAX_LENGTH, 400);
         }
         String id = ctx.stablePhysicalName(explicitName, r.getLogicalId(), SUBNET_GROUP_NAME_MAX_LENGTH, true);
-        String description = ctx.resolveOptional(props, "Description");
         List<String> subnetIds = ctx.resolveStringList(props, "SubnetIds");
 
         CacheSubnetGroup group;
