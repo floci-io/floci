@@ -12,8 +12,15 @@ import java.util.Base64;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.emptyString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
-/** Shared setup for the custom-domain integration tests: pools, clients, certificates and token calls. */
+/**
+ * Shared setup for the custom-domain integration tests: pools, clients, certificates and token calls,
+ * and AWS's answers of the revocation endpoint.
+ */
 final class CognitoCustomDomainFixtures {
 
     static final String FLOCI_URL = "http://localhost:4566";
@@ -84,8 +91,17 @@ final class CognitoCustomDomainFixtures {
 
     /** A public client, a confirmed user and the access token USER_PASSWORD_AUTH issues for it. */
     static String signInNewUser(String poolId) throws Exception {
+        return signIn(poolId).accessToken();
+    }
+
+    /** A confirmed user signed in through a new public client with USER_PASSWORD_AUTH. */
+    static SignedInUser signIn(String poolId) throws Exception {
         String publicClient = cognitoJson("CreateUserPoolClient", """
-                {"UserPoolId": "%s", "ClientName": "routing-user-client", "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH"]}
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "routing-user-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+                }
                 """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
         String username = "user-" + System.nanoTime() + "@example.com";
         cognitoAction("AdminCreateUser", """
@@ -101,14 +117,38 @@ final class CognitoCustomDomainFixtures {
         cognitoAction("AdminSetUserPassword", """
                 {"UserPoolId": "%s", "Username": "%s", "Password": "%s", "Permanent": true}
                 """.formatted(poolId, username, PASSWORD)).then().statusCode(200);
-        return cognitoJson("InitiateAuth", """
+        JsonNode tokens = cognitoJson("InitiateAuth", """
                 {
                   "ClientId": "%s",
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": {"USERNAME": "%s", "PASSWORD": "%s"}
                 }
-                """.formatted(publicClient, username, PASSWORD))
-                .path("AuthenticationResult").path("AccessToken").asText();
+                """.formatted(publicClient, username, PASSWORD)).path("AuthenticationResult");
+        return new SignedInUser(publicClient, tokens.path("AccessToken").asText(),
+                tokens.path("RefreshToken").asText());
+    }
+
+    /** The REFRESH_TOKEN_AUTH call that renews a signed-in user's tokens. */
+    static Response refresh(SignedInUser user) {
+        return cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": {"REFRESH_TOKEN": "%s"}
+                }
+                """.formatted(user.clientId(), user.refreshToken()));
+    }
+
+    /** A public client's refresh_token grant at the token endpoint, on {@code host} when one is given. */
+    static Response refreshGrant(String host, String clientId, String refreshToken) {
+        RequestSpecification request = given()
+                .formParam("grant_type", "refresh_token")
+                .formParam("client_id", clientId)
+                .formParam("refresh_token", refreshToken);
+        if (host != null) {
+            request.header("Host", host);
+        }
+        return request.when().post(host == null ? "/cognito-idp/oauth2/token" : "/oauth2/token");
     }
 
     /** A client-credentials request with Basic authentication, on {@code host} when one is given. */
@@ -132,11 +172,34 @@ final class CognitoCustomDomainFixtures {
         return null;
     }
 
+    /** AWS's answer to a revocation it accepts: 200, with no body and no Content-Type. */
+    static void assertRevoked(Response response) {
+        response.then()
+                .statusCode(200)
+                .header("Content-Length", "0")
+                .header("Content-Type", nullValue())
+                .body(emptyString());
+    }
+
+    /** AWS's answer to every client the revocation endpoint cannot authenticate. */
+    static void assertInvalidClient(Response response) {
+        response.then()
+                .statusCode(401)
+                .contentType(containsString("application/json"))
+                .header("WWW-Authenticate", "Basic")
+                .body("error", equalTo("invalid_client"))
+                .body("error_description", equalTo("Invalid client credentials in request"));
+    }
+
     static String basic(String clientId, String secret) {
         return "Basic " + Base64.getEncoder().encodeToString((clientId + ":" + secret).getBytes(StandardCharsets.UTF_8));
     }
 
     static JsonNode jwtPayload(String token) throws Exception {
         return OBJECT_MAPPER.readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1]));
+    }
+
+    /** A user signed in through the public client {@code clientId}, with the tokens it was issued. */
+    record SignedInUser(String clientId, String accessToken, String refreshToken) {
     }
 }

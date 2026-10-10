@@ -106,6 +106,11 @@ public class CognitoService implements ResourceProvider {
     /** The scope of every access token from an API sign-in such as InitiateAuth, and what the user's own operations need. */
     private static final String USER_ADMIN_SCOPE = "aws.cognito.signin.user.admin";
     private static final List<String> API_SIGN_IN_SCOPES = List.of(USER_ADMIN_SCOPE);
+    /**
+     * Starts the refresh token field that holds an OAuth grant's scopes. A family id, a UUID, never
+     * starts with it, so a token whose username holds a pipe is never read as one with scopes.
+     */
+    private static final String REFRESH_TOKEN_SCOPE_FIELD = "scope=";
 
     private static final String IDENTITIES_ATTRIBUTE = "identities";
 
@@ -3737,6 +3742,11 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
     }
 
+    /**
+     * Mints new access and ID tokens from a refresh token, as the sign-in that issued it did: an OAuth
+     * grant's access token keeps the grant's scopes, and has an ID token only with {@code openid}.
+     * Shared by {@code GetTokensFromRefreshToken} and the OAuth token endpoint's refresh_token grant.
+     */
     public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken) {
         if (refreshToken == null) {
             throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
@@ -3754,6 +3764,7 @@ public class CognitoService implements ResourceProvider {
         if (!client.getUserPoolId().equals(poolId)) {
             throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
         }
+        requireRefreshTokenOfClient(client, parts);
         if (isRefreshTokenExpired(client, parts)) {
             throw new AwsException("NotAuthorizedException", "Refresh Token has expired", 400);
         }
@@ -3768,17 +3779,24 @@ public class CognitoService implements ResourceProvider {
 
         UserPool pool = describeUserPool(poolId);
         CognitoUser user = adminGetUser(poolId, username);
-        ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user);
+        List<String> scopes = refreshTokenScopes(parts);
+        ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user, scopes);
 
         // Use refresh token UUID as origin_jti for derived tokens
-        Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
-        auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
-        auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
-        auth.put("TokenType", "Bearer");
         Map<String, Object> result = new HashMap<>();
-        result.put("AuthenticationResult", auth);
+        result.put("AuthenticationResult", accessAndIdTokens(user, pool, client, override, refreshTokenUuid,
+                scopes, issuedAt / 1000L));
         return result;
+    }
+
+    /**
+     * Refuses a refresh token issued to another client of the pool, as AWS does for
+     * {@code GetTokensFromRefreshToken} and {@code InitiateAuth} {@code REFRESH_TOKEN_AUTH} alike.
+     */
+    static void requireRefreshTokenOfClient(UserPoolClient client, String[] refreshTokenParts) {
+        if (!client.getClientId().equals(refreshTokenParts[2])) {
+            throw new AwsException("NotAuthorizedException", "Refresh Token has different Client", 400);
+        }
     }
 
     public void revokeToken(String clientId, String token, String clientSecret) {
@@ -3861,7 +3879,7 @@ public class CognitoService implements ResourceProvider {
         List<String> scopes = scopesStillAllowed(client, grantedScopes);
         ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user, scopes);
         return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims),
-                UUID.randomUUID().toString(), scopes, scopes.contains("openid"));
+                UUID.randomUUID().toString(), scopes);
     }
 
     /**
@@ -3934,18 +3952,42 @@ public class CognitoService implements ResourceProvider {
     }
 
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
-        return generateAuthResult(user, pool, client, override, originJti, API_SIGN_IN_SCOPES, true);
+        return generateAuthResult(user, pool, client, override, originJti, null);
     }
 
+    /**
+     * @param grantedScopes the scopes of the OAuth grant the tokens are minted for, or null for a
+     *                      sign-in through the API. The refresh token keeps them, so that a refresh
+     *                      mints the same kind of tokens.
+     */
     private Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client,
                                                    ClaimsOverride override, String originJti,
-                                                   List<String> accessScopes, boolean withIdToken) {
+                                                   List<String> grantedScopes) {
+        long issuedAt = System.currentTimeMillis();
+        Map<String, Object> auth = accessAndIdTokens(user, pool, client, override, originJti, grantedScopes,
+                issuedAt / 1000L);
+        auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), issuedAt,
+                originJti, grantedScopes));
+        return auth;
+    }
+
+    /**
+     * An OAuth grant's access token carries the grant's scopes, and it has an ID token only when they
+     * include {@code openid}, as on AWS. A sign-in through the API, {@code grantedScopes} null, has the
+     * {@code aws.cognito.signin.user.admin} scope and always an ID token. {@code authTime} is when the
+     * user signed in, which a refresh keeps.
+     */
+    private Map<String, Object> accessAndIdTokens(CognitoUser user, UserPool pool, UserPoolClient client,
+                                                  ClaimsOverride override, String originJti,
+                                                  List<String> grantedScopes, long authTime) {
+        List<String> accessScopes = grantedScopes == null ? API_SIGN_IN_SCOPES : grantedScopes;
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti, accessScopes));
-        if (withIdToken) {
-            auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, originJti, accessScopes));
+        auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti, accessScopes,
+                authTime));
+        if (grantedScopes == null || grantedScopes.contains("openid")) {
+            auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, originJti, accessScopes,
+                    authTime));
         }
-        auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), originJti));
         auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
         auth.put("TokenType", "Bearer");
         return auth;
@@ -3956,15 +3998,17 @@ public class CognitoService implements ResourceProvider {
     }
 
     String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client, ClaimsOverride override, String originJti) {
-        return generateSignedJwt(user, pool, type, client, override, originJti, API_SIGN_IN_SCOPES);
+        return generateSignedJwt(user, pool, type, client, override, originJti, API_SIGN_IN_SCOPES, null);
     }
 
     /**
      * @param accessScopes the access token's {@code scope} claim before any V2 trigger changes, left
      *                     out when empty; ignored for an ID token
+     * @param authTime     the {@code auth_time} claim, epoch seconds, or null for now
      */
     private String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client,
-                                     ClaimsOverride override, String originJti, List<String> accessScopes) {
+                                     ClaimsOverride override, String originJti, List<String> accessScopes,
+                                     Long authTime) {
         String header = encodeJwtHeader(pool);
         long now = System.currentTimeMillis() / 1000L;
         long lifetimeSeconds = resolveTokenLifetimeSeconds(client, type);
@@ -3974,7 +4018,7 @@ public class CognitoService implements ResourceProvider {
         claims.put("sub", sub);
         claims.put("event_id", UUID.randomUUID().toString());
         claims.put("token_use", type);
-        claims.put("auth_time", now);
+        claims.put("auth_time", authTime != null ? authTime : now);
         claims.put("iss", getIssuer(pool.getId()));
         claims.put("exp", now + lifetimeSeconds);
         claims.put("iat", now);
@@ -4754,13 +4798,22 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
-    String buildRefreshToken(UserPool pool, String username, String clientId, String originJti) {
+    /**
+     * A signed {@code poolId|username|clientId|issuedAt|familyId} token. An OAuth grant's token adds a
+     * field holding its scopes, base64url-encoded because a scope may contain the pipe that separates
+     * the fields; a sign-in through the API, {@code grantedScopes} null, has none.
+     */
+    String buildRefreshToken(UserPool pool, String username, String clientId, long issuedAt, String originJti,
+                             List<String> grantedScopes) {
         if (ensureRefreshTokenSecret(pool)) {
             poolStore.put(pool.getId(), pool);
         }
-        long issuedAt = System.currentTimeMillis();
         String familyId = originJti != null ? originJti : UUID.randomUUID().toString();
         String raw = pool.getId() + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId;
+        if (grantedScopes != null) {
+            raw += "|" + REFRESH_TOKEN_SCOPE_FIELD + Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString(String.join(" ", grantedScopes).getBytes(StandardCharsets.UTF_8));
+        }
         String signature = hmacSha256(refreshTokenSecretBytes(pool), raw);
         return Base64.getEncoder().withoutPadding()
                 .encodeToString((raw + "|" + signature).getBytes(StandardCharsets.UTF_8));
@@ -4775,27 +4828,48 @@ public class CognitoService implements ResourceProvider {
                 || Boolean.TRUE.equals(client.getEnableTokenRevocation());
     }
 
+    /**
+     * The fields of a refresh token whose signature verifies: {@code [poolId, username, clientId,
+     * issuedAt, familyId]}, and for an OAuth grant's token a sixth, its scopes separated by spaces.
+     * Only the username can hold a pipe. One there either puts the family id where the scope field
+     * belongs, and a family id never starts like one, or leaves a pipe in the signature, which then
+     * fails to decode.
+     */
     String[] parseRefreshToken(String refreshToken) {
         try {
             byte[] decoded = Base64.getDecoder().decode(refreshToken);
             String raw = new String(decoded, StandardCharsets.UTF_8);
-            String[] parts = raw.split("\\|", 6);
-            if (parts.length != 6) {
+            String[] parts = raw.split("\\|", 7);
+            int fieldCount = parts.length - 1;
+            if (fieldCount != 5 && (fieldCount != 6 || !parts[5].startsWith(REFRESH_TOKEN_SCOPE_FIELD))) {
                 return null;
             }
             UserPool pool = poolStore.get(parts[0]).orElse(null);
             if (pool == null || pool.getSigningSecret() == null || pool.getSigningSecret().isBlank()) {
                 return null;
             }
-            String payload = String.join("|", Arrays.copyOf(parts, 5));
+            String[] fields = Arrays.copyOf(parts, fieldCount);
+            String payload = String.join("|", fields);
             byte[] expectedSignature = Base64.getDecoder().decode(hmacSha256(refreshTokenSecretBytes(pool), payload));
-            byte[] actualSignature = Base64.getDecoder().decode(parts[5]);
+            byte[] actualSignature = Base64.getDecoder().decode(parts[fieldCount]);
             if (!MessageDigest.isEqual(expectedSignature, actualSignature)) {
                 return null;
             }
-            return Arrays.copyOf(parts, 5); // [poolId, username, clientId, issuedAt, nonce]
+            if (fieldCount == 6) {
+                fields[5] = new String(Base64.getUrlDecoder().decode(
+                        parts[5].substring(REFRESH_TOKEN_SCOPE_FIELD.length())), StandardCharsets.UTF_8);
+            }
+            return fields;
         } catch (Exception ignored) { }
         return null;
+    }
+
+    /** The scopes of the OAuth grant a parsed refresh token belongs to, or null for a sign-in through the API. */
+    private static List<String> refreshTokenScopes(String[] parts) {
+        if (parts.length < 6) {
+            return null;
+        }
+        return parts[5].isEmpty() ? List.of() : List.of(parts[5].split(" "));
     }
 
     record VerifiedAccessToken(String username, String poolId, String subject) {}

@@ -43,6 +43,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -4606,6 +4607,189 @@ class CognitoServiceTest {
                 service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
                         Map.of("REFRESH_TOKEN", malformedToken)));
         assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    // =========================================================================
+    // A refresh keeps the scopes of the OAuth grant
+    // =========================================================================
+
+    /** A scope may contain a pipe, the field separator, so the scopes travel base64url-encoded. */
+    @Test
+    void refreshTokenOfACodeGrantKeepsItsFieldsAndCarriesTheGrantedScopes() {
+        UserPool pool = createPoolAndUser();
+
+        String[] parts = service.parseRefreshToken(service.buildRefreshToken(pool, "alice", "client-id",
+                1_790_000_000_123L, "family-id", List.of("openid", "notes/read|write")));
+
+        assertEquals(List.of(pool.getId(), "alice", "client-id", "1790000000123", "family-id",
+                "openid notes/read|write"), List.of(parts));
+    }
+
+    @Test
+    void refreshTokenOfACodeGrantWithoutScopesHasAnEmptyScopeField() {
+        UserPool pool = createPoolAndUser();
+
+        String[] parts = service.parseRefreshToken(
+                service.buildRefreshToken(pool, "alice", "client-id", 1_790_000_000_123L, "family-id", List.of()));
+
+        assertEquals(6, parts.length);
+        assertEquals("", parts[5]);
+    }
+
+    @Test
+    void refreshTokenOfAnApiSignInHasNoScopeField() {
+        UserPool pool = createPoolAndUser();
+
+        String[] parts = service.parseRefreshToken(
+                service.buildRefreshToken(pool, "alice", "client-id", 1_790_000_000_123L, "family-id", null));
+
+        assertEquals(List.of(pool.getId(), "alice", "client-id", "1790000000123", "family-id"), List.of(parts));
+    }
+
+    /**
+     * Only the username can hold a pipe. A token of an API sign-in whose username holds one has the
+     * field count of a code grant's token, but its sixth field is not a scope field, so it is refused
+     * rather than read as the token of another user.
+     */
+    @Test
+    void getTokensFromRefreshTokenDoesNotReadAPipeInTheUsernameAsAFieldSeparator() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + client.getClientId() + "|"
+                + System.currentTimeMillis() + "|" + UUID.randomUUID();
+        String refreshToken = signRawRefreshToken(pool, raw);
+
+        assertNull(service.parseRefreshToken(refreshToken));
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), refreshToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenOfACodeGrantKeepsItsScopesAndIssuesAnIdTokenOnlyWithOpenid() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, true, List.of("code"),
+                List.of("openid", "email", "aws.cognito.signin.user.admin"), null, List.of("https://app.example.test/cb"),
+                null, List.of(), null, null, List.of(), null, List.of(), null, null, null, List.of(), null, null);
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        for (List<String> granted : List.of(List.of("openid", "email"), List.of("email"))) {
+            String refreshToken = (String) service.generateAuthResultForHostedAuth(user, pool, client, null, granted)
+                    .get("RefreshToken");
+
+            Map<String, Object> refreshed = (Map<String, Object>) service
+                    .getTokensFromRefreshToken(client.getClientId(), refreshToken).get("AuthenticationResult");
+
+            JsonNode accessClaims = MAPPER.readTree(jwtPayload((String) refreshed.get("AccessToken")));
+            assertEquals(String.join(" ", granted), accessClaims.path("scope").asText(), "granted " + granted);
+            assertEquals(granted.contains("openid"), refreshed.containsKey("IdToken"), "granted " + granted);
+            assertNull(refreshed.get("RefreshToken"));
+        }
+    }
+
+    /** A code grant of a client that allows no scopes has no scope claim and no ID token, nor does its refresh. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenOfACodeGrantWithoutScopesDoesNotGainTheApiSignInScope() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        String refreshToken = (String) service.generateAuthResultForHostedAuth(user, pool, client, null, List.of())
+                .get("RefreshToken");
+
+        Map<String, Object> refreshed = (Map<String, Object>) service
+                .getTokensFromRefreshToken(client.getClientId(), refreshToken).get("AuthenticationResult");
+
+        assertFalse(MAPPER.readTree(jwtPayload((String) refreshed.get("AccessToken"))).has("scope"));
+        assertFalse(refreshed.containsKey("IdToken"));
+    }
+
+    /** A token minted before refresh tokens carried scopes refreshes as an API sign-in does. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenWithoutTheScopeFieldIssuesTheApiSignInScopeAndAnIdToken() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + System.currentTimeMillis() + "|"
+                + UUID.randomUUID();
+
+        Map<String, Object> refreshed = (Map<String, Object>) service
+                .getTokensFromRefreshToken(client.getClientId(), signRawRefreshToken(pool, raw))
+                .get("AuthenticationResult");
+
+        JsonNode accessClaims = MAPPER.readTree(jwtPayload((String) refreshed.get("AccessToken")));
+        assertEquals("aws.cognito.signin.user.admin", accessClaims.path("scope").asText());
+        assertNotNull(refreshed.get("IdToken"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenRefusesATokenIssuedToAnotherClient() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient issuedTo = openClient(service, pool.getId(), "issued-to", false);
+        UserPoolClient other = openClient(service, pool.getId(), "other", false);
+        String refreshToken = (String) ((Map<String, Object>) service.initiateAuth(issuedTo.getClientId(),
+                "USER_PASSWORD_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"))
+                .get("AuthenticationResult")).get("RefreshToken");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(other.getClientId(), refreshToken));
+
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+        assertEquals("Refresh Token has different Client", exception.getMessage());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshTokenAuthFlowRefusesATokenIssuedToAnotherClient() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient issuedTo = openClient(service, pool.getId(), "issued-to", false);
+        UserPoolClient other = openClient(service, pool.getId(), "other", false);
+        String refreshToken = (String) ((Map<String, Object>) service.initiateAuth(issuedTo.getClientId(),
+                "USER_PASSWORD_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"))
+                .get("AuthenticationResult")).get("RefreshToken");
+
+        AwsException exception = assertThrows(AwsException.class, () -> service.initiateAuth(other.getClientId(),
+                "REFRESH_TOKEN_AUTH", Map.of("REFRESH_TOKEN", refreshToken)));
+
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+        assertEquals("Refresh Token has different Client", exception.getMessage());
+    }
+
+    /** A sign-in's tokens are authenticated at the moment its refresh token is issued. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void signInAuthTimeIsTheIssuedAtOfItsRefreshToken() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+
+        Map<String, Object> auth = (Map<String, Object>) service.initiateAuth(client.getClientId(),
+                "USER_PASSWORD_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
+
+        long issuedAtSeconds = Long.parseLong(service.parseRefreshToken((String) auth.get("RefreshToken"))[3]) / 1000L;
+        assertEquals(issuedAtSeconds, MAPPER.readTree(jwtPayload((String) auth.get("AccessToken"))).path("auth_time").asLong());
+        assertEquals(issuedAtSeconds, MAPPER.readTree(jwtPayload((String) auth.get("IdToken"))).path("auth_time").asLong());
+    }
+
+    /** AWS: a refresh does not authenticate the user again, so the new tokens keep the sign-in's auth_time. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenKeepsTheAuthTimeOfTheSignIn() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        long issuedAtMillis = System.currentTimeMillis() - 120_000L;
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAtMillis + "|" + UUID.randomUUID();
+
+        Map<String, Object> refreshed = (Map<String, Object>) service
+                .getTokensFromRefreshToken(client.getClientId(), signRawRefreshToken(pool, raw))
+                .get("AuthenticationResult");
+
+        for (String token : List.of((String) refreshed.get("AccessToken"), (String) refreshed.get("IdToken"))) {
+            JsonNode claims = MAPPER.readTree(jwtPayload(token));
+            assertEquals(issuedAtMillis / 1000L, claims.path("auth_time").asLong());
+            assertTrue(claims.path("iat").asLong() > claims.path("auth_time").asLong());
+        }
     }
 
     // =========================================================================

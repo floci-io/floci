@@ -337,6 +337,33 @@ class CognitoUserInfoIntegrationTest {
                 .header("WWW-Authenticate", containsString("invalid_token"));
     }
 
+    /** AWS serves userInfo on POST as well as GET, with the same answer. */
+    @Test
+    @Order(14)
+    void userInfoAnswersAPostAsItAnswersAGet() throws Exception {
+        String get = given()
+                .header("Authorization", "Bearer " + accessToken)
+        .when()
+                .get("/cognito-idp/oauth2/userInfo")
+        .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+
+        String post = given()
+                .header("Authorization", "Bearer " + accessToken)
+        .when()
+                .post("/cognito-idp/oauth2/userInfo")
+        .then()
+                .statusCode(200)
+                .contentType(containsString("application/json"))
+                .extract()
+                .asString();
+
+        assertEquals(OBJECT_MAPPER.readTree(get), OBJECT_MAPPER.readTree(post));
+        assertEquals(USERNAME, OBJECT_MAPPER.readTree(post).path("username").asText());
+    }
+
     private static String base64Url(String raw) {
         return java.util.Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
