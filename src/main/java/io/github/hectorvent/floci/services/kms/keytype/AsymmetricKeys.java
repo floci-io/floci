@@ -12,8 +12,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.Security;
 import java.security.Signature;
 import java.security.SignatureException;
+import java.security.spec.EdDSAParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.PSSParameterSpec;
@@ -66,11 +68,14 @@ final class AsymmetricKeys {
         }
     }
 
-    // KMS RSASSA_PSS uses MGF1 over the same digest, with a salt as long as the digest.
     private static Signature signatureFor(String jcaAlgorithm) throws GeneralSecurityException {
+        if (jcaAlgorithm.equals("Ed25519ph")) {
+            return ed25519ph();
+        }
         if (!jcaAlgorithm.endsWith("withRSA/PSS")) {
             return Signature.getInstance(jcaAlgorithm);
         }
+        // KMS RSASSA_PSS uses MGF1 over the same digest, with a salt as long as the digest.
         String digest = "SHA-" + jcaAlgorithm.substring("SHA".length(), jcaAlgorithm.indexOf("with"));
         MGF1ParameterSpec maskGeneration = switch (digest) {
             case "SHA-256" -> MGF1ParameterSpec.SHA256;
@@ -81,6 +86,17 @@ final class AsymmetricKeys {
         int saltLength = MessageDigest.getInstance(digest).getDigestLength();
         Signature signature = Signature.getInstance("RSASSA-PSS");
         signature.setParameter(new PSSParameterSpec(digest, "MGF1", maskGeneration, saltLength, 1));
+        return signature;
+    }
+
+    // The JDK runs Ed25519ph as Ed25519 with a pre-hash parameter. BC-FIPS registers it as Ed25519ph
+    // instead and rejects that parameter.
+    private static Signature ed25519ph() throws GeneralSecurityException {
+        if (Security.getProviders("Signature.Ed25519ph") != null) {
+            return Signature.getInstance("Ed25519ph");
+        }
+        Signature signature = Signature.getInstance("Ed25519");
+        signature.setParameter(new EdDSAParameterSpec(true));
         return signature;
     }
 }

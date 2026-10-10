@@ -19,7 +19,9 @@ import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PublicKey;
+import java.security.Signature;
 import java.security.spec.ECGenParameterSpec;
+import java.security.spec.EdDSAParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
@@ -1630,7 +1632,7 @@ class KmsIntegrationTest {
      * digest, so the two algorithms produce different signatures over the same input.
      */
     @Test
-    void ed25519KeyIsAnEd25519KeyAndSignsWithBothAlgorithms() {
+    void ed25519KeyIsAnEd25519KeyAndSignsWithBothAlgorithms() throws Exception {
         String keyId = given()
                 .header("X-Amz-Target", "TrentService.CreateKey")
                 .contentType(KMS_CONTENT_TYPE)
@@ -1652,6 +1654,8 @@ class KmsIntegrationTest {
                 .then().statusCode(200)
                 .extract().path("PublicKey");
         assertEquals(44, Base64.getDecoder().decode(publicKey).length);
+        PublicKey jdkPublicKey = KeyFactory.getInstance("Ed25519")
+                .generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(publicKey)));
 
         // ED25519_PH_SHA_512 takes one SHA-512 digest, so the two algorithms are given
         // different payloads here the way a caller would send them.
@@ -1670,6 +1674,15 @@ class KmsIntegrationTest {
                     .body("SigningAlgorithm", equalTo(pair[0]))
                     .extract().path("Signature");
             assertEquals(64, Base64.getDecoder().decode(signature).length);
+
+            // Outside Floci too: the JDK verifies it against the key GetPublicKey returned.
+            Signature verifier = Signature.getInstance("Ed25519");
+            if (pair[0].equals("ED25519_PH_SHA_512")) {
+                verifier.setParameter(new EdDSAParameterSpec(true));
+            }
+            verifier.initVerify(jdkPublicKey);
+            verifier.update(Base64.getDecoder().decode(pair[2]));
+            assertTrue(verifier.verify(Base64.getDecoder().decode(signature)), pair[0] + " verifies with the JDK");
 
             given()
                     .header("X-Amz-Target", "TrentService.Verify")

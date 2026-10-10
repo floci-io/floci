@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -185,6 +186,40 @@ class KmsKeyTypesTest {
 
         assertTrue(keyType.verify(key, digest, signature, KmsKeySpec.Algorithm.ED25519_PH_SHA_512,
                 KmsMessageType.DIGEST));
+    }
+
+    // The Ed25519ph test vector from RFC 8032 section 7.3, so the expected signature comes from outside Floci.
+    @Test
+    void ed25519PreHashMatchesTheRfc8032TestVector() throws Exception {
+        HexFormat hex = HexFormat.of();
+        KmsKey key = newKey(KmsKeySpec.ECC_NIST_EDWARDS25519);
+        key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(hex.parseHex("302e020100300506032b657004220420"
+                + "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42")));
+        key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(hex.parseHex("302a300506032b6570032100"
+                + "ec172b93ad5e563bf4932c70e1245034c35467ef2efd4d64ebf819683467e2bf")));
+        KmsKeyType keyType = keyTypes.of(KmsKeySpec.ECC_NIST_EDWARDS25519);
+        // KmsService requires a 64-byte digest for this algorithm; the key type signs any input, as the vector needs.
+        byte[] message = "abc".getBytes(StandardCharsets.US_ASCII);
+        byte[] expected = hex.parseHex("98a70222f0b8121aa9d30f813d683f809e462b469c7ff87639499bb94e6dae41"
+                + "31f85042463c2a355a2003d062adf5aaa10b8c61e636062aaad11c2a26083406");
+
+        byte[] signature = keyType.sign(key, message, KmsKeySpec.Algorithm.ED25519_PH_SHA_512, KmsMessageType.DIGEST);
+
+        assertArrayEquals(expected, signature);
+        assertTrue(keyType.verify(key, message, expected, KmsKeySpec.Algorithm.ED25519_PH_SHA_512,
+                KmsMessageType.DIGEST));
+    }
+
+    @Test
+    void ed25519PreHashMalformedSignatureDoesNotVerify() throws Exception {
+        KmsKey key = generatedKey(KmsKeySpec.ECC_NIST_EDWARDS25519, REGION);
+        KmsKeyType keyType = keyTypes.of(KmsKeySpec.ECC_NIST_EDWARDS25519);
+        byte[] digest = MessageDigest.getInstance("SHA-512").digest(MESSAGE);
+
+        for (byte[] signature : List.of(new byte[]{1}, new byte[64], new byte[6144])) {
+            assertFalse(keyType.verify(key, digest, signature, KmsKeySpec.Algorithm.ED25519_PH_SHA_512,
+                    KmsMessageType.DIGEST));
+        }
     }
 
     @ParameterizedTest
