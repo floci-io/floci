@@ -151,8 +151,13 @@
   ],
   "AWS::CloudFront::CachePolicy": [],
   "AWS::CloudFront::Distribution": [],
+  "AWS::CloudFront::Function": [
+    "Name"
+  ],
+  "AWS::CloudFront::KeyGroup": [],
   "AWS::CloudFront::OriginAccessControl": [],
   "AWS::CloudFront::OriginRequestPolicy": [],
+  "AWS::CloudFront::PublicKey": [],
   "AWS::CloudFront::ResponseHeadersPolicy": [],
   "AWS::CloudTrail::Trail": [
     "TrailName"

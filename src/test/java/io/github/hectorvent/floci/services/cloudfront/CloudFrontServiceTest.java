@@ -170,6 +170,38 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void createFunction_existingName_isRejectedAndKeepsTheFunction() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction first = new CloudFrontFunction();
+        first.setName("routing");
+        first.setFunctionCode("first");
+        service.createFunction(first);
+        CloudFrontFunction second = new CloudFrontFunction();
+        second.setName("routing");
+        second.setFunctionCode("second");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(second));
+
+        assertEquals("FunctionAlreadyExists", error.getErrorCode());
+        assertEquals(409, error.getHttpStatus());
+        assertEquals("first", service.describeFunction("routing", null).getFunctionCode());
+    }
+
+    @Test
+    void createFunction_nameOfADeletedFunction_isAccepted() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("routing");
+        CloudFrontFunction created = service.createFunction(function);
+        service.publishFunction("routing", created.getEtag());
+        service.deleteFunction("routing", created.getEtag());
+        CloudFrontFunction again = new CloudFrontFunction();
+        again.setName("routing");
+
+        assertEquals("DEVELOPMENT", service.createFunction(again).getStage());
+    }
+
+    @Test
     void listFunctionsWithoutStageReturnsDevelopmentAndLive() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
         CloudFrontFunction function = new CloudFrontFunction();

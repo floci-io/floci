@@ -37,8 +37,11 @@ AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	CustomResourceCfnProvisioner
 AWS::CloudFront::CachePolicy	CloudFrontCfnProvisioner
 AWS::CloudFront::Distribution	CloudFrontCfnProvisioner
+AWS::CloudFront::Function	CloudFrontCfnProvisioner
+AWS::CloudFront::KeyGroup	CloudFrontCfnProvisioner
 AWS::CloudFront::OriginAccessControl	CloudFrontCfnProvisioner
 AWS::CloudFront::OriginRequestPolicy	CloudFrontCfnProvisioner
+AWS::CloudFront::PublicKey	CloudFrontCfnProvisioner
 AWS::CloudFront::ResponseHeadersPolicy	CloudFrontCfnProvisioner
 AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
 AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
