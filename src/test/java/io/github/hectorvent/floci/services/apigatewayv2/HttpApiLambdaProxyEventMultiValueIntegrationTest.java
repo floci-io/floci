@@ -14,9 +14,8 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
- * End to end check of the payload format 2.0 event a Lambda proxy integration receives for
- * repeated query keys, repeated headers and cookies. Format 2.0 has no multi-value maps: AWS
- * combines duplicates with commas and moves cookies into a {@code cookies} array.
+ * End to end checks of the events Lambda proxy integrations receive. Format 2.0 combines repeated
+ * values and moves cookies into a {@code cookies} array, while format 1.0 keeps multi-value maps.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -59,7 +58,7 @@ class HttpApiLambdaProxyEventMultiValueIntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"stageName":"test"}
+                        {"stageName":"test","stageVariables":{"environment":"review"}}
                         """)
                 .when().post("/v2/apis/" + apiId + "/stages")
                 .then().statusCode(201);
@@ -79,6 +78,24 @@ class HttpApiLambdaProxyEventMultiValueIntegrationTest {
                 .body("""
                         {"routeKey":"GET /echo","target":"integrations/%s"}
                         """.formatted(integrationId))
+                .when().post("/v2/apis/" + apiId + "/routes")
+                .then().statusCode(201);
+
+        String v1IntegrationId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"integrationType":"AWS_PROXY","integrationUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations","integrationMethod":"POST","payloadFormatVersion":"1.0"}
+                        """.formatted(FUNCTION_NAME))
+                .when().post("/v2/apis/" + apiId + "/integrations")
+                .then()
+                .statusCode(201)
+                .extract().path("integrationId");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"routeKey":"GET /echo-v1","target":"integrations/%s"}
+                        """.formatted(v1IntegrationId))
                 .when().post("/v2/apis/" + apiId + "/routes")
                 .then().statusCode(201);
     }
@@ -128,6 +145,24 @@ class HttpApiLambdaProxyEventMultiValueIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("cookies", nullValue());
+    }
+
+    @Test
+    @Order(14)
+    void payloadFormatOneUsesV1Event() {
+        given()
+                .queryParam("q", "1", "2")
+                .when().get("/execute-api/" + apiId + "/test/echo-v1")
+                .then()
+                .statusCode(200)
+                .body("version", equalTo("1.0"))
+                .body("resource", equalTo("/echo-v1"))
+                .body("path", equalTo("/echo-v1"))
+                .body("httpMethod", equalTo("GET"))
+                .body("rawPath", nullValue())
+                .body("stageVariables.environment", equalTo("review"))
+                .body("multiValueHeaders", notNullValue())
+                .body("multiValueQueryStringParameters.q", contains("1", "2"));
     }
 
     @Test

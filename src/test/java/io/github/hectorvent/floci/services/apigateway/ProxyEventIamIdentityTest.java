@@ -13,6 +13,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -130,6 +131,19 @@ class ProxyEventIamIdentityTest {
 
         assertTrue(requestContext.path("authorizer").isMissingNode(),
                 "a route with no authorizer must not grow an authorizer node");
+    }
+
+    @Test
+    void httpApiPayloadOneKeepsTheSignatureHeader() throws Exception {
+        requestHeaders.add("Authorization", SIGV4);
+
+        JsonNode event = MAPPER.readTree(controller.buildV1ProxyEvent(
+                "GET", "/iam", "GET /iam", "api1", "us-east-1", "test", Map.of(),
+                headers, uriInfo, null, "req-v1", null, null, null, CALLER));
+
+        assertEquals(SIGV4, event.path("headers").path("authorization").asText());
+        assertEquals(SIGV4,
+                event.path("multiValueHeaders").path("authorization").path(0).asText());
     }
 
     @Test

@@ -2622,16 +2622,24 @@ public class ApiGatewayExecuteController {
         }
 
         String requestId = UUID.randomUUID().toString();
-        String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
-                apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims, jwtScopes,
-                lambdaAuthorizerContext, iamIdentity);
+        boolean payloadV1 = "1.0".equals(integration.getPayloadFormatVersion());
+        Map<String, String> stageVariables = payloadV1
+                ? apiGatewayV2Service.getStage(region, apiId, stageName).getStageVariables()
+                : null;
+        String eventJson = payloadV1
+                ? buildV1ProxyEvent(httpMethod, path, route.getRouteKey(),
+                        apiId, region, stageName, stageVariables, headers, uriInfo, body, requestId,
+                        jwtClaims, jwtScopes, lambdaAuthorizerContext, iamIdentity)
+                : buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
+                        apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims, jwtScopes,
+                        lambdaAuthorizerContext, iamIdentity);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
         try {
             InvokeResult result = lambdaService.invoke(region, functionName,
                     eventJson.getBytes(), InvocationType.RequestResponse);
-            return buildProxyResponse(result, true, !"1.0".equals(integration.getPayloadFormatVersion()));
+            return buildProxyResponse(result, true, !payloadV1);
         } catch (AwsException e) {
             if (e.getHttpStatus() == 404) {
                 return Response.status(404)
@@ -3396,6 +3404,72 @@ public class ApiGatewayExecuteController {
             case 3 -> base64 + "=";
             default -> base64;
         };
+    }
+
+    /** Reuses the REST v1 event shape, then applies the documented HTTP API v1 differences. */
+    String buildV1ProxyEvent(String httpMethod, String path, String routeKey,
+                             String apiId, String region, String stageName,
+                             Map<String, String> stageVariables,
+                             HttpHeaders headers, UriInfo uriInfo, byte[] body, String requestId,
+                             Map<String, String> jwtClaims, List<String> jwtScopes,
+                             ObjectNode lambdaAuthorizerContext,
+                             ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
+        String[] routeParts = routeKey == null ? new String[0] : routeKey.split("\\s+", 2);
+        String resourcePath = routeParts.length == 2 ? routeParts[1] : path;
+        String json = buildProxyEvent(region, apiId, httpMethod, path, resourcePath, null,
+                stageName, null, headers, uriInfo, body, requestId, null, null, null, iamIdentity);
+
+        try {
+            ObjectNode event = (ObjectNode) objectMapper.readTree(json);
+            event.put("version", "1.0");
+            if (stageVariables != null && !stageVariables.isEmpty()) {
+                ObjectNode variables = event.putObject("stageVariables");
+                stageVariables.forEach(variables::put);
+            }
+
+            Map<String, List<String>> lowercaseHeaders = new LinkedHashMap<>();
+            headers.getRequestHeaders().forEach((name, values) ->
+                    lowercaseHeaders.computeIfAbsent(name.toLowerCase(Locale.ROOT), ignored -> new ArrayList<>())
+                            .addAll(values));
+            putSingleValueHeaders(event, lowercaseHeaders);
+            putMultiValueHeaders(event, lowercaseHeaders);
+
+            if (event.path("pathParameters").isEmpty()) {
+                event.putNull("pathParameters");
+            }
+
+            ObjectNode context = (ObjectNode) event.path("requestContext");
+            context.putNull("resourceId");
+            // Payload 1.0 keeps claims and scopes directly under authorizer; jwt belongs to 2.0.
+            if (jwtClaims != null) {
+                ObjectNode authorizer = context.putObject("authorizer");
+                ObjectNode claims = authorizer.putObject("claims");
+                jwtClaims.forEach(claims::put);
+                if (jwtScopes == null) {
+                    authorizer.putNull("scopes");
+                } else {
+                    ArrayNode scopes = authorizer.putArray("scopes");
+                    jwtScopes.forEach(scopes::add);
+                }
+            } else if (lambdaAuthorizerContext != null) {
+                context.putObject("authorizer").set("lambda", lambdaAuthorizerContext);
+            } else {
+                ObjectNode authorizer = context.putObject("authorizer");
+                authorizer.putNull("claims");
+                authorizer.putNull("scopes");
+            }
+
+            if (body != null && body.length > 0) {
+                boolean isText = isV2TextContentType(headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
+                event.put("body", isText
+                        ? new String(body, StandardCharsets.UTF_8)
+                        : Base64.getEncoder().encodeToString(body));
+                event.put("isBase64Encoded", !isText);
+            }
+            return objectMapper.writeValueAsString(event);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize v1 proxy event", e);
+        }
     }
 
     String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
