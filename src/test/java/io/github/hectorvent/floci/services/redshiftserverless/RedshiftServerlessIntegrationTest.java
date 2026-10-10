@@ -381,10 +381,10 @@ class RedshiftServerlessIntegrationTest {
                         "arn:aws:redshift-serverless:us-east-1:\\d{12}:usagelimit/.+"))
                 .extract().path("usageLimit.usageLimitId");
 
-        call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
-                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}")
-                .statusCode(409)
-                .body("__type", equalTo("ConflictException"));
+        String secondLimitId = call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":200,\"period\":\"monthly\"}")
+                .statusCode(200)
+                .extract().path("usageLimit.usageLimitId");
 
         call("UpdateUsageLimit", "{\"usageLimitId\":\"" + limitId + "\",\"amount\":240,\"breachAction\":\"deactivate\"}")
                 .statusCode(200)
@@ -394,12 +394,18 @@ class RedshiftServerlessIntegrationTest {
 
         call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\"}")
                 .statusCode(200)
+                .body("usageLimits", hasSize(2));
+
+        call("DeleteUsageLimit", "{\"usageLimitId\":\"" + secondLimitId + "\"}").statusCode(200);
+
+        call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\"}")
+                .statusCode(200)
                 .body("usageLimits", hasSize(1))
                 .body("usageLimits[0].usageLimitId", equalTo(limitId));
 
         call("DeleteWorkgroup", "{\"workgroupName\":\"limit-wg\"}").statusCode(200);
         call("GetUsageLimit", "{\"usageLimitId\":\"" + limitId + "\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -451,7 +457,7 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(200)
                 .extract().path("workgroup.workgroupArn");
 
-        call("GetUsageLimit", "{\"usageLimitId\":\"" + oldLimitId + "\"}").statusCode(404);
+        call("GetUsageLimit", "{\"usageLimitId\":\"" + oldLimitId + "\"}").statusCode(400);
         call("ListUsageLimits", "{\"resourceArn\":\"" + secondArn + "\"}")
                 .statusCode(200)
                 .body("usageLimits", hasSize(0));
@@ -463,7 +469,7 @@ class RedshiftServerlessIntegrationTest {
     void createUsageLimitRejectsAnUnknownWorkgroup() {
         call("CreateUsageLimit", "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/none"
                 + "\",\"usageType\":\"serverless-compute\",\"amount\":1}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 

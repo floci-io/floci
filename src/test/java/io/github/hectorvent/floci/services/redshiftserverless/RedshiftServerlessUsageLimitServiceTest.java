@@ -72,6 +72,12 @@ class RedshiftServerlessUsageLimitServiceTest {
         return assertThrows(AwsException.class, call::run).getErrorCode();
     }
 
+    private static void assertResourceNotFound(Runnable call) {
+        AwsException exception = assertThrows(AwsException.class, call::run);
+        assertEquals("ResourceNotFoundException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
     @Test
     void createAppliesAwsDefaultsAndBuildsTheArn() {
         UsageLimit limit = create(100);
@@ -118,23 +124,27 @@ class RedshiftServerlessUsageLimitServiceTest {
         String missing = "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/absent";
         removeWorkgroup(missing);
 
-        assertEquals("ResourceNotFoundException", errorCode(() ->
-                service.createUsageLimit(missing, "serverless-compute", 1L, null, null, REGION)));
+        assertResourceNotFound(() ->
+                service.createUsageLimit(missing, "serverless-compute", 1L, null, null, REGION));
     }
 
     @Test
-    void createRejectsASecondLimitOfTheSameTypeOnTheSameWorkgroup() {
-        create(1);
+    void createAllowsMultipleLimitsOnTheSameWorkgroup() {
+        UsageLimit first = service.createUsageLimit(WORKGROUP_ARN, "serverless-compute", 100L,
+                "daily", "log", REGION);
+        UsageLimit second = service.createUsageLimit(WORKGROUP_ARN, "serverless-compute", 500L,
+                "monthly", "deactivate", REGION);
 
-        assertEquals("ConflictException", errorCode(() -> create(2)));
-        // A different usage type on the same workgroup is a separate limit.
-        service.createUsageLimit(WORKGROUP_ARN, "cross-region-datasharing", 2L, null, null, REGION);
+        assertEquals("daily", first.getPeriod());
+        assertEquals("monthly", second.getPeriod());
+        assertEquals(2, service.listUsageLimits(WORKGROUP_ARN, "serverless-compute", REGION, null, null)
+                .items().size());
     }
 
     @Test
     void getAndDeleteRejectAnUnknownId() {
-        assertEquals("ResourceNotFoundException", errorCode(() -> service.getUsageLimit("absent", REGION)));
-        assertEquals("ResourceNotFoundException", errorCode(() -> service.deleteUsageLimit("absent", REGION)));
+        assertResourceNotFound(() -> service.getUsageLimit("absent", REGION));
+        assertResourceNotFound(() -> service.deleteUsageLimit("absent", REGION));
         assertEquals("ValidationException", errorCode(() -> service.getUsageLimit(null, REGION)));
     }
 
@@ -145,9 +155,7 @@ class RedshiftServerlessUsageLimitServiceTest {
         UsageLimit deleted = service.deleteUsageLimit(limit.getUsageLimitId(), REGION);
 
         assertEquals(limit.getUsageLimitId(), deleted.getUsageLimitId());
-        assertEquals("ResourceNotFoundException",
-                errorCode(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION)));
-        // Deleting frees the (workgroup, usage type) slot.
+        assertResourceNotFound(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION));
         create(3);
     }
 
@@ -175,8 +183,8 @@ class RedshiftServerlessUsageLimitServiceTest {
                 service.updateUsageLimit(limit.getUsageLimitId(), 0L, null, REGION)));
         assertEquals("ValidationException", errorCode(() ->
                 service.updateUsageLimit(limit.getUsageLimitId(), null, "block", REGION)));
-        assertEquals("ResourceNotFoundException", errorCode(() ->
-                service.updateUsageLimit("absent", 1L, null, REGION)));
+        assertResourceNotFound(() ->
+                service.updateUsageLimit("absent", 1L, null, REGION));
         assertEquals(10, service.getUsageLimit(limit.getUsageLimitId(), REGION).getAmount());
     }
 
@@ -233,13 +241,11 @@ class RedshiftServerlessUsageLimitServiceTest {
     void getRemovesTheRecordOfADeletedWorkgroup() {
         UsageLimit limit = create(1);
         removeWorkgroup(WORKGROUP_ARN);
-        assertEquals("ResourceNotFoundException",
-                errorCode(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION)));
+        assertResourceNotFound(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION));
 
         // The same ARN is live again, which only a record that survived the Get could answer for.
         liveWorkgroup(WORKGROUP_ARN);
-        assertEquals("ResourceNotFoundException",
-                errorCode(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION)));
+        assertResourceNotFound(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION));
     }
 
     @Test
@@ -247,8 +253,7 @@ class RedshiftServerlessUsageLimitServiceTest {
         UsageLimit limit = create(1);
         removeWorkgroup(WORKGROUP_ARN);
 
-        assertEquals("ResourceNotFoundException",
-                errorCode(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION)));
+        assertResourceNotFound(() -> service.getUsageLimit(limit.getUsageLimitId(), REGION));
         assertTrue(service.listUsageLimits(null, null, REGION, null, null).items().isEmpty());
     }
 

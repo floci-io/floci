@@ -63,14 +63,7 @@ public class RedshiftServerlessUsageLimitService implements Resettable {
         String resolvedAction = breachAction == null
                 ? DEFAULT_BREACH_ACTION : requireOneOf(breachAction, BREACH_ACTIONS, "breachAction");
         serverless.findWorkgroupByArn(resourceArn, region)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The resource " + resourceArn + " was not found.", 404));
-        for (UsageLimit existing : live(region)) {
-            if (resourceArn.equals(existing.getResourceArn()) && usageType.equals(existing.getUsageType())) {
-                throw new AwsException("ConflictException",
-                        "A usage limit of type " + usageType + " already exists for " + resourceArn + ".", 409);
-            }
-        }
+                .orElseThrow(() -> notFound("The resource " + resourceArn + " was not found."));
 
         UsageLimit limit = new UsageLimit();
         limit.setUsageLimitId(UUID.randomUUID().toString());
@@ -144,8 +137,7 @@ public class RedshiftServerlessUsageLimitService implements Resettable {
             limit = null;
         }
         if (limit == null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "The usage limit " + usageLimitId + " was not found.", 404);
+            throw notFound("The usage limit " + usageLimitId + " was not found.");
         }
         return limit;
     }
@@ -189,6 +181,10 @@ public class RedshiftServerlessUsageLimitService implements Resettable {
         if (amount < 1) {
             throw validation("amount must be a positive number.");
         }
+    }
+
+    private static AwsException notFound(String message) {
+        return new AwsException("ResourceNotFoundException", message, 400);
     }
 
     private static AwsException validation(String message) {

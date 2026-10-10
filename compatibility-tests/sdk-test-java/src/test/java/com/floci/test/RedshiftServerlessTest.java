@@ -229,11 +229,12 @@ class RedshiftServerlessTest {
                 assertThat(created.resourceArn()).isEqualTo(workgroupArn);
                 assertThat(created.usageLimitArn()).contains(":usagelimit/");
 
-                assertThatThrownBy(() -> client.createUsageLimit(request -> request
-                                .resourceArn(workgroupArn)
-                                .usageType(UsageLimitUsageType.SERVERLESS_COMPUTE)
-                                .amount(1L)))
-                        .isInstanceOf(ConflictException.class);
+                UsageLimit second = client.createUsageLimit(request -> request
+                        .resourceArn(workgroupArn)
+                        .usageType(UsageLimitUsageType.SERVERLESS_COMPUTE)
+                        .period(UsageLimitPeriod.DAILY)
+                        .amount(10L)).usageLimit();
+                assertThat(second.period()).isEqualTo(UsageLimitPeriod.DAILY);
 
                 UsageLimit updated = client.updateUsageLimit(request -> request
                         .usageLimitId(created.usageLimitId())
@@ -246,8 +247,9 @@ class RedshiftServerlessTest {
                         .usageLimit().amount()).isEqualTo(90L);
                 assertThat(client.listUsageLimits(request -> request.resourceArn(workgroupArn)).usageLimits())
                         .extracting(UsageLimit::usageLimitId)
-                        .containsExactly(created.usageLimitId());
+                        .containsExactlyInAnyOrder(created.usageLimitId(), second.usageLimitId());
 
+                client.deleteUsageLimit(request -> request.usageLimitId(second.usageLimitId()));
                 client.deleteUsageLimit(request -> request.usageLimitId(created.usageLimitId()));
                 assertThatThrownBy(() -> client.getUsageLimit(request -> request.usageLimitId(created.usageLimitId())))
                         .isInstanceOf(ResourceNotFoundException.class);

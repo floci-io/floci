@@ -118,7 +118,7 @@ class RedshiftServerlessJsonHandlerTest {
 
         assertEquals(id, body(handler.handle("DeleteUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
                 REGION)).get("usageLimit").get("usageLimitId").textValue());
-        assertEquals(404, handler.handle("GetUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
+        assertEquals(400, handler.handle("GetUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
                 REGION).getStatus());
     }
 
