@@ -136,10 +136,16 @@ public class EksPodIdentityCredentialsController {
 
         String sessionName = podIdentitySessionName(cluster.getName(), association.serviceAccount());
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
-        // The lookup is by name only. A role recreated under another path is not the role the
-        // association names, so it must not lend the session its id or its ARN.
+        // EKS Auth assumes the association's role through STS, so a role that is gone gets no
+        // credentials. The lookup is by name only, and enforcement loads a session's policies the
+        // same way, so a role recreated under another path is refused too: it is not the role the
+        // association names.
         Optional<IamRole> role = iamService.findRole(roleAccountId, roleName)
                 .filter(found -> IamService.roleArnMatches(roleArn, found));
+        if (role.isEmpty()) {
+            return error(400, "AccessDeniedException: The role of the association cannot be assumed: "
+                    + roleArn + "\n");
+        }
         String assumedRoleId = role.map(IamRole::getRoleId).filter(id -> !id.isBlank())
                 .map(id -> id + ":" + sessionName)
                 .orElse(null);
