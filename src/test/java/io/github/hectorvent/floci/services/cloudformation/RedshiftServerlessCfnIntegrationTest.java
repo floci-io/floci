@@ -149,8 +149,8 @@ class RedshiftServerlessCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(STACK);
 
         // The workgroup is deleted before the namespace, which would otherwise be refused.
-        call("GetWorkgroup", "{\"workgroupName\":\"" + WORKGROUP + "\"}").statusCode(404);
-        call("GetNamespace", "{\"namespaceName\":\"" + NAMESPACE + "\"}").statusCode(404);
+        call("GetWorkgroup", "{\"workgroupName\":\"" + WORKGROUP + "\"}").statusCode(400);
+        call("GetNamespace", "{\"namespaceName\":\"" + NAMESPACE + "\"}").statusCode(400);
     }
 
     private static void cloudFormation(String action, String capacity) {

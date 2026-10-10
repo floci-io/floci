@@ -236,7 +236,7 @@ class RedshiftServerlessJsonHandlerTest {
         assertEquals(400, wrongType.getStatus());
 
         Response missing = handler.handle("GetCredentials", parse("{\"workgroupName\":\"absent-wg\"}"), REGION, "AUTH");
-        assertEquals(404, missing.getStatus());
+        assertEquals(400, missing.getStatus());
         assertEquals("ResourceNotFoundException", errorType(missing));
 
         Response customDomain = handler.handle("GetCredentials",
@@ -313,7 +313,7 @@ class RedshiftServerlessJsonHandlerTest {
 
         assertEquals("DELETING", deleted.get("status").textValue());
         Response missing = handler.handle("GetWorkgroup", request("workgroupName", "del-shape-wg"), REGION);
-        assertEquals(404, missing.getStatus());
+        assertEquals(400, missing.getStatus());
         assertEquals("ResourceNotFoundException", errorType(missing));
     }
 

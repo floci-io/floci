@@ -368,8 +368,10 @@ class RedshiftServerlessServiceTest {
 
     @Test
     void createWorkgroupRequiresAnExistingNamespace() {
-        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
-                () -> createWorkgroup("wg-orphan", "absent-ns")).getErrorCode());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-orphan", "absent-ns"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test
@@ -378,10 +380,15 @@ class RedshiftServerlessServiceTest {
         create("two-ns");
         createWorkgroup("wg-first", "one-ns");
 
-        assertEquals("ConflictException", assertThrows(AwsException.class,
-                () -> createWorkgroup("wg-second", "one-ns")).getErrorCode());
-        assertEquals("ConflictException", assertThrows(AwsException.class,
-                () -> createWorkgroup("wg-first", "two-ns")).getErrorCode());
+        AwsException conflict1 = assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-second", "one-ns"));
+        assertEquals("ConflictException", conflict1.getErrorCode());
+        assertEquals(400, conflict1.getHttpStatus());
+
+        AwsException conflict2 = assertThrows(AwsException.class,
+                () -> createWorkgroup("wg-first", "two-ns"));
+        assertEquals("ConflictException", conflict2.getErrorCode());
+        assertEquals(400, conflict2.getHttpStatus());
     }
 
     @Test

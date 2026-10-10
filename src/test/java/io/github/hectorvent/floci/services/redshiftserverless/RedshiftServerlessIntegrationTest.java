@@ -115,7 +115,7 @@ class RedshiftServerlessIntegrationTest {
                 .body("namespace.status", equalTo("DELETING"));
 
         call("GetNamespace", "{\"namespaceName\":\"lifecycle-ns\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -124,7 +124,7 @@ class RedshiftServerlessIntegrationTest {
         call("CreateNamespace", "{\"namespaceName\":\"conflict-ns\",\"adminUsername\":\"admin\"}")
                 .statusCode(200);
         call("CreateNamespace", "{\"namespaceName\":\"conflict-ns\",\"adminUsername\":\"admin\"}")
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ConflictException"));
         call("DeleteNamespace", "{\"namespaceName\":\"conflict-ns\"}").statusCode(200);
     }
@@ -132,7 +132,7 @@ class RedshiftServerlessIntegrationTest {
     @Test
     void deletingAnUnknownNamespaceReturnsResourceNotFound() {
         call("DeleteNamespace", "{\"namespaceName\":\"absent-ns\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -188,7 +188,7 @@ class RedshiftServerlessIntegrationTest {
         String absent = "arn:aws:redshift-serverless:us-east-1:000000000000:"
                 + "namespace/00000000-0000-0000-0000-000000000000";
         call("ListTagsForResource", "{\"resourceArn\":\"" + absent + "\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -217,7 +217,7 @@ class RedshiftServerlessIntegrationTest {
                 .extract().path("snapshot.snapshotArn");
 
         call("CreateSnapshot", "{\"snapshotName\":\"snap-life\",\"namespaceName\":\"snap-life-ns\"}")
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ConflictException"));
 
         call("GetSnapshot", "{\"snapshotName\":\"snap-life\"}")
@@ -265,7 +265,7 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(200)
                 .body("snapshot.snapshotName", equalTo("snap-life"));
         call("GetSnapshot", "{\"snapshotName\":\"snap-life\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -308,14 +308,14 @@ class RedshiftServerlessIntegrationTest {
                 .body("workgroup.pendingTrackName", equalTo("trailing"));
 
         call("DeleteNamespace", "{\"namespaceName\":\"wg-life-ns\"}")
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ConflictException"));
 
         call("DeleteWorkgroup", "{\"workgroupName\":\"wg-life\"}")
                 .statusCode(200)
                 .body("workgroup.status", equalTo("DELETING"));
         call("GetWorkgroup", "{\"workgroupName\":\"wg-life\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
         call("DeleteNamespace", "{\"namespaceName\":\"wg-life-ns\"}").statusCode(200);
     }
@@ -347,7 +347,7 @@ class RedshiftServerlessIntegrationTest {
     @Test
     void workgroupCreateRejectsAnUnknownNamespaceADuplicateAndABadPort() {
         call("CreateWorkgroup", "{\"workgroupName\":\"wg-orphan\",\"namespaceName\":\"absent-ns\"}")
-                .statusCode(404)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
 
         call("CreateNamespace", "{\"namespaceName\":\"wg-err-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
@@ -356,7 +356,7 @@ class RedshiftServerlessIntegrationTest {
                 .body("__type", equalTo("ValidationException"));
         call("CreateWorkgroup", "{\"workgroupName\":\"wg-err\",\"namespaceName\":\"wg-err-ns\"}").statusCode(200);
         call("CreateWorkgroup", "{\"workgroupName\":\"wg-err\",\"namespaceName\":\"wg-err-ns\"}")
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ConflictException"));
 
         call("DeleteWorkgroup", "{\"workgroupName\":\"wg-err\"}").statusCode(200);
