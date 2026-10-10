@@ -269,22 +269,23 @@ public class BedrockAgentCoreControlService {
     // ──────────────────────────── Tagging (Phase 4) ────────────────────────────
 
     public Map<String, String> getTagsByArn(String region, String arn) {
-        return new HashMap<>(findByArn(region, arn).getTags());
+        return new HashMap<>(getAgentRuntimeByArn(region, arn).getTags());
     }
 
     public void tagByArn(String region, String arn, Map<String, String> tags) {
-        AgentRuntime runtime = findByArn(region, arn);
+        AgentRuntime runtime = getAgentRuntimeByArn(region, arn);
         runtime.getTags().putAll(tags);
         storage.put(key(region, runtime.getAgentRuntimeId()), runtime);
     }
 
     public void untagByArn(String region, String arn, List<String> keys) {
-        AgentRuntime runtime = findByArn(region, arn);
+        AgentRuntime runtime = getAgentRuntimeByArn(region, arn);
         keys.forEach(runtime.getTags()::remove);
         storage.put(key(region, runtime.getAgentRuntimeId()), runtime);
     }
 
-    private AgentRuntime findByArn(String region, String arn) {
+    /** The runtime a runtime ARN names, at any version; ResourceNotFoundException when none does. */
+    public AgentRuntime getAgentRuntimeByArn(String region, String arn) {
         String uuid = uuidFromArn(arn);
         String prefix = keyPrefix(region);
         return storage.scan(k -> k.startsWith(prefix)).stream()
@@ -400,6 +401,32 @@ public class BedrockAgentCoreControlService {
         AgentRuntime runtime = getAgentRuntime(runtimeId, region);
         return Pagination.paginate(runtime.getEndpoints(), AgentRuntimeEndpoint::getName, maxResults, nextToken,
                 MAX_PAGE, "ValidationException");
+    }
+
+    /** An endpoint together with the runtime that holds it. */
+    public record EndpointLocation(AgentRuntime runtime, AgentRuntimeEndpoint endpoint) {
+    }
+
+    /**
+     * The endpoint an endpoint ARN ({@code agentEndpoint/<uuid>}) names, with its runtime, or empty
+     * when no runtime in the region holds it. Endpoints are addressed by runtime id and name on the
+     * API, so this is the only way back from the ARN CloudFormation keeps as the physical id.
+     */
+    public Optional<EndpointLocation> findEndpointByArn(String region, String arn) {
+        String[] parts = arn == null ? new String[0] : arn.split(":");
+        if (parts.length < 6 || !parts[5].startsWith("agentEndpoint/")) {
+            return Optional.empty();
+        }
+        String uuid = parts[5].substring("agentEndpoint/".length());
+        String prefix = keyPrefix(region);
+        for (AgentRuntime runtime : storage.scan(k -> k.startsWith(prefix))) {
+            for (AgentRuntimeEndpoint endpoint : runtime.getEndpoints()) {
+                if (uuid.equals(endpoint.getUuid())) {
+                    return Optional.of(new EndpointLocation(runtime, endpoint));
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     private AgentRuntimeEndpoint findEndpoint(AgentRuntime runtime, String name) {

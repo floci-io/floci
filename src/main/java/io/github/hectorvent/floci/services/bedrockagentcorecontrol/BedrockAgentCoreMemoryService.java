@@ -158,22 +158,23 @@ public class BedrockAgentCoreMemoryService {
     // ── Tagging ──
 
     public Map<String, String> getTagsByArn(String region, String arn) {
-        return new HashMap<>(findByArn(region, arn).getTags());
+        return new HashMap<>(getByArn(region, arn).getTags());
     }
 
     public void tagByArn(String region, String arn, Map<String, String> tags) {
-        Memory memory = findByArn(region, arn);
+        Memory memory = getByArn(region, arn);
         memory.getTags().putAll(tags);
         storage.put(key(region, memory.getMemoryId()), memory);
     }
 
     public void untagByArn(String region, String arn, List<String> keys) {
-        Memory memory = findByArn(region, arn);
+        Memory memory = getByArn(region, arn);
         keys.forEach(memory.getTags()::remove);
         storage.put(key(region, memory.getMemoryId()), memory);
     }
 
-    private Memory findByArn(String region, String arn) {
+    /** The memory a memory ARN names; ValidationException for any other ARN, ResourceNotFoundException when gone. */
+    public Memory getByArn(String region, String arn) {
         String[] parts = arn == null ? new String[0] : arn.split(":");
         if (parts.length < 6 || !parts[5].startsWith("memory/")) {
             throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);

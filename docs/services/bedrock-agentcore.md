@@ -174,6 +174,36 @@ block is ever produced even when a request supplies `tools`.
   `memoryExecutionRoleArn`. As in AWS, memory tags are returned only by
   `ListTagsForResource`, never embedded in the `memory` response shape.
 
+## CloudFormation
+
+Floci provisions these resource types:
+
+- `AWS::BedrockAgentCore::Runtime`
+- `AWS::BedrockAgentCore::RuntimeEndpoint`
+- `AWS::BedrockAgentCore::Memory`
+
+`Ref` follows each registry schema's `primaryIdentifier`: the runtime's `AgentRuntimeId`, the
+endpoint's `AgentRuntimeEndpointArn` and the memory's `MemoryArn`. Every read-only attribute the
+schemas declare resolves through `Fn::GetAtt`, including the runtime's nested
+`WorkloadIdentityDetails.WorkloadIdentityArn`; `FailureReason` is always empty because the
+emulated resources never leave `READY` / `ACTIVE`. Nested configuration objects
+(`AgentRuntimeArtifact`, `NetworkConfiguration`, `AuthorizerConfiguration`) are stored in the
+API's camelCase shape, so `GetAgentRuntime` returns what the template declared; the template's
+string `ProtocolConfiguration` becomes the API's `{"serverProtocol": …}`, and an omitted
+`NetworkConfiguration` defaults to `PUBLIC`.
+
+An update that keeps the create-only properties (the runtime's `AgentRuntimeName`, the endpoint's
+`AgentRuntimeId` and `Name`, the memory's `Name` and `EncryptionKeyArn`) is applied in place with a
+tag diff; a runtime whose declared configuration did not change keeps its version. Changing a
+create-only property creates a replacement and deletes the displaced resource once the stack
+update commits, as on AWS. Deleting the stack deletes the resources.
+
+Properties the emulated control plane has no model for are accepted and logged once at `WARN`
+rather than failing the stack: the runtime's `CapacityProviderConfiguration`,
+`FilesystemConfigurations`, `LifecycleConfiguration`, `PlatformVersion` and
+`RequestHeaderConfiguration`; the endpoint's `Tags`; and the memory's `MemoryStrategies`,
+`IndexedKeys`, `NamespaceKeys` and `StreamDeliveryResources`.
+
 ## Examples
 
 ```bash

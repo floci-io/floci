@@ -32,6 +32,9 @@ AWS::Backup::BackupVault	BackupVaultCfnProvisioner
 AWS::Batch::ComputeEnvironment	BatchCfnProvisioner
 AWS::Batch::JobDefinition	BatchCfnProvisioner
 AWS::Batch::JobQueue	BatchCfnProvisioner
+AWS::BedrockAgentCore::Memory	BedrockAgentCoreCfnProvisioner
+AWS::BedrockAgentCore::Runtime	BedrockAgentCoreCfnProvisioner
+AWS::BedrockAgentCore::RuntimeEndpoint	BedrockAgentCoreCfnProvisioner
 AWS::CDK::Metadata	CdkMetadataCfnProvisioner
 AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	CustomResourceCfnProvisioner
