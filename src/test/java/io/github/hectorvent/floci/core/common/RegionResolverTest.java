@@ -252,6 +252,20 @@ class RegionResolverTest {
     }
 
     @Test
+    void buildArnPreservesAnExplicitOwnerAcrossRegionalAndGlobalScopes() {
+        RegionResolver china = new RegionResolver("cn-north-1", "000000000000");
+        assertEquals("arn:aws-cn:rds:xx-nowhere-9:222222222222:db:db1",
+                china.buildArn("rds", "xx-nowhere-9", "222222222222", "db:db1"));
+        assertEquals("arn:aws:rds:us-east-1:222222222222:db:db1",
+                china.buildArn("rds", "us-east-1", "222222222222", "db:db1"));
+        assertEquals("arn:aws-cn:iam::222222222222:role/r",
+                china.buildArn("iam", "", "222222222222", "role/r"));
+        assertEquals("arn:aws-cn:iam::222222222222:role/r",
+                china.buildArn("iam", null, "222222222222", "role/r"));
+        assertEquals("arn:aws-cn:s3:::bucket", china.buildArn("s3", "", "", "bucket"));
+    }
+
+    @Test
     void getPartitionOutsideARequestIsTheDeploymentPartition() {
         assertEquals("aws", resolver.getPartition());
         assertEquals("aws-cn", new RegionResolver("cn-north-1", "000000000000").getPartition());

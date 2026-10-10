@@ -1866,6 +1866,100 @@ class RdsServiceTest {
     }
 
     @Test
+    void tagOperationsUseDeploymentPartitionForUnknownRegions() {
+        regionResolver = new RegionResolver("cn-north-1", "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        String region = "xx-nowhere-9";
+        DbParameterGroup group = rdsService.createDbParameterGroup(
+                "custom-region-parameters", "postgres16", "test", region);
+        String arn = group.getDbParameterGroupArn();
+        assertEquals("arn:aws-cn:rds:xx-nowhere-9:123456789012:pg:custom-region-parameters", arn);
+        assertEquals(arn, rdsService.getDbParameterGroup("custom-region-parameters", region)
+                .getDbParameterGroupArn());
+
+        rdsService.addTagsToResource(arn, Map.of("env", "original"), region);
+        assertEquals(Map.of("env", "original"), rdsService.listTagsForResource(arn, region));
+        String wrongPartition = arn.replace("arn:aws-cn:", "arn:aws:");
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.listTagsForResource(wrongPartition, region)).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.addTagsToResource(wrongPartition, Map.of("env", "changed"), region)).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.removeTagsFromResource(wrongPartition, List.of("env"), region)).getErrorCode());
+        assertEquals(Map.of("env", "original"), rdsService.listTagsForResource(arn, region));
+        rdsService.removeTagsFromResource(arn, List.of("env"), region);
+        assertEquals(Map.of(), rdsService.listTagsForResource(arn, region));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"cn-north-1", "xx-nowhere-9"})
+    void chinaEventSubscriptionTagsUseTheDeploymentPartition(String region) {
+        regionResolver = new RegionResolver("cn-north-1", "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        String arn = rdsService.createEventSubscription(region, "events",
+                regionResolver.buildArn("sns", region, "rds-events"), null,
+                List.of(), List.of(), true, Map.of("env", "original")).getEventSubscriptionArn();
+        assertEquals("arn:aws-cn:rds:" + region + ":123456789012:es:events", arn);
+        assertEquals(Map.of("env", "original"), rdsService.listTagsForResource(arn, region));
+        rdsService.addTagsToResource(arn, Map.of("env", "changed"), region);
+        assertEquals(Map.of("env", "changed"), rdsService.listTagsForResource(arn, region));
+        String wrongPartition = arn.replace("arn:aws-cn:", "arn:aws:");
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.listTagsForResource(wrongPartition, region)).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.addTagsToResource(wrongPartition, Map.of("env", "wrong"), region)).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.removeTagsFromResource(wrongPartition, List.of("env"), region)).getErrorCode());
+        assertEquals(Map.of("env", "changed"), rdsService.listTagsForResource(arn, region));
+        rdsService.removeTagsFromResource(arn, List.of("env"), region);
+        assertEquals(Map.of(), rdsService.listTagsForResource(arn, region));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    void describeRepairsLegacyCustomRegionSubscriptionArns(boolean named) {
+        regionResolver = new RegionResolver("cn-north-1", "222222222222");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        String region = "xx-nowhere-9";
+        String arn = rdsService.createEventSubscription(region, "legacy-events",
+                regionResolver.buildArn("sns", region, "rds-events"), null,
+                List.of(), List.of(), true, Map.of("env", "original")).getEventSubscriptionArn();
+        rdsService.describeEventSubscriptions(region, "legacy-events", null, null)
+                .subscriptions().getFirst().setEventSubscriptionArn(arn.replace("arn:aws-cn:", "arn:aws:"));
+
+        String restoredArn = rdsService.describeEventSubscriptions(
+                region, named ? "legacy-events" : null, null, null)
+                .subscriptions().getFirst().getEventSubscriptionArn();
+
+        assertEquals("arn:aws-cn:rds:xx-nowhere-9:222222222222:es:legacy-events", restoredArn);
+        assertEquals(Map.of("env", "original"), rdsService.listTagsForResource(restoredArn, region));
+        rdsService.addTagsToResource(restoredArn, Map.of("env", "changed"), region);
+        assertEquals(Map.of("env", "changed"), rdsService.listTagsForResource(restoredArn, region));
+        rdsService.removeTagsFromResource(restoredArn, List.of("env"), region);
+        assertEquals(Map.of(), rdsService.listTagsForResource(restoredArn, region));
+        String legacyArn = restoredArn.replace("arn:aws-cn:", "arn:aws:");
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.listTagsForResource(legacyArn, region)).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.addTagsToResource(legacyArn, Map.of("env", "wrong"), region)).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.removeTagsFromResource(legacyArn, List.of("env"), region)).getErrorCode());
+        assertEquals(Map.of(), rdsService.listTagsForResource(restoredArn, region));
+        String unrelatedArn = legacyArn.replace(":es:legacy-events", ":es:other-events");
+        rdsService.describeEventSubscriptions(region, "legacy-events", null, null)
+                .subscriptions().getFirst().setEventSubscriptionArn(unrelatedArn);
+        assertEquals(unrelatedArn, rdsService.describeEventSubscriptions(
+                region, named ? "legacy-events" : null, null, null)
+                .subscriptions().getFirst().getEventSubscriptionArn());
+    }
+
+    @Test
     void dbProxyTargetGroupTagOperationsRejectMissingTargetGroup() {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.listTagsForResource(
@@ -1892,6 +1986,30 @@ class RdsServiceTest {
         assertEquals("InvalidParameterValue", unsupportedType.getErrorCode());
         // The type is valid on real AWS; the message must present this as a Floci limitation.
         assertTrue(unsupportedType.getMessage().contains("not yet implemented by Floci"));
+    }
+
+    @Test
+    void tagOperationsRejectWrongPartitionWithoutChangingResources() {
+        DbInstance instance = rdsService.createDbInstance("partition-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro", 20, false, null, null, null);
+        DbCluster cluster = rdsService.createDbCluster("partition-cluster", "postgres", "13",
+                "admin", "password", "dbname", false, null);
+        DbSubnetGroup subnetGroup = rdsService.createDbSubnetGroup(
+                "partition-subnets", "test", PROXY_SUBNET_IDS, "us-east-1");
+        DbParameterGroup parameterGroup = rdsService.createDbParameterGroup(
+                "partition-parameters", "postgres16", "test");
+        for (String arn : List.of(instance.getDbInstanceArn(), cluster.getDbClusterArn(),
+                subnetGroup.getDbSubnetGroupArn(), parameterGroup.getDbParameterGroupArn())) {
+            rdsService.addTagsToResource(arn, Map.of("env", "original"));
+            String wrongPartition = arn.replace("arn:aws:", "arn:aws-cn:");
+            assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                    () -> rdsService.listTagsForResource(wrongPartition)).getErrorCode());
+            assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                    () -> rdsService.addTagsToResource(wrongPartition, Map.of("env", "changed"))).getErrorCode());
+            assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                    () -> rdsService.removeTagsFromResource(wrongPartition, List.of("env"))).getErrorCode());
+            assertEquals(Map.of("env", "original"), rdsService.listTagsForResource(arn));
+        }
     }
 
     @Test
@@ -6105,6 +6223,50 @@ class RdsServiceTest {
         assertEquals(Map.of("source", "regional"), canonical.getTags());
         assertTrue(rawProxies.get("us-east-1::app-proxy").isEmpty());
         assertTrue(rawProxies.get(accountId + "/app-proxy").isEmpty());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"xx-nowhere-9,123456789012,aws-cn", "xx-nowhere-9,222222222222,aws-cn",
+            "cn-north-1,222222222222,aws-cn", "us-east-1,222222222222,aws"})
+    void restoredProxyTargetGroupUsesDeploymentPartitionAndSavedOwner(
+            String region, String accountId, String partition) {
+        when(config.services().rds().mock()).thenReturn(true);
+        RegionResolver startupResolver = new RegionResolver("cn-north-1", "123456789012");
+        InMemoryStorage<String, DbProxy> rawProxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> rawGroups = new InMemoryStorage<>();
+        AccountAwareStorageBackend<DbProxy> proxies =
+                new AccountAwareStorageBackend<>(rawProxies, null, "123456789012");
+        AccountAwareStorageBackend<DbProxyTargetGroup> groups =
+                new AccountAwareStorageBackend<>(rawGroups, null, "123456789012");
+        DbProxy proxy = persistedProxy("app-proxy", region, accountId, "current", 5432);
+        proxy.setDbProxyArn("arn:" + partition + ":rds:" + region + ":" + accountId + ":db-proxy:prx-current");
+        proxies.putForAccount(accountId, region + "::app-proxy", proxy);
+        RdsService startup = proxyStoreService(startupResolver, config, proxies, groups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        startup.restorePersistedRuntime();
+
+        DbProxyTargetGroup restored = groups.getForAccount(accountId, region + "::app-proxy").orElseThrow();
+        String arn = restored.getTargetGroupArn();
+        assertTrue(arn.startsWith("arn:" + partition + ":rds:" + region + ":" + accountId + ":target-group:"), arn);
+        RdsService reader = proxyStoreService(new RegionResolver("cn-north-1", accountId), config,
+                new AccountAwareStorageBackend<>(rawProxies, null, accountId),
+                new AccountAwareStorageBackend<>(rawGroups, null, accountId),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        assertSame(restored, reader.describeDbProxyTargetGroups("app-proxy", "default", region).iterator().next());
+        reader.addTagsToResource(arn, Map.of("env", "restored"), region);
+        assertEquals(Map.of("env", "restored"), reader.listTagsForResource(arn, region));
+        String foreignPartition = partition.equals("aws") ? "aws-cn" : "aws";
+        String wrongArn = arn.replace("arn:" + partition + ":", "arn:" + foreignPartition + ":");
+        assertThrows(AwsException.class, () -> reader.addTagsToResource(wrongArn, Map.of("env", "wrong"), region));
+        assertThrows(AwsException.class, () -> reader.listTagsForResource(wrongArn, region));
+        assertThrows(AwsException.class, () -> reader.removeTagsFromResource(wrongArn, List.of("env"), region));
+        assertEquals(Map.of("env", "restored"), reader.listTagsForResource(arn, region));
+        reader.removeTagsFromResource(arn, List.of("env"), region);
+        assertEquals(Map.of(), reader.listTagsForResource(arn, region));
+        startup.restorePersistedRuntime();
+        assertEquals(arn, groups.getForAccount(accountId, region + "::app-proxy")
+                .orElseThrow().getTargetGroupArn());
     }
 
     @Test
