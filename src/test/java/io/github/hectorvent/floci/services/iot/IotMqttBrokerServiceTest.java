@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
@@ -56,6 +57,7 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509ExtendedKeyManager;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -154,9 +156,9 @@ class IotMqttBrokerServiceTest {
 
     @BeforeEach
     void brokerWithTlsOn() throws IOException {
-        plainPort = freePort();
+        plainPort = FreePorts.anyInterfacePort();
         do {
-            tlsPort = freePort();
+            tlsPort = FreePorts.anyInterfacePort();
         } while (tlsPort == plainPort);
         when(config.services().iot().enabled()).thenReturn(true);
         when(config.services().iot().mqtt().enabled()).thenReturn(true);
@@ -879,11 +881,6 @@ class IotMqttBrokerServiceTest {
         }
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
 
     /** A client key manager with no certificate that records whether the server asked for one. */
     private static final class RecordingKeyManager extends X509ExtendedKeyManager {

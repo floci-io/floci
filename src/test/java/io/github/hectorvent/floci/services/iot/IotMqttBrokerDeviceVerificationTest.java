@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.iot.IotService.RegisteredDevice;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.tls.TlsConfiguration;
 import io.quarkus.tls.TlsConfigurationRegistry;
 import io.vertx.core.Vertx;
@@ -29,8 +30,8 @@ import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
+
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
@@ -93,9 +94,9 @@ class IotMqttBrokerDeviceVerificationTest {
 
     @BeforeEach
     void brokerWithTlsOn() throws IOException {
-        plainPort = freePort();
+        plainPort = FreePorts.anyInterfacePort();
         do {
-            tlsPort = freePort();
+            tlsPort = FreePorts.anyInterfacePort();
         } while (tlsPort == plainPort);
         when(config.services().iot().enabled()).thenReturn(true);
         when(config.services().iot().mqtt().enabled()).thenReturn(true);
@@ -341,9 +342,4 @@ class IotMqttBrokerDeviceVerificationTest {
         return kmf.getKeyManagers();
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
 }

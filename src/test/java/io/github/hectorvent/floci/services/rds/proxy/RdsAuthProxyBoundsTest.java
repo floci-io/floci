@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -55,7 +56,7 @@ class RdsAuthProxyBoundsTest {
         fakeBackend = new ServerSocket(0);
         fakeBackend.setSoTimeout(500);
 
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = newProxy(5000, 5000, 100);
         proxy.start(proxyPort);
 
@@ -68,7 +69,7 @@ class RdsAuthProxyBoundsTest {
     @Test
     void idleClientIsDroppedAfterTheConfiguredHandshakeTimeout() throws Exception {
         fakeBackend = new ServerSocket(0);
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = newProxy(200, 5000, 100);
         proxy.start(proxyPort);
 
@@ -84,7 +85,7 @@ class RdsAuthProxyBoundsTest {
     @Test
     void refusesAConnectionBeyondTheConfiguredLimit() throws Exception {
         fakeBackend = new ServerSocket(0);
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = newProxy(5000, 5000, 1);
         proxy.start(proxyPort);
 
@@ -113,7 +114,7 @@ class RdsAuthProxyBoundsTest {
             admit.await();
             return released::countDown;
         };
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = new RdsAuthProxy("db-1", "localhost", fakeBackend.getLocalPort(),
                 DatabaseEngine.SQLSERVER, false, "sa", "Secret123", null,
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
@@ -152,9 +153,4 @@ class RdsAuthProxyBoundsTest {
         return new RdsProxyTlsCertificates(config, new CertificateGenerator());
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
-    }
 }

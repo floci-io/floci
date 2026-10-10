@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.testing.TestImages;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -25,8 +26,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -178,7 +177,7 @@ class EcsImagePullDockerIntegrationTest {
     private String startRegistry() throws InterruptedException, IOException {
         pull(TestImages.REGISTRY);
         ExposedPort registryPort = ExposedPort.tcp(5000);
-        int hostPort = freeLoopbackPort();
+        int hostPort = FreePorts.loopbackIpv4Port();
         registryContainerId = dockerClient.createContainerCmd(TestImages.REGISTRY)
                 .withExposedPorts(registryPort)
                 .withHostConfig(HostConfig.newHostConfig().withPortBindings(new PortBinding(
@@ -234,16 +233,6 @@ class EcsImagePullDockerIntegrationTest {
                 .awaitCompletion(2, TimeUnit.MINUTES);
         assertTrue(finished, "the push to " + repository + " must finish");
         assertNull(pushError.get(), "the push to " + repository + " must succeed");
-    }
-
-    /**
-     * A port named in the binding, not one the daemon picks: Docker Desktop allocates an unnamed
-     * port on the host side only, where the daemon that pushes and pulls cannot reach it.
-     */
-    private static int freeLoopbackPort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            return socket.getLocalPort();
-        }
     }
 
     private boolean isDockerAvailable() {

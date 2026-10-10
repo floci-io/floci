@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -60,7 +61,7 @@ class RedshiftProxyManagerTest {
     @Test
     void startRegistersTheKeyAndBindsThePort() throws Exception {
         RedshiftProxyManager manager = newManager();
-        int port = availablePort();
+        int port = FreePorts.anyInterfacePort();
         try {
             start(manager, KEY, port);
             assertTrue(registry(manager).containsKey(KEY));
@@ -73,7 +74,7 @@ class RedshiftProxyManagerTest {
     @Test
     void stopProxyRemovesTheKeyAndReleasesThePort() throws Exception {
         RedshiftProxyManager manager = newManager();
-        int port = availablePort();
+        int port = FreePorts.anyInterfacePort();
         start(manager, KEY, port);
 
         manager.stopProxy(KEY);
@@ -85,10 +86,10 @@ class RedshiftProxyManagerTest {
     @Test
     void startingAnExistingKeyStopsTheOldProxyAndInstallsTheNewOne() throws IOException {
         RedshiftProxyManager manager = newManager();
-        int firstPort = availablePort();
+        int firstPort = FreePorts.anyInterfacePort();
         try {
             start(manager, KEY, firstPort);
-            int replacementPort = availablePort();
+            int replacementPort = FreePorts.anyInterfacePort();
 
             start(manager, KEY, replacementPort);
 
@@ -103,7 +104,7 @@ class RedshiftProxyManagerTest {
     @Test
     void updateIamRolesSwapsTheRunningSnapshotWithoutARestart() throws Exception {
         RedshiftProxyManager manager = newManager();
-        int port = availablePort();
+        int port = FreePorts.anyInterfacePort();
         try {
             start(manager, KEY, port);
             manager.updateIamRoles(KEY, List.of("arn:aws:iam::111111111111:role/copy"));
@@ -129,7 +130,7 @@ class RedshiftProxyManagerTest {
     @Test
     void updateMasterPasswordSwapsTheRunningSnapshot() throws Exception {
         RedshiftProxyManager manager = newManager();
-        int port = availablePort();
+        int port = FreePorts.anyInterfacePort();
         try {
             start(manager, KEY, port);
             manager.updateMasterPassword(KEY, "rotated");
@@ -142,9 +143,9 @@ class RedshiftProxyManagerTest {
     @Test
     void stopAllReleasesEveryListenerAndIsIdempotent() throws IOException {
         RedshiftProxyManager manager = newManager();
-        int a = availablePort();
+        int a = FreePorts.anyInterfacePort();
         start(manager, KEY, a);
-        int b = availablePort();
+        int b = FreePorts.anyInterfacePort();
         start(manager, SECOND_KEY, b);
 
         manager.stopAll();
@@ -239,7 +240,7 @@ class RedshiftProxyManagerTest {
         RedshiftAuthProxy stuck = mock(RedshiftAuthProxy.class);
         doThrow(new RuntimeException("close failed")).when(stuck).stop();
         unclosable(manager).put(KEY, stuck);
-        int port = availablePort();
+        int port = FreePorts.anyInterfacePort();
         try {
             // A fresh start for the same key must not silently drop the leaked listener.
             start(manager, KEY, port);
@@ -295,11 +296,6 @@ class RedshiftProxyManagerTest {
         return (List<String>) field.get(proxy);
     }
 
-    private static int availablePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
 
     private static void assertPortAvailable(int port) {
         IOException last = null;
