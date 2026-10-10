@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -65,8 +66,8 @@ public class ElastiCacheService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheService.class);
 
-    private final StorageBackend<String, ReplicationGroup> groups;
-    private final StorageBackend<String, CacheCluster> cacheClusters;
+    private final AccountAwareStorageBackend<ReplicationGroup> groups;
+    private final AccountAwareStorageBackend<CacheCluster> cacheClusters;
     /**
      * The Memcached cluster store, the one {@link ElastiCacheMemcachedService} writes.
      * {@link StorageFactory#create} keys backends by file path and hands the second caller the
@@ -74,7 +75,7 @@ public class ElastiCacheService implements ResourceProvider {
      * is one namespace whatever engine claims it, and only a reader of both can say it is free.
      */
     private final StorageBackend<String, CacheCluster> memcachedClusters;
-    private final StorageBackend<String, ElastiCacheUser> users;
+    private final AccountAwareStorageBackend<ElastiCacheUser> users;
     private final AccountAwareStorageBackend<ElastiCacheUserGroup> userGroups;
     private final AccountAwareStorageBackend<CacheParameterGroup> parameterGroups;
     private final StorageBackend<String, CacheSubnetGroup> subnetGroups;
@@ -103,6 +104,15 @@ public class ElastiCacheService implements ResourceProvider {
      * the two kinds cannot collide here either.
      */
     private final Set<String> recordsHoldingTheirPort = ConcurrentHashMap.newKeySet();
+
+    /**
+     * A record's entry in {@link #recordsHoldingTheirPort}: its owning account, then its id. Ids
+     * are unique only within an account, so two accounts' records of the same name each hold
+     * their own port and a delete in one must not release the other's.
+     */
+    private static String recordKey(String accountId, String id) {
+        return accountId + "/" + id;
+    }
     private final ConcurrentHashMap<String, Object> parameterGroupLocks = new ConcurrentHashMap<>();
     /**
      * Parameter groups claimed by in-flight creates, keyed by account and name (see
@@ -362,14 +372,14 @@ public class ElastiCacheService implements ResourceProvider {
                 if (handle != null) {
                     proxyManager.startProxy(groupId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
-                            groupAuthenticator(groupId));
+                            groupAuthenticator(groups.accountId(), groupId));
                 } else {
                     LOG.warnv("Replication group {0} created without a backing cache container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
                             + "the cache do not until a daemon appears.", groupId);
                 }
                 // Under the same monitor as the put, for the reason given on recordsHoldingTheirPort.
-                recordsHoldingTheirPort.add(groupId);
+                recordsHoldingTheirPort.add(recordKey(groups.accountId(), groupId));
             }
 
             LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));
@@ -440,7 +450,7 @@ public class ElastiCacheService implements ResourceProvider {
                 ElastiCacheContainerHandle handle = handles.get(i);
                 proxyManager.startProxy(node.getMemberClusterId(), authMode, node.getProxyPort(),
                         handle.getHost(), handle.getPort(),
-                        groupAuthenticator(groupId));
+                        groupAuthenticator(groups.accountId(), groupId));
                 startedProxyKeys.add(node.getMemberClusterId());
             }
 
@@ -645,26 +655,38 @@ public class ElastiCacheService implements ResourceProvider {
      * or to the failure status their store models as their restoration finishes.
      */
     public CompletableFuture<Void> restorePersistedRuntime() {
-        List<ReplicationGroup> clusterModeToRestore = new ArrayList<>();
-        List<ReplicationGroup> singleNodeToRestore = new ArrayList<>();
-        List<CacheCluster> cacheClustersToRestore = new ArrayList<>();
-        for (ReplicationGroup group : groups.scan(k -> true)) {
+        // Every account's records, each written back under the account that owns it: there is no
+        // request context at boot, so the plain scan and put see and write the default account only,
+        // leaving other accounts' groups without a data plane and their ports free for the next create.
+        // Records stored before account prefixing are moved under the default account first, as
+        // get() would on first read. Restored in place, they would come back on every boot and
+        // outlive a delete, which only removes the prefixed key.
+        String defaultAccountId = regionResolver.getDefaultAccountId();
+        groups.migrateLegacyEntries(defaultAccountId, key -> !key.contains("/"),
+                ReplicationGroup::getReplicationGroupId, group -> true);
+        cacheClusters.migrateLegacyEntries(defaultAccountId, key -> !key.contains("/"),
+                CacheCluster::getCacheClusterId, cluster -> true);
+        List<AccountEntry<ReplicationGroup>> clusterModeToRestore = new ArrayList<>();
+        List<AccountEntry<ReplicationGroup>> singleNodeToRestore = new ArrayList<>();
+        List<AccountEntry<CacheCluster>> cacheClustersToRestore = new ArrayList<>();
+        for (AccountEntry<ReplicationGroup> entry : groups.scanAllAccountEntries(k -> true)) {
+            ReplicationGroup group = entry.value();
             if (group.getStatus() == ReplicationGroupStatus.DELETING) {
                 continue;
             }
             if (group.isClusterEnabled() && !group.getClusterNodes().isEmpty()) {
-                reserveClusterModeGroup(group, clusterModeToRestore);
+                reserveClusterModeGroup(entry, clusterModeToRestore);
             } else {
-                reserveSingleNodeGroup(group, singleNodeToRestore);
+                reserveSingleNodeGroup(entry, singleNodeToRestore);
             }
-            groups.put(group.getReplicationGroupId(), group);
+            groups.putForAccount(entry.accountId(), entry.key(), group);
         }
-        for (CacheCluster cluster : cacheClusters.scan(k -> true)) {
-            if (cluster.getCacheClusterStatus() == CacheClusterStatus.DELETING) {
+        for (AccountEntry<CacheCluster> entry : cacheClusters.scanAllAccountEntries(k -> true)) {
+            if (entry.value().getCacheClusterStatus() == CacheClusterStatus.DELETING) {
                 continue;
             }
-            reserveCacheCluster(cluster, cacheClustersToRestore);
-            cacheClusters.put(cluster.getCacheClusterId(), cluster);
+            reserveCacheCluster(entry, cacheClustersToRestore);
+            cacheClusters.putForAccount(entry.accountId(), entry.key(), entry.value());
         }
         if (clusterModeToRestore.isEmpty() && singleNodeToRestore.isEmpty()
                 && cacheClustersToRestore.isEmpty()) {
@@ -681,7 +703,9 @@ public class ElastiCacheService implements ResourceProvider {
         });
     }
 
-    private void reserveClusterModeGroup(ReplicationGroup group, List<ReplicationGroup> toRestore) {
+    private void reserveClusterModeGroup(AccountEntry<ReplicationGroup> entry,
+                                         List<AccountEntry<ReplicationGroup>> toRestore) {
+        ReplicationGroup group = entry.value();
         List<Integer> reserved = new ArrayList<>();
         try {
             for (ClusterNode node : group.getClusterNodes()) {
@@ -689,7 +713,7 @@ public class ElastiCacheService implements ResourceProvider {
                 reserved.add(node.getProxyPort());
             }
             group.setStatus(ReplicationGroupStatus.CREATING);
-            toRestore.add(group);
+            toRestore.add(entry);
         } catch (RuntimeException e) {
             reserved.forEach(this::releaseProxyPort);
             group.setStatus(ReplicationGroupStatus.CREATE_FAILED);
@@ -705,7 +729,9 @@ public class ElastiCacheService implements ResourceProvider {
      * configuration rather than replayed from the record, so a group restored under a changed
      * {@code FLOCI_HOSTNAME} advertises the name this process actually answers to.
      */
-    private void reserveSingleNodeGroup(ReplicationGroup group, List<ReplicationGroup> toRestore) {
+    private void reserveSingleNodeGroup(AccountEntry<ReplicationGroup> entry,
+                                        List<AccountEntry<ReplicationGroup>> toRestore) {
+        ReplicationGroup group = entry.value();
         try {
             group.setProxyPort(reserveOrAllocateProxyPort(group.getProxyPort()));
             group.setConfigurationEndpoint(new Endpoint(resolveEndpointHost(), group.getProxyPort()));
@@ -713,8 +739,8 @@ public class ElastiCacheService implements ResourceProvider {
             // The reservation above succeeded, so this process owns the port whether or not it is
             // the one the record came back with. Without this the delete path would decline to
             // free a port nothing else holds, and the reservation would outlive the group.
-            recordsHoldingTheirPort.add(group.getReplicationGroupId());
-            toRestore.add(group);
+            recordsHoldingTheirPort.add(recordKey(entry.accountId(), group.getReplicationGroupId()));
+            toRestore.add(entry);
         } catch (RuntimeException e) {
             group.setStatus(ReplicationGroupStatus.CREATE_FAILED);
             group.setConfigurationEndpoint(null);
@@ -733,15 +759,16 @@ public class ElastiCacheService implements ResourceProvider {
      * AWS models on {@code CacheCluster}; a replication group reports {@code create-failed},
      * which is the value its own model carries.
      */
-    private void reserveCacheCluster(CacheCluster cluster, List<CacheCluster> toRestore) {
+    private void reserveCacheCluster(AccountEntry<CacheCluster> entry, List<AccountEntry<CacheCluster>> toRestore) {
+        CacheCluster cluster = entry.value();
         String clusterId = cluster.getCacheClusterId();
         try {
             Endpoint persisted = cluster.getConfigurationEndpoint();
             int proxyPort = reserveOrAllocateProxyPort(persisted != null ? persisted.port() : 0);
             cluster.setConfigurationEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
             cluster.setCacheClusterStatus(CacheClusterStatus.CREATING);
-            recordsHoldingTheirPort.add(clusterId);
-            toRestore.add(cluster);
+            recordsHoldingTheirPort.add(recordKey(entry.accountId(), clusterId));
+            toRestore.add(entry);
         } catch (RuntimeException e) {
             cluster.setCacheClusterStatus(CacheClusterStatus.RESTORE_FAILED);
             cluster.setConfigurationEndpoint(null);
@@ -768,13 +795,15 @@ public class ElastiCacheService implements ResourceProvider {
      * monitor and re-reads the record, because a delete taken while the container started has
      * already removed it.
      */
-    private void restoreCacheCluster(CacheCluster cluster) {
+    private void restoreCacheCluster(AccountEntry<CacheCluster> entry) {
+        String accountId = entry.accountId();
+        CacheCluster cluster = entry.value();
         String clusterId = cluster.getCacheClusterId();
         String image = config.services().elasticache().defaultImage();
         try {
             ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, regionOf(cluster.getArn()));
             synchronized (lockFor("cc:" + clusterId)) {
-                if (cacheClusterRestoreTargetLost(clusterId)) {
+                if (cacheClusterRestoreTargetLost(accountId, clusterId)) {
                     abandonRestoredCacheClusterContainer(clusterId, handle);
                     return;
                 }
@@ -784,7 +813,7 @@ public class ElastiCacheService implements ResourceProvider {
                     cluster.setContainerPort(handle.getPort());
                     proxyManager.startProxy(clusterId, cluster.getAuthMode(),
                             cluster.getConfigurationEndpoint().port(), handle.getHost(), handle.getPort(),
-                            (username, password) -> validateCacheClusterPassword(clusterId, username, password));
+                            (username, password) -> validateCacheClusterPassword(accountId, clusterId, username, password));
                 } else {
                     // Cleared rather than left alone: whatever the record carried describes a
                     // container from the previous process, and nothing must read it as live.
@@ -796,13 +825,13 @@ public class ElastiCacheService implements ResourceProvider {
                             + "the cache do not until a daemon appears.", clusterId);
                 }
                 cluster.setCacheClusterStatus(CacheClusterStatus.AVAILABLE);
-                cacheClusters.put(clusterId, cluster);
+                cacheClusters.putForAccount(accountId, clusterId, cluster);
                 LOG.infov("Restored cache cluster {0}, endpoint={1}:{2}", clusterId,
                         cluster.getConfigurationEndpoint().address(),
                         String.valueOf(cluster.getConfigurationEndpoint().port()));
             }
         } catch (RuntimeException e) {
-            failCacheClusterRestore(cluster, e);
+            failCacheClusterRestore(accountId, cluster, e);
         }
     }
 
@@ -811,8 +840,8 @@ public class ElastiCacheService implements ResourceProvider {
      * Callers must hold the cluster's monitor, for the reason given on
      * {@link #restoreTargetLost}.
      */
-    private boolean cacheClusterRestoreTargetLost(String clusterId) {
-        return cacheClusters.get(clusterId)
+    private boolean cacheClusterRestoreTargetLost(String accountId, String clusterId) {
+        return cacheClusters.getForAccount(accountId, clusterId)
                 .map(current -> current.getCacheClusterStatus() == CacheClusterStatus.DELETING)
                 .orElse(true);
     }
@@ -846,7 +875,7 @@ public class ElastiCacheService implements ResourceProvider {
      * <p>A cluster deleted while the failed attempt ran gets the teardown but no write-back and
      * no port release, for the reasons {@link #failSingleNodeRestore} gives.
      */
-    private void failCacheClusterRestore(CacheCluster cluster, RuntimeException cause) {
+    private void failCacheClusterRestore(String accountId, CacheCluster cluster, RuntimeException cause) {
         String clusterId = cluster.getCacheClusterId();
         synchronized (lockFor("cc:" + clusterId)) {
             try {
@@ -859,13 +888,13 @@ public class ElastiCacheService implements ResourceProvider {
             } catch (RuntimeException e) {
                 LOG.warnv("Error stopping container for cache cluster {0}: {1}", clusterId, e.getMessage());
             }
-            if (cacheClusterRestoreTargetLost(clusterId)) {
+            if (cacheClusterRestoreTargetLost(accountId, clusterId)) {
                 LOG.warnv(cause, "Failed to restore cache cluster {0}, which was deleted while it "
                         + "was being restored", clusterId);
                 return;
             }
             Endpoint endpoint = cluster.getConfigurationEndpoint();
-            if (endpoint != null && recordsHoldingTheirPort.remove(clusterId)) {
+            if (endpoint != null && recordsHoldingTheirPort.remove(recordKey(accountId, clusterId))) {
                 releaseProxyPort(endpoint.port());
             }
             cluster.setContainerId(null);
@@ -874,7 +903,7 @@ public class ElastiCacheService implements ResourceProvider {
             cluster.setCacheClusterStatus(CacheClusterStatus.RESTORE_FAILED);
             cluster.setConfigurationEndpoint(null);
             try {
-                cacheClusters.put(clusterId, cluster);
+                cacheClusters.putForAccount(accountId, clusterId, cluster);
             } catch (RuntimeException persistFailure) {
                 cause.addSuppressed(persistFailure);
             }
@@ -897,13 +926,15 @@ public class ElastiCacheService implements ResourceProvider {
      * takes the monitor and re-reads the record, because a delete taken while the container
      * started has already removed it.
      */
-    private void restoreSingleNodeGroup(ReplicationGroup group) {
+    private void restoreSingleNodeGroup(AccountEntry<ReplicationGroup> entry) {
+        String accountId = entry.accountId();
+        ReplicationGroup group = entry.value();
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
         try {
             ElastiCacheContainerHandle handle = containerManager.tryStart(groupId, image, regionOf(group.getArn()));
             synchronized (lockFor("rg:" + groupId)) {
-                if (restoreTargetLost(groupId)) {
+                if (restoreTargetLost(accountId, groupId)) {
                     abandonRestoredContainer(groupId, handle);
                     return;
                 }
@@ -913,7 +944,7 @@ public class ElastiCacheService implements ResourceProvider {
                     group.setContainerPort(handle.getPort());
                     proxyManager.startProxy(groupId, group.getAuthMode(), group.getProxyPort(),
                             handle.getHost(), handle.getPort(),
-                            groupAuthenticator(groupId));
+                            groupAuthenticator(accountId, groupId));
                 } else {
                     // Cleared rather than left alone: whatever the record carried describes a
                     // container from the previous process, and nothing must read it as live.
@@ -925,13 +956,13 @@ public class ElastiCacheService implements ResourceProvider {
                             + "the cache do not until a daemon appears.", groupId);
                 }
                 group.setStatus(ReplicationGroupStatus.AVAILABLE);
-                groups.put(groupId, group);
+                groups.putForAccount(accountId, groupId, group);
                 LOG.infov("Restored replication group {0}, endpoint={1}:{2}", groupId,
                         group.getConfigurationEndpoint().address(),
                         String.valueOf(group.getProxyPort()));
             }
         } catch (RuntimeException e) {
-            failSingleNodeRestore(group, e);
+            failSingleNodeRestore(accountId, group, e);
         }
     }
 
@@ -942,8 +973,8 @@ public class ElastiCacheService implements ResourceProvider {
      * group the caller was told had been deleted, as {@code available}, with a fresh container
      * behind it.
      */
-    private boolean restoreTargetLost(String groupId) {
-        return groups.get(groupId)
+    private boolean restoreTargetLost(String accountId, String groupId) {
+        return groups.getForAccount(accountId, groupId)
                 .map(current -> current.getStatus() == ReplicationGroupStatus.DELETING)
                 .orElse(true);
     }
@@ -977,7 +1008,7 @@ public class ElastiCacheService implements ResourceProvider {
      * port release: reporting {@code create-failed} would put a deleted group back, and the
      * delete released the port itself.
      */
-    private void failSingleNodeRestore(ReplicationGroup group, RuntimeException cause) {
+    private void failSingleNodeRestore(String accountId, ReplicationGroup group, RuntimeException cause) {
         String groupId = group.getReplicationGroupId();
         synchronized (lockFor("rg:" + groupId)) {
             try {
@@ -990,14 +1021,14 @@ public class ElastiCacheService implements ResourceProvider {
             } catch (RuntimeException e) {
                 LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
             }
-            if (restoreTargetLost(groupId)) {
+            if (restoreTargetLost(accountId, groupId)) {
                 LOG.warnv(cause, "Failed to restore replication group {0}, which was deleted while "
                         + "it was being restored", groupId);
                 return;
             }
             // Dropped from the holders as it is released, so the delete of a failed group does
             // not free the port a second time and hand a live record's port to the next create.
-            if (recordsHoldingTheirPort.remove(groupId)) {
+            if (recordsHoldingTheirPort.remove(recordKey(accountId, groupId))) {
                 releaseProxyPort(group.getProxyPort());
             }
             group.setContainerId(null);
@@ -1006,7 +1037,7 @@ public class ElastiCacheService implements ResourceProvider {
             group.setStatus(ReplicationGroupStatus.CREATE_FAILED);
             group.setConfigurationEndpoint(null);
             try {
-                groups.put(groupId, group);
+                groups.putForAccount(accountId, groupId, group);
             } catch (RuntimeException persistFailure) {
                 cause.addSuppressed(persistFailure);
             }
@@ -1020,7 +1051,9 @@ public class ElastiCacheService implements ResourceProvider {
      * only the write-back takes it, so a delete that ran in the meantime is seen before the
      * group is put back.
      */
-    private void restoreClusterModeGroup(ReplicationGroup group) {
+    private void restoreClusterModeGroup(AccountEntry<ReplicationGroup> entry) {
+        String accountId = entry.accountId();
+        ReplicationGroup group = entry.value();
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
         String endpointHost = resolveClusterAnnounceHost();
@@ -1052,7 +1085,7 @@ public class ElastiCacheService implements ResourceProvider {
             clusterFormation.form(groupId, formationNodes, group.getNumNodeGroups());
 
             synchronized (lockFor("rg:" + groupId)) {
-                if (restoreTargetLost(groupId)) {
+                if (restoreTargetLost(accountId, groupId)) {
                     // No ports: the delete that removed the record released every one of them.
                     rollbackClusterModeGroup(groupId, startedProxyKeys, handles, inFlightMemberId,
                             List.of());
@@ -1065,19 +1098,19 @@ public class ElastiCacheService implements ResourceProvider {
                     ElastiCacheContainerHandle handle = handles.get(i);
                     proxyManager.startProxy(node.getMemberClusterId(), group.getAuthMode(), node.getProxyPort(),
                             handle.getHost(), handle.getPort(),
-                            groupAuthenticator(groupId));
+                            groupAuthenticator(accountId, groupId));
                     startedProxyKeys.add(node.getMemberClusterId());
                 }
 
                 group.setConfigurationEndpoint(new Endpoint(endpointHost, nodes.getFirst().getProxyPort()));
                 group.setStatus(ReplicationGroupStatus.AVAILABLE);
-                groups.put(groupId, group);
+                groups.putForAccount(accountId, groupId, group);
                 LOG.infov("Restored cluster-mode replication group {0}: {1} node(s), configuration endpoint={2}:{3}",
                         groupId, String.valueOf(nodes.size()), endpointHost,
                         String.valueOf(group.getConfigurationEndpoint().port()));
             }
         } catch (RuntimeException e) {
-            failClusterModeRestore(group, startedProxyKeys, handles, inFlightMemberId, reservedPorts, e);
+            failClusterModeRestore(accountId, group, startedProxyKeys, handles, inFlightMemberId, reservedPorts, e);
         }
     }
 
@@ -1087,13 +1120,13 @@ public class ElastiCacheService implements ResourceProvider {
      * endpoint, unless a delete removed it while the attempt ran. In that case the rollback still
      * runs but the ports are left to the delete that released them, and nothing is written back.
      */
-    private void failClusterModeRestore(ReplicationGroup group, List<String> startedProxyKeys,
+    private void failClusterModeRestore(String accountId, ReplicationGroup group, List<String> startedProxyKeys,
                                         List<ElastiCacheContainerHandle> handles,
                                         String inFlightMemberId, Collection<Integer> reservedPorts,
                                         RuntimeException cause) {
         String groupId = group.getReplicationGroupId();
         synchronized (lockFor("rg:" + groupId)) {
-            boolean lost = restoreTargetLost(groupId);
+            boolean lost = restoreTargetLost(accountId, groupId);
             rollbackClusterModeGroup(groupId, startedProxyKeys, handles, inFlightMemberId,
                     lost ? List.of() : reservedPorts);
             if (lost) {
@@ -1109,7 +1142,7 @@ public class ElastiCacheService implements ResourceProvider {
             group.setStatus(ReplicationGroupStatus.CREATE_FAILED);
             group.setConfigurationEndpoint(null);
             try {
-                groups.put(groupId, group);
+                groups.putForAccount(accountId, groupId, group);
             } catch (RuntimeException persistFailure) {
                 cause.addSuppressed(persistFailure);
             }
@@ -1136,7 +1169,7 @@ public class ElastiCacheService implements ResourceProvider {
             LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
         } finally {
             groups.delete(groupId);
-            recordsHoldingTheirPort.remove(groupId);
+            recordsHoldingTheirPort.remove(recordKey(groups.accountId(), groupId));
             releaseProxyPort(proxyPort);
         }
     }
@@ -1192,7 +1225,7 @@ public class ElastiCacheService implements ResourceProvider {
 
                 // Only a port this process reserved for this record, as on the cluster path: a
                 // restored group whose port was already taken advertises one it does not own.
-                if (recordsHoldingTheirPort.remove(groupId)) {
+                if (recordsHoldingTheirPort.remove(recordKey(groups.accountId(), groupId))) {
                     releaseProxyPort(group.getProxyPort());
                 }
             }
@@ -1349,12 +1382,16 @@ public class ElastiCacheService implements ResourceProvider {
                 cluster.setContainerPort(handle.getPort());
             }
 
+            // Resolved here, inside the request: the proxy calls the validator on its own thread,
+            // where the store's implicit account is the default one rather than the owner's.
+            String accountId = cacheClusters.accountId();
             synchronized (lockFor("cc:" + clusterId)) {
                 cacheClusters.put(clusterId, cluster);
                 if (handle != null) {
                     proxyManager.startProxy(clusterId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
-                            (username, password) -> validateCacheClusterPassword(clusterId, username, password));
+                            (username, password) -> validateCacheClusterPassword(
+                                    accountId, clusterId, username, password));
                 } else {
                     LOG.warnv("Cache cluster {0} created without a backing cache container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
@@ -1362,7 +1399,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 // Under the same monitor as the put: a delete slipping into the gap would find
                 // no claim on the port and leave the reservation behind for good.
-                recordsHoldingTheirPort.add(clusterId);
+                recordsHoldingTheirPort.add(recordKey(accountId, clusterId));
             }
 
             LOG.infov("Cache cluster {0} created, endpoint={1}:{2}", clusterId,
@@ -1422,7 +1459,7 @@ public class ElastiCacheService implements ResourceProvider {
             LOG.warnv("Error stopping container for cache cluster {0}: {1}", clusterId, e.getMessage());
         } finally {
             cacheClusters.delete(clusterId);
-            recordsHoldingTheirPort.remove(clusterId);
+            recordsHoldingTheirPort.remove(recordKey(cacheClusters.accountId(), clusterId));
             releaseProxyPort(proxyPort);
         }
     }
@@ -1460,7 +1497,8 @@ public class ElastiCacheService implements ResourceProvider {
             // Only a port this process reserved for this record: a restored cluster whose port
             // was already taken advertises one it does not own, and freeing it would hand the
             // holder's port to the next create.
-            if (cluster.getConfigurationEndpoint() != null && recordsHoldingTheirPort.remove(clusterId)) {
+            if (cluster.getConfigurationEndpoint() != null
+                    && recordsHoldingTheirPort.remove(recordKey(cacheClusters.accountId(), clusterId))) {
                 releaseProxyPort(cluster.getConfigurationEndpoint().port());
             }
 
@@ -1476,7 +1514,16 @@ public class ElastiCacheService implements ResourceProvider {
      * carries no user list.
      */
     public boolean validateCacheClusterPassword(String clusterId, String username, String password) {
-        CacheCluster cluster = cacheClusters.get(clusterId).orElse(null);
+        return validateCacheClusterPassword(cacheClusters.accountId(), clusterId, username, password);
+    }
+
+    /**
+     * The account-explicit form the proxy calls: it authenticates on its own thread, outside any
+     * request, where the store's implicit account is the default one rather than the owner's.
+     */
+    private boolean validateCacheClusterPassword(String accountId, String clusterId, String username,
+                                                 String password) {
+        CacheCluster cluster = cacheClusters.getForAccount(accountId, clusterId).orElse(null);
         if (cluster == null || cluster.getAuthToken() == null) {
             return false;
         }
@@ -1854,10 +1901,10 @@ public class ElastiCacheService implements ResourceProvider {
      * groups, read at the time of the check so a ModifyUserGroup applies at once, plus any user
      * associated with it directly.
      */
-    private Set<String> effectiveUserIds(ReplicationGroup group) {
+    private Set<String> effectiveUserIds(String accountId, ReplicationGroup group) {
         Set<String> userIds = new LinkedHashSet<>(group.getAssociatedUserIds());
         for (String userGroupId : group.getUserGroupIds()) {
-            userGroups.get(userGroupId).ifPresent(g -> userIds.addAll(g.getUserIds()));
+            userGroups.getForAccount(accountId, userGroupId).ifPresent(g -> userIds.addAll(g.getUserIds()));
         }
         return userIds;
     }
@@ -1933,7 +1980,15 @@ public class ElastiCacheService implements ResourceProvider {
      * ModifyReplicationGroup are checked, preventing cross-group credential leakage.
      */
     public boolean validatePassword(String groupId, String username, String password) {
-        ReplicationGroup group = groups.get(groupId).orElse(null);
+        return validatePassword(groups.accountId(), groupId, username, password);
+    }
+
+    /**
+     * The account-explicit form {@link #groupAuthenticator} calls, for the reason given on
+     * {@link #validateCacheClusterPassword(String, String, String, String)}.
+     */
+    private boolean validatePassword(String accountId, String groupId, String username, String password) {
+        ReplicationGroup group = groups.getForAccount(accountId, groupId).orElse(null);
         if (group == null) {
             return false;
         }
@@ -1945,9 +2000,9 @@ public class ElastiCacheService implements ResourceProvider {
                 return true;
             }
             // Fall back to the "default" user among this group's members
-            Set<String> groupUserIds = effectiveUserIds(group);
+            Set<String> groupUserIds = effectiveUserIds(accountId, group);
             ElastiCacheUser defaultUser = groupUserIds.stream()
-                    .map(id -> users.get(id).orElse(null))
+                    .map(id -> users.getForAccount(accountId, id).orElse(null))
                     .filter(u -> u != null && "default".equals(u.getUserName()))
                     .findFirst()
                     .orElse(null);
@@ -1963,9 +2018,9 @@ public class ElastiCacheService implements ResourceProvider {
             return false;
         }
         // AUTH username password form: find user by userName, scoped to group
-        Set<String> groupUserIds = effectiveUserIds(group);
+        Set<String> groupUserIds = effectiveUserIds(accountId, group);
         ElastiCacheUser targetUser = groupUserIds.stream()
-                .map(id -> users.get(id).orElse(null))
+                .map(id -> users.getForAccount(accountId, id).orElse(null))
                 .filter(u -> u != null && username.equals(u.getUserName()))
                 .findFirst()
                 .orElse(null);
@@ -1986,45 +2041,60 @@ public class ElastiCacheService implements ResourceProvider {
      * even while it has no members, since RBAC then admits nobody rather than every caller.
      */
     public boolean hasMembers(String groupId) {
-        ReplicationGroup group = groups.get(groupId).orElse(null);
+        return hasMembers(groups.accountId(), groupId);
+    }
+
+    private boolean hasMembers(String accountId, String groupId) {
+        ReplicationGroup group = groups.getForAccount(accountId, groupId).orElse(null);
         if (group == null) {
             return false;
         }
         if (!group.getUserGroupIds().isEmpty()) {
             return true;
         }
-        return group.getAssociatedUserIds().stream().anyMatch(id -> users.get(id).isPresent());
+        return group.getAssociatedUserIds().stream()
+                .anyMatch(id -> users.getForAccount(accountId, id).isPresent());
     }
 
     public AuthMode memberAuthMode(String groupId, String username) {
-        ReplicationGroup group = groups.get(groupId).orElse(null);
+        return memberAuthMode(groups.accountId(), groupId, username);
+    }
+
+    private AuthMode memberAuthMode(String accountId, String groupId, String username) {
+        ReplicationGroup group = groups.getForAccount(accountId, groupId).orElse(null);
         if (group == null) {
             return null;
         }
         String target = (username == null || username.isEmpty()) ? "default" : username;
-        return effectiveUserIds(group).stream()
-                .map(id -> users.get(id).orElse(null))
+        return effectiveUserIds(accountId, group).stream()
+                .map(id -> users.getForAccount(accountId, id).orElse(null))
                 .filter(u -> u != null && target.equals(u.getUserName()) && u.isEnabled())
                 .map(ElastiCacheUser::getAuthMode)
                 .findFirst()
                 .orElse(null);
     }
 
-    private ElastiCacheAuthProxy.PasswordValidator groupAuthenticator(String groupId) {
+    /**
+     * Bound to the account that owns the group, captured when the proxy is registered: the proxy
+     * calls back on its own thread, where the store's implicit account is always the default one,
+     * so a lookup by id alone would miss another account's group or find the default account's
+     * group of the same name.
+     */
+    private ElastiCacheAuthProxy.PasswordValidator groupAuthenticator(String accountId, String groupId) {
         return new ElastiCacheAuthProxy.PasswordValidator() {
             @Override
             public boolean validatePassword(String username, String password) {
-                return ElastiCacheService.this.validatePassword(groupId, username, password);
+                return ElastiCacheService.this.validatePassword(accountId, groupId, username, password);
             }
 
             @Override
             public boolean hasMembers() {
-                return ElastiCacheService.this.hasMembers(groupId);
+                return ElastiCacheService.this.hasMembers(accountId, groupId);
             }
 
             @Override
             public AuthMode memberAuthMode(String username) {
-                return ElastiCacheService.this.memberAuthMode(groupId, username);
+                return ElastiCacheService.this.memberAuthMode(accountId, groupId, username);
             }
 
             @Override
