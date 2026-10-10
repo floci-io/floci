@@ -68,7 +68,7 @@ class PreSignedUrlGeneratorSessionTest {
         assertFalse(secrets.containsKey(firstKey), "Expired superseded sessions are removed");
         assertTrue(secrets.containsKey(secondKey));
         assertEquals(2, secrets.size(), "Unexpired object-scoped sessions remain available");
-        verify(iamService, times(1)).sweepExpiredSessions(start);
+        verify(iamService, times(1)).sweepExpiredSessions();
     }
 
     @Test
