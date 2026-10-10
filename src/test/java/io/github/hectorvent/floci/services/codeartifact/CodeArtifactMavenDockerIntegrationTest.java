@@ -410,6 +410,35 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     /**
+     * A throwaway groupId/artifactId, not {@link #GAV}: deleting it exercises Reposilite's real
+     * directory delete (confirmed live before this was built: a single {@code DELETE} on the
+     * group/artifact path removes everything beneath it), and must not disturb the artifact every
+     * other test in this class shares.
+     */
+    @Test
+    @Order(13)
+    void deletePackageRemovesTheWholeReposiliteArtifactDirectory() {
+        byte[] content = "delete-me-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken).body(content)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/deleteme/1.0.0/deleteme-1.0.0.jar")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=deleteme")
+                .then().statusCode(200).body("deletedPackage.package", equalTo("deleteme"));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/deleteme/1.0.0/deleteme-1.0.0.jar")
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=deleteme")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /**
      * Reads the real Reposilite instance's own {@code maven} settings domain directly (the same
      * shared container {@link ReposiliteSidecarManager} started for every test in this class).
      */

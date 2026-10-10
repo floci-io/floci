@@ -63,6 +63,7 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
     private static final int DEDUP_LOCK_STRIPES = 256;
     private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
+    private static final int MAX_BATCH_ENTRIES = 10;
     private static final int MAX_TERMINAL_MOVE_TASKS = 10;
     private static final Duration TERMINAL_MOVE_TASK_TTL = Duration.ofHours(1);
     /** AWS accepts MaximumMessageSize between 1 KiB and 1 MiB; 1 MiB is also the default.
@@ -1084,6 +1085,23 @@ public class SqsService implements Resettable, ResourceProvider {
     private static boolean hasKmsMasterKey(Map<String, String> attributes) {
         String keyId = attributes.get("KmsMasterKeyId");
         return keyId != null && !keyId.isEmpty();
+    }
+
+    /**
+     * Reject a batch call carrying no entries or more than {@value #MAX_BATCH_ENTRIES}. AWS applies
+     * both checks to {@code SendMessageBatch}, {@code DeleteMessageBatch} and
+     * {@code ChangeMessageVisibilityBatch} alike, fails the whole request and processes no entry.
+     */
+    public void validateBatchEntryCount(String entryTypeName, int entryCount) {
+        if (entryCount == 0) {
+            throw new AwsException("AWS.SimpleQueueService.EmptyBatchRequest",
+                    "There should be at least one " + entryTypeName + " in the request.", 400);
+        }
+        if (entryCount > MAX_BATCH_ENTRIES) {
+            throw new AwsException("AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
+                    "Maximum number of entries per request are " + MAX_BATCH_ENTRIES
+                            + ". You have sent " + entryCount + ".", 400);
+        }
     }
 
     /**

@@ -1755,6 +1755,12 @@ public class NativeDynamoDbJsonHandler {
             }
         }
 
+        if ((gsiCreates.size() + gsiDeletes.size() > 0) && (request.has("BillingMode")
+                || request.has("ProvisionedThroughput") || request.has("OnDemandThroughput"))) {
+            throw new AwsException("ValidationException",
+                    "You cannot create or delete index while updating table IOPS", 400);
+        }
+
         if (!gsiThroughputUpdates.isEmpty()) {
             TableDefinition currentTable = dynamoDbService.describeTable(tableName, region);
             for (GsiThroughputUpdate gsiUpdate : gsiThroughputUpdates) {

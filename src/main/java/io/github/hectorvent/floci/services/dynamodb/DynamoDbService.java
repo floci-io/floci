@@ -2316,7 +2316,8 @@ public class DynamoDbService {
         if (newAttrDefs != null) {
             knownAttrDefs.addAll(newAttrDefs);
         }
-        validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes, knownAttrDefs,
+        validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes,
+                gsiCreates.size() + gsiDeletes.size(), knownAttrDefs,
                 billingMode != null ? billingMode : table.getBillingMode());
 
         if (readCapacity != null) {
@@ -2372,13 +2373,14 @@ public class DynamoDbService {
      * current lifecycle state.
      *
      * <p>AWS allows one online index operation per table at a time. That limit binds the table,
-     * not the request, so two creates in one request and a create issued while an earlier index
+     * not the request, and GSI creates and deletes count against it too, so two creates in one
+     * request and a create issued while an earlier index
      * still builds are refused the same way. Deleting an index that is still in its resource
      * allocation phase is refused with a different error, and the same delete is accepted once
      * the index reaches backfilling.
      */
     private void validateVectorIndexUpdates(TableDefinition table, List<VectorIndexCreate> creates,
-                                            List<String> deletes,
+                                            List<String> deletes, int gsiOperations,
                                             List<AttributeDefinition> attributeDefinitions,
                                             String billingMode) {
         validateVectorIndexMembers(creates);
@@ -2389,7 +2391,7 @@ public class DynamoDbService {
                     "One or more parameter values were invalid: Vector indexes are only supported "
                     + "for PAY_PER_REQUEST tables", 400);
         }
-        if (creates.isEmpty() && deletes.isEmpty()) {
+        if (creates.isEmpty() && deletes.isEmpty() && gsiOperations == 0) {
             return;
         }
         for (VectorIndexCreate create : creates) {
@@ -2421,7 +2423,8 @@ public class DynamoDbService {
                 .count();
         // Deleting an index that is still backfilling takes over the slot that index already
         // holds, so it does not need one of its own.
-        long onlineOperations = building + creates.size() + deletes.size() - deletesOfBuildingIndexes;
+        long onlineOperations = building + creates.size() + deletes.size() + gsiOperations
+                - deletesOfBuildingIndexes;
         if (onlineOperations > 1) {
             throw new AwsException("LimitExceededException",
                     "Subscriber limit exceeded: Only 1 online index can be created or deleted "

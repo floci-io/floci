@@ -340,6 +340,40 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     /**
+     * A throwaway package, not {@link #PACKAGE_NAME}: deleting it exercises the real Verdaccio
+     * unpublish-whole-package mechanism (GET the packument's own {@code _rev}, then {@code DELETE}
+     * with that revision), confirmed live before this was built, and must not disturb the package
+     * every other test in this class shares.
+     */
+    @Test
+    @Order(11)
+    void deletePackageRemovesTheWholeVerdaccioPackage() {
+        String packageName = "delete-me-pkg";
+        byte[] tarball = "throwaway tarball".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/" + packageName + "-1.0.0.tgz\""
+                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
+                + "\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package=" + packageName)
+                .then().statusCode(200).body("deletedPackage.package", equalTo(packageName));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package=" + packageName)
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code VerdaccioSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container, not the repository-record

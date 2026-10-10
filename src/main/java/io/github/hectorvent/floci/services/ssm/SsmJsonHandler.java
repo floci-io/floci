@@ -26,6 +26,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -65,6 +66,7 @@ public class SsmJsonHandler {
             case "GetParameterHistory" -> handleGetParameterHistory(request, region);
             case "DescribeParameters" -> handleDescribeParameters(request, region);
             case "LabelParameterVersion" -> handleLabelParameterVersion(request, region);
+            case "UnlabelParameterVersion" -> handleUnlabelParameterVersion(request, region);
             case "AddTagsToResource" -> handleAddTagsToResource(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
             case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(request, region);
@@ -1021,44 +1023,68 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
-    private static final int MAX_LABELS = 10;
-    private static final int MAX_LABEL_LENGTH = 100;
+    private static final BigDecimal LONG_MIN = BigDecimal.valueOf(Long.MIN_VALUE);
+    private static final BigDecimal LONG_MAX = BigDecimal.valueOf(Long.MAX_VALUE);
 
     private List<String> requireLabels(JsonNode request) {
+        List<String> labels = optionalLabels(request);
+        String violation = SsmService.labelListViolation(labels);
+        if (violation != null) {
+            throw SsmService.validationErrors(List.of(violation));
+        }
+        return labels;
+    }
+
+    /** The {@code Labels} member, or null when absent; a non-string member fails to deserialize, as on AWS. */
+    private static List<String> optionalLabels(JsonNode request) {
         JsonNode labelsNode = request.path("Labels");
         if (labelsNode.isMissingNode() || labelsNode.isNull()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'labels' failed to satisfy constraint: Member must not be null",
-                    400);
-        }
-        if (!labelsNode.isArray() || labelsNode.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
-                    400);
-        }
-        if (labelsNode.size() > MAX_LABELS) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to "
-                            + MAX_LABELS,
-                    400);
+            return null;
         }
         List<String> labels = new ArrayList<>(labelsNode.size());
         for (JsonNode l : labelsNode) {
-            String label = l.asText();
-            if (!l.isTextual() || label.isEmpty()) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
-                        400);
+            if (l.isNull()) {
+                labels.add(null);
+            } else if (l.isTextual()) {
+                labels.add(l.textValue());
+            } else {
+                throw serializationException(l, "String");
             }
-            if (label.length() > MAX_LABEL_LENGTH) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to "
-                                + MAX_LABEL_LENGTH,
-                        400);
-            }
-            labels.add(label);
         }
         return labels;
+    }
+
+    private static String optionalString(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isTextual()) {
+            throw serializationException(node, "String");
+        }
+        return node.textValue();
+    }
+
+    /** AWS truncates a fractional number and clamps one outside the range of a long. */
+    private static Long optionalLong(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isNumber()) {
+            throw serializationException(node, "Long");
+        }
+        return node.decimalValue().max(LONG_MIN).min(LONG_MAX).longValue();
+    }
+
+    private static AwsException serializationException(JsonNode node, String targetType) {
+        String token = switch (node.getNodeType()) {
+            case STRING -> "STRING_VALUE";
+            case NUMBER -> "NUMBER_VALUE";
+            case BOOLEAN -> node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE";
+            default -> node.getNodeType().name();
+        };
+        return new AwsException("SerializationException", token + " can not be converted to a " + targetType, 400);
     }
 
     private Response handleLabelParameterVersion(JsonNode request, String region) {
@@ -1076,6 +1102,41 @@ public class SsmJsonHandler {
         result.invalidLabels().forEach(invalidArray::add);
         response.set("InvalidLabels", invalidArray);
         response.put("ParameterVersion", result.parameterVersion());
+        return Response.ok(response).build();
+    }
+
+    private Response handleUnlabelParameterVersion(JsonNode request, String region) {
+        String name = optionalString(request, "Name");
+        Long parameterVersion = optionalLong(request, "ParameterVersion");
+        List<String> labels = optionalLabels(request);
+
+        List<String> violations = new ArrayList<>();
+        if (name == null) {
+            violations.add("Value null at 'name' failed to satisfy constraint: Member must not be null");
+        } else if (name.isEmpty()) {
+            violations.add("Value '' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 1");
+        }
+        if (parameterVersion == null) {
+            violations.add("Value null at 'parameterVersion' failed to satisfy constraint: Member must not be null");
+        }
+        String labelViolation = SsmService.labelListViolation(labels);
+        if (labelViolation != null) {
+            violations.add(labelViolation);
+        }
+        if (!violations.isEmpty()) {
+            throw SsmService.validationErrors(violations);
+        }
+
+        SsmService.UnlabelParameterVersionResult result = ssmService.unlabelParameterVersion(
+                name, parameterVersion, labels, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode removedArray = objectMapper.createArrayNode();
+        result.removedLabels().forEach(removedArray::add);
+        response.set("RemovedLabels", removedArray);
+        ArrayNode invalidArray = objectMapper.createArrayNode();
+        result.invalidLabels().forEach(invalidArray::add);
+        response.set("InvalidLabels", invalidArray);
         return Response.ok(response).build();
     }
 

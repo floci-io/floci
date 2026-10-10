@@ -2356,4 +2356,184 @@ class LambdaServiceTest {
         LambdaFunction updatedFn = service.getFunction(REGION, "revision-lock-func");
         assertNotEquals(initialRevisionId, updatedFn.getRevisionId());
     }
+
+    @Test
+    void createEventSourceMapping_moreThanOneTopic_isRejected() {
+        // Catches: a Topics list longer than the model's maximum of 1 is stored instead of rejected
+        service.createFunction(REGION, baseRequest("kafka-topics-max-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-topics-max-fn", List.of("topic-a", "topic-b"), List.of())));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'topics' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1", error.getMessage());
+    }
+
+    @Test
+    void createEventSourceMapping_topicStartingWithADot_isRejected() {
+        // Catches: a Topic that doesn't match the model pattern [^.]([a-zA-Z0-9\-_.]+) is stored
+        service.createFunction(REGION, baseRequest("kafka-topic-pattern-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-topic-pattern-fn", List.of(".hidden"), List.of())));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value '.hidden' at 'topics.member' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [^.]([a-zA-Z0-9\\-_.]+)", error.getMessage());
+    }
+
+    @Test
+    void createEventSourceMapping_moreThan23SourceAccessConfigurations_isRejected() {
+        // Catches: a SourceAccessConfigurations list longer than the model's maximum of 23 is stored
+        service.createFunction(REGION, baseRequest("kafka-access-max-fn"));
+        List<Map<String, Object>> access = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            access.add(Map.of("Type", "BASIC_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:s" + i));
+        }
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-access-max-fn", List.of("my-topic"), access)));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'sourceAccessConfigurations' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 23", error.getMessage());
+    }
+
+    @Test
+    void updateEventSourceMapping_moreThanOneTopic_isRejectedAndLeavesTheMappingUnchanged() {
+        // Catches: UpdateEventSourceMapping accepting (or half-applying) a Topics list longer than 1
+        service.createFunction(REGION, baseRequest("kafka-update-topics-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-update-topics-fn", List.of("my-topic"), List.of()));
+        // Floci's default BatchSize differs per source type, so compare against the value before the update
+        int batchSizeBefore = esm.getBatchSize();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(),
+                Map.of("BatchSize", 5, "Topics", List.of("topic-a", "topic-b"))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
+        assertEquals(List.of("my-topic"), stored.getTopics());
+        assertEquals(batchSizeBefore, stored.getBatchSize());
+    }
+
+    @Test
+    void createEventSourceMapping_emptyTopic_isRejectedWithAValidationException() {
+        // Catches: an empty Topic reaching the blank check and answering InvalidParameterValueException instead of the Topic shape's min-length ValidationException
+        service.createFunction(REGION, baseRequest("kafka-topic-empty-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-topic-empty-fn", List.of(""), List.of())));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value '' at 'topics.member' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", error.getMessage());
+    }
+
+    @Test
+    void createEventSourceMapping_sqsSourceWithMoreThan23SourceAccessConfigurations_isRejected() {
+        // Catches: the 23-entry SourceAccessConfigurations cap being enforced only for self-managed Kafka sources
+        service.createFunction(REGION, baseRequest("sqs-access-max-fn"));
+        List<Map<String, Object>> access = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            access.add(Map.of("Type", "BASIC_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:s" + i));
+        }
+        Map<String, Object> request = new HashMap<>();
+        request.put("FunctionName", "sqs-access-max-fn");
+        request.put("EventSourceArn", "arn:aws:sqs:us-east-1:000000000000:access-max-queue");
+        request.put("SourceAccessConfigurations", access);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION, request));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'sourceAccessConfigurations' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 23", error.getMessage());
+    }
+
+    @Test
+    void updateEventSourceMapping_moreThan23SourceAccessConfigurations_isRejectedAndLeavesTheMappingUnchanged() {
+        // Catches: UpdateEventSourceMapping accepting (or half-applying) more than 23 SourceAccessConfigurations
+        service.createFunction(REGION, baseRequest("kafka-update-access-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-update-access-fn", List.of("my-topic"), List.of()));
+        int batchSizeBefore = esm.getBatchSize();
+        List<Map<String, Object>> accessBefore = esm.getSourceAccessConfigurations();
+        List<Map<String, Object>> access = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            access.add(Map.of("Type", "BASIC_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:s" + i));
+        }
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(),
+                Map.of("BatchSize", 5, "SourceAccessConfigurations", access)));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
+        assertEquals(batchSizeBefore, stored.getBatchSize());
+        assertEquals(accessBefore, stored.getSourceAccessConfigurations());
+    }
+
+    private static Map<String, Object> kafkaMappingRequest(String functionName, List<String> topics,
+                                                            List<Map<String, Object>> sourceAccessConfigurations) {
+        Map<String, Object> request = new HashMap<>();
+        request.put("FunctionName", functionName);
+        request.put("Topics", topics);
+        request.put("SelfManagedEventSource", Map.of("Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092"))));
+        if (!sourceAccessConfigurations.isEmpty()) {
+            request.put("SourceAccessConfigurations", sourceAccessConfigurations);
+        }
+        return request;
+    }
+
+    @Test
+    void updateFunctionCode_s3BucketEndingInADot_isRejected() {
+        // Catches: UpdateFunctionCode accepting an S3Bucket that breaks the model pattern [0-9A-Za-z\.\-_]*(?<!\.)
+        service.createFunction(REGION, baseRequest("code-bucket-pattern-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION,
+                "code-bucket-pattern-fn", Map.of("S3Bucket", "my-bucket.", "S3Key", "code.zip")));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value 'my-bucket.' at 's3Bucket' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [0-9A-Za-z\\.\\-_]*(?<!\\.)", error.getMessage());
+    }
+
+    @Test
+    void updateFunctionCode_s3KeyLongerThan1024_isRejected() {
+        // Catches: UpdateFunctionCode accepting an S3Key longer than the model's 1024-character maximum
+        service.createFunction(REGION, baseRequest("code-key-length-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION,
+                "code-key-length-fn", Map.of("S3Bucket", "my-bucket", "S3Key", "k".repeat(1025))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 's3Key' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1024", error.getMessage());
+    }
+
+    @Test
+    void createAlias_functionVersionOutsideTheModelPattern_isRejected() {
+        // Catches: CreateAlias storing a FunctionVersion that isn't $LATEST, $LATEST.PUBLISHED or a number
+        service.createFunction(REGION, baseRequest("alias-version-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createAlias(REGION, "alias-version-fn", "live", "v1", null, null));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value 'v1' at 'functionVersion' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: (\\$LATEST(\\.PUBLISHED)?|[0-9]+)", error.getMessage());
+    }
+
+    @Test
+    void updateAlias_descriptionLongerThan256_isRejectedAndLeavesTheAliasUnchanged() {
+        // Catches: UpdateAlias accepting (or half-applying) a Description over the model's 256-character maximum
+        service.createFunction(REGION, baseRequest("alias-description-fn"));
+        service.createAlias(REGION, "alias-description-fn", "live", "$LATEST", "original", null);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.updateAlias(REGION, "alias-description-fn", "live", "$LATEST", "d".repeat(257), null));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("original", service.getAlias(REGION, "alias-description-fn", "live").getDescription());
+    }
 }

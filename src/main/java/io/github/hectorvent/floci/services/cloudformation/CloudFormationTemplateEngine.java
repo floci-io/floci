@@ -208,12 +208,10 @@ public class CloudFormationTemplateEngine {
             if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
                 return objectMapper.valueToTree(resolveList(node));
             }
-            if (node.has("Ref") || node.has("Fn::Sub") || node.has("Fn::Join") ||
-                    node.has("Fn::Select") || node.has("Fn::Base64") ||
-                    node.has("Fn::GetAtt") || node.has("Fn::ImportValue") || node.has("Fn::FindInMap")) {
+            if (isIntrinsic(node)) {
                 return TextNode.valueOf(resolve(node));
             }
-            // Plain object — resolve each field
+            // Plain object: resolve each field.
             ObjectNode resolved = objectMapper.createObjectNode();
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
@@ -251,11 +249,7 @@ public class CloudFormationTemplateEngine {
                     return omitNoValue(branch);
                 }
             }
-            if (node.has("Ref") || node.has("Fn::Sub") || node.has("Fn::Join")
-                    || node.has("Fn::Select") || node.has("Fn::Base64") || node.has("Fn::GetAtt")
-                    || node.has("Fn::ImportValue") || node.has("Fn::FindInMap")
-                    || node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")
-                    || node.has("Fn::If")) {
+            if (isIntrinsic(node)) {
                 return node;
             }
             ObjectNode resolved = objectMapper.createObjectNode();
@@ -280,6 +274,14 @@ public class CloudFormationTemplateEngine {
             return resolved;
         }
         return node;
+    }
+
+    private static boolean isIntrinsic(JsonNode node) {
+        return node.has("Ref") || node.has("Fn::Sub") || node.has("Fn::Join")
+                || node.has("Fn::Select") || node.has("Fn::Base64") || node.has("Fn::GetAtt")
+                || node.has("Fn::ImportValue") || node.has("Fn::FindInMap")
+                || node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")
+                || node.has("Fn::If");
     }
 
     /**

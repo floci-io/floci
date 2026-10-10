@@ -149,10 +149,14 @@ As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT
 | `GET /latest/meta-data/iam/info` | IAM instance profile info |
 | `GET /latest/meta-data/iam/security-credentials/` | Role name list |
 | `GET /latest/meta-data/iam/security-credentials/{role}` | Temporary credentials |
+| `GET /latest/meta-data/identity-credentials/ec2/info` | Instance identity role info (`Code`, `LastUpdated`, `AccountId`) |
+| `GET /latest/meta-data/identity-credentials/ec2/security-credentials/ec2-instance` | Instance identity role credentials |
 | `GET /latest/user-data` | UserData script |
 | `GET /latest/dynamic/instance-identity/document` | Identity document JSON |
 
 IAM credentials are served when the instance has an `IamInstanceProfile.Arn` that resolves to an existing instance profile with one role in the profile's account. The role list uses the role name, which can differ from the profile name. Missing profiles, missing roles, and requests for another role return `404`.
+
+Instance identity credentials are served for every instance, with or without an instance profile, under `identity-credentials/ec2/`, with directory listings at each level. They are a session of the instance identity role, `arn:<partition>:sts::<account>:assumed-role/aws:ec2-instance/<instance-id>` to `GetCallerIdentity`, where `<account>` is the account that launched the instance. As on AWS, no identity policy applies to that role, so with IAM enforcement on they are granted nothing beyond what needs no permission, such as `sts:GetCallerIdentity`. They follow the same lifetime, refresh and revocation rules as role credentials. The SSM Agent requests them first when it registers.
 
 Each registered instance receives its own temporary IAM session. Credentials last one hour and refresh on retrieval during the final five minutes; the previous generation remains valid until expiration. Floci revokes tracked sessions when the instance is unregistered or IMDS shuts down, and discards persisted EC2 sessions when Floci restarts. Restored guests obtain fresh credentials after metadata registration is rebuilt.
 

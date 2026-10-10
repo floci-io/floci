@@ -345,20 +345,20 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         }
         validateKeys(props, Set.of("EmailIdentity", "ConfigurationSetAttributes", "DkimSigningAttributes",
                 "DkimAttributes", "MailFromAttributes", "FeedbackAttributes", "Tags"), "Properties");
-        String identity = requiredText(props.get("EmailIdentity"), "EmailIdentity", ctx);
+        String identity = requiredText(ctx.engine().resolveNode(props.get("EmailIdentity")), "EmailIdentity");
         JsonNode config = object(props, "ConfigurationSetAttributes", Set.of("ConfigurationSetName"), ctx);
-        String configurationSet = optionalText(config, "ConfigurationSetName", ctx);
+        String configurationSet = optionalText(config, "ConfigurationSetName");
         if (configurationSet != null && configurationSet.isEmpty()) {
             configurationSet = null;
         }
 
         JsonNode signing = object(props, "DkimSigningAttributes",
                 Set.of("DomainSigningSelector", "DomainSigningPrivateKey", "NextSigningKeyLength"), ctx);
-        if (optionalText(signing, "DomainSigningSelector", ctx) != null
-                || optionalText(signing, "DomainSigningPrivateKey", ctx) != null) {
+        if (optionalText(signing, "DomainSigningSelector") != null
+                || optionalText(signing, "DomainSigningPrivateKey") != null) {
             throw invalid("BYODKIM is not supported by this CloudFormation resource.");
         }
-        String keyLength = optionalText(signing, "NextSigningKeyLength", ctx);
+        String keyLength = optionalText(signing, "NextSigningKeyLength");
         if (keyLength != null && !Set.of("RSA_1024_BIT", DEFAULT_KEY_LENGTH).contains(keyLength)) {
             throw invalid("NextSigningKeyLength must be RSA_1024_BIT or RSA_2048_BIT.");
         }
@@ -367,14 +367,14 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         }
 
         JsonNode dkim = object(props, "DkimAttributes", Set.of("SigningEnabled"), ctx);
-        Boolean signingEnabled = optionalBoolean(dkim, "SigningEnabled", ctx);
+        Boolean signingEnabled = optionalBoolean(dkim, "SigningEnabled");
         JsonNode mailFrom = object(props, "MailFromAttributes",
                 Set.of("MailFromDomain", "BehaviorOnMxFailure"), ctx);
-        String mailFromDomain = optionalText(mailFrom, "MailFromDomain", ctx);
+        String mailFromDomain = optionalText(mailFrom, "MailFromDomain");
         if (mailFromDomain != null && mailFromDomain.isEmpty()) {
             mailFromDomain = null;
         }
-        String behavior = optionalText(mailFrom, "BehaviorOnMxFailure", ctx);
+        String behavior = optionalText(mailFrom, "BehaviorOnMxFailure");
         if (behavior != null) {
             behavior = switch (behavior) {
                 case "USE_DEFAULT_VALUE" -> "UseDefaultValue";
@@ -386,7 +386,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         JsonNode feedback = object(props, "FeedbackAttributes", Set.of("EmailForwardingEnabled"), ctx);
-        Boolean forwarding = optionalBoolean(feedback, "EmailForwardingEnabled", ctx);
+        Boolean forwarding = optionalBoolean(feedback, "EmailForwardingEnabled");
         return new Properties(identity, configurationSet, keyLength, signingEnabled, mailFromDomain,
                 behavior, forwarding, readTags(props, ctx));
     }
@@ -409,8 +409,8 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
                 throw invalid("Each tag must be an object.");
             }
             validateKeys(tag, Set.of("Key", "Value"), "Tag");
-            String key = requiredText(tag.get("Key"), "Tag.Key", ctx);
-            String value = text(tag.get("Value"), "Tag.Value", ctx);
+            String key = requiredText(tag.get("Key"), "Tag.Key");
+            String value = text(tag.get("Value"), "Tag.Value");
             if (!keys.add(key)) {
                 throw invalid("Duplicate tag key: " + key);
             }
@@ -444,36 +444,35 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private String optionalText(JsonNode props, String name, ProvisionContext ctx) {
+    private String optionalText(JsonNode props, String name) {
         return props == null || !props.has(name) || props.get(name).isNull()
-                ? null : text(props.get(name), name, ctx);
+                ? null : text(props.get(name), name);
     }
 
-    private String requiredText(JsonNode node, String name, ProvisionContext ctx) {
-        String value = text(node, name, ctx);
+    private String requiredText(JsonNode node, String name) {
+        String value = text(node, name);
         if (value.isBlank()) {
             throw invalid(name + " must not be empty.");
         }
         return value;
     }
 
-    private String text(JsonNode node, String name, ProvisionContext ctx) {
-        JsonNode resolved = ctx.engine().resolveNode(node);
-        if (resolved == null || !resolved.isTextual()) {
+    private String text(JsonNode node, String name) {
+        if (node == null || !node.isTextual()) {
             throw invalid(name + " must be a string.");
         }
-        return resolved.textValue();
+        return node.textValue();
     }
 
-    private Boolean optionalBoolean(JsonNode props, String name, ProvisionContext ctx) {
+    private Boolean optionalBoolean(JsonNode props, String name) {
         if (props == null || !props.has(name) || props.get(name).isNull()) {
             return null;
         }
-        JsonNode resolved = ctx.engine().resolveNode(props.get(name));
-        if (resolved == null || !resolved.isBoolean()) {
+        JsonNode node = props.get(name);
+        if (!node.isBoolean()) {
             throw invalid(name + " must be a boolean.");
         }
-        return resolved.booleanValue();
+        return node.booleanValue();
     }
 
     private boolean same(String left, String right) {

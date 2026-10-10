@@ -88,6 +88,15 @@ public class LambdaService implements ResourceProvider {
                     + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
     private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
+    // The model's Topic shape: 1-249 characters, pattern [^.]([a-zA-Z0-9\-_.]+); Topics holds at most 1.
+    private static final Pattern TOPIC_PATTERN = Pattern.compile("[^.]([a-zA-Z0-9\\-_.]+)");
+    private static final int MAX_TOPIC_LENGTH = 249;
+    private static final int MAX_TOPICS = 1;
+    private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
+    // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
+    private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
+    // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
+    private static final Pattern ALIAS_FUNCTION_VERSION_PATTERN = Pattern.compile("(\\$LATEST(\\.PUBLISHED)?|[0-9]+)");
     // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
     // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
@@ -739,6 +748,7 @@ public class LambdaService implements ResourceProvider {
         String imageUri = (String) request.get("ImageUri");
         String s3Bucket = (String) request.get("S3Bucket");
         String s3Key = (String) request.get("S3Key");
+        validateS3CodeLocation(s3Bucket, s3Key);
 
         requireMatchingRevisionId(fn, request);
 
@@ -1375,6 +1385,11 @@ public class LambdaService implements ResourceProvider {
         boolean hasEventSourceArn = request.containsKey("EventSourceArn") && request.get("EventSourceArn") != null;
         boolean isSelfManagedKafka = hasKafkaSource || hasTopics;
 
+        // The SourceAccessConfigurations cap applies to every source type, not only self-managed Kafka
+        if (request.get("SourceAccessConfigurations") instanceof List<?> accessToCap) {
+            validateMaxItems(accessToCap, "sourceAccessConfigurations", MAX_SOURCE_ACCESS_CONFIGURATIONS);
+        }
+
         String eventSourceArn;
         String resolvedRegion;
         Map<String, Object> selfManagedEventSource = null;
@@ -1429,6 +1444,7 @@ public class LambdaService implements ResourceProvider {
                 throw new AwsException("InvalidParameterValueException",
                         "Topics must be a non-empty list of strings", 400);
             }
+            validateTopicConstraints(topicList);
             List<String> validatedTopics = new ArrayList<>();
             for (Object item : topicList) {
                 if (!(item instanceof String s) || s.isBlank()) {
@@ -2150,6 +2166,7 @@ public class LambdaService implements ResourceProvider {
                 throw new AwsException("InvalidParameterValueException",
                         "Topics must be a non-empty list of strings", 400);
             }
+            validateTopicConstraints(topicList);
             List<String> validatedTopics = new ArrayList<>();
             for (Object item : topicList) {
                 if (!(item instanceof String s) || s.isBlank()) {
@@ -2168,6 +2185,7 @@ public class LambdaService implements ResourceProvider {
                     throw new AwsException("InvalidParameterValueException",
                             "SourceAccessConfigurations must be a list", 400);
                 }
+                validateMaxItems(accessList, "sourceAccessConfigurations", MAX_SOURCE_ACCESS_CONFIGURATIONS);
                 List<Map<String, Object>> typedAccess = new ArrayList<>();
                 for (Object item : accessList) {
                     if (!(item instanceof Map<?, ?> m)) {
@@ -2721,11 +2739,7 @@ public class LambdaService implements ResourceProvider {
         if (!(requireListOrNull(value, field) instanceof List<?> list)) {
             return;
         }
-        if (list.size() > maxItems) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + maxItems, 400);
-        }
+        validateMaxItems(list, field, maxItems);
         for (Object item : list) {
             validateEnum(item, field + ".member", allowed);
         }
@@ -2748,11 +2762,7 @@ public class LambdaService implements ResourceProvider {
         if (!(requireListOrNull(value, field) instanceof List<?> list)) {
             return;
         }
-        if (list.size() > maxItems) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + maxItems, 400);
-        }
+        validateMaxItems(list, field, maxItems);
         for (Object item : list) {
             validatePattern(item, field + ".member", pattern);
         }
@@ -2768,7 +2778,51 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
-    private static void validateMaxLength(Object value, String field, int maxLength) {
+    /** Topics: at most MAX_TOPICS entries, each 1 to MAX_TOPIC_LENGTH characters matching TOPIC_PATTERN. */
+    private static void validateTopicConstraints(List<?> topics) {
+        for (Object topic : topics) {
+            if (topic instanceof String s) {
+                validateNonEmpty(s, "topics.member", false);
+            }
+        }
+        validateArnList(topics, "topics", TOPIC_PATTERN, MAX_TOPICS);
+        for (Object topic : topics) {
+            validateMaxLength(topic, "topics.member", MAX_TOPIC_LENGTH);
+        }
+    }
+
+    private static void validateS3CodeLocation(String bucket, String key) {
+        if (bucket != null) {
+            if (bucket.length() < 3) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + bucket + "' at 's3Bucket' failed to satisfy constraint: "
+                                + "Member must have length greater than or equal to 3", 400);
+            }
+            validateMaxLength(bucket, "s3Bucket", 63);
+            validatePattern(bucket, "s3Bucket", S3_BUCKET_PATTERN);
+        }
+        if (key != null) {
+            validateNonEmpty(key, "s3Key", false);
+            validateMaxLength(key, "s3Key", 1024);
+        }
+    }
+
+    private static void validateAliasMembers(String functionVersion, String description) {
+        validateNonEmpty(functionVersion, "functionVersion", false);
+        validateMaxLength(functionVersion, "functionVersion", 1024);
+        validatePattern(functionVersion, "functionVersion", ALIAS_FUNCTION_VERSION_PATTERN);
+        validateMaxLength(description, "description", 256);
+    }
+
+    private static void validateMaxItems(List<?> list, String field, int maxItems) {
+        if (list.size() > maxItems) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + maxItems, 400);
+        }
+    }
+
+    static void validateMaxLength(Object value, String field, int maxLength) {
         if (!(value instanceof String s) || s.length() <= maxLength) {
             return;
         }
@@ -2899,6 +2953,7 @@ public class LambdaService implements ResourceProvider {
                                    String functionVersion, String description,
                                    java.util.Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
+        validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
         if (aliasStore != null && aliasStore.get(region, functionName, aliasName).isPresent()) {
@@ -2940,6 +2995,7 @@ public class LambdaService implements ResourceProvider {
                                    String functionVersion, String description,
                                    java.util.Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
+        validateAliasMembers(functionVersion, description);
         LambdaAlias alias = getAlias(region, functionName, aliasName);
         if (functionVersion != null) alias.setFunctionVersion(functionVersion);
         if (description != null) alias.setDescription(description);

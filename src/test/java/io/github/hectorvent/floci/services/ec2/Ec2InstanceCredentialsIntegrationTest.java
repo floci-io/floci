@@ -7,6 +7,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -17,6 +18,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -103,6 +105,68 @@ class Ec2InstanceCredentialsIntegrationTest {
             given().header("Authorization", auth).contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "DeleteRole").formParam("RoleName", role)
                     .post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
+    void identityCredentialsIdentifyTheLaunchingAccountWithoutAnInstanceProfile() throws Exception {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        int port;
+        try (ServerSocket socket = new ServerSocket(0)) {
+            port = socket.getLocalPort();
+        }
+        when(config.services().ec2().imdsPort()).thenReturn(port);
+        when(config.defaultAccountId()).thenReturn("123456789012");
+        Vertx vertx = Vertx.vertx();
+        Ec2MetadataServer server = new Ec2MetadataServer(vertx, config, iam);
+        Instance instance = new Instance();
+        instance.setInstanceId("i-identity");
+        instance.setRegion("us-east-1");
+        instance.setOwnerId("246813579012");
+        String endpoint = "http://127.0.0.1:" + port;
+        String base = endpoint + "/latest/meta-data/identity-credentials";
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            server.start().get(10, TimeUnit.SECONDS);
+            server.registerContainer("127.0.0.1", instance.getInstanceId(), instance);
+            HttpResponse<String> token = client.send(HttpRequest.newBuilder(URI.create(endpoint + "/latest/api/token"))
+                    .timeout(Duration.ofSeconds(5)).header("X-aws-ec2-metadata-token-ttl-seconds", "60")
+                    .PUT(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals("ec2/", get(client, base, token.body()).body());
+            assertEquals("ec2/", get(client, base + "/", token.body()).body());
+            assertEquals("info\nsecurity-credentials/", get(client, base + "/ec2/", token.body()).body());
+            assertEquals("ec2-instance", get(client, base + "/ec2/security-credentials/", token.body()).body());
+
+            JsonObject info = new JsonObject(get(client, base + "/ec2/info", token.body()).body());
+            assertEquals("Success", info.getString("Code"));
+            assertEquals("246813579012", info.getString("AccountId"));
+            assertNotNull(Instant.parse(info.getString("LastUpdated")));
+
+            String path = base + "/ec2/security-credentials/ec2-instance";
+            HttpResponse<String> response = get(client, path, token.body());
+            assertEquals(200, response.statusCode());
+            JsonObject credential = new JsonObject(response.body());
+            assertEquals("Success", credential.getString("Code"));
+            assertEquals("AWS-HMAC", credential.getString("Type"));
+            assertTrue(Instant.parse(credential.getString("Expiration")).isAfter(Instant.now()));
+            assertNotNull(Instant.parse(credential.getString("LastUpdated")));
+            String key = credential.getString("AccessKeyId");
+            String sessionToken = credential.getString("Token");
+            assertEquals(credential.getString("SecretAccessKey"), iam.findSecretKey(key, sessionToken).orElseThrow());
+            assertEquals("246813579012", iam.resolveAccountId(key).orElseThrow());
+            assertEquals("arn:aws:sts::246813579012:assumed-role/aws:ec2-instance/i-identity",
+                    iam.resolveCallerArn(key).orElseThrow());
+            assertEquals("246813579012:aws:ec2-instance:i-identity", iam.resolveCallerUserId(key, sessionToken).orElseThrow());
+            List<String> grants = iam.resolveCallerContext(key).identityPolicies();
+            assertTrue(grants == null || grants.isEmpty());
+            assertEquals(response.body(), get(client, path, token.body()).body());
+
+            assertEquals(401, get(client, path, "not-a-token").statusCode());
+
+            server.unregisterInstance(instance);
+            assertTrue(iam.findSecretKey(key, sessionToken).isEmpty());
+        } finally {
+            server.stop();
+            vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
         }
     }
 

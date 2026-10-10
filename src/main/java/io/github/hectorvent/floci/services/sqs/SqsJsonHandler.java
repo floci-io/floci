@@ -326,28 +326,27 @@ public class SqsJsonHandler {
 
     private Response handleDeleteMessageBatch(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
-        JsonNode entries = request.path("Entries");
+        JsonNode entries = requireBatchEntries(request);
+        sqsService.validateBatchEntryCount("DeleteMessageBatchRequestEntry", entries.size());
 
         ArrayNode successful = objectMapper.createArrayNode();
         ArrayNode failed = objectMapper.createArrayNode();
 
-        if (entries.isArray()) {
-            for (JsonNode entry : entries) {
-                String id = entry.path("Id").asText();
-                String receiptHandle = entry.path("ReceiptHandle").asText(null);
-                try {
-                    sqsService.deleteMessageInBatch(queueUrl, receiptHandle, region);
-                    ObjectNode success = objectMapper.createObjectNode();
-                    success.put("Id", id);
-                    successful.add(success);
-                } catch (AwsException e) {
-                    ObjectNode fail = objectMapper.createObjectNode();
-                    fail.put("Id", id);
-                    fail.put("Code", e.getErrorCode());
-                    fail.put("Message", e.getMessage());
-                    fail.put("SenderFault", true);
-                    failed.add(fail);
-                }
+        for (JsonNode entry : entries) {
+            String id = entry.path("Id").asText();
+            String receiptHandle = entry.path("ReceiptHandle").asText(null);
+            try {
+                sqsService.deleteMessageInBatch(queueUrl, receiptHandle, region);
+                ObjectNode success = objectMapper.createObjectNode();
+                success.put("Id", id);
+                successful.add(success);
+            } catch (AwsException e) {
+                ObjectNode fail = objectMapper.createObjectNode();
+                fail.put("Id", id);
+                fail.put("Code", e.getErrorCode());
+                fail.put("Message", e.getMessage());
+                fail.put("SenderFault", true);
+                failed.add(fail);
             }
         }
 
@@ -361,7 +360,8 @@ public class SqsJsonHandler {
 
     private Response handleSendMessageBatch(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
-        JsonNode entries = request.path("Entries");
+        JsonNode entries = requireBatchEntries(request);
+        sqsService.validateBatchEntryCount("SendMessageBatchRequestEntry", entries.size());
 
         ArrayNode successful = objectMapper.createArrayNode();
         ArrayNode failed = objectMapper.createArrayNode();
@@ -371,72 +371,70 @@ public class SqsJsonHandler {
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
-        if (entries.isArray()) {
-            for (JsonNode entry : entries) {
-                String id = entry.path("Id").asText();
-                String messageBody = entry.path("MessageBody").asText(null);
-                JsonNode entryDelayNode = entry.path("DelaySeconds");
-                Integer delaySeconds = parseOptionalInteger(entryDelayNode, "DelaySeconds");
-                String messageGroupId = entry.path("MessageGroupId").asText(null);
-                String messageDeduplicationId = entry.path("MessageDeduplicationId").asText(null);
+        for (JsonNode entry : entries) {
+            String id = entry.path("Id").asText();
+            String messageBody = entry.path("MessageBody").asText(null);
+            JsonNode entryDelayNode = entry.path("DelaySeconds");
+            Integer delaySeconds = parseOptionalInteger(entryDelayNode, "DelaySeconds");
+            String messageGroupId = entry.path("MessageGroupId").asText(null);
+            String messageDeduplicationId = entry.path("MessageDeduplicationId").asText(null);
 
-                Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
-                JsonNode attrsNode = entry.path("MessageAttributes");
-                if (attrsNode.isObject()) {
-                    attrsNode.fields().forEachRemaining(attrEntry -> {
-                        String name = attrEntry.getKey();
-                        String dataType = attrEntry.getValue().path("DataType").asText(null);
-                        String stringValue = attrEntry.getValue().path("StringValue").asText(null);
-                        String binaryValueBase64 = attrEntry.getValue().path("BinaryValue").asText(null);
-                        if (dataType != null) {
-                            if (binaryValueBase64 != null) {
-                                byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
-                                messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
-                            } else if (stringValue != null) {
-                                messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
-                            }
+            Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
+            JsonNode attrsNode = entry.path("MessageAttributes");
+            if (attrsNode.isObject()) {
+                attrsNode.fields().forEachRemaining(attrEntry -> {
+                    String name = attrEntry.getKey();
+                    String dataType = attrEntry.getValue().path("DataType").asText(null);
+                    String stringValue = attrEntry.getValue().path("StringValue").asText(null);
+                    String binaryValueBase64 = attrEntry.getValue().path("BinaryValue").asText(null);
+                    if (dataType != null) {
+                        if (binaryValueBase64 != null) {
+                            byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                            messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
+                        } else if (stringValue != null) {
+                            messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
                         }
-                    });
-                }
-
-                String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
-                        .path("AWSTraceHeader").path("StringValue").asText(null);
-
-                totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
-                parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
-                        messageGroupId, messageDeduplicationId, messageAttributes,
-                        entryAwsTraceHeader));
+                    }
+                });
             }
+
+            String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
+                    .path("AWSTraceHeader").path("StringValue").asText(null);
+
+            totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
+            parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
+                    messageGroupId, messageDeduplicationId, messageAttributes,
+                    entryAwsTraceHeader));
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
 
         String senderId = sqsService.resolveCallerSenderId(queueUrl);
         for (ParsedEntry parsed : parsedEntries) {
-                String id = parsed.id();
-                try {
-                    Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
-                            parsed.groupId(), parsed.dedupId(), parsed.attributes(),
-                            parsed.awsTraceHeader(), senderId, region);
-                    ObjectNode success = objectMapper.createObjectNode();
-                    success.put("Id", id);
-                    success.put("MessageId", msg.getMessageId());
-                    success.put("MD5OfMessageBody", msg.getMd5OfBody());
-                    if (msg.getMd5OfMessageAttributes() != null) {
-                        success.put("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
-                    }
-                    if (msg.getSequenceNumber() > 0) {
-                        success.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
-                    }
-                    successful.add(success);
-                } catch (AwsException e) {
-                    ObjectNode fail = objectMapper.createObjectNode();
-                    fail.put("Id", id);
-                    fail.put("Code", e.getErrorCode());
-                    fail.put("Message", e.getMessage());
-                    fail.put("SenderFault", true);
-                    failed.add(fail);
+            String id = parsed.id();
+            try {
+                Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
+                        parsed.groupId(), parsed.dedupId(), parsed.attributes(),
+                        parsed.awsTraceHeader(), senderId, region);
+                ObjectNode success = objectMapper.createObjectNode();
+                success.put("Id", id);
+                success.put("MessageId", msg.getMessageId());
+                success.put("MD5OfMessageBody", msg.getMd5OfBody());
+                if (msg.getMd5OfMessageAttributes() != null) {
+                    success.put("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
                 }
+                if (msg.getSequenceNumber() > 0) {
+                    success.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
+                }
+                successful.add(success);
+            } catch (AwsException e) {
+                ObjectNode fail = objectMapper.createObjectNode();
+                fail.put("Id", id);
+                fail.put("Code", e.getErrorCode());
+                fail.put("Message", e.getMessage());
+                fail.put("SenderFault", true);
+                failed.add(fail);
+            }
         }
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -512,16 +510,15 @@ public class SqsJsonHandler {
 
     private Response handleChangeMessageVisibilityBatch(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
-        JsonNode entries = request.path("Entries");
+        JsonNode entries = requireBatchEntries(request);
+        sqsService.validateBatchEntryCount("ChangeMessageVisibilityBatchRequestEntry", entries.size());
 
         List<SqsService.ChangeVisibilityBatchEntry> batchEntries = new ArrayList<>();
-        if (entries.isArray()) {
-            for (JsonNode entry : entries) {
-                batchEntries.add(new SqsService.ChangeVisibilityBatchEntry(
-                        entry.path("Id").asText(),
-                        entry.path("ReceiptHandle").asText(null),
-                        entry.path("VisibilityTimeout").asInt(30)));
-            }
+        for (JsonNode entry : entries) {
+            batchEntries.add(new SqsService.ChangeVisibilityBatchEntry(
+                    entry.path("Id").asText(),
+                    entry.path("ReceiptHandle").asText(null),
+                    entry.path("VisibilityTimeout").asInt(30)));
         }
 
         List<SqsService.BatchResultEntry> results =
@@ -614,5 +611,18 @@ public class SqsJsonHandler {
                     "Value for parameter " + paramName + " is invalid. Reason: Must be an integer.", 400);
         }
         return node.asInt();
+    }
+
+    private JsonNode requireBatchEntries(JsonNode request) {
+        JsonNode entries = request.path("Entries");
+        if (entries.isMissingNode() || entries.isNull()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter Entries.", 400);
+        }
+        if (!entries.isArray()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value for parameter Entries is invalid. Reason: Must be an array.", 400);
+        }
+        return entries;
     }
 }

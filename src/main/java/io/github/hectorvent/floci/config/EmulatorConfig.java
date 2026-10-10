@@ -1121,6 +1121,20 @@ public interface EmulatorConfig {
     interface CloudControlServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Worker threads that run CreateResource provisioning.
+         * Env: FLOCI_SERVICES_CLOUDCONTROL_CREATE_WORKER_THREADS
+         */
+        @WithDefault("4")
+        int createWorkerThreads();
+
+        /**
+         * CreateResource requests that may wait for a worker; past that a new create is refused with
+         * ThrottlingException. Env: FLOCI_SERVICES_CLOUDCONTROL_CREATE_QUEUE_CAPACITY
+         */
+        @WithDefault("64")
+        int createQueueCapacity();
     }
     interface S3VectorsServiceConfig {
         @WithDefault("true")

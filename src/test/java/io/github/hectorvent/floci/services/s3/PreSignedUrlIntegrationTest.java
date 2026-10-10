@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import jakarta.inject.Inject;
@@ -15,23 +15,15 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-@TestProfile(PreSignedUrlIntegrationTest.PresignValidationProfile.class)
+@TestProfile(ValidateSignaturesProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class PreSignedUrlIntegrationTest {
-
-    public static final class PresignValidationProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.auth.validate-signatures", "true");
-        }
-    }
 
     private static final String BUCKET = "presign-test-bucket";
 

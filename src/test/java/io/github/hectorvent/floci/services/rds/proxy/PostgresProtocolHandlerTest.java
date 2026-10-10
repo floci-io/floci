@@ -634,13 +634,7 @@ class PostgresProtocolHandlerTest {
                 DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
                 DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
 
-                // Applied while the backend session is still the master's, this would outlive the
-                // handover and let RESET ROLE regain the master.
-                Map<String, String> clientStartup = new LinkedHashMap<>();
-                clientStartup.put("user", "approle");
-                clientStartup.put("database", "postgres");
-                clientStartup.put("options", "-c role=dbadmin");
-                writeStartup(clientOut, clientStartup);
+                writeStartup(clientOut, "approle", "postgres");
                 readCleartextPasswordChallenge(clientIn);
                 writePassword(clientOut, rdsToken("approle"));
                 readAuthenticationOk(clientIn);
@@ -658,10 +652,343 @@ class PostgresProtocolHandlerTest {
             }
 
             assertEquals("dbadmin", backendStartup.get().get("user"), "backend connection is still opened as master");
-            assertEquals(List.of("user", "database"), List.copyOf(backendStartup.get().keySet()),
-                    "client startup parameters are not applied to the master session");
             assertEquals("SET SESSION AUTHORIZATION \"approle\"", backendQuery.get());
         }
+    }
+
+    @Test
+    void iamSessionAppliesClientStartupParametersAsTheTokenRole() throws Exception {
+        AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
+        AtomicReference<String> settingsQuery = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, backendStartup, new AtomicReference<>(),
+                            "approle", true, (in, out) -> {
+                                settingsQuery.set(readSimpleQuery(in));
+                                writeParameterStatus(out, "application_name", "svc");
+                                writeCommandComplete(out, "SELECT 1");
+                                writeReadyForQuery(out);
+                            });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                Map<String, String> clientStartup = new LinkedHashMap<>();
+                clientStartup.put("user", "approle");
+                clientStartup.put("database", "postgres");
+                clientStartup.put("application_name", "svc");
+                clientStartup.put("options", "-c search_path=app --statement-timeout=5s");
+                writeStartup(clientOut, clientStartup);
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+                readAuthenticationOk(clientIn);
+
+                Map<String, String> params = readParametersUntilReadyForQuery(clientIn);
+                assertEquals("approle", params.get("session_authorization"));
+                assertEquals("svc", params.get("application_name"));
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+
+            assertEquals(List.of("user", "database"), List.copyOf(backendStartup.get().keySet()),
+                    "client startup parameters are not applied to the master session");
+            assertEquals("SELECT pg_catalog.set_config(E'search_path', E'app', false), "
+                    + "pg_catalog.set_config(E'statement_timeout', E'5s', false), "
+                    + "pg_catalog.set_config(E'application_name', E'svc', false)",
+                    settingsQuery.get());
+        }
+    }
+
+    @Test
+    void iamSessionIsRefusedWhenPostgresRefusesAStartupParameterForTheTokenRole() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
+                            "approle", true, (in, out) -> {
+                                readSimpleQuery(in);
+                                // What PostgreSQL answers when a role that is not a member of
+                                // the master asks to act as it.
+                                writeErrorResponse(out, "ERROR", "42501",
+                                        "permission denied to set role \"dbadmin\"");
+                                writeReadyForQuery(out);
+                            });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                Map<String, String> clientStartup = new LinkedHashMap<>();
+                clientStartup.put("user", "approle");
+                clientStartup.put("database", "postgres");
+                clientStartup.put("options", "-c role=dbadmin");
+                writeStartup(clientOut, clientStartup);
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+
+                Map<Character, String> error = readErrorResponse(clientIn);
+                assertEquals("FATAL", error.get('S'));
+                assertEquals("42501", error.get('C'));
+                assertEquals("permission denied to set role \"dbadmin\"", error.get('M'));
+                assertEquals(-1, clientIn.read(), "the login must fail, not continue without the parameter");
+
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+    }
+
+    @Test
+    void iamSessionIsRefusedBeforeAnyParameterIsAppliedWhenOneWouldRestoreTheMaster() throws Exception {
+        AtomicReference<Integer> afterHandover = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
+                            "approle", true, (in, out) -> afterHandover.set(in.read()));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                Map<String, String> clientStartup = new LinkedHashMap<>();
+                clientStartup.put("user", "approle");
+                clientStartup.put("database", "postgres");
+                clientStartup.put("options", "-c session_replication_role=replica -c session_authorization=dbadmin");
+                writeStartup(clientOut, clientStartup);
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+
+                Map<Character, String> error = readErrorResponse(clientIn);
+                assertEquals("FATAL", error.get('S'));
+                assertEquals("42501", error.get('C'));
+                assertEquals("permission denied to set session authorization", error.get('M'));
+                assertEquals(-1, clientIn.read(), "the login must fail");
+
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+        assertEquals(-1, afterHandover.get(), "no setting may reach the backend once one is refused");
+    }
+
+    @Test
+    void iamSessionIsRefusedWhenPostgresReportsAnotherSessionRoleAfterTheParameters() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
+                            "approle", true, (in, out) -> {
+                                readSimpleQuery(in);
+                                writeParameterStatus(out, "session_authorization", "dbadmin");
+                                writeParameterStatus(out, "is_superuser", "on");
+                                writeCommandComplete(out, "SELECT 1");
+                                writeReadyForQuery(out);
+                            });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                Map<String, String> clientStartup = new LinkedHashMap<>();
+                clientStartup.put("user", "approle");
+                clientStartup.put("database", "postgres");
+                clientStartup.put("application_name", "svc");
+                writeStartup(clientOut, clientStartup);
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+
+                Map<Character, String> error = readErrorResponse(clientIn);
+                assertEquals("FATAL", error.get('S'));
+                assertEquals("42501", error.get('C'));
+                assertEquals(-1, clientIn.read(), "the session must not be handed over as the master");
+
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+    }
+
+    @Test
+    void sessionSettingsApplyOptionsFirstThenTheOtherParametersInOrder() throws Exception {
+        Map<String, String> startup = new LinkedHashMap<>();
+        startup.put("user", "approle");
+        startup.put("application_name", "svc");
+        startup.put("database", "postgres");
+        startup.put("_pq_.test_extension", "on");
+        startup.put("DateStyle", "ISO");
+        startup.put("replication", "off");
+        startup.put("options", "-c search_path=app");
+
+        assertEquals(List.of(
+                        new PostgresProtocolHandler.SessionSetting("search_path", "app"),
+                        new PostgresProtocolHandler.SessionSetting("application_name", "svc"),
+                        new PostgresProtocolHandler.SessionSetting("DateStyle", "ISO")),
+                PostgresProtocolHandler.sessionSettings(startup));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"f", "FALSE", "n", "no", "of", "OFF", "0"})
+    void sessionSettingsTreatEveryFalseReplicationValueAsAnOrdinaryConnection(String value) throws Exception {
+        assertEquals(List.of(), PostgresProtocolHandler.sessionSettings(
+                Map.of("user", "approle", "replication", value)));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"database,0A000", "true,0A000", "t,0A000", "on,0A000", "1,0A000", "o,22023", "maybe,22023"})
+    void sessionSettingsRefuseAReplicationConnectionOrAValuePostgresCannotRead(String value, String sqlState) {
+        PostgresProtocolHandler.StartupParameterException e = assertThrows(
+                PostgresProtocolHandler.StartupParameterException.class,
+                () -> PostgresProtocolHandler.sessionSettings(Map.of("user", "approle", "replication", value)));
+        assertEquals(sqlState, e.sqlState());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"t,true", "TRUE,true", "y,true", "yes,true", "on,true", "1,true",
+            "f,false", "fal,false", "n,false", "of,false", "off,false", "0,false"})
+    void parseBoolReadsWhatPostgresReads(String value, boolean expected) {
+        assertEquals(Boolean.valueOf(expected), PostgresProtocolHandler.parseBool(value));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "o", "truex", "10", "nope"})
+    void parseBoolRefusesWhatPostgresRefuses(String value) {
+        assertNull(PostgresProtocolHandler.parseBool(value));
+    }
+
+    @Test
+    void sessionAuthorizationNamingAnotherRoleIsRefusedWhateverItsSpelling() throws Exception {
+        for (Map<String, String> startup : List.of(
+                Map.of("options", "-c session_authorization=dbadmin"),
+                Map.of("options", "--session-authorization=dbadmin"),
+                Map.of("Session_Authorization", "dbadmin"))) {
+            List<PostgresProtocolHandler.SessionSetting> settings = PostgresProtocolHandler.sessionSettings(startup);
+            PostgresProtocolHandler.StartupParameterException e = assertThrows(
+                    PostgresProtocolHandler.StartupParameterException.class,
+                    () -> PostgresProtocolHandler.refuseSessionAuthorizationChange(settings, "approle"),
+                    startup.toString());
+            assertEquals("42501", e.sqlState());
+            assertEquals("permission denied to set session authorization", e.getMessage());
+        }
+    }
+
+    @Test
+    void sessionAuthorizationNamingTheTokenRoleIsAllowed() throws Exception {
+        PostgresProtocolHandler.refuseSessionAuthorizationChange(
+                PostgresProtocolHandler.sessionSettings(Map.of("options", "-c session_authorization=approle")),
+                "approle");
+    }
+
+    @Test
+    void parseOptionsReadsEverySwitchFormPostgresAccepts() throws Exception {
+        assertEquals(List.of(
+                        new PostgresProtocolHandler.SessionSetting("search_path", "app, public"),
+                        new PostgresProtocolHandler.SessionSetting("work_mem", "64MB"),
+                        new PostgresProtocolHandler.SessionSetting("statement_timeout", "5s"),
+                        new PostgresProtocolHandler.SessionSetting("application_name", "a\\b")),
+                PostgresProtocolHandler.parseOptions(
+                        "  -c search_path=app,\\ public -cwork_mem=64MB\t--statement-timeout=5s -c application_name=a\\\\b "));
+    }
+
+    @Test
+    void parseOptionsSplitsOnlyOnAsciiWhitespaceAndDropsATrailingBackslash() throws Exception {
+        assertEquals(List.of(
+                        new PostgresProtocolHandler.SessionSetting("application_name", "a\u00A0b"),
+                        new PostgresProtocolHandler.SessionSetting("search_path", "app")),
+                PostgresProtocolHandler.parseOptions("-c application_name=a\u00A0b\u000B-c search_path=app\\"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "-B 128|invalid command-line argument for server process: -B",
+            "-c|invalid command-line argument for server process: -c",
+            "-c work_mem|-c work_mem requires a value",
+            "--work_mem|--work_mem requires a value"
+    })
+    void parseOptionsRefusesWhatPostgresRefuses(String options, String message) {
+        PostgresProtocolHandler.StartupParameterException e = assertThrows(
+                PostgresProtocolHandler.StartupParameterException.class,
+                () -> PostgresProtocolHandler.parseOptions(options));
+        assertEquals("42601", e.sqlState());
+        assertEquals(message, e.getMessage());
+    }
+
+    @Test
+    void setConfigStatementQuotesNamesAndValuesAsEscapeStrings() {
+        assertEquals("SELECT pg_catalog.set_config(E'application_name', E'it''s a \\\\ path', false)",
+                PostgresProtocolHandler.setConfigStatement(List.of(
+                        new PostgresProtocolHandler.SessionSetting("application_name", "it's a \\ path"))));
     }
 
     @Test

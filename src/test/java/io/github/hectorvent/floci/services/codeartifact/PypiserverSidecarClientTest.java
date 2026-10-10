@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -13,8 +14,11 @@ import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -374,6 +378,128 @@ class PypiserverSidecarClientTest {
         assertEquals("/simple/a%2F-%2Fb/", observedRawPath.get());
     }
 
+    /**
+     * Confirmed live: pypiserver's own management endpoint ({@code POST /} with
+     * {@code :action=remove_pkg}) only deletes one exact name/version pair per call, matched
+     * against the literal, unnormalized name it derived from the uploaded filename, not the PEP 503
+     * normalized form the simple index uses. An sdist and a wheel of the very same release can
+     * legitimately differ there ({@code demo-pkg} versus {@code demo_pkg}), so this proves
+     * {@code deletePackage} recovers each file's own name from the JSON listing and removes both,
+     * rather than deleting by one shared name and silently leaving the other file behind.
+     */
+    @Test
+    void deletePackageRemovesEveryFileUnderItsOwnRecoveredNameNotOneSharedName() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        respondWithJsonReleases("demo-pkg",
+                Map.of("1.0.0", List.of("demo-pkg-1.0.0.tar.gz", "demo_pkg-1.0.0-py3-none-any.whl")));
+        List<String> removeBodies = new CopyOnWriteArrayList<>();
+        backend.createContext("/", exchange -> {
+            removeBodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+
+        client(manager).deletePackage("pypi-repo-1", "dom", "repo", null, "demo-pkg");
+
+        assertEquals(2, removeBodies.size());
+        assertTrue(removeBodies.stream().anyMatch(b -> b.contains("name=demo-pkg") && b.contains("version=1.0.0")),
+                "expected a remove_pkg call for the sdist's own name: " + removeBodies);
+        assertTrue(removeBodies.stream().anyMatch(b -> b.contains("name=demo_pkg") && b.contains("version=1.0.0")),
+                "expected a remove_pkg call for the wheel's own name: " + removeBodies);
+    }
+
+    /**
+     * A 404 from {@code remove_pkg} means it matched nothing for that exact name/version, which
+     * happens for real when an earlier call in the same {@code deletePackage} loop already removed
+     * every file sharing it; {@code deletePackage} must treat that as already done, not a failure.
+     */
+    @Test
+    void deletePackageToleratesANotFoundResponseFromRemovePkgAsAlreadyRemoved() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        respondWithJsonReleases("demo-pkg", Map.of("1.0.0", List.of("demo-pkg-1.0.0.tar.gz")));
+        backend.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+
+        client(manager).deletePackage("pypi-repo-1", "dom", "repo", null, "demo-pkg");
+    }
+
+    /** A package with no releases at all deletes nothing and does not fail. */
+    @Test
+    void deletePackageIsANoOpForAPackageThatWasNeverUploaded() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        backend.createContext("/demo-pkg/json", exchange -> {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+        backend.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(500, -1);
+            exchange.close();
+        });
+
+        client(manager).deletePackage("pypi-repo-1", "dom", "repo", null, "demo-pkg");
+    }
+
+    @Test
+    void deletePackageThrowsRatherThanReportingNotFoundWhenListingVersionsFails() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        backend.createContext("/demo-pkg/json", exchange -> {
+            exchange.sendResponseHeaders(500, -1);
+            exchange.close();
+        });
+
+        assertThrows(IllegalStateException.class,
+                () -> client(manager).deletePackage("pypi-repo-1", "dom", "repo", null, "demo-pkg"));
+    }
+
+    @Test
+    void deletePackageThrowsRatherThanReportingNotFoundOnARemovePkgServerError() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        respondWithJsonReleases("demo-pkg", Map.of("1.0.0", List.of("demo-pkg-1.0.0.tar.gz")));
+        backend.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(500, -1);
+            exchange.close();
+        });
+
+        assertThrows(IllegalStateException.class,
+                () -> client(manager).deletePackage("pypi-repo-1", "dom", "repo", null, "demo-pkg"));
+    }
+
+    private void respondWithJsonReleases(String packageName, Map<String, List<String>> releases) {
+        StringBuilder json = new StringBuilder("{\"info\":{\"version\":\"\"},\"releases\":{");
+        boolean firstVersion = true;
+        for (Map.Entry<String, List<String>> release : releases.entrySet()) {
+            if (!firstVersion) {
+                json.append(',');
+            }
+            firstVersion = false;
+            json.append('"').append(release.getKey()).append("\":[");
+            boolean firstFile = true;
+            for (String filename : release.getValue()) {
+                if (!firstFile) {
+                    json.append(',');
+                }
+                firstFile = false;
+                json.append("{\"url\":\"/packages/").append(filename).append("\"}");
+            }
+            json.append(']');
+        }
+        json.append("}}");
+        byte[] bytes = json.toString().getBytes(StandardCharsets.UTF_8);
+        backend.createContext("/" + packageName + "/json", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+    }
+
     private void respondWithSimpleIndex(String packageName, String filename) {
         String html = "<a href=\"/packages/" + filename + "\">" + filename + "</a>";
         backend.createContext("/simple/" + packageName + "/", exchange -> {
@@ -390,7 +516,7 @@ class PypiserverSidecarClientTest {
     }
 
     private PypiserverSidecarClient client(PypiserverSidecarManager manager) {
-        return new PypiserverSidecarClient(manager, HttpClient.newHttpClient());
+        return new PypiserverSidecarClient(manager, new ObjectMapper(), HttpClient.newHttpClient());
     }
 
     @SuppressWarnings("unchecked")

@@ -500,6 +500,210 @@ class SsmServiceTest {
     }
 
     @Test
+    void unlabelParameterVersionRemovesLabelsAndReportsMissingOnes() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.labelParameterVersion("/app/key", 1L, List.of("prod", "stable"), region);
+
+        SsmService.UnlabelParameterVersionResult result = ssmService.unlabelParameterVersion(
+                "/app/key", 1L, List.of("prod", "never-attached", "prod"), region);
+
+        assertEquals(List.of("prod"), result.removedLabels());
+        assertEquals(List.of("never-attached"), result.invalidLabels());
+        ParameterHistory v1 = ssmService.getParameterHistory("/app/key", region).get(0);
+        assertEquals(List.of("stable"), v1.getLabels());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.getParameter("/app/key:prod", region));
+        assertEquals("ParameterVersionNotFound", ex.getErrorCode());
+        assertEquals("v1", ssmService.getParameter("/app/key:stable", region).getValue());
+    }
+
+    @Test
+    void unlabelParameterVersionLeavesLabelOnAnotherVersionInPlace() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+        ssmService.labelParameterVersion("/app/key", 2L, List.of("prod"), region);
+
+        SsmService.UnlabelParameterVersionResult result = ssmService.unlabelParameterVersion(
+                "/app/key", 1L, List.of("prod"), region);
+
+        assertEquals(List.of(), result.removedLabels());
+        assertEquals(List.of("prod"), result.invalidLabels());
+        assertEquals("v2", ssmService.getParameter("/app/key:prod", region).getValue());
+    }
+
+    @Test
+    void unlabelParameterVersionMissingParameterThrowsParameterNotFound() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("/app/missing", 1L, List.of("prod"), "eu-west-1"));
+        assertEquals("ParameterNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void unlabelParameterVersionUnknownVersionThrowsParameterVersionNotFound() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("/app/key", 2L, List.of("prod"), region));
+        assertEquals("ParameterVersionNotFound", unknown.getErrorCode());
+        assertEquals("Systems Manager could not find version 2 of /app/key. Verify the version and try again.",
+                unknown.getMessage());
+        AwsException zero = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("/app/key", 0L, List.of("prod"), region));
+        assertEquals("ParameterVersionNotFound", zero.getErrorCode());
+    }
+
+    @Test
+    void unlabelParameterVersionRejectsEmptyOrOversizedLabelLists() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException empty = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("/app/key", 1L, List.of(), region));
+        assertEquals("ValidationException", empty.getErrorCode());
+        List<String> elevenLabels = List.of(
+                "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11");
+        AwsException tooMany = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("/app/key", 1L, elevenLabels, region));
+        assertEquals("ValidationException", tooMany.getErrorCode());
+    }
+
+    @Test
+    void deletesWaitForTheMonitorThatLabelUpdatesHold() throws Exception {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/one", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/two", "v1", "String", null, false, region);
+        List<Thread> deleters = List.of(
+                new Thread(() -> ssmService.deleteParameter("/app/one", region)),
+                new Thread(() -> ssmService.deleteParameters(List.of("/app/two"), region)));
+
+        // Holding the monitor stands in for a label or unlabel call between its lookup and its history write.
+        synchronized (ssmService) {
+            for (Thread deleter : deleters) {
+                deleter.start();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (deleter.getState() != Thread.State.BLOCKED) {
+                    assertTrue(System.nanoTime() < deadline, "delete did not wait for the service monitor");
+                    Thread.onSpinWait();
+                }
+            }
+            assertEquals("v1", ssmService.getParameter("/app/one", region).getValue());
+            assertEquals("v1", ssmService.getParameter("/app/two", region).getValue());
+        }
+        for (Thread deleter : deleters) {
+            deleter.join(TimeUnit.SECONDS.toMillis(5));
+        }
+
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/app/one", region));
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/app/two", region));
+    }
+
+    @Test
+    void unlabelParameterVersionReturnsRemovedLabelsInStoredOrder() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.labelParameterVersion("/app/key", 1L, List.of("mike", "zulu", "alpha"), region);
+
+        SsmService.UnlabelParameterVersionResult result = ssmService.unlabelParameterVersion(
+                "/app/key", 1L, List.of("alpha", "yankee", "mike", "charlie"), region);
+
+        assertEquals(List.of("mike", "alpha"), result.removedLabels());
+        assertEquals(List.of("yankee", "charlie"), result.invalidLabels());
+    }
+
+    @Test
+    void unlabelParameterVersionIgnoresSurroundingWhitespaceButEchoesTheNameAsSent() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.labelParameterVersion("/app/key", 1L, List.of("prod"), region);
+
+        SsmService.UnlabelParameterVersionResult result = ssmService.unlabelParameterVersion(
+                " \t/app/key  ", 1L, List.of("prod"), region);
+        assertEquals(List.of("prod"), result.removedLabels());
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("  /app/nope ", 1L, List.of("prod"), region));
+        assertEquals("Parameter   /app/nope  not found.", missing.getMessage());
+        AwsException version = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion(" /app/key ", 9L, List.of("prod"), region));
+        assertEquals("Systems Manager could not find version 9 of  /app/key . Verify the version and try again.",
+                version.getMessage());
+    }
+
+    @Test
+    void unlabelParameterVersionRejectsAnArnBeforeLookingItUp() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("arn:aws:ssm:us-east-1:123456789012:parameter/nope",
+                        9L, List.of("prod"), "us-east-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Parameter ARN is not supported for this operation.", ex.getMessage());
+    }
+
+    @Test
+    void unlabelParameterVersionRejectsMalformedAndSsmPrefixedNames() {
+        String expected = "Parameter name: can't be prefixed with \"ssm\" (case-insensitive). If formed as a path, "
+                + "it can consist of sub-paths divided by slash symbol; each sub-path can be formed as a mix of "
+                + "letters, numbers and the following 3 symbols .-_";
+        for (String name : List.of("ssm-foo", "/ssm", "/SSM/x", "/a#b", "/a//b", "/a/b/", "a/b", "/a b", "   ",
+                "/aws/a#b")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> ssmService.unlabelParameterVersion(name, 1L, List.of("prod"), "us-east-1"), name);
+            assertEquals("ValidationException", ex.getErrorCode(), name);
+            assertEquals(expected, ex.getMessage(), name);
+        }
+        for (String name : List.of("/a:b/c", "plain-name", "/x/ssm-y", "/x/aws")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> ssmService.unlabelParameterVersion(name, 1L, List.of("prod"), "us-east-1"), name);
+            assertEquals("ParameterNotFound", ex.getErrorCode(), name);
+        }
+    }
+
+    @Test
+    void unlabelParameterVersionDeniesReservedAwsNames() {
+        AwsException path = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("/AWS/foo", 1L, List.of("prod"), "us-east-1"));
+        assertEquals("AccessDeniedException", path.getErrorCode());
+        assertEquals("No access to reserved parameter name: AWS/foo.", path.getMessage());
+        AwsException bare = assertThrows(AwsException.class,
+                () -> ssmService.unlabelParameterVersion("awsfoo", 1L, List.of("prod"), "us-east-1"));
+        assertEquals("No access to reserved parameter name: awsfoo.", bare.getMessage());
+    }
+
+    @Test
+    void labelListViolationWordsEachConstraintAsAws() {
+        String prefix = "failed to satisfy constraint: ";
+        String member = "Member must satisfy constraint: [Member must have length less than or equal to 100, "
+                + "Member must have length greater than or equal to 1]";
+        assertEquals("Value null at 'labels' " + prefix + "Member must not be null",
+                SsmService.labelListViolation(null));
+        assertEquals("Value '[]' at 'labels' " + prefix + "Member must have length greater than or equal to 1",
+                SsmService.labelListViolation(List.of()));
+        assertEquals("Value '[l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11]' at 'labels' " + prefix
+                        + "Member must have length less than or equal to 10",
+                SsmService.labelListViolation(List.of("l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11")));
+        assertEquals("Value '[]' at 'labels' " + prefix + member, SsmService.labelListViolation(List.of("")));
+        assertEquals("Value '[prod, ]' at 'labels' " + prefix + member,
+                SsmService.labelListViolation(List.of("prod", "")));
+        assertNull(SsmService.labelListViolation(List.of("prod")));
+    }
+
+    @Test
+    void unlabelParameterVersionDoesNotMutateStoredHistoryObjectsInPlace() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.labelParameterVersion("/app/key", 1L, List.of("prod"), region);
+        ParameterHistory before = ssmService.getParameterHistory("/app/key", region).get(0);
+
+        ssmService.unlabelParameterVersion("/app/key", 1L, List.of("prod"), region);
+
+        assertTrue(before.getLabels().contains("prod"));
+        ParameterHistory after = ssmService.getParameterHistory("/app/key", region).get(0);
+        assertFalse(after.getLabels().contains("prod"));
+    }
+
+    @Test
     void getParameterWithUnknownVersionThrowsParameterVersionNotFound() {
         String region = "eu-west-1";
         ssmService.putParameter("/app/key", "v1", "String", null, false, region);

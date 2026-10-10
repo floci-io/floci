@@ -81,6 +81,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -166,6 +167,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
     private static final Pattern CUSTOM_SUFFIX_PATTERN = Pattern.compile("[\\w+=,.@-]{1,64}");
     private static final int ROLE_NAME_MAX_LENGTH = 64;
+    /** roleNameType's character set. Excluding {@code :} is what reserves names such as {@code aws:ec2-instance} for AWS. */
+    private static final Pattern ROLE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]+");
     /** groupNameType / instanceProfileNameType: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern IAM_RESOURCE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /**
@@ -1010,6 +1013,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public IamRole createRole(String roleName, String path, String assumeRolePolicyDocument,
                               String description, int maxSessionDuration, Map<String, String> tags,
                               String permissionsBoundaryArn) {
+        validateRoleName(roleName);
         if (permissionsBoundaryArn != null) {
             requirePolicy(permissionsBoundaryArn); // validate before anything is created
         }
@@ -1053,6 +1057,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return aware.getForAccount(accountId, roleName);
         }
         return roles.get(roleName);
+    }
+
+    /** roleNameType: 1-64 characters of {@code [\w+=,.@-]}, reported the way AWS reports a model constraint. */
+    private static void validateRoleName(String roleName) {
+        String constraint;
+        if (roleName == null) {
+            constraint = "Member must not be null";
+        } else if (roleName.isEmpty()) {
+            constraint = "Member must have length greater than or equal to 1";
+        } else if (roleName.length() > ROLE_NAME_MAX_LENGTH) {
+            constraint = "Member must have length less than or equal to " + ROLE_NAME_MAX_LENGTH;
+        } else if (!ROLE_NAME_PATTERN.matcher(roleName).matches()) {
+            constraint = "Member must satisfy regular expression pattern: " + ROLE_NAME_PATTERN.pattern();
+        } else {
+            return;
+        }
+        String value = roleName == null ? "null" : "'" + roleName + "'";
+        throw new AwsException("ValidationError", "1 validation error detected: Value " + value
+                + " at 'roleName' failed to satisfy constraint: " + constraint, 400);
     }
 
     /**
@@ -2696,6 +2719,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void deleteServerCertificate(String name) {
         deleteServerCertificate(name, List.of());
+    }
+
+    /**
+     * Runs an action that checks a server certificate and then records a reference to it, holding
+     * the lock {@link #deleteServerCertificate} takes so the certificate cannot be deleted in
+     * between. Without it the check and the write straddle the delete: the delete sees no
+     * reference because the referring resource is not saved yet, removes the certificate, and the
+     * resource is then saved pointing at something that is gone.
+     *
+     * <p>Safe to call from inside a provider's own monitor, because the ordering only ever runs
+     * one way. {@code deleteServerCertificate} holds this lock while calling
+     * {@link ServerCertificateReferenceProvider#serverCertificateReferences()} on each provider,
+     * and those are plain reads over the provider's own store that take no provider monitor, so
+     * IAM never waits on a provider while a provider waits on IAM.
+     */
+    public <T> T supplyWithServerCertificatesHeld(Supplier<T> action) {
+        synchronized (serverCertificateLock) {
+            return action.get();
+        }
+    }
+
+    /** {@link #supplyWithServerCertificatesHeld} for an action with no result. */
+    public void runWithServerCertificatesHeld(Runnable action) {
+        synchronized (serverCertificateLock) {
+            action.run();
+        }
     }
 
     /**
@@ -4416,6 +4465,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
      */
     public CallerContext resolveCallerContext(String accessKeyId) {
+        return resolveCallerContext(accessKeyId, Instant.now());
+    }
+
+    /**
+     * {@link #resolveCallerContext(String)} as of {@code now}. Enforcement passes the moment it
+     * asked {@link #isExpiredSession} about, so a session that expires between the two calls is
+     * neither deleted here nor then answered as a key that exists nowhere.
+     */
+    public CallerContext resolveCallerContext(String accessKeyId, Instant now) {
         // Check user access keys
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
@@ -4430,7 +4488,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
-            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+            if (session.getExpiration() != null && session.getExpiration().isBefore(now)) {
                 deleteSession(accessKeyId, session);
                 return null; // expired — unknown key → bypass
             }
@@ -4465,6 +4523,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * an unauthenticated caller, so enforcement needs to tell them apart. The lookup spans every
      * account deliberately: a key belonging to another account is a real credential, and denying
      * it here would be a false rejection rather than a closed hole.
+     *
+     * <p>An inactive key counts too. {@link #registerIssuedSession} relies on that, so a session
+     * minted with an inactive key has no issuer rather than acting as the account root, and
+     * enforcement refuses the key itself through {@link #isInactiveAccessKey}.
      */
     public boolean isKnownAccessKey(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
@@ -4478,6 +4540,43 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         return accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware
                 && !aware.scanAllAccountEntries(accessKeyId::equals).isEmpty();
+    }
+
+    /**
+     * True when this is an IAM user's long-term access key, in any account, that is not Active. An
+     * inactive key can't be used for API calls (IAM User Guide, "Manage access keys for IAM
+     * users"), so enforcement refuses it as it refuses a key that exists nowhere, rather than
+     * letting {@link #isKnownAccessKey}, which counts it as a credential, wave it through.
+     */
+    public boolean isInactiveAccessKey(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank() || isTemporaryAccessKey(accessKeyId)) {
+            return false;
+        }
+        // Routing sends an active key to its own account, so the usual case is answered here
+        // without scanning the others. An inactive key lands in the default account instead.
+        Optional<AccessKey> routed = accessKeys.get(accessKeyId);
+        if (routed.isPresent()) {
+            return !"Active".equals(routed.get().getStatus());
+        }
+        return accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware
+                && aware.scanAllAccountEntries(accessKeyId::equals).stream()
+                        .anyMatch(entry -> !"Active".equals(entry.value().getStatus()));
+    }
+
+    /**
+     * True when this temporary access key belongs to a session that had expired by {@code now} but
+     * is still stored. AWS answers its use with {@code ExpiredTokenException} rather than as a key
+     * it does not know, so enforcement asks before {@link #resolveCallerContext(String, Instant)},
+     * which deletes such a session and leaves nothing to tell the two apart.
+     */
+    public boolean isExpiredSession(String accessKeyId, Instant now) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return false;
+        }
+        return findSessionForCallerContext(accessKeyId)
+                .map(SessionCredential::getExpiration)
+                .filter(expiration -> expiration.isBefore(now))
+                .isPresent();
     }
 
     private Optional<SessionCredential> findSessionForCallerContext(String accessKeyId) {

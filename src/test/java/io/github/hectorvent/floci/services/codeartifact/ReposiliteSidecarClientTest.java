@@ -578,6 +578,27 @@ class ReposiliteSidecarClientTest {
                 "com.example", "broken"));
     }
 
+    @Test
+    void deletePackageSendsADeleteToTheGroupArtifactDirectory() {
+        AtomicReference<String> deletedPath = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/gone/", exchange -> {
+            deletedPath.set(exchange.getRequestURI().toString());
+            respond(exchange, 200, "");
+        });
+
+        client.deletePackage("dom--repo", "dom", "repo", "com.example", "gone");
+
+        assertThat(deletedPath.get(), equalTo("/dom--repo/com/example/gone/"));
+    }
+
+    @Test
+    void deletePackageThrowsWhenTheSidecarAnswersWithAnUnexpectedStatus() {
+        server.createContext("/dom--repo/com/example/weird/", exchange -> respond(exchange, 500, ""));
+
+        assertThrows(IllegalStateException.class, () -> client.deletePackage("dom--repo", "dom", "repo",
+                "com.example", "weird"));
+    }
+
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);

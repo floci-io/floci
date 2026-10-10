@@ -30,6 +30,13 @@ import java.util.regex.Pattern;
 @PreMatching
 public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
 
+    /**
+     * The number of bytes this filter appended to a Query body, set only when it appended any.
+     * {@link SigV4HeaderSignatureFilter} verifies the body the client signed, which ends before them.
+     */
+    public static final String APPENDED_BODY_BYTES_PROPERTY =
+            SqsQueueUrlRouterFilter.class.getName() + ".appendedBodyBytes";
+
     private static final Pattern QUEUE_PATH = Pattern.compile("^/(\\d+)/([^/]+)$");
 
     @Override
@@ -74,6 +81,7 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
                     .getBytes(StandardCharsets.UTF_8);
             ctx.setEntityStream(new SequenceInputStream(ctx.getEntityStream(),
                     new ByteArrayInputStream(injection)));
+            ctx.setProperty(APPENDED_BODY_BYTES_PROPERTY, injection.length);
             String cl = ctx.getHeaderString("Content-Length");
             if (cl != null) {
                 ctx.getHeaders().putSingle("Content-Length",

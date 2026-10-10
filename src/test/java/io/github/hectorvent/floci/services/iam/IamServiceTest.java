@@ -1589,6 +1589,80 @@ class IamServiceTest {
     }
 
     @Test
+    void anInactiveAccessKeyIsReportedWhicheverAccountHoldsIt() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey inactive = new AccessKey("AKIAINACTIVEEXAMPLE", "secret", "worker");
+        inactive.setStatus("Inactive");
+        accessKeys.putForAccount("111122223333", inactive.getAccessKeyId(), inactive);
+        AccessKey active = new AccessKey("AKIAACTIVEEXAMPLE", "secret", "worker");
+        accessKeys.putForAccount("111122223333", active.getAccessKeyId(), active);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        // Routing skips the inactive key, so a request lands in another account than the one holding it.
+        assertTrue(service.isInactiveAccessKey(inactive.getAccessKeyId()));
+        assertFalse(service.isInactiveAccessKey(active.getAccessKeyId()));
+        assertFalse(service.isInactiveAccessKey("AKIADOESNOTEXIST0000"));
+        assertFalse(service.isInactiveAccessKey("ASIATEMPORARYEXAMPLE"));
+        assertFalse(service.isInactiveAccessKey(null));
+    }
+
+    @Test
+    void anExpiredSessionIsReportedWhicheverAccountStoresItAndIsNotDeletedByAsking() {
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+        service.registerSessionForAccount("111122223333", "ASIAEXPIREDEXAMPLE", "secret",
+                "arn:aws:iam::111122223333:role/worker", Instant.parse("2020-01-01T00:00:00Z"), null);
+        service.registerSessionForAccount("111122223333", "ASIALIVEEXAMPLE", "secret",
+                "arn:aws:iam::111122223333:role/worker", Instant.parse("2999-01-01T00:00:00Z"), null);
+
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+
+        assertTrue(service.isExpiredSession("ASIAEXPIREDEXAMPLE", now));
+        // Still stored, so a second request is answered the same way.
+        assertTrue(service.isExpiredSession("ASIAEXPIREDEXAMPLE", now));
+        assertFalse(service.isExpiredSession("ASIALIVEEXAMPLE", now));
+        assertFalse(service.isExpiredSession("ASIADOESNOTEXIST0000", now));
+        assertFalse(service.isExpiredSession("AKIAEXPIREDEXAMPLE", now));
+        assertFalse(service.isExpiredSession(null, now));
+    }
+
+    @Test
+    void aSessionLiveAtTheMomentEnforcementAsksAboutIsResolvedAndKept() {
+        // Enforcement asks both questions about one moment. A lookup reading its own, later clock
+        // could find the session expired, delete it and leave it to be answered as unknown.
+        IamService service = iamService(false, new InMemoryStorage<>(), new InMemoryStorage<>());
+        Instant expiration = Instant.parse("2026-01-01T00:00:00Z");
+        service.registerSessionForAccount("000000000000", "ASIAEXPIRINGEXAMPLE", "secret",
+                "arn:aws:iam::000000000000:role/worker", expiration, null);
+        Instant asked = expiration.minusNanos(1);
+
+        assertFalse(service.isExpiredSession("ASIAEXPIRINGEXAMPLE", asked));
+        assertNotNull(service.resolveCallerContext("ASIAEXPIRINGEXAMPLE", asked));
+        // Not deleted, so the next request finds it expired rather than unknown.
+        assertTrue(service.isExpiredSession("ASIAEXPIRINGEXAMPLE", expiration.plusNanos(1)));
+    }
+
+    @Test
+    void anAccessKeyOfTheRequestAccountIsCheckedWithoutScanningOtherAccounts() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        AccessKey active = new AccessKey("AKIAOWNACTIVEKEY", "secret", "dev");
+        accessKeys.putForAccount("000000000000", active.getAccessKeyId(), active);
+        AccessKey inactive = new AccessKey("AKIAOWNINACTIVEKEY", "secret", "dev");
+        inactive.setStatus("Inactive");
+        accessKeys.putForAccount("000000000000", inactive.getAccessKeyId(), inactive);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertFalse(service.isInactiveAccessKey(active.getAccessKeyId()));
+        assertTrue(service.isInactiveAccessKey(inactive.getAccessKeyId()));
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
     void findSecretKeyDoesNotResolveAnotherAccountsKey() {
         // The ElastiCache, MemoryDB and RDS IAM-auth proxies verify through findSecretKey and do
         // not compare the key's account with the cluster's, so another account's key must stay unknown.

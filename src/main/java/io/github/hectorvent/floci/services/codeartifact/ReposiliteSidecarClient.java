@@ -131,12 +131,8 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     public boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
             String packageName) {
         String baseUrl = manager.ensureReady();
-        StringBuilder path = new StringBuilder("/").append(SidecarUriUtils.encodeSegment(repositoryContainerId));
-        for (String namespacePart : namespace.split("\\.", -1)) {
-            path.append('/').append(SidecarUriUtils.encodeSegment(namespacePart));
-        }
-        path.append('/').append(SidecarUriUtils.encodeSegment(packageName)).append('/');
-        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path.toString()))
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
+                        packageDirectoryPath(repositoryContainerId, namespace, packageName)))
                 .timeout(Duration.ofSeconds(30))
                 .header("Authorization", manager.basicAuthHeader())
                 .GET()
@@ -150,6 +146,39 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
                     + "upstream returned " + status);
         }
         return true;
+    }
+
+    /**
+     * Removes a whole package, every version at once: a single {@code DELETE} on the group/artifact
+     * directory. Confirmed against a live Reposilite container: it recursively removes everything
+     * beneath that path in one call. {@link #packageExists} is checked by the caller first, since
+     * Reposilite answers a confusing HTTP 500 for a {@code DELETE} on a path that was never there,
+     * not a 404.
+     */
+    @Override
+    public void deletePackage(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        String baseUrl = manager.ensureReady();
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
+                        packageDirectoryPath(repositoryContainerId, namespace, packageName)))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .DELETE()
+                .build();
+        HttpResponse<Void> response = send(request, BodyHandlers.discarding());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not delete " + packageName
+                    + " from the Reposilite sidecar: upstream returned " + response.statusCode());
+        }
+    }
+
+    private static String packageDirectoryPath(String repositoryContainerId, String namespace, String packageName) {
+        StringBuilder path = new StringBuilder("/").append(SidecarUriUtils.encodeSegment(repositoryContainerId));
+        for (String namespacePart : namespace.split("\\.", -1)) {
+            path.append('/').append(SidecarUriUtils.encodeSegment(namespacePart));
+        }
+        path.append('/').append(SidecarUriUtils.encodeSegment(packageName)).append('/');
+        return path.toString();
     }
 
     /** Ensures a Reposilite repository named {@code repoId} exists, creating it if not. */

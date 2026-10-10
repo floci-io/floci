@@ -43,6 +43,7 @@ class RedshiftDataResourceResolverTest {
     private RedshiftDataResourceResolver resolver(RedshiftService redshift, SecretsManagerService secrets) {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT);
+        when(regionResolver.getDefaultRegion()).thenReturn(REGION);
         return new RedshiftDataResourceResolver(redshift, secrets, mapper, broker, regionResolver, serverless);
     }
 
@@ -64,6 +65,21 @@ class RedshiftDataResourceResolverTest {
         assertEquals("dev", target.database());
         assertEquals("admin", target.user());
         assertEquals("Secret123", target.password());
+    }
+
+    @Test
+    void aProvisionedClusterArnCarriesTheCallersAccount() {
+        RedshiftService redshift = mock(RedshiftService.class);
+        when(redshift.describeClusters("wh")).thenReturn(List.of(cluster()));
+        ObjectNode req = mapper.createObjectNode();
+        req.put("ClusterIdentifier", "wh");
+        req.put("DbUser", "admin");
+        req.put("Database", "dev");
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(redshift, mock(SecretsManagerService.class)).resolve(req, REGION);
+
+        assertEquals("arn:aws:redshift:us-east-1:" + ACCOUNT + ":cluster:wh", target.arn());
     }
 
     private static RedshiftServerlessService.WorkgroupTarget workgroupTarget() {

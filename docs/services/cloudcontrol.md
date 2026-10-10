@@ -26,6 +26,12 @@ Cloud Control.
   `GetResourceRequestStatus` with the token until the status is `SUCCESS` or `FAILED`.
   `DeleteResource` is synchronous (deletes are fast enough not to need polling) but
   still returns a `ProgressEvent` for API-shape consistency.
+- **Create backpressure**: creates run on 4 workers with room for 64 more queued, both
+  set in [Configuration](#configuration). This is a Floci limit, not an AWS quota. A
+  `CreateResource` beyond that fails with `ThrottlingException` (HTTP 400) and no
+  request token; the AWS SDKs retry it automatically. Outside `memory` storage mode,
+  creates still `IN_PROGRESS` when Floci stopped are replayed on the next start, even
+  past that limit.
 - **`ListResources` / `GetResource` type coverage**: the read side lists
   `AWS::S3::Bucket`, `AWS::EC2::VPC`, `AWS::EC2::Subnet`, `AWS::EC2::SecurityGroup`,
   `AWS::EC2::Instance`, `AWS::EC2::LaunchTemplate`, `AWS::IAM::Role`, `AWS::IAM::User`,
@@ -46,3 +52,11 @@ Cloud Control.
   that's still there.
 - **No account context**: Cloud Control requests don't carry an account id; Floci uses
   its default test account (`000000000000`) for all resources.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_CLOUDCONTROL_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_CLOUDCONTROL_CREATE_WORKER_THREADS` | `4` | Threads that run `CreateResource` provisioning |
+| `FLOCI_SERVICES_CLOUDCONTROL_CREATE_QUEUE_CAPACITY` | `64` | Creates that may wait for a free thread; past that a new `CreateResource` fails with `ThrottlingException` |

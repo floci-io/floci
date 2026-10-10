@@ -123,6 +123,51 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         stack = null;
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void selectedTagDynamicReferenceDoesNotExpandItsResultBeforeSesValidation(boolean updating) throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        String source = "/" + stack + "/source";
+        String nested = "/" + stack + "/literal";
+        String literal = "{{resolve:ssm:" + nested + "}}";
+        try {
+            for (Map.Entry<String, String> parameter : Map.of(source, literal, nested, "expanded-again").entrySet()) {
+                given().header("Authorization", auth("000000000000", "ssm"))
+                        .contentType("application/x-amz-json-1.1").header("X-Amz-Target", "AmazonSSM.PutParameter")
+                        .body(Map.of("Name", parameter.getKey(), "Value", parameter.getValue(), "Type", "String"))
+                        .post("/").then().statusCode(200);
+            }
+            if (updating) {
+                cfn("CreateStack", template(identityName, false)).then().statusCode(200);
+                awaitStatus("CREATE_COMPLETE");
+            }
+            ObjectNode template = (ObjectNode) MAPPER.readTree(template(identityName, false));
+            template.withObject("/Conditions").set("IncludeTag",
+                    MAPPER.valueToTree(Map.of("Fn::Equals", List.of("included", "included"))));
+            template.withObject("/Resources/Identity/Properties").set("Tags", MAPPER.valueToTree(List.of(Map.of(
+                    "Key", "chain",
+                    "Value", Map.of("Fn::If", List.of("IncludeTag", "{{resolve:ssm:" + source + "}}",
+                            Map.of("Ref", "AWS::NoValue")))))));
+            cfn(updating ? "UpdateStack" : "CreateStack", template.toString()).then().statusCode(200);
+            awaitStatus(updating ? "UPDATE_ROLLBACK_COMPLETE" : "ROLLBACK_COMPLETE");
+            String events = cfn("DescribeStackEvents", null).then().statusCode(200).extract().asString();
+            assertTrue(events.contains("Tags can only contain"), events);
+            if (updating) {
+                assertEquals("old", sesIdentity(identityName).jsonPath().getString(
+                        "Tags.find { it.Key == 'purpose' }.Value"));
+                assertEquals(null, sesIdentity(identityName).jsonPath().getString(
+                        "Tags.find { it.Key == 'chain' }.Value"));
+            } else {
+                assertEquals(404, sesIdentity(identityName).statusCode());
+            }
+        } finally {
+            given().header("Authorization", auth("000000000000", "ssm"))
+                    .contentType("application/x-amz-json-1.1").header("X-Amz-Target", "AmazonSSM.DeleteParameters")
+                    .body(Map.of("Names", List.of(source, nested))).post("/").then().statusCode(200);
+        }
+    }
+
     @Test
     void emailAddressIdentityHasNoDomainDkimRecordsAndDeletesWithStack() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
@@ -286,6 +331,43 @@ class CloudFormationSesEmailIdentityIntegrationTest {
                         .contains(XmlParser.extractFirst(body, "StackStatus", null)));
         assertEquals("ROLLBACK_COMPLETE", XmlParser.extractFirst(failed, "StackStatus", null), failed);
         sesIdentity(identityName).then().statusCode(404);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedCreateOrReplacementCannotDeleteAnExistingIdentity(boolean replacing) throws Exception {
+        String existing = "existing-ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String original = "original-" + existing;
+        stack = "cfn-ses-collision-" + Long.toString(System.nanoTime(), 36);
+        given().header("Authorization", SES_AUTH).contentType("application/json")
+                .body(Map.of("EmailIdentity", existing, "Tags", List.of(Map.of("Key", "owner", "Value", "external"))))
+                .post("/v2/email/identities").then().statusCode(200);
+        List<String> tokens = sesIdentity(existing).jsonPath().getList("DkimAttributes.Tokens", String.class);
+        try {
+            if (replacing) {
+                cfn("CreateStack", template(original, false)).then().statusCode(200);
+                awaitStatus("CREATE_COMPLETE");
+            }
+            cfn(replacing ? "UpdateStack" : "CreateStack", template(existing, true)).then().statusCode(200);
+            String rolledBack = awaitStatus(replacing ? "UPDATE_ROLLBACK_COMPLETE" : "ROLLBACK_COMPLETE");
+            if (replacing) {
+                assertEquals(original, XmlParser.extractPairs(rolledBack, "Outputs", "OutputKey", "OutputValue")
+                        .get("IdentityRef"));
+                sesIdentity(original).then().statusCode(200);
+            }
+            cfn("DeleteStack", null).then().statusCode(200);
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertEquals(400, cfn("DescribeStacks", null).statusCode()));
+            stack = null;
+            sesIdentity(original).then().statusCode(404);
+            Response retained = sesIdentity(existing);
+            assertEquals(200, retained.statusCode(), retained.asString());
+            assertEquals(tokens, retained.jsonPath().getList("DkimAttributes.Tokens", String.class));
+            assertEquals(List.of(Map.of("Key", "owner", "Value", "external")), retained.jsonPath().getList("Tags"));
+        } finally {
+            given().header("Authorization", SES_AUTH).delete("/v2/email/identities/{identity}", existing)
+                    .then().statusCode(200);
+        }
     }
 
     @Test

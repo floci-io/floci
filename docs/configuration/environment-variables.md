@@ -23,7 +23,7 @@ Floci is configured exclusively through environment variables. Every option belo
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | When `true`, verifies S3 SigV4 signatures (`Authorization` header, presigned URL and presigned POST) without evaluating bucket policies |
+| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | When `true`, verifies the SigV4 signature of every signed request without evaluating policies: every S3 placement (`Authorization` header, presigned URL and presigned POST), and the `Authorization` header for every other service (see [Signature Validation](multi-account.md#signature-validation)) |
 | `FLOCI_AUTH_PRESIGN_SECRET` | `local-emulator-secret` | Secret used to sign and verify pre-signed URLs |
 
 ## Network Exposure
@@ -357,6 +357,14 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_CLOUDFORMATION_ENABLED` | `true` | Enable the CloudFormation service |
 | `FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_LAMBDA_CODE` | `false` | Fall back to the built-in stub handler for an `AWS::Lambda::Function` whose S3 code cannot be read. Off matches real CloudFormation, which fails the resource and rolls the stack back |
 | `FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES` | `true` | Stub a resource whose type has no provisioner (synthetic physical ID, `arn:aws:stub:::` ARN attribute, `CREATE_COMPLETE`), logged at `WARN` with a resource status reason. Set `false` to fail the resource instead, which rolls the stack back |
+
+### Cloud Control
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_CLOUDCONTROL_ENABLED` | `true` | Enable the Cloud Control API service |
+| `FLOCI_SERVICES_CLOUDCONTROL_CREATE_WORKER_THREADS` | `4` | Threads that run `CreateResource` provisioning |
+| `FLOCI_SERVICES_CLOUDCONTROL_CREATE_QUEUE_CAPACITY` | `64` | Creates that may wait for a free thread; past that a new `CreateResource` fails with `ThrottlingException` |
 
 ### ACM (Certificate Manager)
 

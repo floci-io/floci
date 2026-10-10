@@ -811,6 +811,8 @@ floci:
       enabled: true
     cloudcontrol:
       enabled: true
+      create-worker-threads: 4             # Threads that run CreateResource provisioning
+      create-queue-capacity: 64            # Creates that may wait for a thread before ThrottlingException
     resourceexplorer2:
       enabled: true
     cloudfront:

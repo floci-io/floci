@@ -123,6 +123,7 @@ public class LambdaLayerService {
 
         String description = (String) request.get("Description");
         String licenseInfo = (String) request.get("LicenseInfo");
+        LambdaService.validateMaxLength(licenseInfo, "licenseInfo", 512);
 
         LambdaService.validateEnumList(request.get("CompatibleRuntimes"), "compatibleRuntimes",
                 LambdaService.RUNTIME_VALUES, 15);

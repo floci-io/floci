@@ -197,6 +197,54 @@ class VerdaccioSidecarClientTest {
         assertEquals("/%2E%2E", observedRawPath.get());
     }
 
+    /**
+     * Mirrors the real npm unpublish mechanism, confirmed against a live Verdaccio container: GET
+     * the packument for its {@code _rev}, then {@code DELETE} the package path with that revision
+     * appended as {@code /-rev/<rev>}.
+     */
+    @Test
+    void deletePackageFetchesTheRevisionThenDeletesWithIt() throws Exception {
+        VerdaccioSidecarManager manager = manager();
+        seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", backendUrl);
+        backend.createContext("/demo-pkg", exchange -> {
+            byte[] bytes = "{\"_rev\":\"3-abc123\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        AtomicReference<String> deletePath = new AtomicReference<>();
+        backend.createContext("/demo-pkg/-rev/3-abc123", exchange -> {
+            deletePath.set(exchange.getRequestURI().toString());
+            exchange.sendResponseHeaders(201, -1);
+            exchange.close();
+        });
+
+        client(manager).deletePackage("npm-repo-1", "dom", "repo", null, "demo-pkg");
+
+        assertEquals("/demo-pkg/-rev/3-abc123", deletePath.get());
+    }
+
+    @Test
+    void deletePackageThrowsWhenTheSidecarRejectsTheDelete() throws Exception {
+        VerdaccioSidecarManager manager = manager();
+        seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", backendUrl);
+        backend.createContext("/demo-pkg", exchange -> {
+            byte[] bytes = "{\"_rev\":\"3-abc123\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        backend.createContext("/demo-pkg/-rev/3-abc123", exchange -> {
+            exchange.sendResponseHeaders(409, -1);
+            exchange.close();
+        });
+
+        assertThrows(IllegalStateException.class, () -> client(manager).deletePackage("npm-repo-1", "dom", "repo",
+                null, "demo-pkg"));
+    }
+
     private void respondWithMetadata(String packagePath, String version, String tarballPath) {
         String body = "{\"versions\":{\"" + version + "\":{\"dist\":{\"tarball\":\"http://ignored" + tarballPath
                 + "\"}}}}";

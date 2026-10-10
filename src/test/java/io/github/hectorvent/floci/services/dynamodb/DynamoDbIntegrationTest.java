@@ -1709,6 +1709,7 @@ class DynamoDbIntegrationTest {
     @Test
     @Order(25)
     void updateTableDeleteAllGsis() {
+        // AWS deletes at most one GSI per UpdateTable request (#4572), so the two go one at a time.
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -1720,7 +1721,23 @@ class DynamoDbIntegrationTest {
                             "Delete": {
                                 "IndexName": "OwnerIndex"
                             }
-                        },
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.GlobalSecondaryIndexes.size()", equalTo(1));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "GsiTestTable",
+                    "GlobalSecondaryIndexUpdates": [
                         {
                             "Delete": {
                                 "IndexName": "OwnerIndexProj"
@@ -5795,5 +5812,273 @@ given()
                 """.formatted(tableName))
         .when().post("/")
         .then().statusCode(200);
+    }
+
+    @Test
+    void gsiDeletionTogetherWithABillingModeChangeFailsWithValidation() {
+        // Catches: Floci deletes the index and switches the billing mode in one request instead of rejecting it
+        String tableName = "GsiDeleteWithBillingTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "gsiPk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "GsiOne",
+                            "KeySchema": [{"AttributeName": "gsiPk", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "ALL"}
+                        }
+                    ]
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "BillingMode": "PROVISIONED",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5},
+                    "GlobalSecondaryIndexUpdates": [{"Delete": {"IndexName": "GsiOne"}}]
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("You cannot create or delete index while updating table IOPS"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "%s"}
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.GlobalSecondaryIndexes.size()", equalTo(1))
+            .body("Table.BillingModeSummary.BillingMode", equalTo("PAY_PER_REQUEST"));
+
+        deleteTable(tableName);
+    }
+
+    @Test
+    void twoGsiDeletionsInSameRequestFailWithLimitExceeded() {
+        // Catches: Floci deletes both indexes when one UpdateTable request carries two GSI deletes
+        String tableName = "TwoGsiDeleteTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "gsiPk", "AttributeType": "S"},
+                        {"AttributeName": "gsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "GsiOne",
+                            "KeySchema": [{"AttributeName": "gsiPk", "KeyType": "HASH"}, {"AttributeName": "gsiSk", "KeyType": "RANGE"}],
+                            "Projection": {"ProjectionType": "ALL"}
+                        },
+                        {
+                            "IndexName": "GsiTwo",
+                            "KeySchema": [{"AttributeName": "gsiPk", "KeyType": "HASH"}, {"AttributeName": "gsiSk", "KeyType": "RANGE"}],
+                            "Projection": {"ProjectionType": "ALL"}
+                        }
+                    ]
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "GlobalSecondaryIndexUpdates": [
+                        {"Delete": {"IndexName": "GsiOne"}},
+                        {"Delete": {"IndexName": "GsiTwo"}}
+                    ]
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("LimitExceededException"))
+            .body("message", equalTo("Subscriber limit exceeded: Only 1 online index can be created "
+                    + "or deleted simultaneously per table"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "%s"}
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.GlobalSecondaryIndexes.size()", equalTo(2));
+
+        deleteTable(tableName);
+    }
+
+    @Test
+    void twoGsiCreationsInSameRequestFailWithLimitExceeded() {
+        // Catches: Floci builds both indexes when one UpdateTable request carries two GSI creates
+        String tableName = "TwoGsiCreateTable";
+        createOnDemandTableForGsiUpdates(tableName);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "AttributeDefinitions": [{"AttributeName": "gsiPk", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [
+                        {"Create": {"IndexName": "GsiOne", "KeySchema": [{"AttributeName": "gsiPk", "KeyType": "HASH"}], "Projection": {"ProjectionType": "ALL"}}},
+                        {"Create": {"IndexName": "GsiTwo", "KeySchema": [{"AttributeName": "gsiPk", "KeyType": "HASH"}], "Projection": {"ProjectionType": "ALL"}}}
+                    ]
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("LimitExceededException"))
+            .body("message", equalTo("Subscriber limit exceeded: Only 1 online index can be created "
+                    + "or deleted simultaneously per table"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "%s"}
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.GlobalSecondaryIndexes", nullValue());
+
+        deleteTable(tableName);
+    }
+
+    @Test
+    void gsiCreationWithTableOnDemandThroughputFailsAndLeavesLimitsUnchanged() {
+        // Catches: an index create applied together with new table-level OnDemandThroughput limits
+        String tableName = "GsiCreateOnDemandTable";
+        createOnDemandTableForGsiUpdates(tableName);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "AttributeDefinitions": [{"AttributeName": "gsiPk", "AttributeType": "S"}],
+                    "OnDemandThroughput": {"MaxReadRequestUnits": 100, "MaxWriteRequestUnits": 100},
+                    "GlobalSecondaryIndexUpdates": [
+                        {"Create": {"IndexName": "GsiOne", "KeySchema": [{"AttributeName": "gsiPk", "KeyType": "HASH"}], "Projection": {"ProjectionType": "ALL"}}}
+                    ]
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("You cannot create or delete index while updating table IOPS"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "%s"}
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.GlobalSecondaryIndexes", nullValue())
+            .body("Table.OnDemandThroughput", nullValue());
+
+        deleteTable(tableName);
+    }
+
+    @Test
+    void gsiCreationWithTableProvisionedThroughputAloneFails() {
+        // Catches: the IOPS conflict only fires when BillingMode is sent together with throughput
+        String tableName = "GsiCreateProvisionedTable";
+        createOnDemandTableForGsiUpdates(tableName);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "AttributeDefinitions": [{"AttributeName": "gsiPk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5},
+                    "GlobalSecondaryIndexUpdates": [
+                        {"Create": {"IndexName": "GsiOne", "KeySchema": [{"AttributeName": "gsiPk", "KeyType": "HASH"}], "Projection": {"ProjectionType": "ALL"}}}
+                    ]
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("You cannot create or delete index while updating table IOPS"));
+
+        deleteTable(tableName);
+    }
+
+    private void createOnDemandTableForGsiUpdates(String tableName) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }

@@ -39,6 +39,7 @@ the remaining formats (NuGet, etc.) have no real proxy behind them yet.
 | `DisassociateExternalConnection` | Removes a repository's external connection. |
 | `PublishPackageVersion` | Uploads a generic-format asset, creating or extending a package version; requires `x-amz-content-sha256` and verifies it against the real hash of the bytes received. |
 | `DescribePackage` | Returns a package's format, namespace, name, and origin controls (`publish` and `upstream` restrictions). |
+| `DeletePackage` | Deletes a package and every one of its versions; `ResourceNotFoundException` for one that does not exist. |
 | `DescribePackageVersion` | Returns a package version's status, revision, and origin. |
 | `GetPackageVersionAsset` | Downloads one asset from a package version by name, optionally pinned to a specific revision. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
