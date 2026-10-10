@@ -247,6 +247,7 @@ floci:
 
     cognito:
       enabled: true
+      enforce-token-validity-limits: true  # Reject app clients whose token validity is outside AWS's limits; false allows shorter tokens
 
     stepfunctions:
       enabled: true

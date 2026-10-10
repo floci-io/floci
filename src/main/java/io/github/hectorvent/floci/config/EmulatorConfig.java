@@ -1909,6 +1909,18 @@ public interface EmulatorConfig {
     interface CognitoServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Rejects an app client whose token validity is outside AWS's limits: access and ID tokens
+         * between 5 minutes and 1 day, refresh tokens between 60 minutes and 3,650 days. Env:
+         * {@code FLOCI_SERVICES_COGNITO_ENFORCE_TOKEN_VALIDITY_LIMITS}
+         *
+         * <p>On by default, because a client that Floci accepts and AWS refuses only fails when it is
+         * deployed. Turn it off to keep tokens shorter than AWS allows, such as a one-minute access
+         * token for a test of what happens when it expires.
+         */
+        @WithDefault("true")
+        boolean enforceTokenValidityLimits();
     }
 
     interface StepFunctionsServiceConfig {

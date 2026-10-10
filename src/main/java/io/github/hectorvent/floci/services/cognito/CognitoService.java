@@ -88,6 +88,10 @@ import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownR
 @ApplicationScoped
 public class CognitoService implements ResourceProvider {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
+    private static final Duration MIN_ACCESS_AND_ID_TOKEN_VALIDITY = Duration.ofMinutes(5);
+    private static final Duration MAX_ACCESS_AND_ID_TOKEN_VALIDITY = Duration.ofDays(1);
+    private static final Duration MIN_REFRESH_TOKEN_VALIDITY = Duration.ofMinutes(60);
+    private static final Duration MAX_REFRESH_TOKEN_VALIDITY = Duration.ofDays(3650);
     static final List<String> DEFAULT_EXPLICIT_AUTH_FLOWS =
             List.of("ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH");
     private static final String COGNITO_PASSWORD_SYMBOLS =
@@ -149,6 +153,7 @@ public class CognitoService implements ResourceProvider {
     private final VerificationCodeService verificationCodeService;
     private final CognitoMessageDispatcher messageDispatcher;
     private final TlsCertificateManager certificateManager;
+    private final boolean enforceTokenValidityLimits;
     private final Object[] userLocks = newUserLockStripes();
     // The userKey of each username an AdminCreateUser is creating, from before its existence check
     // until it stores the user or fails, so an overlapping request for the same username is refused
@@ -201,7 +206,8 @@ public class CognitoService implements ResourceProvider {
                 new VerificationCodeService(storageFactory, clock),
                 new CognitoMessageDispatcher(sesService, snsService, regionResolver.getDefaultRegion()),
                 certificateManager,
-                clock
+                clock,
+                emulatorConfig.services().cognito().enforceTokenValidityLimits()
         );
     }
 
@@ -273,10 +279,10 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * Full constructor accepting the {@link Clock} used to time-bound Cognito auth challenge
-     * sessions (see {@link CognitoAuthFlowHandler}). Production code reaches this through the
-     * {@code @Inject} constructor above with the CDI-managed clock; every other constructor here
-     * defaults to {@link Clock#systemUTC()} so existing call sites are unaffected.
+     * Accepts the {@link Clock} used to time-bound Cognito auth challenge sessions (see
+     * {@link CognitoAuthFlowHandler}); every constructor above defaults to {@link Clock#systemUTC()}
+     * so existing call sites are unaffected. Enforces AWS's token validity limits, as Floci does by
+     * default.
      */
     CognitoService(StorageBackend<String, UserPool> poolStore,
             StorageBackend<String, UserPoolClient> clientStore,
@@ -293,6 +299,34 @@ public class CognitoService implements ResourceProvider {
             CognitoMessageDispatcher messageDispatcher,
             TlsCertificateManager certificateManager,
             Clock clock) {
+        this(poolStore, clientStore, resourceServerStore, domainStore, identityProviderStore, userStore,
+                groupStore, revokedTokenStore, baseUrl, cloudFrontDomainSuffix, regionResolver, lambdaService,
+                acmService, verificationCodeService, messageDispatcher, certificateManager, clock, true);
+    }
+
+    /**
+     * Full constructor. Production code reaches this through the {@code @Inject} constructor above,
+     * with the CDI-managed clock and {@code floci.services.cognito.enforce-token-validity-limits}.
+     *
+     * @param enforceTokenValidityLimits whether an app client's token validity must be within AWS's
+     *                                   limits; see {@link #validateTokenValidityLimits}
+     */
+    CognitoService(StorageBackend<String, UserPool> poolStore,
+            StorageBackend<String, UserPoolClient> clientStore,
+            StorageBackend<String, ResourceServer> resourceServerStore,
+            StorageBackend<String, UserPoolDomain> domainStore,
+            StorageBackend<String, IdentityProvider> identityProviderStore,
+            StorageBackend<String, CognitoUser> userStore,
+            StorageBackend<String, CognitoGroup> groupStore,
+            StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
+            String baseUrl,
+            String cloudFrontDomainSuffix,
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
+            VerificationCodeService verificationCodeService,
+            CognitoMessageDispatcher messageDispatcher,
+            TlsCertificateManager certificateManager,
+            Clock clock,
+            boolean enforceTokenValidityLimits) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
@@ -309,6 +343,7 @@ public class CognitoService implements ResourceProvider {
         this.verificationCodeService = verificationCodeService;
         this.messageDispatcher = messageDispatcher;
         this.certificateManager = certificateManager;
+        this.enforceTokenValidityLimits = enforceTokenValidityLimits;
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver, clock);
     }
 
@@ -1020,6 +1055,8 @@ public class CognitoService implements ResourceProvider {
                 normalizedLogoutUrls,
                 copiedTokenValidityUnits
         );
+        validateTokenValidityLimits(accessTokenValidity, idTokenValidity, refreshTokenValidity,
+                copiedTokenValidityUnits);
 
         UserPoolClient client = new UserPoolClient();
         client.setClientId(clientId);
@@ -1238,6 +1275,9 @@ public class CognitoService implements ResourceProvider {
                 effectiveLogoutUrls,
                 effectiveTokenValidityUnits
         );
+        validateTokenValidityLimits(effectiveAccessTokenValidity, effectiveIdTokenValidity,
+                refreshTokenValidity != null ? refreshTokenValidity : client.getRefreshTokenValidity(),
+                effectiveTokenValidityUnits);
 
         if (clientName != null) client.setClientName(clientName);
         if (allowedOAuthFlowsUserPoolClient != null) {
@@ -4341,6 +4381,53 @@ public class CognitoService implements ResourceProvider {
         if (value != null && value < 0) {
             throw new AwsException("InvalidParameterException", "RefreshTokenValidity must be greater than or equal to 0.", 400);
         }
+    }
+
+    /**
+     * AWS: access and ID tokens "Must be set to a value between 5 minutes and 1 day", refresh tokens
+     * "between 60 minutes and 3,650 days", each in its TokenValidityUnits unit: hours for access and ID
+     * tokens and days for refresh tokens when the client names none. A refresh token validity of 0 is
+     * AWS's 30-day default. Runs after {@link #validateTokenValidityUnits}, so every unit is a known one.
+     * {@code floci.services.cognito.enforce-token-validity-limits=false} turns it off.
+     *
+     * @param refreshTokenValidity the value as the caller gave it, before 0 becomes the default
+     */
+    private void validateTokenValidityLimits(Integer accessTokenValidity, Integer idTokenValidity,
+                                             Integer refreshTokenValidity, Map<String, String> tokenValidityUnits) {
+        if (!enforceTokenValidityLimits) {
+            return;
+        }
+        boolean outOfRange = outsideLimits(accessTokenValidity,
+                        tokenValidityUnit(tokenValidityUnits, "AccessToken", "hours"),
+                        MIN_ACCESS_AND_ID_TOKEN_VALIDITY, MAX_ACCESS_AND_ID_TOKEN_VALIDITY)
+                || outsideLimits(idTokenValidity, tokenValidityUnit(tokenValidityUnits, "IdToken", "hours"),
+                        MIN_ACCESS_AND_ID_TOKEN_VALIDITY, MAX_ACCESS_AND_ID_TOKEN_VALIDITY)
+                || (refreshTokenValidity != null && refreshTokenValidity != 0
+                        && outsideLimits(refreshTokenValidity,
+                                tokenValidityUnit(tokenValidityUnits, "RefreshToken", "days"),
+                                MIN_REFRESH_TOKEN_VALIDITY, MAX_REFRESH_TOKEN_VALIDITY));
+        if (outOfRange) {
+            // AWS's message names neither the token nor the limit.
+            throw new AwsException("InvalidParameterException", "Invalid range for token validity.", 400);
+        }
+    }
+
+    private static String tokenValidityUnit(Map<String, String> tokenValidityUnits, String token, String defaultUnit) {
+        String unit = tokenValidityUnits == null ? null : tokenValidityUnits.get(token);
+        return unit == null || unit.isBlank() ? defaultUnit : unit.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean outsideLimits(Integer value, String unit, Duration min, Duration max) {
+        if (value == null) {
+            return false;
+        }
+        Duration validity = switch (unit) {
+            case "seconds" -> Duration.ofSeconds(value);
+            case "minutes" -> Duration.ofMinutes(value);
+            case "hours" -> Duration.ofHours(value);
+            default -> Duration.ofDays(value);
+        };
+        return validity.compareTo(min) < 0 || validity.compareTo(max) > 0;
     }
 
     private Integer normalizeRefreshTokenValidity(Integer value) {
