@@ -29,6 +29,7 @@ order:
   - AWS::EC2
   - AWS::ElasticLoadBalancingV2
   - AWS::AutoScaling
+  - AWS::ApplicationAutoScaling
   - AWS::Route53
   - AWS::ServiceDiscovery
   - AWS::ApiGateway
@@ -94,6 +95,7 @@ type_order:
      VPCGatewayAttachment, VPCEndpoint, NetworkAcl, NetworkAclEntry, SubnetNetworkAclAssociation,
      FlowLog]
   AWS::ElasticLoadBalancingV2: [LoadBalancer, TargetGroup, Listener, ListenerRule]
+  AWS::ApplicationAutoScaling: [ScalableTarget, ScalingPolicy]
   AWS::AutoScaling: [LaunchConfiguration, AutoScalingGroup, LifecycleHook]
   AWS::Route53: [HostedZone, RecordSet]
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping, GatewayResponse]
@@ -110,6 +112,7 @@ service_labels:
   AWS::ApiGateway: API Gateway (v1)
   AWS::ApiGatewayV2: API Gateway v2
   AWS::AppSync: AppSync
+  AWS::ApplicationAutoScaling: Application Auto Scaling
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch
   AWS::Backup: Backup

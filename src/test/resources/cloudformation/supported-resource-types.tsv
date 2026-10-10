@@ -24,6 +24,8 @@ AWS::AppSync::FunctionConfiguration	AppSyncCfnProvisioner
 AWS::AppSync::GraphQLApi	AppSyncCfnProvisioner
 AWS::AppSync::GraphQLSchema	AppSyncCfnProvisioner
 AWS::AppSync::Resolver	AppSyncCfnProvisioner
+AWS::ApplicationAutoScaling::ScalableTarget	ApplicationAutoScalingCfnProvisioner
+AWS::ApplicationAutoScaling::ScalingPolicy	ApplicationAutoScalingCfnProvisioner
 AWS::AutoScaling::AutoScalingGroup	AutoScalingGroupCfnProvisioner
 AWS::AutoScaling::LaunchConfiguration	AutoScalingGroupCfnProvisioner
 AWS::AutoScaling::LifecycleHook	AutoScalingLifecycleHookCfnProvisioner

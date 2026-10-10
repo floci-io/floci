@@ -528,9 +528,12 @@ public class ApplicationAutoScalingService {
         return targets.get(targetKey(region, serviceNamespace, resourceId, scalableDimension));
     }
 
-    /** Looked up by {@link ScalingPolicyAlarmActionHandler} when an alarm's AlarmActions
-     * references a scaling-policy ARN. */
-    Optional<ScalingPolicy> findPolicyByArn(String policyArn, String region) {
+    /**
+     * Looked up by {@link ScalingPolicyAlarmActionHandler} when an alarm's AlarmActions references
+     * a scaling-policy ARN, and by the CloudFormation provisioner, whose physical id for a policy
+     * is that ARN while deleting one takes the triple plus the policy name.
+     */
+    public Optional<ScalingPolicy> findPolicyByArn(String policyArn, String region) {
         String prefix = region + "::";
         return policies.scan(k -> k.startsWith(prefix)).stream()
                 .filter(p -> policyArn.equals(p.getPolicyArn()))
