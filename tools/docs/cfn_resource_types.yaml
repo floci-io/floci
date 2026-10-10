@@ -44,6 +44,7 @@ order:
   - AWS::Scheduler
   - AWS::Transfer
   - AWS::Backup
+  - AWS::GuardDuty
   - AWS::Pipes
   - AWS::Kinesis
   - AWS::KinesisFirehose
@@ -130,6 +131,7 @@ service_labels:
   AWS::EKS: EKS
   AWS::ElasticLoadBalancingV2: Elastic Load Balancing v2
   AWS::Events: EventBridge
+  AWS::GuardDuty: GuardDuty
   AWS::IAM: IAM
   AWS::IoT: IoT Core
   AWS::KMS: KMS
@@ -178,6 +180,7 @@ notes:
   Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda
   AWS::Cognito::UserPool: '`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`'
   AWS::Events::Archive: '`KmsKeyIdentifier` is ignored'
+  AWS::GuardDuty::MalwareProtectionPlan: 'management plane only: no scan runs, so the plan stays ACTIVE; Ref returns the plan id; a BucketName change is rejected'
 
 # Trailing prose appended to a row after its type list, for behaviour that belongs to the service
 # rather than to one type.

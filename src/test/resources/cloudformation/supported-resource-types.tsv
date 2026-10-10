@@ -92,6 +92,7 @@ AWS::Events::Archive	EventsArchiveCfnProvisioner
 AWS::Events::EventBus	EventsCfnProvisioner
 AWS::Events::EventBusPolicy	EventsCfnProvisioner
 AWS::Events::Rule	EventsCfnProvisioner
+AWS::GuardDuty::MalwareProtectionPlan	GuardDutyMalwareProtectionPlanCfnProvisioner
 AWS::IAM::AccessKey	IamAccessKeyCfnProvisioner
 AWS::IAM::InstanceProfile	IamInstanceProfileCfnProvisioner
 AWS::IAM::ManagedPolicy	IamManagedPolicyCfnProvisioner

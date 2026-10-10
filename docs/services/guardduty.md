@@ -4,9 +4,10 @@
 
 **Endpoint:** `http://localhost:4566`
 
-Floci implements the GuardDuty detector management lifecycle and organization-configuration
-readback for local SDK, CLI, and Terraform workflows. Detectors are isolated by account and
-region and use the configured Floci storage mode.
+Floci implements the GuardDuty detector management lifecycle, organization-configuration
+readback, and Malware Protection plans for local SDK, CLI, Terraform and CloudFormation
+workflows. Detectors and plans are isolated by account and region and use the configured Floci
+storage mode.
 
 ## Supported Operations
 
@@ -24,14 +25,35 @@ region and use the configured Floci storage mode.
 | `ListOrganizationAdminAccounts` | `GET /admin` | List the delegated administrator account |
 | `CreateMembers` | `POST /detector/{detectorId}/member` | Create GuardDuty member accounts for a detector |
 | `ListMembers` | `GET /detector/{detectorId}/member` | List detector members with pagination and association filtering |
-| `TagResource` | `POST /tags/{resourceArn}` | Add tags to a detector |
-| `UntagResource` | `DELETE /tags/{resourceArn}` | Remove tags from a detector |
-| `ListTagsForResource` | `GET /tags/{resourceArn}` | List detector tags |
+| `CreateMalwareProtectionPlan` | `POST /malware-protection-plan` | Create a Malware Protection plan for an S3 bucket |
+| `GetMalwareProtectionPlan` | `GET /malware-protection-plan/{malwareProtectionPlanId}` | Return a plan's role, protected bucket, actions, status, and tags |
+| `UpdateMalwareProtectionPlan` | `PATCH /malware-protection-plan/{malwareProtectionPlanId}` | Update a plan's role, object prefixes, and tagging action |
+| `DeleteMalwareProtectionPlan` | `DELETE /malware-protection-plan/{malwareProtectionPlanId}` | Delete a plan |
+| `ListMalwareProtectionPlans` | `GET /malware-protection-plan` | List plan ids with pagination |
+| `TagResource` | `POST /tags/{resourceArn}` | Add tags to a detector or Malware Protection plan |
+| `UntagResource` | `DELETE /tags/{resourceArn}` | Remove tags from a detector or Malware Protection plan |
+| `ListTagsForResource` | `GET /tags/{resourceArn}` | List detector or Malware Protection plan tags |
 
 Feature lists and each feature's `additionalConfiguration` list are returned in the order
 they were submitted, so Terraform's ordered list blocks re-plan cleanly. A missing detector
 is reported as `BadRequestException` with the exact message the Terraform AWS provider
 matches for not-found detection, mirroring AWS.
+
+## Malware Protection plans
+
+Plans are management plane only. Floci stores the plan and answers the five operations above, and
+`AWS::GuardDuty::MalwareProtectionPlan` is provisioned from CloudFormation (`Ref` and
+`Fn::GetAtt MalwareProtectionPlanId` are the plan id; `Arn`, `CreatedAt`, `Status` and
+`StatusReasons` are also set). No object is scanned, no `GuardDutyMalwareScanStatus` tag is written,
+and no scan-result event is published, so a plan stays `ACTIVE` with no status reasons.
+
+A bucket has at most one plan per account and region: a second `CreateMalwareProtectionPlan` for
+the same bucket fails with `ConflictException`, unless it repeats the earlier request's
+`clientToken`, which returns the existing plan. The bucket cannot be changed on an existing plan;
+`UpdateMalwareProtectionPlan` changes the role, object prefixes (at most 5), and the tagging action.
+
+The role must be an IAM role ARN. An update is applied all-or-nothing: if any supplied field is invalid, none of them are stored.
+`ListMalwareProtectionPlans` returns up to 100 ids per page, and its `nextToken` survives plans being created or deleted between pages. In a CloudFormation stack, dropping `ObjectPrefixes` or `Actions` from the template clears them on the plan, and a failed stack update restores the plan's previous role, prefixes, tagging action and tags.
 
 ## Configuration
 
