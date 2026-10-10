@@ -151,6 +151,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
     private static final long SYNTHETIC_FIRST_OFFSET = 10;
+    /** AWS reserves the first four addresses of every subnet, so offset 4 is the first assignable one. */
+    private static final long ENDPOINT_FIRST_USABLE_OFFSET = 4;
+    /** Where an endpoint interface sits in a block of 256 addresses or more, above the network address. */
+    private static final long ENDPOINT_WIDE_SUBNET_OFFSET = 200;
+    private static final long ENDPOINT_ADDRESS_WINDOW = 50;
     private static final String SYNTHETIC_FALLBACK_CIDR = "172.31.0.0/24";
     private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
     private static final Set<String> VALID_VOLUME_TYPES =
@@ -3787,7 +3792,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (privateIpAllocationLock) {
             // The addresses persisted resources already hold, so a restart, which forgets the
             // cursor, never hands out an address that is still in use.
-            Set<String> inUse = privateIpsInUse(region, subnetId);
+            Set<String> persistedInUse = privateIpsInUse(region, subnetId);
+            Set<String> inUse = new HashSet<>(persistedInUse);
+            // Interface endpoint interfaces are derived, not stored, so the scan above misses them.
+            if (subnetId != null) {
+                inUse.addAll(endpointPrivateIpsIn(region, subnetId, persistedInUse));
+            }
             inUse.addAll(pending);
             long start = Math.clamp(subnetIpCursors.getOrDefault(cursorKey, SYNTHETIC_FIRST_OFFSET), first, last);
             long span = last - first + 1;
@@ -4882,8 +4892,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 effectiveSubnetIds.add(config.getSubnetId());
             }
         }
+        String effectiveType = endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway";
         for (String subnetId : effectiveSubnetIds) {
-            requireSubnet(region, subnetId);
+            requireEndpointAddressSpace(effectiveType, requireSubnet(region, subnetId));
         }
         validateSubnetConfigurations(region, subnetConfigurations);
         for (String securityGroupId : securityGroupIds) {
@@ -4894,7 +4905,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         endpoint.setVpcEndpointId("vpce-" + randomHex(17));
         endpoint.setVpcId(vpcId);
         endpoint.setServiceName(serviceName);
-        endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
+        endpoint.setVpcEndpointType(effectiveType);
         boolean isInterface = "Interface".equalsIgnoreCase(endpoint.getVpcEndpointType());
         endpoint.setPrivateDnsEnabled(privateDnsEnabled != null ? privateDnsEnabled : isInterface);
         endpoint.setCreationTimestamp(Instant.now());
@@ -4977,7 +4988,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             getRequiredRouteTable(region, routeTableId);
         }
         for (String subnetId : addSubnetIds) {
-            requireSubnet(region, subnetId);
+            requireEndpointAddressSpace(endpoint.getVpcEndpointType(), requireSubnet(region, subnetId));
         }
         for (String securityGroupId : addSecurityGroupIds) {
             getRequiredSecurityGroup(region, securityGroupId);
@@ -5106,9 +5117,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public List<NetworkInterface> endpointNetworkInterfaces(String region) {
         List<NetworkInterface> result = new ArrayList<>();
+        // One occupancy scan per subnet for the whole enumeration, not one per endpoint.
+        Map<String, Set<Long>> occupiedBySubnet = new HashMap<>();
         for (VpcEndpoint endpoint : vpcEndpoints.scan(k -> true)) {
             if (region.equals(endpoint.getRegion())) {
-                result.addAll(endpointNetworkInterfacesOf(endpoint));
+                result.addAll(endpointNetworkInterfacesOf(endpoint, occupiedBySubnet));
             }
         }
         return result;
@@ -5134,11 +5147,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>A Gateway endpoint owns no interfaces and gets an empty list.
      */
     private List<NetworkInterface> endpointNetworkInterfacesOf(VpcEndpoint endpoint) {
+        return endpointNetworkInterfacesOf(endpoint, new HashMap<>());
+    }
+
+    /**
+     * @param occupiedBySubnet per-subnet memo of the addresses persisted resources hold (see
+     *                         {@link #persistedAddressValuesInUse}); filled lazily and shareable
+     *                         across endpoints so a regional enumeration scans each subnet once
+     */
+    private List<NetworkInterface> endpointNetworkInterfacesOf(VpcEndpoint endpoint,
+                                                               Map<String, Set<Long>> occupiedBySubnet) {
         if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
             return List.of();
         }
         String region = endpoint.getRegion();
         List<NetworkInterface> result = new ArrayList<>();
+        List<EndpointSubnetInterface> subnetInterfaces = new ArrayList<>();
         List<NetworkInterface> fallbackInterfaces = new ArrayList<>();
         Set<Long> usedAddresses = new HashSet<>();
         for (String subnetId : endpoint.getSubnetIds()) {
@@ -5173,16 +5197,36 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .ifPresent(sg -> group.setGroupName(sg.getGroupName()));
                 ni.getGroups().add(group);
             }
-            String address = endpointPrivateIp(subnet, endpoint, subnetId);
-            ni.setPrivateIpAddress(address);
-            if (address == null) {
-                fallbackInterfaces.add(ni);
+            String pinned = endpointPinnedIpv4(endpoint, subnetId);
+            Optional<Cidr4> cidr = endpointSubnetCidr(subnet);
+            if (pinned != null) {
+                ni.setPrivateIpAddress(pinned);
+                usedAddresses.add(Ipv4Cidrs.addressValue(pinned));
+            } else if (cidr.isPresent()) {
+                subnetInterfaces.add(new EndpointSubnetInterface(ni, cidr.get()));
             } else {
-                usedAddresses.add(Ipv4Cidrs.addressValue(address));
+                fallbackInterfaces.add(ni);
             }
             result.add(ni);
         }
-        // Reserve real addresses first and resolve collisions in subnet order, independent of request order.
+        // Pinned addresses are reserved first, then each subnet's own range is probed in subnet
+        // order, then the synthetic fallback, so the outcome is independent of request order.
+        // A subnet with no address left for the interface (one too small to hold any, stored
+        // before CreateVpcEndpoint refused those, or one other resources have filled) degrades
+        // to the synthetic fallback: this runs on every read, including the regional enumeration
+        // DescribeNetworkInterfaces and flow logs share, and must not fail them.
+        subnetInterfaces.sort(Comparator.comparing(entry -> entry.networkInterface().getSubnetId()));
+        for (EndpointSubnetInterface entry : subnetInterfaces) {
+            NetworkInterface ni = entry.networkInterface();
+            Set<Long> occupied = occupiedBySubnet.computeIfAbsent(ni.getSubnetId(),
+                    id -> persistedAddressValuesInUse(region, id));
+            String address = endpointSubnetPrivateIp(endpoint, entry.cidr(), usedAddresses, occupied);
+            if (address != null) {
+                ni.setPrivateIpAddress(address);
+            } else {
+                fallbackInterfaces.add(ni);
+            }
+        }
         fallbackInterfaces.sort(Comparator.comparing(NetworkInterface::getSubnetId));
         for (NetworkInterface ni : fallbackInterfaces) {
             ni.setPrivateIpAddress(endpointFallbackPrivateIp(endpoint, ni.getSubnetId(), usedAddresses));
@@ -5305,26 +5349,140 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The interface address for one of the endpoint's subnets. An address the caller pinned
-     * through {@code SubnetConfiguration} wins outright: AWS fixes that address on the interface,
-     * and falling back to a synthesized one would answer a later describe with an address the
-     * caller never asked for. Otherwise it is a stable host address near the top of the subnet
-     * range, clear of the instance counter (starts at 10).
+     * The address the caller pinned for the endpoint's interface in {@code subnetId} through
+     * {@code SubnetConfiguration}, or {@code null} when there is none. A pinned address wins
+     * outright: AWS fixes that address on the interface, and synthesizing another would answer a
+     * later describe with an address the caller never asked for.
      */
-    private static String endpointPrivateIp(Subnet subnet, VpcEndpoint endpoint, String subnetId) {
+    private static String endpointPinnedIpv4(VpcEndpoint endpoint, String subnetId) {
         for (VpcEndpointSubnetConfiguration config : endpoint.getSubnetConfigurations()) {
             if (subnetId.equals(config.getSubnetId())
                     && config.getIpv4() != null && !config.getIpv4().isBlank()) {
                 return config.getIpv4();
             }
         }
+        return null;
+    }
+
+    /**
+     * The subnet's IPv4 block, or empty when it has none. CreateSubnet stores whatever it is given
+     * without validating the family, and an IPv6-only subnet has no IPv4 CIDR at all; those take
+     * the synthetic fallback rather than failing the describe that derives the interface.
+     */
+    private static Optional<Cidr4> endpointSubnetCidr(Subnet subnet) {
         String cidr = subnet.getCidrBlock();
         if (!Ipv4Cidrs.isIpv4(cidr)) {
+            return Optional.empty();
+        }
+        return Cidr4.parse(cidr);
+    }
+
+    /**
+     * A stable interface address inside the subnet's own block, honouring its prefix length.
+     *
+     * <p>Only offsets AWS lets a resource hold are candidates: the first four addresses and the
+     * last one of every subnet are reserved. The preferred offset comes from the endpoint id and
+     * sits clear of the instance counter, which starts at offset 10 and climbs: for a block of 256
+     * addresses or more it is 200..249 above the network address, which keeps every /24 answering
+     * with the address it always has, and for a smaller block it is the top of the usable range.
+     * Starting there, the usable range is walked in order until an address held neither by
+     * another interface of the same endpoint nor by a persisted resource of the subnet turns up,
+     * so a pinned address or a second subnet over the same range can never be reported twice,
+     * and an instance, network interface or NAT gateway already on the preferred address in a
+     * small subnet pushes the endpoint to the next free one instead of sharing it.
+     *
+     * <p>The other direction holds too: {@link #assignPrivateIp} treats these derived addresses
+     * as taken, so a resource allocated after the endpoint never lands on its address, and the
+     * endpoint keeps answering with the same one. The remaining trade-off comes from the address
+     * not being stored: an endpoint that was pushed off its preferred address (the resource got
+     * there first, or was given that address explicitly) moves back to it once that resource is
+     * removed. In a /24 or larger, where instances count up from offset 10 and the endpoint sits
+     * at 200..249, that needs the preferred address taken before the endpoint is created, so
+     * those subnets keep reporting the address they always have unless something was there first.
+     *
+     * @param occupied addresses persisted resources hold in the subnet; never modified
+     * @return the address, or {@code null} when none is left, for the caller to degrade
+     */
+    private static String endpointSubnetPrivateIp(VpcEndpoint endpoint, Cidr4 cidr, Set<Long> usedAddresses,
+                                                  Set<Long> occupied) {
+        long first = ENDPOINT_FIRST_USABLE_OFFSET;
+        long last = cidr.size() - 2;
+        long usable = last - first + 1;
+        if (usable <= 0) {
             return null;
         }
-        String[] parts = cidr.split("/")[0].split("\\.");
-        int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
-        return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
+        long windowSize = Math.min(ENDPOINT_ADDRESS_WINDOW, usable);
+        long windowStart = cidr.size() >= 256 ? ENDPOINT_WIDE_SUBNET_OFFSET : last - windowSize + 1;
+        long preferred = windowStart + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), windowSize);
+        for (long step = 0; step < usable; step++) {
+            long address = cidr.network() + first + Math.floorMod(preferred - first + step, usable);
+            if (!occupied.contains(address) && usedAddresses.add(address)) {
+                return Cidr4.format(address);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Refuses an interface endpoint in a subnet whose block leaves no address AWS would assign,
+     * before anything is stored: an endpoint persisted there would fail every later describe that
+     * derives its interfaces.
+     */
+    private static void requireEndpointAddressSpace(String endpointType, Subnet subnet) {
+        if (!"Interface".equalsIgnoreCase(endpointType)) {
+            return;
+        }
+        Optional<Cidr4> cidr = endpointSubnetCidr(subnet);
+        if (cidr.isPresent() && cidr.get().size() - 2 < ENDPOINT_FIRST_USABLE_OFFSET) {
+            throw new AwsException("InsufficientFreeAddressesInSubnet",
+                    "There are no free IPv4 addresses in subnet '" + subnet.getSubnetId()
+                            + "' for an endpoint network interface.", 400);
+        }
+    }
+
+    /**
+     * {@link #privateIpsInUse} as numeric IPv4 values, for endpoint derivation. Only persisted
+     * resources are read, never another endpoint's derived interfaces, so the derivation cannot
+     * recurse into itself through the allocator.
+     */
+    private Set<Long> persistedAddressValuesInUse(String region, String subnetId) {
+        return addressValues(privateIpsInUse(region, subnetId));
+    }
+
+    private static Set<Long> addressValues(Collection<String> addresses) {
+        Set<Long> values = new HashSet<>();
+        for (String address : addresses) {
+            if (Ipv4Cidrs.isIpv4(address + "/32")) {
+                values.add(Ipv4Cidrs.addressValue(address));
+            }
+        }
+        return values;
+    }
+
+    /**
+     * The addresses interface endpoints' derived interfaces hold in {@code subnetId}, given what
+     * persisted resources hold there ({@code persistedInUse}, already read by the caller).
+     */
+    private Set<String> endpointPrivateIpsIn(String region, String subnetId, Set<String> persistedInUse) {
+        Set<String> addresses = new HashSet<>();
+        Map<String, Set<Long>> occupiedBySubnet = new HashMap<>();
+        occupiedBySubnet.put(subnetId, addressValues(persistedInUse));
+        for (VpcEndpoint endpoint : vpcEndpoints.scan(k -> true)) {
+            if (!region.equals(endpoint.getRegion())
+                    || !"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())
+                    || !endpoint.getSubnetIds().contains(subnetId)) {
+                continue;
+            }
+            for (NetworkInterface ni : endpointNetworkInterfacesOf(endpoint, occupiedBySubnet)) {
+                if (subnetId.equals(ni.getSubnetId())) {
+                    addIfSet(addresses, ni.getPrivateIpAddress());
+                }
+            }
+        }
+        return addresses;
+    }
+
+    private record EndpointSubnetInterface(NetworkInterface networkInterface, Cidr4 cidr) {
     }
 
     private static String endpointFallbackPrivateIp(VpcEndpoint endpoint, String subnetId,
