@@ -126,6 +126,8 @@ public interface EmulatorConfig {
 
     ProtocolsConfig protocols();
 
+    ChaosConfig chaos();
+
     interface NetworkConfig {
         SecurityGroupEnforcementConfig securityGroupEnforcement();
     }
@@ -173,6 +175,92 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean rejectUnknownServiceScope();
+    }
+
+    /**
+     * Fault and network chaos injection, plus HAR request/response logging. Everything here is
+     * off by default, so a deployment that does not set {@code floci.chaos.*} behaves exactly as
+     * it did before: {@link io.github.hectorvent.floci.core.common.ChaosInterceptorFilter} returns
+     * immediately unless {@link #enabled()} is set, and
+     * {@link io.github.hectorvent.floci.core.common.HarLoggingFilter} unless
+     * {@link HarConfig#enabled()} is.
+     *
+     * <p>Environment variables follow the usual mapping:
+     * {@code FLOCI_CHAOS_ENABLED}, {@code FLOCI_CHAOS_SEED}, {@code FLOCI_CHAOS_HAR_ENABLED},
+     * {@code FLOCI_CHAOS_HAR_FILE},
+     * {@code FLOCI_CHAOS_FAULT_FAULT_PROBABILITY},
+     * {@code FLOCI_CHAOS_FAULT_THROTTLE_PROBABILITY},
+     * {@code FLOCI_CHAOS_FAULT_ACCESS_DENIED_PROBABILITY},
+     * {@code FLOCI_CHAOS_NETWORK_LATENCY_PROBABILITY},
+     * {@code FLOCI_CHAOS_NETWORK_LATENCY_MS},
+     * {@code FLOCI_CHAOS_NETWORK_NO_RESPONSE_PROBABILITY}.
+     */
+    interface ChaosConfig {
+
+        /** Main switch for fault and network injection. HAR logging has its own switch. */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * Optional seed for deterministic fault injection. When unset, fault and latency rolls are
+         * nondeterministic (a fresh random stream per process). When set, every roll is a pure
+         * function of the seed, a stable per-request key and the decision point, so a replay with
+         * the same seed and the same sequence of requests reproduces exactly the same faults,
+         * independent of thread interleaving. This is the deterministic-simulation (DST) mode:
+         * pick a seed, find a sequence that breaks the workload, then replay that seed to
+         * reproduce and debug it. The per-request key prefers the SDK's
+         * {@code amz-sdk-invocation-id} (constant across a call's retries) and falls back to the
+         * method, path and SigV4 signature.
+         */
+        Optional<Long> seed();
+
+        HarConfig har();
+
+        ChaosFaultConfig fault();
+
+        ChaosNetworkConfig network();
+
+        interface HarConfig {
+            /** Whether every request/response pair is appended to the request/response log. */
+            @WithDefault("false")
+            boolean enabled();
+
+            /**
+             * Where to write the request/response log, one JSON object per line (JSONL).
+             * Defaults to {@code ./floci-chaos.jsonl} when unset.
+             *
+             * <p>Logged bodies and URLs can contain plaintext secrets: STS and IAM responses
+             * carry secret access keys, and request/response bodies or presigned URLs can carry
+             * credentials and tokens. The filter redacts known secret headers and query
+             * parameters, but a service body that embeds a secret is logged as-is. Treat this log
+             * as sensitive: keep it off in shared environments and do not commit or share it.
+             */
+            Optional<String> file();
+        }
+
+        interface ChaosFaultConfig {
+            /** Probability of the default injected fault, which is Throttling. */
+            @WithDefault("0.0")
+            double faultProbability();
+
+            @WithDefault("0.0")
+            double throttleProbability();
+
+            @WithDefault("0.0")
+            double accessDeniedProbability();
+        }
+
+        interface ChaosNetworkConfig {
+            @WithDefault("0.0")
+            double latencyProbability();
+
+            /** Delay applied when the latency roll fires, in milliseconds. */
+            @WithDefault("0")
+            long latencyMs();
+
+            @WithDefault("0.0")
+            double noResponseProbability();
+        }
     }
 
     interface DnsConfig {
