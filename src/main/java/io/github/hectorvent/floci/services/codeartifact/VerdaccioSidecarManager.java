@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -20,41 +18,17 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.Optional;
 
 /**
- * Lazily starts and manages one Verdaccio container per CodeArtifact repository backing the
- * {@code npm} format. Unlike Reposilite (Maven), Verdaccio has no native concept of multiple
- * named repositories inside one instance, so npm repositories each get their own container
- * instead of sharing one the way {@link ReposiliteSidecarManager} does. The actual per-key
- * container lifecycle (map of running containers, per-key start lock, health poll,
- * restart-on-unhealthy, stop-all on shutdown) is generic and lives in
- * {@link PerKeyContainerPool}; this class only knows how to build and configure a Verdaccio
- * container specifically.
- *
- * <p>Each container is configured with open access (no auth, no upstream proxying) since the
- * real CodeArtifact authorization check happens once at Floci's proxy layer
- * ({@code CodeArtifactNpmDataPlane}), before a request ever reaches the container; the container
- * itself is never reachable directly by a client.
- *
- * <p>Implements {@link ContainerTeardown} rather than observing {@code ShutdownEvent} directly:
- * {@code ContainerTeardowns.stopAll} already runs every implementation both at process shutdown
- * and on {@code /state/reset}/{@code /state/nuke}, so this is what actually stops every
- * repository's container on reset, driven by what {@link #pool} is really tracking rather than by
- * which repository records still exist in storage.
+ * Starts and stops one Verdaccio container per CodeArtifact npm repository, unlike Reposilite's one
+ * shared instance. The HTTP protocol lives in {@link VerdaccioSidecarClient}. Implements
+ * {@link ContainerTeardown} so reset, nuke, and shutdown stop every container this manager started.
  */
 @ApplicationScoped
-public class VerdaccioSidecarManager implements RepositorySidecarManager, ContainerTeardown {
+public class VerdaccioSidecarManager implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(VerdaccioSidecarManager.class);
-    private static final String FORMAT = "npm";
     private static final int VERDACCIO_PORT = 4873;
     private static final String HEALTH_PATH = "/-/ping";
     private static final String CONFIG_REMOTE_DIR = "/verdaccio/conf";
@@ -88,129 +62,28 @@ public class VerdaccioSidecarManager implements RepositorySidecarManager, Contai
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
-    private final HttpClient httpClient;
-    private final ObjectMapper mapper;
 
     @Inject
     public VerdaccioSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
-                                    EmulatorConfig config, ObjectMapper mapper) {
+                                    EmulatorConfig config) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.config = config;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
-        this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-        this.mapper = mapper;
-    }
-
-    @Override
-    public String format() {
-        return FORMAT;
     }
 
     /**
-     * Base URL of a ready Verdaccio instance for this npm repository, starting its container if
-     * this is the first use. Each repository's container is independent, so concurrent first-use
-     * of two different repositories never blocks on each other (unlike Reposilite's one shared
-     * instance, which does need a single lock around every provisioning call).
-     *
-     * @param publicUrl the externally reachable proxy URL for this specific repository (e.g.
-     *                  {@code http://localhost:4566/codeartifact/npm/<domain>/<repository>/}),
-     *                  passed to the container as {@code VERDACCIO_PUBLIC_URL} so package metadata
-     *                  it returns (notably {@code dist.tarball}) points back through Floci's proxy
-     *                  instead of the container's own internal, unreachable-by-the-client address.
+     * Base URL of a ready Verdaccio for this repository, starting its container on first use.
+     * {@code publicUrl} becomes {@code VERDACCIO_PUBLIC_URL}, so the {@code dist.tarball} links it
+     * returns point back through Floci's proxy.
      */
-    @Override
     public String ensureReady(String npmRepositoryId, String publicUrl) {
         return pool.ensureReady(npmRepositoryId, () -> startContainer(npmRepositoryId, publicUrl));
     }
 
     /** Stops and removes the container for one npm repository, if one was ever started. */
-    @Override
     public void release(String npmRepositoryId) {
         pool.stopContainer(npmRepositoryId);
-    }
-
-    /**
-     * {@code namespace} is the npm scope without its leading {@code @}, or {@code null} for an
-     * unscoped package; real npm (and Verdaccio, confirmed against a live container) serves every
-     * version's tarball at {@code <scoped-or-plain-name>/-/<filename>}, with the scope, if any,
-     * still carrying its {@code @} in that path even though the filename itself never includes it.
-     *
-     * <p>The tarball path alone is keyed by filename, not version: a package's own metadata is
-     * checked first (its {@code versions.<version>.dist.tarball} entry) to confirm {@code version}
-     * genuinely maps to {@code assetName} before fetching it, rather than serving whatever file
-     * that name happens to resolve to under a version the caller never actually published.
-     *
-     * <p>{@code namespace}, {@code packageName}, and {@code assetName} are each their own
-     * independently caller-supplied value, only meant to be one path segment; {@code
-     * packagePath} and the final {@code /-/<assetName>} suffix supply the real {@code /}
-     * separators themselves, around each value already percent-encoded on its own via
-     * {@link SidecarUriUtils#encodeSegment(String)}. Without that, a {@code /} inside, say,
-     * {@code assetName} would be indistinguishable from one of those real separators and could
-     * splice in extra path segments.
-     */
-    @Override
-    public Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
-            String namespace, String packageName, String version, String assetName) {
-        String publicUrl = config.effectiveBaseUrl() + "/codeartifact/npm/" + domain + "/" + repository + "/";
-        String baseUrl = ensureReady(repositoryContainerId, publicUrl);
-        String packagePath = packagePath(namespace, packageName);
-        if (!versionHasAsset(baseUrl, packagePath, version, assetName)) {
-            return Optional.empty();
-        }
-        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + packagePath + "/-/"
-                + SidecarUriUtils.encodeSegment(assetName));
-        HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
-        HttpResponse<byte[]> response;
-        try {
-            response = httpClient.send(request, BodyHandlers.ofByteArray());
-        } catch (Exception e) {
-            throw new IllegalStateException("Could not reach the Verdaccio sidecar to fetch " + packagePath, e);
-        }
-        if (response.statusCode() == 404) {
-            return Optional.empty();
-        }
-        if (response.statusCode() != 200) {
-            throw new IllegalStateException("Could not fetch " + packagePath + "/-/" + assetName
-                    + " from the Verdaccio sidecar: upstream returned " + response.statusCode());
-        }
-        return Optional.of(response.body());
-    }
-
-    private static String packagePath(String namespace, String packageName) {
-        return namespace == null
-                ? SidecarUriUtils.encodeSegment(packageName)
-                : "@" + SidecarUriUtils.encodeSegment(namespace) + "/" + SidecarUriUtils.encodeSegment(packageName);
-    }
-
-    private boolean versionHasAsset(String baseUrl, String packagePath, String version, String assetName) {
-        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), "/" + packagePath))
-                .timeout(Duration.ofSeconds(10)).GET().build();
-        HttpResponse<String> response;
-        try {
-            response = httpClient.send(request, BodyHandlers.ofString());
-        } catch (Exception e) {
-            throw new IllegalStateException("Could not reach the Verdaccio sidecar to look up " + packagePath, e);
-        }
-        if (response.statusCode() == 404) {
-            return false;
-        }
-        if (response.statusCode() != 200) {
-            throw new IllegalStateException("Could not look up " + packagePath + " on the Verdaccio sidecar: "
-                    + "upstream returned " + response.statusCode());
-        }
-        JsonNode versionNode;
-        try {
-            versionNode = mapper.readTree(response.body()).path("versions").path(version);
-        } catch (Exception e) {
-            throw new IllegalStateException("Could not parse Verdaccio's package metadata for " + packagePath, e);
-        }
-        if (versionNode.isMissingNode()) {
-            return false;
-        }
-        String tarballUrl = versionNode.path("dist").path("tarball").asText("");
-        String tarballFilename = tarballUrl.substring(tarballUrl.lastIndexOf('/') + 1);
-        return assetName.equals(tarballFilename);
     }
 
     private PerKeyContainerPool.StartedContainer startContainer(String npmRepositoryId, String publicUrl) {

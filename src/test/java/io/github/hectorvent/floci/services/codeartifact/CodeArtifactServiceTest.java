@@ -9,9 +9,9 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.DomainView;
-import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.ResourcePolicy;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PublishPackageVersionResult;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.ResourcePolicy;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
@@ -35,11 +35,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -51,9 +53,9 @@ class CodeArtifactServiceTest {
     private CodeArtifactService service;
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
-    private VerdaccioSidecarManager verdaccioManager;
+    private VerdaccioSidecarClient verdaccioClient;
     private ReposiliteSidecarClient reposiliteClient;
-    private PypiserverSidecarManager pypiserverManager;
+    private PypiserverSidecarClient pypiserverClient;
 
     @BeforeEach
     void setUp() {
@@ -71,15 +73,15 @@ class CodeArtifactServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
-        verdaccioManager = mock(VerdaccioSidecarManager.class);
-        when(verdaccioManager.format()).thenReturn("npm");
+        verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.format()).thenReturn("npm");
         reposiliteClient = mock(ReposiliteSidecarClient.class);
         when(reposiliteClient.format()).thenReturn("maven");
-        pypiserverManager = mock(PypiserverSidecarManager.class);
-        when(pypiserverManager.format()).thenReturn("pypi");
+        pypiserverClient = mock(PypiserverSidecarClient.class);
+        when(pypiserverClient.format()).thenReturn("pypi");
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
                 true, null, new CodeArtifactSidecarRegistry(
-                        List.of(verdaccioManager, reposiliteClient, pypiserverManager)));
+                        List.of(verdaccioClient, reposiliteClient, pypiserverClient)));
     }
 
     // -------------------------------------------------------------- domains
@@ -396,7 +398,7 @@ class CodeArtifactServiceTest {
 
         service.deleteRepository(REGION, "dom", null, "repo");
 
-        verify(verdaccioManager).release(created.getSidecarContainerIds().get("npm"));
+        verify(verdaccioClient).release(created.getSidecarContainerIds().get("npm"));
         verify(reposiliteClient).release(created.getSidecarContainerIds().get("maven"));
     }
 
@@ -413,7 +415,7 @@ class CodeArtifactServiceTest {
         CodeArtifactRepository deleted = service.deleteRepository(REGION, "dom", null, "repo");
 
         assertEquals("repo", deleted.getName());
-        verify(verdaccioManager).release(deleted.getSidecarContainerIds().get("npm"));
+        verify(verdaccioClient).release(deleted.getSidecarContainerIds().get("npm"));
         AwsException e = assertThrows(AwsException.class,
                 () -> service.describeRepository(REGION, "dom", null, "repo"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
@@ -1007,6 +1009,240 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void describePackageReportsTheDirectPublishDefaultsAndMatchesExactly() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my::pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("generic", described.format());
+        assertEquals("ns", described.namespace());
+        assertEquals("my-pkg", described.packageName());
+        assertEquals("ALLOW", described.publishRestriction());
+        assertEquals("BLOCK", described.upstreamRestriction());
+
+        AwsException prefixOfAnotherPackage = assertThrows(AwsException.class, () -> service.describePackage(REGION,
+                "dom", null, "repo", "generic", "ns", "my"));
+        assertEquals("ResourceNotFoundException", prefixOfAnotherPackage.getErrorCode());
+
+        AwsException wrongNamespace = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "other", "my-pkg"));
+        assertEquals("ResourceNotFoundException", wrongNamespace.getErrorCode());
+    }
+
+    @Test
+    void describePackageValidatesPackageAndNamespaceShapeBeforeTouchingRepositoryState() {
+        AwsException badPackageName = assertThrows(AwsException.class, () -> service.describePackage(REGION,
+                "no-such-domain", null, "repo", "generic", "ns", "has/slash"));
+        assertEquals("ValidationException", badPackageName.getErrorCode());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException badNamespace = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "has#hash", "my-pkg"));
+        assertEquals("ValidationException", badNamespace.getErrorCode());
+
+        AwsException missingNamespaceForGeneric = assertThrows(AwsException.class, () -> service.describePackage(
+                REGION, "dom", null, "repo", "generic", null, "my-pkg"));
+        assertEquals("ValidationException", missingNamespaceForGeneric.getErrorCode());
+
+        AwsException missingNamespaceForMaven = assertThrows(AwsException.class, () -> service.describePackage(
+                REGION, "dom", null, "repo", "maven", null, "my-artifact"));
+        assertEquals("ValidationException", missingNamespaceForMaven.getErrorCode());
+    }
+
+    /**
+     * {@code domain}/{@code repository}/{@code package} being required, and an unrecognized format
+     * being rejected, are not new behavior (every other action in this file already enforces them),
+     * but {@code describePackage} had no regression test proving any of them, and none of these
+     * rejections may start a sidecar or otherwise touch state before failing.
+     */
+    @Test
+    void describePackageRejectsMissingRequiredFieldsAndUnknownFormatsWithoutTouchingAnyState() {
+        AwsException missingDomain = assertThrows(AwsException.class, () -> service.describePackage(REGION, null,
+                null, "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ValidationException", missingDomain.getErrorCode());
+
+        AwsException missingRepository = assertThrows(AwsException.class, () -> service.describePackage(REGION,
+                "dom", null, null, "generic", "ns", "my-pkg"));
+        assertEquals("ValidationException", missingRepository.getErrorCode());
+
+        AwsException missingPackageName = assertThrows(AwsException.class, () -> service.describePackage(REGION,
+                "dom", null, "repo", "generic", "ns", null));
+        assertEquals("ValidationException", missingPackageName.getErrorCode());
+
+        AwsException unknownFormat = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "not-a-real-format", "ns", "my-pkg"));
+        assertEquals("ValidationException", unknownFormat.getErrorCode());
+
+        verify(verdaccioClient, never()).packageExists(any(), any(), any(), any(), any());
+        verify(reposiliteClient, never()).packageExists(any(), any(), any(), any(), any());
+        verify(pypiserverClient, never()).packageExists(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * pypi packages have no namespace at all (confirmed against the API reference): the sidecar
+     * check genuinely ignores whatever namespace is supplied, so without this rejection the response
+     * would echo a namespace back as if it were real, describing a package that does not exist the
+     * way the caller asked.
+     */
+    @Test
+    void describePackageRejectsANamespaceSuppliedForPypiRatherThanEchoingAFabricatedOne() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("real-pkg")))
+                .thenReturn(true);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "pypi", "bogus-namespace", "real-pkg"));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void deletePackageRemovesEveryVersionAndAssetButLeavesOtherPackagesAlone() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "2.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "other-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg");
+        assertEquals("generic", deleted.format());
+        assertEquals("ns", deleted.namespace());
+        assertEquals("my-pkg", deleted.packageName());
+
+        AwsException goneAsPackage = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", goneAsPackage.getErrorCode());
+        AwsException goneVersionOne = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", null));
+        assertEquals("ResourceNotFoundException", goneVersionOne.getErrorCode());
+        AwsException goneVersionTwo = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", "2.0.0", "a.txt", null));
+        assertEquals("ResourceNotFoundException", goneVersionTwo.getErrorCode());
+
+        CodeArtifactService.PackageDescription stillThere = service.describePackage(REGION, "dom", null, "repo",
+                "generic", "ns", "other-pkg");
+        assertEquals("other-pkg", stillThere.packageName());
+
+        AwsException alreadyDeleted = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg"));
+        assertEquals("ResourceNotFoundException", alreadyDeleted.getErrorCode());
+
+        AwsException unknown = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null,
+                "repo", "generic", "ns", "no-such-package"));
+        assertEquals("ResourceNotFoundException", unknown.getErrorCode());
+    }
+
+    @Test
+    void deletePackageBridgesToReposiliteForMavenAfterConfirmingItExists() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created =
+                service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageExists(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("my-artifact"))).thenReturn(true);
+
+        CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo", "maven",
+                "com.example", "my-artifact");
+
+        assertEquals("maven", deleted.format());
+        verify(reposiliteClient).deletePackage(repoId, "dom", "repo", "com.example", "my-artifact");
+    }
+
+    @Test
+    void deletePackageReportsNotFoundForAContainerBackedPackageThatDoesNotExistRatherThanDeletingAnything() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(verdaccioClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(false);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null, "repo",
+                "npm", null, "my-pkg"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        verify(verdaccioClient, never()).deletePackage(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * {@link RepositorySidecarManager#deletePackage}'s default throws
+     * {@link UnsupportedOperationException} for a sidecar that genuinely cannot delete (every sidecar
+     * Floci actually backs can, but the service must still handle one that can't, present or future);
+     * this stubs that default's own throw straight onto the mock to exercise it without needing a
+     * real sidecar that refuses. The service must not let it propagate as an unhandled 500: it
+     * becomes a real, if deliberately blunt, documented AWS error instead.
+     */
+    @Test
+    void deletePackageTranslatesAnUnsupportedSidecarDeleteIntoAnInternalServerException() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(true);
+        doThrow(new UnsupportedOperationException("pypi packages cannot be deleted through this sidecar"))
+                .when(pypiserverClient).deletePackage(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg"));
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null, "repo",
+                "pypi", null, "my-pkg"));
+        assertEquals("InternalServerException", e.getErrorCode());
+    }
+
+    /**
+     * Mirrors describePackage's own boundary-validation test: deletePackage must reject the same
+     * malformed coordinates before touching repository state, not just the single maven-namespace
+     * check it had before this test existed.
+     */
+    @Test
+    void deletePackageValidatesPackageAndNamespaceShapeBeforeTouchingRepositoryState() {
+        AwsException badPackageName = assertThrows(AwsException.class, () -> service.deletePackage(REGION,
+                "no-such-domain", null, "repo", "generic", "ns", "has/slash"));
+        assertEquals("ValidationException", badPackageName.getErrorCode());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException badNamespace = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom",
+                null, "repo", "generic", "has#hash", "my-pkg"));
+        assertEquals("ValidationException", badNamespace.getErrorCode());
+
+        AwsException missingNamespaceForGeneric = assertThrows(AwsException.class, () -> service.deletePackage(
+                REGION, "dom", null, "repo", "generic", null, "my-pkg"));
+        assertEquals("ValidationException", missingNamespaceForGeneric.getErrorCode());
+
+        AwsException missingNamespaceForMaven = assertThrows(AwsException.class, () -> service.deletePackage(
+                REGION, "dom", null, "repo", "maven", null, "my-artifact"));
+        assertEquals("ValidationException", missingNamespaceForMaven.getErrorCode());
+    }
+
+    /**
+     * pypi packages have no namespace at all (same API-reference fact describePackage's own test
+     * documents). Without this rejection, a caller-supplied namespace would be silently ignored by
+     * the sidecar's existence check below and the real package would be deleted anyway, as if the
+     * namespace the caller specified had actually been honored.
+     */
+    @Test
+    void deletePackageRejectsANamespaceSuppliedForPypiRatherThanDeletingTheRealPackageAnyway() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("real-pkg")))
+                .thenReturn(true);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deletePackage(REGION, "dom", null, "repo",
+                "pypi", "bogus-namespace", "real-pkg"));
+        assertEquals("ValidationException", e.getErrorCode());
+        verify(pypiserverClient, never()).deletePackage(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void getPackageVersionAssetReturnsExactBytesAndValidatesRevision() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
@@ -1108,7 +1344,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "tarball bytes".getBytes(StandardCharsets.UTF_8);
-        when(verdaccioManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), eq("myscope"),
+        when(verdaccioClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), eq("myscope"),
                 eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(content));
 
         PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "npm",
@@ -1122,7 +1358,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "wheel bytes".getBytes(StandardCharsets.UTF_8);
-        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+        when(pypiserverClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"), eq("1.0.0"), eq("my_pkg-1.0.0-py3-none-any.whl"))).thenReturn(Optional.of(content));
 
         PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "pypi",
@@ -1135,7 +1371,7 @@ class CodeArtifactServiceTest {
     void getPackageVersionAssetReturns404WhenTheSidecarHasNoSuchAssetForAContainerBackedFormat() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
-        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+        when(pypiserverClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"), eq("1.0.0"), eq("missing.whl"))).thenReturn(Optional.empty());
 
         AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom", null,
@@ -1150,7 +1386,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "wheel bytes".getBytes(StandardCharsets.UTF_8);
-        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+        when(pypiserverClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"), eq("1.0.0"), eq("my_pkg-1.0.0.whl"))).thenReturn(Optional.of(content));
         String realRevision = service.getPackageVersionAsset(REGION, "dom", null, "repo", "pypi", null, "my-pkg",
                 "1.0.0", "my_pkg-1.0.0.whl", null).packageVersionRevision();

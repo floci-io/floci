@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
+import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
+import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -10,11 +12,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -24,11 +29,11 @@ import static org.hamcrest.Matchers.equalTo;
  * {@code floci.auth.validate-signatures} authenticates every signed S3 request, whichever
  * placement carries the signature, without authorizing it: a forged or unknown credential is
  * refused, while bucket policies are not evaluated and unsigned requests pass, as they do with
- * {@code enforce-auth} off. Shares {@link PreSignedUrlIntegrationTest}'s profile, which covers the
- * presigned query-string placement.
+ * {@code enforce-auth} off. Shares {@link ValidateSignaturesProfile} with
+ * {@link PreSignedUrlIntegrationTest}, which covers the presigned query-string placement.
  */
 @QuarkusTest
-@TestProfile(PreSignedUrlIntegrationTest.PresignValidationProfile.class)
+@TestProfile(ValidateSignaturesProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class S3ValidateSignaturesIntegrationTest {
 
@@ -44,6 +49,29 @@ class S3ValidateSignaturesIntegrationTest {
 
     private static String userAccessKeyId;
     private static String userSecretKey;
+
+    @Test
+    void layerContentLocationCanBeFetchedWithSignatureValidationEnabled() throws Exception {
+        ByteArrayOutputStream archive = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(archive)) {
+            zip.putNextEntry(new ZipEntry("nodejs/index.js"));
+            zip.write("module.exports = {};".getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        String location = given()
+            .contentType("application/json")
+            .body("""
+                    {"Content":{"ZipFile":"%s"}}
+                    """.formatted(Base64.getEncoder().encodeToString(archive.toByteArray())))
+        .when()
+            .post("/2018-10-31/layers/signed-location/versions")
+        .then()
+            .statusCode(201)
+            .body("Content.Location", containsString("X-Amz-Algorithm=AWS4-HMAC-SHA256"))
+            .extract().path("Content.Location");
+
+        given().urlEncodingEnabled(false).when().get(location).then().statusCode(200);
+    }
 
     @Test
     @Order(1)
@@ -207,22 +235,83 @@ class S3ValidateSignaturesIntegrationTest {
             .statusCode(204);
     }
 
-    private static void createIamUser(String userName) {
-        String authorization = "AWS4-HMAC-SHA256 Credential=test/" + CREDENTIAL_DATE
-                + "/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=unused";
+    @Test
+    @Order(30)
+    void headerWithMalformedSigV4IsRejectedWithoutCreatingBucket() {
         given()
-            .formParam("Action", "CreateUser")
-            .formParam("UserName", userName)
-            .header("Authorization", authorization)
+            .header("Authorization", "X Credential=111122223333/20261001/us-east-1/s3/aws4_request")
+        .when()
+            .put("/routing-check-malformed")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("AuthorizationHeaderMalformed"))
+            .body("Error.Message", equalTo("The authorization header you provided is invalid."));
+
+        given().filter(LOCAL_SIGNER).when().get("/routing-check-malformed").then().statusCode(404);
+    }
+
+    @Test
+    @Order(31)
+    void presignedQueryMissingAlgorithmIsRejectedWithoutCreatingBucket() {
+        given()
+        .when()
+            .put("/routing-check-missing-algo?X-Amz-Credential=111122223333%2F20261001%2Fus-east-1%2Fs3%2Faws4_request")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("AuthorizationQueryParametersError"))
+            .body("Error.Message", equalTo(S3RequestAuthorizationParser.AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE));
+
+        given().filter(LOCAL_SIGNER).when().get("/routing-check-missing-algo").then().statusCode(404);
+    }
+
+    @Test
+    @Order(32)
+    void headerSignedRequestWithDateOrExpiresQueryParamIsAccepted() {
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .put("/" + BUCKET + "/query-date-test.txt?X-Amz-Date=" + AMZ_DATE + "&X-Amz-Expires=3600")
+        .then()
+            .statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + BUCKET + "/query-date-test.txt")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(33)
+    void sigV4AHeaderIsRejectedWhenSignatureValidationEnabled() {
+        String authSigV4A = "AWS4-ECDSA-P256-SHA256 Credential=test/" + CREDENTIAL_DATE
+                + "/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=30450220abc";
+        given()
+            .header("Authorization", authSigV4A)
+        .when()
+            .get("/" + BUCKET + "/" + KEY)
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>AuthorizationHeaderMalformed</Code>"));
+    }
+
+    private static void createIamUser(String userName) {
+        // validate-signatures verifies IAM's signatures too, so these calls carry real ones.
+        AwsRequestSigner iam = AwsRequestSigner.signedAs("test", "test", "iam");
+        given()
+            .filter(iam)
+            .contentType("application/x-www-form-urlencoded")
+            .body("Action=CreateUser&UserName=" + userName + "&Version=2010-05-08")
         .when()
             .post("/")
         .then()
             .statusCode(200);
 
         XmlPath key = given()
-            .formParam("Action", "CreateAccessKey")
-            .formParam("UserName", userName)
-            .header("Authorization", authorization)
+            .filter(iam)
+            .contentType("application/x-www-form-urlencoded")
+            .body("Action=CreateAccessKey&UserName=" + userName + "&Version=2010-05-08")
         .when()
             .post("/")
         .then()

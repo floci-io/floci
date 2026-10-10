@@ -5,9 +5,9 @@ import io.github.hectorvent.floci.services.appsync.graphql.AppSyncExecutionContr
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.github.hectorvent.floci.testutil.AppSyncRequestSigner;
-import io.restassured.RestAssured;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;

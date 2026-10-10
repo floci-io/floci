@@ -247,6 +247,25 @@ class SigV4ValidatorTest {
         assertTrue(validator.validate(token, "cache-cluster-01", "default"));
     }
 
+    /** A Lambda execution role's session token carries {@code +}, {@code /} and {@code =}. */
+    @Test
+    void validateAcceptsTokenSignedWithLambdaSessionCredentials() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "lambda+session/secret";
+        String sessionToken = "IQoJb3JpZ2luX2VjEJr+abc/def+ghi/jkl==";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
+                accessKeyId, secretAccessKey, sessionToken, Instant.now().plusSeconds(3600));
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01", "default", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900, sessionToken);
+
+        assertTrue(validator.validate(token, "cache-cluster-01", "default"));
+        assertFalse(validator.validate(token.replace("%2B", "%20"), "cache-cluster-01", "default"),
+                "a token whose session token reads a space where the issued one has a + is another token");
+    }
+
     @Test
     void validateRejectsStsCredentialWithoutIssuedSessionToken() throws Exception {
         String accessKeyId = "ASIAIOSFODNN7EXAMPLE";

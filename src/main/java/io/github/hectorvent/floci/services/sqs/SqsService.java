@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -17,12 +18,14 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -60,6 +63,7 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
     private static final int DEDUP_LOCK_STRIPES = 256;
     private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
+    private static final int MAX_BATCH_ENTRIES = 10;
     private static final int MAX_TERMINAL_MOVE_TASKS = 10;
     private static final Duration TERMINAL_MOVE_TASK_TTL = Duration.ofHours(1);
     /** AWS accepts MaximumMessageSize between 1 KiB and 1 MiB; 1 MiB is also the default.
@@ -272,15 +276,24 @@ public class SqsService implements Resettable, ResourceProvider {
     private final SnsService snsService;
     private final Clock clock;
     private final String receiptHandleSecret;
+    private final Instance<RequestContext> requestContextInstance;
+    private final IamService iamService;
 
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                       SnsService snsService) {
         this(storageFactory, config, regionResolver, snsService, Clock.systemUTC());
     }
 
-    @Inject
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                       SnsService snsService, Clock clock) {
+        this(storageFactory, config, regionResolver, snsService, clock, null, null);
+    }
+
+    @Inject
+    public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                      SnsService snsService, Clock clock,
+                      Instance<RequestContext> requestContextInstance,
+                      IamService iamService) {
         this(
                 storageFactory.create("sqs", "sqs-queues.json",
                         new TypeReference<Map<String, Queue>>() {
@@ -301,7 +314,9 @@ public class SqsService implements Resettable, ResourceProvider {
                 config.services().sqs().clearFifoDeduplicationCacheOnPurge(),
                 snsService,
                 clock,
-                config.services().sqs().receiptHandleSecret()
+                config.services().sqs().receiptHandleSecret(),
+                requestContextInstance,
+                iamService
         );
     }
 
@@ -318,6 +333,14 @@ public class SqsService implements Resettable, ResourceProvider {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl, Clock clock) {
         this(queueStore, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
                 new RegionResolver("us-east-1", "000000000000"), false, null, clock); // partition-literal: test-shaped constructor default
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl, Clock clock,
+               Instance<RequestContext> requestContextInstance, IamService iamService) {
+        this(queueStore, null, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock, // partition-literal: test-shaped constructor default
+                ReceiptHandle.DEFAULT_SECRET, requestContextInstance, iamService);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
@@ -363,6 +386,18 @@ public class SqsService implements Resettable, ResourceProvider {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService, Clock clock, String receiptHandleSecret) {
+        this(queueStore, messageStore, dedupStore, dedupIdentityStore, defaultVisibilityTimeout, maxMessageSize,
+                baseUrl, regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, clock,
+                receiptHandleSecret, null, null);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               StorageBackend<String, Map<String, Map<String, String>>> dedupIdentityStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, Clock clock, String receiptHandleSecret,
+               Instance<RequestContext> requestContextInstance, IamService iamService) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -376,6 +411,8 @@ public class SqsService implements Resettable, ResourceProvider {
         this.snsService = snsService;
         this.clock = clock;
         this.receiptHandleSecret = receiptHandleSecret;
+        this.requestContextInstance = requestContextInstance;
+        this.iamService = iamService;
         this.moveTasksByHandle = new MoveTaskStore(clock);
         loadPersistedMessages();
         loadPersistedDedup();
@@ -755,6 +792,35 @@ public class SqsService implements Resettable, ResourceProvider {
         return filtered;
     }
 
+    /**
+     * Resolves the principal of the in-flight request. Only the SQS protocol handlers may call this,
+     * because only there is the request scope known to belong to a real SendMessage caller. Internal
+     * producers (SNS, S3 notifications, EventBridge...) run on someone else's request thread and must
+     * not inherit that identity: they pass an explicit senderId or get the queue owner by default.
+     */
+    public String resolveCallerSenderId(String queueUrl) {
+        if (requestContextInstance != null) {
+            try {
+                RequestContext ctx = requestContextInstance.get();
+                if (ctx != null) {
+                    String akid = ctx.getAccessKeyId();
+                    if (akid != null && iamService != null) {
+                        Optional<String> principalId = iamService.resolveCallerUserId(akid, ctx.getSessionToken());
+                        if (principalId.isPresent()) {
+                            return principalId.get();
+                        }
+                    }
+                    if (ctx.getAccountId() != null) {
+                        return ctx.getAccountId();
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                // outside request scope or unsatisfied bean resolution, fall through to default
+            }
+        }
+        return senderIdFor(queueUrl);
+    }
+
     public Message sendMessage(String queueUrl, String body, Integer delaySeconds, String region) {
         return sendMessage(queueUrl, body, delaySeconds, null, null, region);
     }
@@ -778,6 +844,16 @@ public class SqsService implements Resettable, ResourceProvider {
                                Map<String, MessageAttributeValue> messageAttributes,
                                String awsTraceHeader,
                                String region) {
+        return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId,
+                messageAttributes, awsTraceHeader, null, region);
+    }
+
+    public Message sendMessage(String queueUrl, String body, Integer delaySeconds,
+                               String messageGroupId, String messageDeduplicationId,
+                               Map<String, MessageAttributeValue> messageAttributes,
+                               String awsTraceHeader,
+                               String senderId,
+                               String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -792,6 +868,7 @@ public class SqsService implements Resettable, ResourceProvider {
         }
 
         int queueDelaySeconds = parseNonNegativeSecondsAttribute(queue.getAttributes().get("DelaySeconds"));
+        String effectiveSenderId = senderId != null ? senderId : senderIdFor(queueUrl);
 
         // Resolve the effective delay:
         //   - FIFO queues only support queue-level DelaySeconds per AWS SQS,
@@ -872,6 +949,7 @@ public class SqsService implements Resettable, ResourceProvider {
                     // continues tracking the deduplication ID for the full interval.
                     // Return the original identity without re-enqueueing a message.
                     Message response = new Message(body);
+                    response.setSenderId(effectiveSenderId);
                     if (identity != null) {
                         response.setMessageId(identity.messageId());
                         response.setSequenceNumber(identity.sequenceNumber());
@@ -890,6 +968,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 persistDedup(storageKey);
 
                 Message message = new Message(body);
+                message.setSenderId(effectiveSenderId);
                 message.setMessageGroupId(messageGroupId);
                 message.setMessageDeduplicationId(dedupId);
                 message.setSequenceNumber(sequenceCounter.incrementAndGet());
@@ -919,6 +998,7 @@ public class SqsService implements Resettable, ResourceProvider {
         // Standard queue. MessageGroupId is retained for ReceiveMessage to
         // return (fair queues); it has no effect on standard-queue delivery.
         Message message = new Message(body);
+        message.setSenderId(effectiveSenderId);
         message.setMessageGroupId(messageGroupId);
         message.setAwsTraceHeader(awsTraceHeader);
         if (effectiveDelaySeconds > 0) {
@@ -1005,6 +1085,23 @@ public class SqsService implements Resettable, ResourceProvider {
     private static boolean hasKmsMasterKey(Map<String, String> attributes) {
         String keyId = attributes.get("KmsMasterKeyId");
         return keyId != null && !keyId.isEmpty();
+    }
+
+    /**
+     * Reject a batch call carrying no entries or more than {@value #MAX_BATCH_ENTRIES}. AWS applies
+     * both checks to {@code SendMessageBatch}, {@code DeleteMessageBatch} and
+     * {@code ChangeMessageVisibilityBatch} alike, fails the whole request and processes no entry.
+     */
+    public void validateBatchEntryCount(String entryTypeName, int entryCount) {
+        if (entryCount == 0) {
+            throw new AwsException("AWS.SimpleQueueService.EmptyBatchRequest",
+                    "There should be at least one " + entryTypeName + " in the request.", 400);
+        }
+        if (entryCount > MAX_BATCH_ENTRIES) {
+            throw new AwsException("AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
+                    "Maximum number of entries per request are " + MAX_BATCH_ENTRIES
+                            + ". You have sent " + entryCount + ".", 400);
+        }
     }
 
     /**
@@ -1844,11 +1941,9 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * SQS reports SenderId as the principal that called SendMessage. Floci
-     * has no per-call IAM context, so it falls back to the account that owns
-     * the queue (parsed from the queue URL when present), otherwise the
-     * account from the current request context, otherwise the configured
-     * default account.
+     * Default SenderId for messages with no caller principal (internal producers such as SNS,
+     * S3 notifications or EventBridge): the account that owns the queue (parsed from the queue
+     * URL when present), otherwise the configured default account.
      */
     public String senderIdFor(String queueUrl) {
         String fromUrl = accountFromQueueUrl(normalizeQueueUrl(queueUrl));

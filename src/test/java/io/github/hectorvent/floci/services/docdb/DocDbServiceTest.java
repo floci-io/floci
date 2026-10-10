@@ -2,39 +2,40 @@ package io.github.hectorvent.floci.services.docdb;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.BackupWindows;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
 import io.github.hectorvent.floci.services.docdb.model.DocDbCluster;
-import io.github.hectorvent.floci.services.docdb.model.DocDbInstance;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 import io.github.hectorvent.floci.services.docdb.model.DocDbClusterSettings;
+import io.github.hectorvent.floci.services.docdb.model.DocDbInstance;
 import io.github.hectorvent.floci.services.docdb.model.DocDbInstanceSettings;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.RdsService;
-import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.anyList;
 import java.util.List;
 import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -84,7 +85,7 @@ class DocDbServiceTest {
         assertEquals(27017, cluster.getPort());
         assertTrue(cluster.getDbClusterArn().contains("mock-cluster"));
 
-        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString());
+        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString(), any());
     }
 
     @Test
@@ -166,7 +167,7 @@ class DocDbServiceTest {
         when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
 
         DocDbContainerManager noDaemonContainerManager = Mockito.mock(DocDbContainerManager.class);
-        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString()))
+        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString(), any()))
                 .thenReturn(null);
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         DocDbService noDaemonService = new DocDbService(config, regionResolver, noDaemonContainerManager, storageFactory,
@@ -520,7 +521,7 @@ class DocDbServiceTest {
         e = refused(new DocDbClusterSettings(null, null, null, null, null, null, "02:00-02:30", "tue:02:15-tue:02:45", null));
         assertEquals("The backup window and maintenance window must not overlap.", e.getMessage());
         assertThrows(AwsException.class, () -> docDbService.getDbCluster("c1"));
-        verify(containerManager, never()).tryStart(any(), any(), any(), any());
+        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any());
 
         // a window given alone is paired with a default clear of it
         docDbService.createDbCluster("alone", "5.0.0", "u", "pw", false,

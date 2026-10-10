@@ -7,15 +7,9 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.GetAccountSendingEnabledResponse;
 import software.amazon.awssdk.services.ses.model.UpdateAccountSendingEnabledRequest;
-
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.AccountDetails;
 import software.amazon.awssdk.services.sesv2.model.ContactLanguage;
@@ -32,6 +26,10 @@ import software.amazon.awssdk.services.sesv2.model.PutAccountVdmAttributesReques
 import software.amazon.awssdk.services.sesv2.model.SesV2Exception;
 import software.amazon.awssdk.services.sesv2.model.SuppressionListReason;
 import software.amazon.awssdk.services.sesv2.model.VdmAttributes;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;

@@ -11,10 +11,10 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -198,8 +198,8 @@ class SnsHttpDeliveryIntegrationTest {
         assertEquals("Hello HTTP endpoint!", envelope.get("Message").asText());
         assertEquals("Test Subject", envelope.get("Subject").asText());
         assertEquals("1", envelope.get("SignatureVersion").asText());
-        assertEquals("EXAMPLE", envelope.get("Signature").asText());
-        assertEquals("EXAMPLE", envelope.get("SigningCertURL").asText());
+        assertFalse(envelope.get("Signature").asText().isEmpty());
+        assertTrue(envelope.get("SigningCertURL").asText().endsWith(".pem"));
         assertTrue(envelope.get("UnsubscribeURL").asText().contains("Action=Unsubscribe"));
         assertNotNull(envelope.get("MessageId").asText());
         assertNotNull(envelope.get("Timestamp").asText());

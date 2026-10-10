@@ -107,6 +107,17 @@ public enum SesListPaging {
             token -> badRequest("Provided NextToken is invalid"),
             true),
 
+    /**
+     * ListEmailIdentityCertificates (probed 2026-10-04) answers Smithy's page-size messages; its
+     * default could not be measured and is taken to be the bound.
+     */
+    V2_LIST_EMAIL_IDENTITY_CERTIFICATES(Namespace.IDENTITY_CERTIFICATE, 1000, 1000,
+            size -> badRequest("1 validation error detected: Value '" + size + "' at 'pageSize' failed to "
+                    + "satisfy constraint: Member must have value "
+                    + (size < 1 ? "greater than or equal to 1" : "less than or equal to 1000")),
+            token -> badRequest("Invalid NextToken."),
+            false),
+
     /** 12 pools came back whole without a PageSize, so the default is taken to be the bound. */
     V2_LIST_DEDICATED_IP_POOLS(Namespace.DEDICATED_IP_POOL, 1000, 1000,
             size -> badRequest("The page size must be in [1, 1000] range."),
@@ -145,6 +156,7 @@ public enum SesListPaging {
         static final String IMPORT_JOB = "import-job";
         static final String CONTACT_LIST = "contact-list";
         static final String CONTACT = "contact";
+        static final String IDENTITY_CERTIFICATE = "identity-certificate";
         static final String DEDICATED_IP_POOL = "dedicated-ip-pool";
         static final String DEDICATED_IP = "dedicated-ip";
         static final String SUPPRESSED_DESTINATION = "suppressed-destination";

@@ -21,7 +21,9 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -36,7 +38,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>Validate (IAM SigV4 or plain password)
  *   <li>Connect to backend with MD5 or SCRAM-SHA-256 auth
  *   <li>Buffer backend messages until ReadyForQuery
- *   <li>For IAM logins, hand the session over to the role named in the token
+ *   <li>For IAM logins, hand the session over to the role named in the token, then apply the
+ *       client's startup parameters as that role
  *   <li>Send AuthOK + buffered messages to client, then bridge, guarding an IAM
  *       session against being handed back to the master role
  * </ol>
@@ -85,6 +88,10 @@ public class PostgresProtocolHandler {
         return new BackendLogin(clientUsername, clientPassword);
     }
 
+    /**
+     * Authenticates the client, opening the backend session with only {@code user} and
+     * {@code database}: the client's other StartupMessage parameters are not forwarded.
+     */
     public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
                                       String masterUsername, String masterPassword, String dbName,
                                       boolean iamEnabled, RdsSigV4Validator sigV4,
@@ -92,6 +99,25 @@ public class PostgresProtocolHandler {
                                       RdsProxyTlsCertificates tlsCertificates,
                                       PasswordValidator passwordValidator,
                                       int handshakeTimeoutMillis) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator,
+                handshakeTimeoutMillis, false);
+    }
+
+    /**
+     * Authenticates the client. With {@code forwardStartupParameters}, the client's other
+     * StartupMessage parameters ({@code options}, {@code application_name} and any run-time
+     * parameter) apply as they would on the server itself: they open the backend session, or,
+     * for an IAM login handed over to the token's role, are set once the role owns the session.
+     */
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding,
+                                      RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator,
+                                      int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
 
@@ -176,12 +202,32 @@ public class PostgresProtocolHandler {
                     masterUsername, masterPassword, clientUsername, clientPassword);
             String backendUser = backendLogin.user();
             String backendPass = backendLogin.password();
-            sendStartupToBackend(backendOut, backendUser, effectiveDbName);
+            // An IAM login for any role but the master runs on a session opened as the master and
+            // handed over below, so PostgreSQL would apply the client's parameters with the
+            // master's privileges: a "-c role=<master>" would outlive the handover and RESET ROLE
+            // would regain the master. Those logins open with only user and database, and their
+            // parameters are applied once the session belongs to the role (Phase 5c).
+            Map<String, String> clientParameters = forwardStartupParameters && !(isIam && !isMaster)
+                    ? startup.parameters() : Map.of();
+            sendStartupToBackend(backendOut, backendUser, effectiveDbName, clientParameters);
             backendOut.flush();
 
-            if (!authenticateWithBackend(backendIn, backendOut, backendUser, backendPass)) {
-                sendErrorResponse(clientOut, "FATAL", "08006",
-                        "Backend database authentication failed");
+            boolean backendAuthenticated = false;
+            byte[] backendRejection = null;
+            try {
+                backendAuthenticated = authenticateWithBackend(backendIn, backendOut, backendUser, backendPass);
+            } catch (BackendRejectedException e) {
+                backendRejection = e.errorResponse();
+            }
+            if (!backendAuthenticated) {
+                // PostgreSQL's own refusal, such as a missing pg_hba.conf entry for a forwarded
+                // replication=true, says far more than the proxy's generic error.
+                if (backendRejection != null) {
+                    clientOut.write(backendRejection);
+                } else {
+                    sendErrorResponse(clientOut, "FATAL", "08006",
+                            "Backend database authentication failed");
+                }
                 clientOut.flush();
                 closeQuietly(client);
                 closeQuietly(backend);
@@ -211,6 +257,50 @@ public class PostgresProtocolHandler {
                 }
                 bufferedMessages = applyParameterStatusUpdates(bufferedMessages, roleSwitch);
                 iamRole = clientUsername;
+
+                // Phase 5c: Apply the client's startup parameters now that the session belongs to
+                // the role, so PostgreSQL checks each one against the role's privileges, as it
+                // does when the role logs in directly. A parameter PostgreSQL refuses fails the
+                // login with PostgreSQL's own reason, as it would at startup. One check cannot be
+                // left to PostgreSQL: it authorizes session_authorization against the user the
+                // backend connection authenticated as, the superuser master, so a change of it is
+                // refused here before anything is applied, and the outcome is checked again below.
+                if (forwardStartupParameters) {
+                    List<SessionSetting> settings;
+                    try {
+                        settings = sessionSettings(startup.parameters());
+                        refuseSessionAuthorizationChange(settings, clientUsername);
+                    } catch (StartupParameterException e) {
+                        sendErrorResponse(clientOut, "FATAL", e.sqlState(), e.getMessage());
+                        clientOut.flush();
+                        closeQuietly(client);
+                        closeQuietly(backend);
+                        return null;
+                    }
+                    if (!settings.isEmpty()) {
+                        List<byte[]> applied = applySessionSettings(backendIn, backendOut, settings);
+                        if (endsWithErrorResponse(applied)) {
+                            byte[] refusal = applied.get(applied.size() - 1);
+                            sendErrorResponse(clientOut, "FATAL", errorField(refusal, 'C', "42601"),
+                                    errorField(refusal, 'M', "invalid startup parameter"));
+                            clientOut.flush();
+                            closeQuietly(client);
+                            closeQuietly(backend);
+                            return null;
+                        }
+                        if (reportsAnotherSessionAuthorization(applied, iamRole)) {
+                            LOG.warnv("RDS IAM session for role {0} changed its session authorization "
+                                    + "through startup parameters; refusing the login", iamRole);
+                            sendErrorResponse(clientOut, "FATAL", "42501",
+                                    "permission denied to set session authorization");
+                            clientOut.flush();
+                            closeQuietly(client);
+                            closeQuietly(backend);
+                            return null;
+                        }
+                        bufferedMessages = applyParameterStatusUpdates(bufferedMessages, applied);
+                    }
+                }
             }
 
             // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
@@ -270,7 +360,8 @@ public class PostgresProtocolHandler {
             Map<String, String> params = parseStartupParams(payload);
             return new StartupMessage(currentSocket,
                     params.getOrDefault("user", "postgres"),
-                    params.get("database"));
+                    params.get("database"),
+                    params);
         }
     }
 
@@ -286,7 +377,8 @@ public class PostgresProtocolHandler {
         }
     }
 
-    private record StartupMessage(Socket socket, String username, String database) {}
+    private record StartupMessage(Socket socket, String username, String database,
+                                  Map<String, String> parameters) {}
 
     static String resolveEffectiveDbName(String clientDatabase, String instanceDbName) {
         if (clientDatabase != null && !clientDatabase.isBlank()) {
@@ -302,8 +394,8 @@ public class PostgresProtocolHandler {
         return !messages.isEmpty() && messages.get(messages.size() - 1)[0] == 'E';
     }
 
-    private static Map<String, String> parseStartupParams(byte[] data) {
-        Map<String, String> params = new HashMap<>();
+    static Map<String, String> parseStartupParams(byte[] data) {
+        Map<String, String> params = new LinkedHashMap<>();
         int i = 0;
         while (i < data.length) {
             int keyStart = i;
@@ -329,25 +421,35 @@ public class PostgresProtocolHandler {
         return params;
     }
 
-    private static void sendStartupToBackend(OutputStream out, String username, String dbName)
-            throws IOException {
-        byte[] userKey = "user".getBytes(StandardCharsets.UTF_8);
-        byte[] userVal = username.getBytes(StandardCharsets.UTF_8);
-        byte[] dbKey = "database".getBytes(StandardCharsets.UTF_8);
-        byte[] dbVal = dbName.getBytes(StandardCharsets.UTF_8);
+    /**
+     * Writes the backend StartupMessage: the proxy's own {@code user} and {@code database}, then
+     * the client's other parameters in the order the client sent them. {@code _pq_.} names request
+     * protocol extensions, which the proxy does not negotiate with the backend.
+     */
+    private static void sendStartupToBackend(OutputStream out, String username, String dbName,
+                                             Map<String, String> clientParameters) throws IOException {
+        ByteArrayOutputStream parameters = new ByteArrayOutputStream();
+        writeStartupParameter(parameters, "user", username);
+        writeStartupParameter(parameters, "database", dbName);
+        for (Map.Entry<String, String> parameter : clientParameters.entrySet()) {
+            String name = parameter.getKey();
+            if (!"user".equals(name) && !"database".equals(name) && !name.startsWith("_pq_.")) {
+                writeStartupParameter(parameters, name, parameter.getValue());
+            }
+        }
+        parameters.write(0); // final null
 
-        int length = 4 + 4
-                + userKey.length + 1 + userVal.length + 1
-                + dbKey.length + 1 + dbVal.length + 1
-                + 1; // final null
-
-        writeInt32(out, length);
+        writeInt32(out, 4 + 4 + parameters.size());
         writeInt32(out, STARTUP_PROTOCOL_VERSION);
-        out.write(userKey); out.write(0);
-        out.write(userVal); out.write(0);
-        out.write(dbKey); out.write(0);
-        out.write(dbVal); out.write(0);
-        out.write(0); // final null
+        parameters.writeTo(out);
+    }
+
+    private static void writeStartupParameter(ByteArrayOutputStream out, String name, String value)
+            throws IOException {
+        out.write(name.getBytes(StandardCharsets.UTF_8));
+        out.write(0);
+        out.write(value.getBytes(StandardCharsets.UTF_8));
+        out.write(0);
     }
 
     // ── Client auth phase ─────────────────────────────────────────────────────
@@ -376,7 +478,7 @@ public class PostgresProtocolHandler {
 
     private static boolean authenticateWithBackend(InputStream in, OutputStream out,
                                                    String username, String password) throws IOException {
-        int type = in.read();
+        int type = readAuthenticationType(in);
         if (type != 'R') {
             LOG.warnv("Expected Authentication ('R') from backend, got type={0}", type);
             return false;
@@ -422,6 +524,33 @@ public class PostgresProtocolHandler {
         return false;
     }
 
+    /**
+     * Reads the type byte of a message the handshake expects to be an Authentication one. When
+     * PostgreSQL refuses the login instead, the whole ErrorResponse is read and thrown so the
+     * client sees PostgreSQL's reason.
+     */
+    private static int readAuthenticationType(InputStream in) throws IOException {
+        int type = in.read();
+        if (type == 'E') {
+            throw new BackendRejectedException(readMessage(in, type));
+        }
+        return type;
+    }
+
+    /** PostgreSQL refused the backend login with {@code errorResponse}, a complete message. */
+    private static final class BackendRejectedException extends IOException {
+        private final byte[] errorResponse;
+
+        BackendRejectedException(byte[] errorResponse) {
+            super("Backend rejected the login: " + errorMessage(errorResponse, "no message"));
+            this.errorResponse = errorResponse;
+        }
+
+        byte[] errorResponse() {
+            return errorResponse;
+        }
+    }
+
     // ── SCRAM-SHA-256 ─────────────────────────────────────────────────────────
 
     private static boolean performScramSha256(InputStream in, OutputStream out,
@@ -445,7 +574,7 @@ public class PostgresProtocolHandler {
         out.flush();
 
         // Step 2: Read AuthenticationSASLContinue (authType=11)
-        if (in.read() != 'R') {
+        if (readAuthenticationType(in) != 'R') {
             return false;
         }
         int len2 = checkedPacketLength(readInt32(in), 8, "SASL continue message");
@@ -486,7 +615,7 @@ public class PostgresProtocolHandler {
         out.flush();
 
         // Step 4: Read AuthenticationSASLFinal (authType=12) — server signature (ignored)
-        if (in.read() != 'R') {
+        if (readAuthenticationType(in) != 'R') {
             return false;
         }
         int len3 = checkedPacketLength(readInt32(in), 8, "SASL final message");
@@ -560,7 +689,7 @@ public class PostgresProtocolHandler {
     // ── MD5 password ──────────────────────────────────────────────────────────
 
     private static boolean readAuthOk(InputStream in) throws IOException {
-        int type = in.read();
+        int type = readAuthenticationType(in);
         if (type != 'R') {
             LOG.warnv("Expected AuthenticationOK from backend, got type={0}", type);
             return false;
@@ -605,19 +734,7 @@ public class PostgresProtocolHandler {
             if (type < 0) {
                 throw new EOFException("Connection closed before ReadyForQuery");
             }
-            int length = checkedPacketLength(readInt32(in), 4, "backend message");
-            byte[] payload = new byte[length - 4];
-            readFully(in, payload);
-
-            // Reconstruct full message: type + length(4) + payload
-            byte[] full = new byte[1 + 4 + payload.length];
-            full[0] = (byte) type;
-            full[1] = (byte) ((length >> 24) & 0xFF);
-            full[2] = (byte) ((length >> 16) & 0xFF);
-            full[3] = (byte) ((length >> 8) & 0xFF);
-            full[4] = (byte) (length & 0xFF);
-            System.arraycopy(payload, 0, full, 5, payload.length);
-            messages.add(full);
+            messages.add(readMessage(in, type));
 
             if (type == 'Z') { // ReadyForQuery
                 break;
@@ -628,6 +745,23 @@ public class PostgresProtocolHandler {
             }
         }
         return messages;
+    }
+
+    /** Reads the rest of a backend message whose type byte was {@code type}, returning it whole. */
+    private static byte[] readMessage(InputStream in, int type) throws IOException {
+        int length = checkedPacketLength(readInt32(in), 4, "backend message");
+        byte[] payload = new byte[length - 4];
+        readFully(in, payload);
+
+        // Reconstruct full message: type + length(4) + payload
+        byte[] full = new byte[1 + 4 + payload.length];
+        full[0] = (byte) type;
+        full[1] = (byte) ((length >> 24) & 0xFF);
+        full[2] = (byte) ((length >> 16) & 0xFF);
+        full[3] = (byte) ((length >> 8) & 0xFF);
+        full[4] = (byte) (length & 0xFF);
+        System.arraycopy(payload, 0, full, 5, payload.length);
+        return full;
     }
 
     // ── IAM session role ──────────────────────────────────────────────────────
@@ -649,6 +783,232 @@ public class PostgresProtocolHandler {
 
     static String quoteIdentifier(String identifier) {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    /** One run-time parameter a client asked for at startup, by name. */
+    record SessionSetting(String name, String value) {}
+
+    /**
+     * A startup parameter PostgreSQL would refuse while parsing the StartupMessage, before any
+     * setting is applied.
+     */
+    static final class StartupParameterException extends IOException {
+        private final String sqlState;
+
+        StartupParameterException(String sqlState, String message) {
+            super(message);
+            this.sqlState = sqlState;
+        }
+
+        String sqlState() {
+            return sqlState;
+        }
+    }
+
+    /**
+     * The run-time parameters a StartupMessage asks for, in the order PostgreSQL applies them:
+     * the {@code -c} switches in {@code options} first, then every other parameter as sent.
+     * {@code user}, {@code database} and {@code _pq_.} protocol extensions are not parameters.
+     */
+    static List<SessionSetting> sessionSettings(Map<String, String> startupParameters)
+            throws StartupParameterException {
+        List<SessionSetting> settings = new ArrayList<>();
+        String options = startupParameters.get("options");
+        if (options != null) {
+            settings.addAll(parseOptions(options));
+        }
+        for (Map.Entry<String, String> parameter : startupParameters.entrySet()) {
+            String name = parameter.getKey();
+            if ("user".equals(name) || "database".equals(name) || "options".equals(name)
+                    || name.startsWith("_pq_.")) {
+                continue;
+            }
+            if ("replication".equals(name)) {
+                String value = parameter.getValue();
+                Boolean replication = "database".equals(value) ? Boolean.TRUE : parseBool(value);
+                if (replication == null) {
+                    throw new StartupParameterException("22023",
+                            "invalid value for parameter \"replication\": \"" + value + "\"");
+                }
+                if (replication) {
+                    throw new StartupParameterException("0A000",
+                            "replication connections are not supported for IAM sessions through the proxy");
+                }
+                continue;
+            }
+            settings.add(new SessionSetting(name, parameter.getValue()));
+        }
+        return settings;
+    }
+
+    /**
+     * A boolean as PostgreSQL's {@code parse_bool} reads it: any case-insensitive prefix of
+     * {@code true}, {@code false}, {@code yes} or {@code no}, at least two letters of {@code on}
+     * or {@code off}, or exactly {@code 1} or {@code 0}. {@code null} for anything else,
+     * including the ambiguous {@code o}.
+     */
+    static Boolean parseBool(String value) {
+        if (value.isEmpty()) {
+            return null;
+        }
+        String lower = value.toLowerCase(Locale.ROOT);
+        if ("true".startsWith(lower) || "yes".startsWith(lower)) {
+            return Boolean.TRUE;
+        }
+        if ("false".startsWith(lower) || "no".startsWith(lower)) {
+            return Boolean.FALSE;
+        }
+        if (lower.length() >= 2 && "on".startsWith(lower)) {
+            return Boolean.TRUE;
+        }
+        if (lower.length() >= 2 && "off".startsWith(lower)) {
+            return Boolean.FALSE;
+        }
+        if ("1".equals(lower)) {
+            return Boolean.TRUE;
+        }
+        if ("0".equals(lower)) {
+            return Boolean.FALSE;
+        }
+        return null;
+    }
+
+    /**
+     * Refuses a {@code session_authorization} setting naming anyone but {@code role}. PostgreSQL
+     * would authorize it against the superuser the backend connection authenticated as, not the
+     * token's role, so it would hand the session back to the master.
+     */
+    static void refuseSessionAuthorizationChange(List<SessionSetting> settings, String role)
+            throws StartupParameterException {
+        for (SessionSetting setting : settings) {
+            if ("session_authorization".equalsIgnoreCase(setting.name()) && !role.equals(setting.value())) {
+                throw new StartupParameterException("42501", "permission denied to set session authorization");
+            }
+        }
+    }
+
+    /** Whether {@code messages} report a {@code session_authorization} other than {@code role}. */
+    private static boolean reportsAnotherSessionAuthorization(List<byte[]> messages, String role) {
+        for (byte[] message : messages) {
+            if (!"session_authorization".equals(parameterStatusName(message))) {
+                continue;
+            }
+            String[] status = parameterStatus(message, 5);
+            if (status != null && !role.equals(status[1])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The settings an {@code options} startup parameter carries: {@code -c name=value},
+     * {@code -cname=value} or {@code --name=value}, with arguments split on unescaped ASCII
+     * whitespace and a backslash taking the next character literally, as PostgreSQL's
+     * {@code pg_split_opts} does; a backslash that ends the string is dropped. A dash in a name stands for an underscore. The proxy cannot apply PostgreSQL's other
+     * server switches to a session that has already started, so it refuses them.
+     */
+    static List<SessionSetting> parseOptions(String options) throws StartupParameterException {
+        List<String> arguments = splitOptions(options);
+        List<SessionSetting> settings = new ArrayList<>();
+        for (int i = 0; i < arguments.size(); i++) {
+            String argument = arguments.get(i);
+            String assignment;
+            String switchName;
+            if (argument.startsWith("--")) {
+                assignment = argument.substring(2);
+                switchName = "--";
+            } else if ("-c".equals(argument)) {
+                if (i + 1 >= arguments.size()) {
+                    throw new StartupParameterException("42601",
+                            "invalid command-line argument for server process: -c");
+                }
+                assignment = arguments.get(++i);
+                switchName = "-c ";
+            } else if (argument.startsWith("-c")) {
+                assignment = argument.substring(2);
+                switchName = "-c ";
+            } else {
+                throw new StartupParameterException("42601",
+                        "invalid command-line argument for server process: " + argument);
+            }
+            int equals = assignment.indexOf('=');
+            if (equals <= 0) {
+                throw new StartupParameterException("42601",
+                        switchName + assignment + " requires a value");
+            }
+            settings.add(new SessionSetting(assignment.substring(0, equals).replace('-', '_'),
+                    assignment.substring(equals + 1)));
+        }
+        return settings;
+    }
+
+    private static List<String> splitOptions(String options) {
+        List<String> arguments = new ArrayList<>();
+        int i = 0;
+        while (i < options.length()) {
+            while (i < options.length() && isAsciiSpace(options.charAt(i))) {
+                i++;
+            }
+            if (i >= options.length()) {
+                break;
+            }
+            StringBuilder argument = new StringBuilder();
+            while (i < options.length() && !isAsciiSpace(options.charAt(i))) {
+                if (options.charAt(i) == '\\') {
+                    i++;
+                    if (i >= options.length()) {
+                        break;
+                    }
+                }
+                argument.append(options.charAt(i));
+                i++;
+            }
+            arguments.add(argument.toString());
+        }
+        return arguments;
+    }
+
+    /** The characters C's {@code isspace} accepts in the C locale. */
+    private static boolean isAsciiSpace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\u000B' || c == '\f' || c == '\r';
+    }
+
+    /**
+     * Applies {@code settings} to the session in one statement, in order, with
+     * {@code set_config(name, value, false)}: what a startup parameter does, checked against the
+     * privileges of the role the session now belongs to.
+     *
+     * @return the backend messages the statement produced, up to ReadyForQuery or ErrorResponse
+     */
+    private static List<byte[]> applySessionSettings(InputStream in, OutputStream out,
+                                                     List<SessionSetting> settings) throws IOException {
+        sendMessage(out, 'Q', setConfigStatement(settings).getBytes(StandardCharsets.UTF_8), new byte[]{0});
+        out.flush();
+        return readUntilReadyForQuery(in);
+    }
+
+    static String setConfigStatement(List<SessionSetting> settings) {
+        StringBuilder sql = new StringBuilder("SELECT ");
+        for (int i = 0; i < settings.size(); i++) {
+            if (i > 0) {
+                sql.append(", ");
+            }
+            sql.append("pg_catalog.set_config(")
+                    .append(quoteLiteral(settings.get(i).name()))
+                    .append(", ")
+                    .append(quoteLiteral(settings.get(i).value()))
+                    .append(", false)");
+        }
+        return sql.toString();
+    }
+
+    /**
+     * An escape-string literal, so it reads the same whatever standard_conforming_strings says.
+     * Apostrophes are doubled rather than backslash-escaped, which backslash_quote can forbid.
+     */
+    static String quoteLiteral(String value) {
+        return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
     /**
@@ -727,6 +1087,11 @@ public class PostgresProtocolHandler {
 
     /** Human-readable 'M' field of an ErrorResponse, or {@code fallback} when it carries none. */
     static String errorMessage(byte[] errorResponse, String fallback) {
+        return errorField(errorResponse, 'M', fallback);
+    }
+
+    /** The {@code field} of an ErrorResponse, such as 'C' for SQLSTATE, or {@code fallback}. */
+    static String errorField(byte[] errorResponse, char field, String fallback) {
         int i = 5; // skip type byte and Int32 length
         while (i < errorResponse.length && errorResponse[i] != 0) {
             char fieldType = (char) errorResponse[i];
@@ -735,7 +1100,7 @@ public class PostgresProtocolHandler {
             while (i < errorResponse.length && errorResponse[i] != 0) {
                 i++;
             }
-            if (fieldType == 'M') {
+            if (fieldType == field) {
                 return new String(errorResponse, start, i - start, StandardCharsets.UTF_8);
             }
             i++; // skip the field's null terminator

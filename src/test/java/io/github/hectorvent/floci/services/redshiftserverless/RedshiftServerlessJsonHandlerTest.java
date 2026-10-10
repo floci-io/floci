@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -74,8 +75,10 @@ class RedshiftServerlessJsonHandlerTest {
                         Instant.ofEpochSecond(1_800_000_000L), List.of()));
         iamDbUserResolver = mock(RedshiftIamDbUserResolver.class);
         when(iamDbUserResolver.resolveDbUser("AUTH")).thenReturn("IAM:alice");
+        EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(config.storage().persistentPath()).thenReturn(System.getProperty("java.io.tmpdir"));
         handler = new RedshiftServerlessJsonHandler(
-                new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime), mapper,
+                new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config), mapper,
                 iamDbUserResolver);
     }
 
@@ -287,7 +290,7 @@ class RedshiftServerlessJsonHandlerTest {
 
     @Test
     void anUnknownActionIsReportedAsUnknownOperation() {
-        Response response = handler.handle("CreateSnapshot", mapper.createObjectNode(), REGION);
+        Response response = handler.handle("CreateScheduledAction", mapper.createObjectNode(), REGION);
 
         assertEquals(400, response.getStatus());
         assertEquals("UnknownOperationException", errorType(response));

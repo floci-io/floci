@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
-import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Cookie;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -218,6 +218,37 @@ class RegionResolverTest {
         assertEquals("aws-cn", resolver.partitionForRegion("aws-cn-global"));
         assertEquals("aws-iso", resolver.partitionForRegion("aws-iso-global"));
         assertEquals("aws", resolver.partitionForRegion("aws-global"));
+    }
+
+    /**
+     * AWS never signs with a pseudo-region, so one named in a credential scope is served as its
+     * partition's implicit global region instead of becoming a regional namespace of its own.
+     */
+    @Test
+    void aPseudoSigningRegionIsServedAsItsPartitionsGlobalRegion() {
+        assertEquals("cn-northwest-1", resolver.resolveRegionFromAuth(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260617/aws-cn-global/sqs/aws4_request, SignedHeaders=host, Signature=abc"));
+        assertEquals("us-east-1", resolver.resolveRegionFromAuthOrNull(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260617/aws-global/sqs/aws4_request, SignedHeaders=host, Signature=abc"));
+        assertEquals("us-gov-west-1",
+                resolver.resolveRegionFromPresignedCredential("AKID/20260617/aws-us-gov-global/s3/aws4_request"));
+        assertEquals("cn-north-1", resolver.resolveRegionFromAuth(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260617/cn-north-1/sqs/aws4_request, SignedHeaders=host, Signature=abc"));
+        assertEquals("xx-nowhere-9", resolver.resolveRegionFromAuth(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260617/xx-nowhere-9/sqs/aws4_request, SignedHeaders=host, Signature=abc"),
+                "an unknown label stays raw so the unknown-region guard can name it");
+    }
+
+    /**
+     * A region no partition publishes is scoped to the deployment's partition when served
+     * ({@code floci.partitions.allow-unknown-regions}), and its ARNs must agree with that scope.
+     */
+    @Test
+    void buildArnMintsAnUnknownRegionInTheDeploymentPartition() {
+        RegionResolver china = new RegionResolver("cn-north-1", "000000000000");
+        assertEquals("arn:aws-cn:sqs:xx-nowhere-9:000000000000:q", china.buildArn("sqs", "xx-nowhere-9", "q"));
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:q", china.buildArn("sqs", "us-east-1", "q"));
+        assertEquals("arn:aws:sqs:xx-nowhere-9:000000000000:q", resolver.buildArn("sqs", "xx-nowhere-9", "q"));
     }
 
     @Test

@@ -43,6 +43,7 @@ class RedshiftDataResourceResolverTest {
     private RedshiftDataResourceResolver resolver(RedshiftService redshift, SecretsManagerService secrets) {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT);
+        when(regionResolver.getDefaultRegion()).thenReturn(REGION);
         return new RedshiftDataResourceResolver(redshift, secrets, mapper, broker, regionResolver, serverless);
     }
 
@@ -66,10 +67,26 @@ class RedshiftDataResourceResolverTest {
         assertEquals("Secret123", target.password());
     }
 
+    @Test
+    void aProvisionedClusterArnCarriesTheCallersAccount() {
+        RedshiftService redshift = mock(RedshiftService.class);
+        when(redshift.describeClusters("wh")).thenReturn(List.of(cluster()));
+        ObjectNode req = mapper.createObjectNode();
+        req.put("ClusterIdentifier", "wh");
+        req.put("DbUser", "admin");
+        req.put("Database", "dev");
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(redshift, mock(SecretsManagerService.class)).resolve(req, REGION);
+
+        assertEquals("arn:aws:redshift:us-east-1:" + ACCOUNT + ":cluster:wh", target.arn());
+    }
+
     private static RedshiftServerlessService.WorkgroupTarget workgroupTarget() {
         return new RedshiftServerlessService.WorkgroupTarget(
                 "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", "wg-1",
-                "127.0.0.1", 55433, "analytics", "root", "Secret123", "root");
+                "127.0.0.1", 55433, "analytics", "root", "Secret123", "root",
+                List.of("arn:aws:iam::" + ACCOUNT + ":role/Spectrum"));
     }
 
     @Test
@@ -88,6 +105,10 @@ class RedshiftDataResourceResolverTest {
         assertEquals("analytics", target.database());
         assertEquals("root", target.user());
         assertEquals("Secret123", target.password());
+        assertEquals(ACCOUNT, target.spectrum().accountId());
+        assertEquals(ACCOUNT + ":serverless_us-east-1_wg-1", target.spectrum().clusterKey());
+        assertEquals("analytics", target.spectrum().databaseName());
+        assertEquals(List.of("arn:aws:iam::" + ACCOUNT + ":role/Spectrum"), target.spectrum().iamRoleArns());
     }
 
     @Test

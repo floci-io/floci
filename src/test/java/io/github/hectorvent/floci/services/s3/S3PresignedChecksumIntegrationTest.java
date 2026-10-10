@@ -52,7 +52,7 @@ class S3PresignedChecksumIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("BadDigest"))
-            .body(containsString("The CRC32 checksum you specified did not match the payload."));
+            .body(containsString("The CRC32 you specified did not match the calculated checksum."));
 
         // Xác nhận object không được lưu vào storage
         given()
@@ -137,7 +137,7 @@ class S3PresignedChecksumIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("BadDigest"))
-            .body(containsString("The SHA256 checksum you specified did not match the payload."));
+            .body(containsString("The SHA256 you specified did not match the calculated checksum."));
     }
 
     @Test
@@ -170,7 +170,7 @@ class S3PresignedChecksumIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("BadDigest"))
-            .body(containsString("The CRC32 checksum you specified did not match the payload."));
+            .body(containsString("The CRC32 you specified did not match the calculated checksum."));
     }
 
     @Test

@@ -1,7 +1,13 @@
 package io.github.hectorvent.floci.services.ecs;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -13,11 +19,6 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
-import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -26,7 +27,6 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
@@ -59,8 +59,6 @@ public class EcsTaskMetadataController {
 
     private static final DateTimeFormatter TIMESTAMP = DateTimeFormatter.ISO_INSTANT;
     private static final String SERVICE_GROUP_PREFIX = "service:";
-    /** The search domain an instance gets, which us-east-1 spells differently from every other region. */
-    private static final String LEGACY_SEARCH_DOMAIN_REGION = "us-east-1"; // partition-literal: ec2.internal is us-east-1's own search domain
 
     /**
      * Docker's stats document, written back out the way the daemon sent it. docker-java's model
@@ -506,7 +504,7 @@ public class EcsTaskMetadataController {
     }
 
     private static String searchDomain(String region) {
-        return LEGACY_SEARCH_DOMAIN_REGION.equals(region) ? "ec2.internal" : region + ".compute.internal";
+        return AwsRegions.ec2PrivateDnsDomain(region);
     }
 
     private static ContainerDefinition definitionOf(TaskDefinition taskDef, String containerName) {

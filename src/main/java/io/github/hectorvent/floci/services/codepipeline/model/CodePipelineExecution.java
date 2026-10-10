@@ -37,6 +37,7 @@ public class CodePipelineExecution {
     private volatile boolean abandon;
     private volatile boolean artifactsReleased;
     private String rollbackTargetPipelineExecutionId;
+    private String rollbackStageName;
     private List<Map<String, Object>> ruleExecutions = new ArrayList<>();
     /** Overridden stage conditions, keyed {@code <stageName>/<conditionType>}. */
     private Map<String, Boolean> conditionOverrides = new LinkedHashMap<>();
@@ -216,6 +217,14 @@ public class CodePipelineExecution {
 
     public void setArtifactsReleased(boolean artifactsReleased) {
         this.artifactsReleased = artifactsReleased;
+    }
+
+    public String getRollbackStageName() {
+        return rollbackStageName;
+    }
+
+    public void setRollbackStageName(String rollbackStageName) {
+        this.rollbackStageName = rollbackStageName;
     }
 
     public String getRollbackTargetPipelineExecutionId() {

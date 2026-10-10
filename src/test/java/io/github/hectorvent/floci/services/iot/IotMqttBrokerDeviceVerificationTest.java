@@ -108,7 +108,7 @@ class IotMqttBrokerDeviceVerificationTest {
                 .addCertValue(Buffer.buffer(serverLeaf.certificatePem()))
                 .addKeyValue(Buffer.buffer(serverLeaf.privateKeyPem())));
         when(iotService.get()).thenReturn(service);
-        broker = new IotMqttBrokerService(config, vertx, iotService, registry);
+        broker = new IotMqttBrokerService(config, vertx, iotService, mock(IotCustomAuthorizer.class), registry);
         broker.startIfEnabled();
     }
 

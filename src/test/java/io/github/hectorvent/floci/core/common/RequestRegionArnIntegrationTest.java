@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -117,7 +117,7 @@ class RequestRegionArnIntegrationTest {
             .then()
                 .statusCode(200)
                 .body("domainNameConfig.domainNameArn", startsWith("arn:aws:appsync:" + REGION + ":"))
-                .body("domainNameConfig.appsyncDomainName", containsString(REGION));
+                .body("domainNameConfig.appsyncDomainName", endsWith(".cloudfront.net"));
         given().header("Authorization", auth("appsync")).delete("/v1/domainnames/" + domain)
                 .then().statusCode(204);
 

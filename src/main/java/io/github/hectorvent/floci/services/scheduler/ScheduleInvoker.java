@@ -6,14 +6,16 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
-import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
+import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import io.github.hectorvent.floci.services.sns.SnsMessageAttributes;
@@ -21,6 +23,7 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -28,18 +31,22 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 /**
  * Delivers an EventBridge Scheduler target invocation to the underlying service.
  * Supports templated SQS, Lambda, SNS, Step Functions, and EventBridge PutEvents targets, plus
  * universal targets ({@code arn:aws:scheduler:::aws-sdk:<service>:<action>}) for
- * {@code sns:publish} and {@code sqs:sendMessage}. Mirrors the subset handled by
+ * {@code sns:publish}, {@code sqs:sendMessage}, {@code redshiftdata:executeStatement} and
+ * {@code redshiftdata:batchExecuteStatement}. Mirrors the subset handled by
  * {@code EventBridgeInvoker} but using Scheduler's {@link Target} model (raw
  * {@code input} string, no JSONPath/template).
  */
@@ -48,15 +55,23 @@ public class ScheduleInvoker {
 
     private static final Logger LOG = Logger.getLogger(ScheduleInvoker.class);
 
+    static final String CONTEXT_SCHEDULE_ARN = "<aws.scheduler.schedule-arn>";
+    static final String CONTEXT_SCHEDULED_TIME = "<aws.scheduler.scheduled-time>";
+    static final String CONTEXT_EXECUTION_ID = "<aws.scheduler.execution-id>";
+    static final String CONTEXT_ATTEMPT_NUMBER = "<aws.scheduler.attempt-number>";
+
     private final SqsService sqsService;
     private final LambdaService lambdaService;
     private final SnsService snsService;
     private final EventBridgeService eventBridgeService;
     private final EcsService ecsService;
     private final StepFunctionsService stepFunctionsService;
+    private final RedshiftDataService redshiftDataService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
     private final String defaultRegion;
+    private final ServiceRegistry serviceRegistry;
+    private final Executor redshiftDataExecutor;
 
     @Inject
     public ScheduleInvoker(SqsService sqsService,
@@ -65,38 +80,84 @@ public class ScheduleInvoker {
                            EventBridgeService eventBridgeService,
                            EcsService ecsService,
                            StepFunctionsService stepFunctionsService,
+                           RedshiftDataService redshiftDataService,
                            ObjectMapper objectMapper,
-                           EmulatorConfig config) {
+                           EmulatorConfig config,
+                           ServiceRegistry serviceRegistry) {
+        this(sqsService, lambdaService, snsService, eventBridgeService, ecsService, stepFunctionsService,
+                redshiftDataService, objectMapper, config, serviceRegistry, newRedshiftDataExecutor());
+    }
+
+    ScheduleInvoker(SqsService sqsService,
+                    LambdaService lambdaService,
+                    SnsService snsService,
+                    EventBridgeService eventBridgeService,
+                    EcsService ecsService,
+                    StepFunctionsService stepFunctionsService,
+                    RedshiftDataService redshiftDataService,
+                    ObjectMapper objectMapper,
+                    EmulatorConfig config,
+                    ServiceRegistry serviceRegistry,
+                    Executor redshiftDataExecutor) {
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
         this.snsService = snsService;
         this.eventBridgeService = eventBridgeService;
         this.ecsService = ecsService;
         this.stepFunctionsService = stepFunctionsService;
+        this.redshiftDataService = redshiftDataService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
         this.defaultRegion = config.defaultRegion();
+        this.serviceRegistry = serviceRegistry;
+        this.redshiftDataExecutor = redshiftDataExecutor;
+    }
+
+    private static ExecutorService newRedshiftDataExecutor() {
+        return Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "scheduler-redshift-data");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    @PreDestroy
+    void shutdown() {
+        if (redshiftDataExecutor instanceof ExecutorService service) {
+            service.shutdownNow();
+        }
     }
 
     /**
-     * Delivers one occurrence of {@code schedule}, scheduled at {@code scheduledAt}, to its target
-     * and returns the JSON request that was sent (see {@link #materializeRequest}).
+     * Delivers the first attempt of one occurrence of {@code schedule}, under a fresh execution id.
+     * See {@link #invoke(Schedule, Instant, String, int)}.
      */
     public String invoke(Schedule schedule, Instant scheduledAt) {
+        return invoke(schedule, scheduledAt, newExecutionId(), 1);
+    }
+
+    /**
+     * Delivers one attempt of the occurrence of {@code schedule} scheduled at {@code scheduledAt}
+     * to its target and returns the JSON request that was sent (see {@link #materializeRequest}).
+     * {@code executionId} and the 1-based {@code attemptNumber} fill the context attributes of
+     * the target's {@code Input}.
+     */
+    public String invoke(Schedule schedule, Instant scheduledAt, String executionId, int attemptNumber) {
         Target target = schedule.getTarget();
         if (target == null || target.getArn() == null) {
             return "{}";
         }
         String arn = target.getArn();
         String region = regionOf(schedule, defaultRegion);
+        String input = contextualInput(schedule, scheduledAt, executionId, attemptNumber);
         if (isUniversalTarget(arn)) {
             invokeUniversalTarget(arn.substring(arn.indexOf(":aws-sdk:") + ":aws-sdk:".length()),
-                    target.getInput(), region);
-            return universalTargetRequest(target);
+                    input, region, schedule.getAccountId());
+            return universalTargetRequest(input);
         }
 
         TargetKind kind = TargetKind.of(target);
-        String payload = templatedPayload(schedule, scheduledAt);
+        String payload = templatedPayload(schedule, input, scheduledAt);
         String targetRegion = extractRegion(arn, region);
         switch (kind) {
             case SQS -> {
@@ -141,14 +202,52 @@ public class ScheduleInvoker {
      * in the dead-letter queue example of the Scheduler user guide.
      */
     public String materializeRequest(Schedule schedule, Instant scheduledAt) {
+        return materializeRequest(schedule, scheduledAt, newExecutionId(), 1);
+    }
+
+    /** The request {@link #invoke(Schedule, Instant, String, int)} sends for the same attempt. */
+    public String materializeRequest(Schedule schedule, Instant scheduledAt, String executionId,
+                                     int attemptNumber) {
         Target target = schedule.getTarget();
         if (target == null || target.getArn() == null) {
             return "{}";
         }
+        String input = contextualInput(schedule, scheduledAt, executionId, attemptNumber);
         if (isUniversalTarget(target.getArn())) {
-            return universalTargetRequest(target);
+            return universalTargetRequest(input);
         }
-        return templatedTargetRequest(target, TargetKind.of(target), templatedPayload(schedule, scheduledAt));
+        return templatedTargetRequest(target, TargetKind.of(target),
+                templatedPayload(schedule, input, scheduledAt));
+    }
+
+    static String formatScheduledTime(Instant scheduledAt) {
+        return scheduledAt.truncatedTo(ChronoUnit.SECONDS).toString();
+    }
+
+    /** A Scheduler-style execution id: 16 lowercase hex characters. */
+    public static String newExecutionId() {
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+    }
+
+    /**
+     * The target's {@code Input} with the Scheduler context attributes replaced: the schedule ARN,
+     * the scheduled time as UTC seconds with a {@code Z} suffix, the execution id and the 1-based
+     * attempt number. Null when the target has no {@code Input}, so the default event is untouched.
+     */
+    static String contextualInput(Schedule schedule, Instant scheduledAt, String executionId,
+                                  int attemptNumber) {
+        String input = schedule.getTarget().getInput();
+        if (input == null || input.indexOf('<') < 0) {
+            return input;
+        }
+        String scheduledTime = scheduledAt == null
+                ? ""
+                : formatScheduledTime(scheduledAt);
+        return input
+                .replace(CONTEXT_SCHEDULE_ARN, schedule.getArn() == null ? "" : schedule.getArn())
+                .replace(CONTEXT_SCHEDULED_TIME, scheduledTime)
+                .replace(CONTEXT_EXECUTION_ID, executionId == null ? "" : executionId)
+                .replace(CONTEXT_ATTEMPT_NUMBER, String.valueOf(attemptNumber));
     }
 
     /** The templated target types Floci delivers to, in the order their ARNs are recognised. */
@@ -189,8 +288,8 @@ public class ScheduleInvoker {
         return arn.contains(":aws-sdk:");
     }
 
-    private String universalTargetRequest(Target target) {
-        return validJsonOrString(target.getInput() != null ? target.getInput() : "{}");
+    private String universalTargetRequest(String input) {
+        return validJsonOrString(input != null ? input : "{}");
     }
 
     private String templatedTargetRequest(Target target, TargetKind kind, String payload) {
@@ -256,8 +355,7 @@ public class ScheduleInvoker {
      * The payload a templated target receives: the target's {@code Input}, or Scheduler's default
      * notification when no {@code Input} was configured (API reference, {@code Target.Input}).
      */
-    private String templatedPayload(Schedule schedule, Instant scheduledAt) {
-        String input = schedule.getTarget().getInput();
+    private String templatedPayload(Schedule schedule, String input, Instant scheduledAt) {
         return input != null ? input : defaultScheduledEvent(schedule, scheduledAt);
     }
 
@@ -275,7 +373,7 @@ public class ScheduleInvoker {
         event.put("detail-type", "Scheduled Event");
         event.put("source", "aws.scheduler");
         event.put("account", scheduleArn.accountId());
-        event.put("time", scheduledAt.truncatedTo(ChronoUnit.SECONDS).toString());
+        event.put("time", formatScheduledTime(scheduledAt));
         event.put("region", scheduleArn.region());
         event.put("resources", List.of(schedule.getArn()));
         event.put("detail", "{}");
@@ -348,9 +446,11 @@ public class ScheduleInvoker {
      * Dispatches an EventBridge Scheduler universal target ({@code aws-sdk:<service>:<action>}),
      * reading the call parameters from the target's {@code Input} payload. Supports the
      * common {@code sns:publish} and {@code sqs:sendMessage} actions; other actions fail
-     * as unsupported.
+     * as unsupported. {@code scheduleAccountId} scopes the Redshift Data calls, whose cluster and
+     * statement storage is account-aware and the dispatcher thread carries no request account.
      */
-    private void invokeUniversalTarget(String serviceAction, String input, String region) {
+    private void invokeUniversalTarget(String serviceAction, String input, String region,
+                                       String scheduleAccountId) {
         JsonNode params;
         try {
             params = objectMapper.readTree(input == null || input.isBlank() ? "{}" : input);
@@ -383,9 +483,42 @@ public class ScheduleInvoker {
                         messageAttributes, region);
                 LOG.debugv("Scheduler delivered to SQS (universal target): {0}", queueUrl);
             }
+            case "redshiftdata:executeStatement" -> {
+                requireRedshiftData();
+                submitRedshiftData(scheduleAccountId, region, () -> redshiftDataService.submitStatement(params, region));
+                LOG.debugv("Scheduler submitted to the Redshift Data API (universal target): {0}", serviceAction);
+            }
+            case "redshiftdata:batchExecuteStatement" -> {
+                requireRedshiftData();
+                submitRedshiftData(scheduleAccountId, region, () -> redshiftDataService.submitBatch(params, region));
+                LOG.debugv("Scheduler submitted to the Redshift Data API (universal target): {0}", serviceAction);
+            }
             default -> throw new UnsupportedOperationException(
                     "Scheduler: unsupported universal target action: " + serviceAction);
         }
+    }
+
+    private void requireRedshiftData() {
+        if (!serviceRegistry.isServiceEnabled("redshift-data")) {
+            throw new AwsException("ServiceNotAvailableException", "Service redshift-data is not enabled.", 400);
+        }
+    }
+
+    /**
+     * The Data API is asynchronous: AWS returns once the statement is submitted. The request check
+     * runs here, so a rejected request still fails the occurrence and is retried, while the SQL runs
+     * on its own thread so a slow statement cannot hold up the single dispatcher thread. Both halves
+     * run as the schedule's account, which neither thread carries.
+     */
+    private void submitRedshiftData(String scheduleAccountId, String region, Supplier<Runnable> submit) {
+        Runnable statement = RequestScopes.callAs(scheduleAccountId, region, submit);
+        redshiftDataExecutor.execute(() -> {
+            try {
+                RequestScopes.runAs(scheduleAccountId, region, statement);
+            } catch (RuntimeException e) {
+                LOG.warnv("Scheduled Redshift Data statement failed: {0}", e.getMessage());
+            }
+        });
     }
 
     private static Map<String, MessageAttributeValue> parseUniversalSqsMessageAttributes(JsonNode attrsNode) {
@@ -397,19 +530,15 @@ public class ScheduleInvoker {
             JsonNode valueNode = entry.getValue();
             String dataType = valueNode.path("DataType").asText(null);
             String stringValue = valueNode.path("StringValue").asText(null);
-            String binaryValueBase64 = valueNode.path("BinaryValue").asText(null);
+            String binaryValueText = valueNode.path("BinaryValue").asText(null);
             if (dataType == null) {
                 return;
             }
-            if (binaryValueBase64 != null) {
-                byte[] binaryValue;
-                try {
-                    binaryValue = Base64.getDecoder().decode(binaryValueBase64);
-                } catch (IllegalArgumentException e) {
-                    throw new AwsException("InvalidParameterValue",
-                            "Invalid binary value for message attribute '" + entry.getKey()
-                                    + "': not valid base64.", 400);
-                }
+            if (binaryValueText != null) {
+                // Unlike the SQS JSON protocol, AWS does not base64-decode BinaryValue in a universal
+                // target Input: the attribute bytes are the UTF-8 encoding of the JSON string, and a
+                // base64 string is delivered as its own text.
+                byte[] binaryValue = binaryValueText.getBytes(StandardCharsets.UTF_8);
                 attributes.put(entry.getKey(), new MessageAttributeValue(binaryValue, dataType));
             } else if (stringValue != null) {
                 attributes.put(entry.getKey(), new MessageAttributeValue(

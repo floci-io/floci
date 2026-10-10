@@ -32,7 +32,7 @@ public class CurrentContainerNetworkResolver {
 
     private final DockerClient dockerClient;
     private final ContainerDetector containerDetector;
-    private final Map<Integer, Integer> cachedPublishedPorts = new ConcurrentHashMap<>();
+    private final Map<Integer, OptionalInt> cachedPublishedPorts = new ConcurrentHashMap<>();
 
     private volatile Optional<CurrentContainerNetwork> cachedNetwork;
 
@@ -59,15 +59,14 @@ public class CurrentContainerNetworkResolver {
     }
 
     public OptionalInt resolvePublishedPort(int containerPort) {
-        Integer cachedPublishedPort = cachedPublishedPorts.get(containerPort);
+        OptionalInt cachedPublishedPort = cachedPublishedPorts.get(containerPort);
         if (cachedPublishedPort != null) {
-            return OptionalInt.of(cachedPublishedPort);
+            return cachedPublishedPort;
         }
 
         OptionalInt resolvedPublishedPort = detectPublishedPort(containerPort);
-        resolvedPublishedPort.ifPresent(port -> cachedPublishedPorts.putIfAbsent(containerPort, port));
-        Integer publishedPort = cachedPublishedPorts.get(containerPort);
-        return publishedPort == null ? OptionalInt.empty() : OptionalInt.of(publishedPort);
+        OptionalInt publishedPort = cachedPublishedPorts.putIfAbsent(containerPort, resolvedPublishedPort);
+        return publishedPort == null ? resolvedPublishedPort : publishedPort;
     }
 
     Optional<CurrentContainerNetwork> resolve() {
@@ -79,6 +78,13 @@ public class CurrentContainerNetworkResolver {
         return cachedNetwork;
     }
 
+    /**
+     * The host port Floci's own container publishes for {@code containerPort}, empty when it is
+     * not published, Floci is not in a container, or the container cannot be inspected. Every
+     * result is cached, a failure included, as {@link #resolve()} does: a running container's
+     * port bindings never change, and an inspect that fails (no Docker access, no container id)
+     * fails the same way on the next call.
+     */
     private OptionalInt detectPublishedPort(int containerPort) {
         if (!containerDetector.isRunningInContainer()) {
             return OptionalInt.empty();

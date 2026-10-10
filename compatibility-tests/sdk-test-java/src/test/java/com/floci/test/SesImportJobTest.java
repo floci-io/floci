@@ -7,7 +7,6 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
@@ -38,9 +37,9 @@ import software.amazon.awssdk.services.sesv2.model.ListImportJobsResponse;
 import software.amazon.awssdk.services.sesv2.model.ListSuppressedDestinationsRequest;
 import software.amazon.awssdk.services.sesv2.model.NotFoundException;
 import software.amazon.awssdk.services.sesv2.model.SubscriptionStatus;
+import software.amazon.awssdk.services.sesv2.model.SuppressedDestinationSummary;
 import software.amazon.awssdk.services.sesv2.model.SuppressionListDestination;
 import software.amazon.awssdk.services.sesv2.model.SuppressionListImportAction;
-import software.amazon.awssdk.services.sesv2.model.SuppressedDestinationSummary;
 import software.amazon.awssdk.services.sesv2.model.Topic;
 
 import java.util.List;

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -27,8 +28,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -41,6 +44,32 @@ class IamServicePersistenceTest {
     private static final String OIDC_URL =
             "https://oidc.eks.eu-central-1.amazonaws.com/id/PERSISTED0EXAMPLE";
     private static final String THUMBPRINT = "9e99a48a9960b14926bb7f3b02e22da2b0ab7280";
+
+    @Test
+    void roleInlinePolicyQuotaUsesPersistedAggregateAfterRestart(@TempDir Path directory) {
+        IamService first = newService(directory);
+        first.createRole("R", "/", "{}", null, 0, null);
+        String firstPolicy = policyWithNonWhitespaceLength(6_000);
+        String secondPolicy = policyWithNonWhitespaceLength(4_000);
+        first.putRolePolicy("R", "first", firstPolicy);
+        first.putRolePolicy("R", "second", secondPolicy);
+
+        IamService restarted = newService(directory);
+        assertEquals(firstPolicy, restarted.getRolePolicy("R", "first"));
+        assertEquals(secondPolicy, restarted.getRolePolicy("R", "second"));
+
+        AwsException aggregateError = assertThrows(AwsException.class,
+                () -> restarted.putRolePolicy("R", "third", policyWithNonWhitespaceLength(241)));
+        assertEquals("LimitExceeded", aggregateError.getErrorCode());
+        assertEquals(409, aggregateError.getHttpStatus());
+
+        AwsException replacementError = assertThrows(AwsException.class,
+                () -> restarted.putRolePolicy("R", "first", policyWithNonWhitespaceLength(6_241)));
+        assertEquals("LimitExceeded", replacementError.getErrorCode());
+        assertEquals(409, replacementError.getHttpStatus());
+        assertEquals(firstPolicy, restarted.getRolePolicy("R", "first"));
+        assertEquals(secondPolicy, restarted.getRolePolicy("R", "second"));
+    }
 
     @Test
     void openIdConnectProviderSurvivesRestart(@TempDir Path dir) {
@@ -116,10 +145,10 @@ class IamServicePersistenceTest {
     void expiredTemporarySessionsAreRemovedAfterRestart(@TempDir Path dir) {
         Instant now = Instant.now();
         IamService first = newService(dir);
-        first.registerSessionForAccount("000000000000", "ASIAEXPIREDPRESIGN", "expired-secret",
-                "expired-token", null, now.minusSeconds(1), null);
-        first.registerSessionForAccount("000000000000", "ASIAVALIDPRESIGN", "valid-secret",
-                "valid-token", null, now.plusSeconds(3600), null);
+        first.registerPresignedUrlSession("000000000000", "ASIAEXPIREDPRESIGN", "expired-secret",
+                "expired-token", now.minusSeconds(1), null, "s3:GetObject", "arn:aws:s3:::bucket/key");
+        first.registerPresignedUrlSession("000000000000", "ASIAVALIDPRESIGN", "valid-secret",
+                "valid-token", now.plusSeconds(3600), null, "s3:GetObject", "arn:aws:s3:::bucket/key");
 
         IamService restarted = newService(dir);
         assertEquals(1, restarted.sweepExpiredSessions(now));
@@ -233,6 +262,8 @@ class IamServicePersistenceTest {
                 new InMemoryStorage<>(), devices, new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
     }
 

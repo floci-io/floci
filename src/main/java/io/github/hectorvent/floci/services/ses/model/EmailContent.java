@@ -12,18 +12,27 @@ import java.util.List;
  */
 public sealed interface EmailContent {
 
-    record Simple(String subject, String bodyText, String bodyHtml, List<MessageHeader> headers)
-            implements EmailContent {
+    record Simple(String subject, String bodyText, String bodyHtml, List<MessageHeader> headers,
+                  List<MessageAttachment> attachments) implements EmailContent {
+
+        public Simple(String subject, String bodyText, String bodyHtml, List<MessageHeader> headers) {
+            this(subject, bodyText, bodyHtml, headers, List.of());
+        }
 
         public boolean hasHeaders() {
             return headers != null && !headers.isEmpty();
+        }
+
+        public boolean hasAttachments() {
+            return attachments != null && !attachments.isEmpty();
         }
 
         public Simple withSafeHeaders() {
             if (!hasHeaders()) {
                 return this;
             }
-            return new Simple(subject, bodyText, bodyHtml, headers.stream().filter(MessageHeader::isSafe).toList());
+            return new Simple(subject, bodyText, bodyHtml, headers.stream().filter(MessageHeader::isSafe).toList(),
+                    attachments);
         }
     }
 

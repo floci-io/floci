@@ -95,6 +95,11 @@ class CodeArtifactPypiDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertEquals(new String(content, StandardCharsets.UTF_8), new String(fetched, StandardCharsets.UTF_8));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package=" + PACKAGE_NAME)
+                .then().statusCode(200).body("package.name", equalTo(PACKAGE_NAME))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"));
     }
 
     /**
@@ -148,6 +153,10 @@ class CodeArtifactPypiDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/pypi/" + DOMAIN + "/no-such-repo/simple/does-not-exist/")
                 .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
@@ -345,6 +354,36 @@ class CodeArtifactPypiDockerIntegrationTest {
                 .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
                         + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=does-not-exist.tar.gz")
                 .then().statusCode(404);
+    }
+
+    /**
+     * pypiserver has no single whole-package delete route the way Verdaccio and Reposilite do, but
+     * its own management endpoint ({@code POST /} with {@code :action=remove_pkg}) does delete a
+     * named version for real, confirmed live: {@code DeletePackage} lists every version through
+     * that same container and removes each one, so this asserts the real removal rather than a
+     * refusal, and that the file this class's earlier tests uploaded is genuinely gone afterward.
+     */
+    @Test
+    @Order(13)
+    void deletePackageRemovesTheFileFromTheRealPypiserverSidecar() {
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package="
+                        + PACKAGE_NAME)
+                .then().statusCode(200).body("deletedPackage.package", equalTo(PACKAGE_NAME));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/simple/" + PACKAGE_NAME + "/")
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=" + FILENAME)
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package="
+                        + PACKAGE_NAME)
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     /**

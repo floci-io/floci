@@ -85,26 +85,41 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     private final PreSignedUrlGenerator presignGenerator;
     private final IamService iamService;
     private final CurrentVertxRequest currentVertxRequest;
-
-    @Context
-    ResourceInfo resourceInfo;
+    private final ResourceInfo resourceInfo;
 
     @Inject
-    public S3HeaderSignatureFilter(S3Service s3Service, PreSignedUrlGenerator presignGenerator,
-                                   IamService iamService, CurrentVertxRequest currentVertxRequest) {
+    public S3HeaderSignatureFilter(S3Service s3Service,
+                                   PreSignedUrlGenerator presignGenerator,
+                                   IamService iamService,
+                                   CurrentVertxRequest currentVertxRequest,
+                                   @Context ResourceInfo resourceInfo) {
         this.s3Service = s3Service;
         this.presignGenerator = presignGenerator;
         this.iamService = iamService;
         this.currentVertxRequest = currentVertxRequest;
+        this.resourceInfo = resourceInfo;
+    }
+
+    S3HeaderSignatureFilter(S3Service s3Service,
+                            PreSignedUrlGenerator presignGenerator,
+                            IamService iamService,
+                            CurrentVertxRequest currentVertxRequest) {
+        this(s3Service, presignGenerator, iamService, currentVertxRequest, null);
     }
 
     @Override
     public void filter(ContainerRequestContext ctx) throws IOException {
-        if (!verifiesSignatures() || !routedToS3()) {
+        if (!S3SignatureFilterScope.routedToS3(resourceInfo)
+                || !S3SignatureFilterScope.verifiesSignatures(s3Service, presignGenerator)) {
             return;
         }
         String authorization = ctx.getHeaderString("Authorization");
-        if (authorization == null || !authorization.startsWith(ALGORITHM + " ")) {
+        if (authorization == null || authorization.isBlank()) {
+            return;
+        }
+        if (!authorization.startsWith(ALGORITHM + " ")) {
+            abort(ctx, 400, "AuthorizationHeaderMalformed",
+                    "The authorization header you provided is invalid.");
             return;
         }
 
@@ -186,14 +201,6 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
             abort(ctx, 400, "XAmzContentSHA256Mismatch",
                     "The provided 'x-amz-content-sha256' header does not match what was computed.");
         }
-    }
-
-    private boolean verifiesSignatures() {
-        return s3Service.isAuthEnforced() || presignGenerator.shouldValidateSignatures();
-    }
-
-    private boolean routedToS3() {
-        return resourceInfo != null && S3Controller.class.equals(resourceInfo.getResourceClass());
     }
 
     private boolean signatureMatches(ContainerRequestContext ctx, String secretKey, String scopeDate,

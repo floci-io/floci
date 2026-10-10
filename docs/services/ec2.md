@@ -149,10 +149,14 @@ As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT
 | `GET /latest/meta-data/iam/info` | IAM instance profile info |
 | `GET /latest/meta-data/iam/security-credentials/` | Role name list |
 | `GET /latest/meta-data/iam/security-credentials/{role}` | Temporary credentials |
+| `GET /latest/meta-data/identity-credentials/ec2/info` | Instance identity role info (`Code`, `LastUpdated`, `AccountId`) |
+| `GET /latest/meta-data/identity-credentials/ec2/security-credentials/ec2-instance` | Instance identity role credentials |
 | `GET /latest/user-data` | UserData script |
 | `GET /latest/dynamic/instance-identity/document` | Identity document JSON |
 
 IAM credentials are served when the instance has an `IamInstanceProfile.Arn` that resolves to an existing instance profile with one role in the profile's account. The role list uses the role name, which can differ from the profile name. Missing profiles, missing roles, and requests for another role return `404`.
+
+Instance identity credentials are served for every instance, with or without an instance profile, under `identity-credentials/ec2/`, with directory listings at each level. They are a session of the instance identity role, `arn:<partition>:sts::<account>:assumed-role/aws:ec2-instance/<instance-id>` to `GetCallerIdentity`, where `<account>` is the account that launched the instance. As on AWS, no identity policy applies to that role, so with IAM enforcement on they are granted nothing beyond what needs no permission, such as `sts:GetCallerIdentity`. They follow the same lifetime, refresh and revocation rules as role credentials. The SSM Agent requests them first when it registers.
 
 Each registered instance receives its own temporary IAM session. Credentials last one hour and refresh on retrieval during the final five minutes; the previous generation remains valid until expiration. Floci revokes tracked sessions when the instance is unregistered or IMDS shuts down, and discards persisted EC2 sessions when Floci restarts. Restored guests obtain fresh credentials after metadata registration is rebuilt.
 
@@ -462,6 +466,27 @@ As with the gateway itself, state is reported settled rather than transitional, 
 trimmed the way AWS trims them: modify omits the `tagSet`, and delete omits both the `tagSet` and
 the subnets. `Ipv6Support` is accepted without checking that the subnets carry IPv6 CIDRs, which
 real AWS rejects; Floci does not model subnet IPv6 allocation.
+
+### Transit Gateway Peering Attachments
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGatewayPeeringAttachment | Requests a peering between a local transit gateway and a peer one, pending acceptance. |
+| DescribeTransitGatewayPeeringAttachments | Lists or returns peering attachments, from either side's region. |
+| AcceptTransitGatewayPeeringAttachment | Accepts a pending peering attachment from the accepter's region. |
+| DeleteTransitGatewayPeeringAttachment | Deletes a peering attachment from either side. |
+
+The requester's gateway must exist; the peer gateway is recorded as given and not resolved, since
+it may belong to an account this emulator cannot see. One attachment id serves both sides, so a
+cross-region peering is visible from both regions, and the `transit-gateway-id` filter matches
+either side's gateway. Creation reports `pendingAcceptance` (AWS passes through
+`initiatingRequest` first), accepting moves it to `available`, and accepting anything but a pending
+attachment returns `IncorrectState`. Across accounts, only the peer account can see the attachment
+from its side and accept it, and accepting checks that the peer gateway exists in the accepter's
+account and region, returning `InvalidTransitGatewayID.NotFound` otherwise. Each account keeps its
+own tags on the attachment. A pending peering does not stop the peer gateway's owner deleting it;
+that rejects the peering instead. Peering attachments do not yet appear in
+`DescribeTransitGatewayAttachments` and cannot be associated with a route table.
 
 ### Transit Gateway Route Tables
 
@@ -855,6 +880,18 @@ Each VPC is backed by a real Docker network, created lazily when the first insta
 launches. An instance's reported private IP is then an address its container actually holds, drawn
 from the subnet CIDR the caller declared, not a plausible-looking number. Instances in the same
 VPC reach each other at those addresses; instances in different VPCs sit on different bridges.
+
+`CreateVpc` and `CreateSubnet` record declarations without contacting Docker. CIDR collision
+checks and fallback address planning run when a consumer first needs an effective address or
+network attachment. This keeps management calls responsive even when the Docker daemon is slow.
+For overlapping VPC CIDRs, the first VPC whose addresses are needed keeps the declared range;
+later VPCs use the fallback pool. Within one emulator run, allocated addresses remain on the
+same effective range.
+
+When EC2 is enabled, Floci initializes its service, restores persisted state, and seeds the
+configured region's default resources during startup. Other account and region scopes seed on
+first access. Docker reconciliation can lengthen startup, and Docker-backed instance launches
+still depend on daemon responsiveness.
 
 One network per **VPC**, not per subnet: subnets inside a VPC route to each other in AWS, so a
 network per subnet would manufacture a partition AWS does not have. Per-subnet addressing is kept

@@ -1,34 +1,5 @@
 package io.github.hectorvent.floci.services.eks;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.config.FlociCertificateAuthority;
-import io.github.hectorvent.floci.core.common.AwsRegions;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
-import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
-import io.github.hectorvent.floci.core.common.dns.DnsForwardingRule;
-import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
-import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
-import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
-import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
-import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
-import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
-import io.github.hectorvent.floci.core.common.docker.PortAllocator;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
-import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
-import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
-import io.github.hectorvent.floci.services.eks.model.Cluster;
-import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
-import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
-import io.github.hectorvent.floci.services.eks.model.LogSetup;
-import io.github.hectorvent.floci.services.eks.model.Logging;
-import io.github.hectorvent.floci.services.eks.model.Nodegroup;
-import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
-import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
-import io.github.hectorvent.floci.testutil.LogCapture;
-
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
@@ -46,17 +17,48 @@ import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
+import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
+import io.github.hectorvent.floci.core.common.dns.DnsForwardingRule;
+import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.Placement;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
+import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
+import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Logging;
+import io.github.hectorvent.floci.services.eks.model.Nodegroup;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
+import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -77,6 +79,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
@@ -89,9 +94,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -1052,7 +1059,7 @@ class EksClusterManagerTest {
             when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
 
             registryManager = Mockito.mock(EcrRegistryManager.class);
-
+            when(registryManager.advertisedPort()).thenReturn(4566);
             config = Mockito.mock(EmulatorConfig.class);
             eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
             ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
@@ -1085,6 +1092,22 @@ class EksClusterManagerTest {
             verify(config, never()).tls();
             String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
             assertFalse(yaml.contains("localhost.floci.io"));
+        }
+
+        @Test
+        void mirrorsTheAdvertisedRegistryPortToTheInNetworkDataPlane() throws Exception {
+            // Floci published as -p 54321:4566: pods name the advertised repository URI, while
+            // k3s still reaches Floci on its own port inside the Docker network.
+            when(registryManager.advertisedPort()).thenReturn(54321);
+
+            manager.injectEcrRegistryMirror("container-1", "demo");
+
+            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost:54321\":"));
+            assertTrue(yaml.contains("\"localhost:54321\":"));
+            assertFalse(yaml.contains("localhost:4566\":"));
+            assertTrue(yaml.contains("- \"http://floci:4566\""));
+            verify(copyCmd).exec();
         }
 
         @Test
@@ -3704,6 +3727,173 @@ class EksClusterManagerTest {
             verify(builder).withCmd(cmdCaptor.capture());
             List<String> cmd = cmdCaptor.getValue();
             assertTrue(cmd.contains("--kubelet-arg=max-pods=250"));
+        }
+    }
+
+    @Nested
+    class JoinedInstancesTest {
+
+        private EksClusterManager manager;
+        private EmulatorConfig config;
+
+        @BeforeEach
+        void setUp() {
+            config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.eks()).thenReturn(Mockito.mock(EmulatorConfig.EksServiceConfig.class));
+            manager = Mockito.spy(new EksClusterManager(Mockito.mock(ContainerBuilder.class),
+                    Mockito.mock(ContainerLifecycleManager.class), Mockito.mock(ContainerDetector.class),
+                    Mockito.mock(PortAllocator.class), Mockito.mock(DockerHostResolver.class),
+                    Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"),
+                    Mockito.mock(Ec2MetadataServer.class), Mockito.mock(EksOidcService.class),
+                    Mockito.mock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
+                    new InMemoryStorage<>()));
+        }
+
+        private Cluster clusterNamed(String name, String containerId) {
+            Cluster c = new Cluster();
+            c.setName(name);
+            c.setContainerId(containerId);
+            return c;
+        }
+
+        @Test
+        void deriveInstanceNodeNameAndProviderId() {
+            Instance inst = createInstance("i-0123456789abcdef0", "us-east-1b", null, null, null);
+            inst.setPrivateDnsName("ip-10-0-1-50.ec2.internal");
+            assertEquals("ip-10-0-1-50.ec2.internal", manager.deriveInstanceNodeName(inst, "us-east-1"));
+            assertEquals("aws:///us-east-1b/i-0123456789abcdef0", manager.deriveInstanceNodeProviderId(inst, "us-east-1"));
+            Instance euInst = createInstance("i-0abcdef1234567890", "eu-west-1c", null, null, null);
+            assertEquals("i-0abcdef1234567890.eu-west-1.compute.internal", manager.deriveInstanceNodeName(euInst, "eu-west-1"));
+            assertEquals("aws:///eu-west-1c/i-0abcdef1234567890", manager.deriveInstanceNodeProviderId(euInst, "eu-west-1"));
+        }
+
+        @Test
+        void joinAndQueryJoinedInstances() {
+            Cluster cluster = clusterNamed("track-cluster", null);
+            cluster.setEndpoint("https://public:6443");
+            cluster.setInternalEndpoint("https://internal:6443");
+            Instance inst = createInstance("i-0123456789abcdef0", "us-east-1a", null, null, "10.0.1.50");
+            assertFalse(manager.isInstanceJoined(cluster, "i-0123456789abcdef0"));
+            manager.joinInstance(cluster, inst);
+            assertTrue(manager.isInstanceJoined(cluster, "i-0123456789abcdef0"));
+            assertEquals(1, manager.getJoinedInstances(cluster).size());
+            assertEquals("i-0123456789abcdef0", manager.getJoinedInstances(cluster).getFirst().getInstanceId());
+            Optional<DnsAnswer> ans = manager.resolveIpv4("i-0123456789abcdef0.ec2.internal");
+            assertTrue(ans.isPresent() && ans.get().addresses().contains("10.0.1.50"));
+            manager.unregisterMetadataEndpoint(cluster);
+            assertFalse(manager.isInstanceJoined(cluster, "i-0123456789abcdef0"));
+        }
+
+        @Test
+        void joinInstanceRegistersNodeInRunningContainerWithExpectedManifest() {
+            Cluster cluster = clusterNamed("live-cluster", "live-container-123");
+            Instance inst = createInstance("i-0123456789abcdef0", "us-east-1a", "t3.medium", "x86_64", "10.0.1.50");
+
+            ArgumentCaptor<String[]> cmdCaptor = ArgumentCaptor.forClass(String[].class);
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(eq("live-container-123"), cmdCaptor.capture(), anyInt());
+
+            manager.joinInstance(cluster, inst);
+            assertTrue(manager.isInstanceJoined(cluster, "i-0123456789abcdef0"));
+            List<String[]> capturedCmds = cmdCaptor.getAllValues();
+            assertEquals(2, capturedCmds.size());
+
+            String applyScript = capturedCmds.getFirst()[2];
+            assertTrue(applyScript.contains("i-0123456789abcdef0.ec2.internal")
+                    && applyScript.contains("aws:///us-east-1a/i-0123456789abcdef0")
+                    && applyScript.contains("\"topology.kubernetes.io/zone\":\"us-east-1a\"")
+                    && applyScript.contains("\"topology.kubernetes.io/region\":\"us-east-1\"")
+                    && applyScript.contains("\"node.kubernetes.io/instance-type\":\"t3.medium\"")
+                    && applyScript.contains("\"kubernetes.io/arch\":\"amd64\""));
+
+            String[] patchCmd = capturedCmds.get(1);
+            assertEquals("node", patchCmd[2]);
+            assertEquals("i-0123456789abcdef0.ec2.internal", patchCmd[3]);
+            assertTrue(patchCmd[7].contains("10.0.1.50") && patchCmd[7].contains("KubeletReady"));
+        }
+
+        @Test
+        void joinArmInstanceRegistersWithArm64Label() {
+            Cluster cluster = clusterNamed("arm-cluster", "arm-container-123");
+            Instance inst = createInstance("i-0arm1234567890abc", "us-east-1b", "t4g.medium", "arm64", "10.0.2.60");
+
+            ArgumentCaptor<String[]> cmdCaptor = ArgumentCaptor.forClass(String[].class);
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(eq("arm-container-123"), cmdCaptor.capture(), anyInt());
+
+            manager.joinInstance(cluster, inst);
+            assertTrue(cmdCaptor.getAllValues().getFirst()[2].contains("\"kubernetes.io/arch\":\"arm64\""));
+        }
+
+        @Test
+        void joinInstanceRegistrationFailureCleansUpAndThrows() {
+            Cluster c1 = clusterNamed("fail-apply", "c1");
+            doReturn(new ContainerExec.Result(1L, "", "apply failed", false))
+                    .when(manager).execInContainerForResult(eq("c1"), any(), anyInt());
+            assertThrows(IllegalStateException.class, () ->
+                    manager.joinInstance(c1, createInstance("i-fail1", "us-east-1a", null, null, null)));
+            assertFalse(manager.isInstanceJoined(c1, "i-fail1"));
+
+            Cluster c2 = clusterNamed("fail-patch", "c2");
+            ArgumentCaptor<String[]> captor = ArgumentCaptor.forClass(String[].class);
+            doReturn(new ContainerExec.Result(0L, "", "", false),
+                    new ContainerExec.Result(1L, "", "patch failed", false),
+                    new ContainerExec.Result(0L, "", "", false))
+                    .when(manager).execInContainerForResult(eq("c2"), captor.capture(), anyInt());
+            assertThrows(IllegalStateException.class, () ->
+                    manager.joinInstance(c2, createInstance("i-fail2", "us-east-1a", null, null, null)));
+            assertFalse(manager.isInstanceJoined(c2, "i-fail2"));
+            assertEquals("delete", captor.getAllValues().get(2)[1]);
+        }
+
+        @Test
+        void joinInstanceSameClusterIsIdempotent() {
+            Cluster cluster = clusterNamed("idem-cluster", null);
+            Instance inst = createInstance("i-idem123456789", "us-east-1a", null, null, null);
+            manager.joinInstance(cluster, inst);
+            assertTrue(manager.isInstanceJoined(cluster, "i-idem123456789"));
+            manager.joinInstance(cluster, inst);
+            assertEquals(1, manager.getJoinedInstances(cluster).size());
+        }
+
+        @Test
+        void joinInstanceRejectsInstanceAlreadyJoinedToAnotherCluster() {
+            Cluster c1 = clusterNamed("c1", null), c2 = clusterNamed("c2", null);
+            Instance inst = createInstance("i-shared1234567890", "us-east-1a", null, null, null);
+            manager.joinInstance(c1, inst);
+            assertTrue(manager.isInstanceJoined(c1, "i-shared1234567890"));
+            assertThrows(AwsException.class, () -> manager.joinInstance(c2, inst));
+            assertFalse(manager.isInstanceJoined(c2, "i-shared1234567890"));
+        }
+
+        @Test
+        void recordJoinedInstanceIdConcurrentSafety() throws Exception {
+            Cluster cluster = clusterNamed("concurrent-cluster", null);
+            ExecutorService executor = Executors.newFixedThreadPool(8);
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < 20; i++) {
+                final int idx = i;
+                futures.add(executor.submit(() ->
+                        manager.recordJoinedInstanceId(cluster, createInstance("i-c" + idx, "us-east-1a", null, null, null))));
+            }
+            for (Future<?> f : futures) {
+                f.get();
+            }
+            executor.shutdown();
+            assertEquals(20, cluster.getJoinedInstanceIds().size());
+        }
+
+        private Instance createInstance(String id, String zone, String type, String arch, String ip) {
+            Instance inst = new Instance();
+            inst.setInstanceId(id);
+            inst.setRegion(zone.substring(0, zone.length() - 1));
+            inst.setPlacement(new Placement(zone));
+            inst.setInstanceType(type);
+            inst.setArchitecture(arch);
+            inst.setPrivateIpAddress(ip);
+            return inst;
         }
     }
 }

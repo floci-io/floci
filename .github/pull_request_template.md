@@ -19,7 +19,7 @@
 - [ ] `./mvnw test` passes locally
 - [ ] New or updated integration test added
 - [ ] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
-- [ ] I have no more than 2 open, non-draft pull requests in this repository (maintainers and dependency bots are exempt).
+- [ ] I have no more than 2 open, non-draft pull requests and no more than 4 open pull requests in total (drafts included) in this repository (maintainers and dependency bots are exempt).
 
 <!-- First PR here? Your CI checks wait for a maintainer to approve them before they run — that's GitHub's gate on first-time contributors, not a problem with your PR. -->
 <!-- Questions, or want feedback on an approach before going further? Join us on Slack: https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw -->

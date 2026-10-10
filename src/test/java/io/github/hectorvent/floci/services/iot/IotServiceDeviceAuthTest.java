@@ -396,6 +396,27 @@ class IotServiceDeviceAuthTest {
         assertFalse(connect(device, "sensor-1"));
     }
 
+    @Test
+    void customAuthorizerPoliciesAllowTheClientArnOfTheDefaultAccountAndRegion() {
+        String onlySensor1 = statement("Allow", "arn:aws:iot:" + REGION + ":" + ACCOUNT + ":client/sensor-1", null);
+
+        assertTrue(service.isConnectAllowedBy(List.of(onlySensor1), "sensor-1", "127.0.0.1", null));
+        assertFalse(service.isConnectAllowedBy(List.of(onlySensor1), "sensor-2", "127.0.0.1", null));
+        assertFalse(service.isConnectAllowedBy(List.of(statement("Allow", "arn:aws:iot:eu-west-1:" + ACCOUNT + ":client/sensor-1",
+                null)), "sensor-1", "127.0.0.1", null), "a client ARN in another region");
+        assertFalse(service.isConnectAllowedBy(List.of(), "sensor-1", "127.0.0.1", null), "no policy means deny");
+    }
+
+    @Test
+    void customAuthorizerPoliciesResolveTheConnectionVariables() {
+        String policy = statement("Allow", "arn:aws:iot:*:*:client/${iot:ClientId}",
+                "{\"StringEquals\":{\"iot:DomainName\":\"iot.example.com\"},\"IpAddress\":{\"aws:SourceIp\":\"10.0.0.0/8\"}}");
+
+        assertTrue(service.isConnectAllowedBy(List.of(policy), "sensor-1", "10.1.2.3", "iot.example.com"));
+        assertFalse(service.isConnectAllowedBy(List.of(policy), "sensor-1", "127.0.0.1", "iot.example.com"));
+        assertFalse(service.isConnectAllowedBy(List.of(policy), "sensor-1", "10.1.2.3", null));
+    }
+
     private RegisteredDevice registeredDevice(boolean active) {
         IotCertificate created = service.createKeysAndCertificate(active, REGION);
         return service.findRegisteredCertificate(parse(created)).orElseThrow();

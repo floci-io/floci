@@ -12,9 +12,9 @@ import software.amazon.awssdk.services.elasticbeanstalk.model.CreateApplicationV
 import software.amazon.awssdk.services.elasticbeanstalk.model.CreateApplicationVersionResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.CreateEnvironmentRequest;
 import software.amazon.awssdk.services.elasticbeanstalk.model.CreateEnvironmentResponse;
+import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationVersionsRequest;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationVersionsResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationsRequest;
-import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationVersionsRequest;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationsResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeConfigurationSettingsRequest;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeConfigurationSettingsResponse;

@@ -57,6 +57,8 @@ class ElastiCacheMemcachedIntegrationTest {
                     .formParam("Action", "CreateCacheCluster")
                     .formParam("CacheClusterId", CLUSTER_ID)
                     .formParam("Engine", "memcached")
+                    .formParam("NumCacheNodes", "2")
+                    .formParam("CacheNodeType", "cache.m5.large")
                     .header("Authorization", AUTH_HEADER)
                 .when()
                     .post("/")
@@ -83,6 +85,7 @@ class ElastiCacheMemcachedIntegrationTest {
         given()
             .formParam("Action", "DescribeCacheClusters")
             .formParam("CacheClusterId", CLUSTER_ID)
+            .formParam("ShowCacheNodeInfo", "true")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -91,7 +94,16 @@ class ElastiCacheMemcachedIntegrationTest {
             .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.CacheClusterId",
                     equalTo(CLUSTER_ID))
             .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.Engine",
-                    equalTo("memcached"));
+                    equalTo("memcached"))
+            // what the create set is read back through the describe, not the create's response
+            .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.NumCacheNodes",
+                    equalTo("2"))
+            .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.CacheNodeType",
+                    equalTo("cache.m5.large"))
+            .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.ARN",
+                    equalTo("arn:aws:elasticache:us-east-1:000000000000:cluster:" + CLUSTER_ID))
+            .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.CacheNodes.CacheNode.size()",
+                    equalTo(2));
     }
 
     @Test

@@ -48,6 +48,7 @@ import java.util.SequencedSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -191,20 +192,22 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateOriginCustomHeaders(dist.getConfig());
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
-        validateViewerCertificate(dist.getConfig());
-        String id = generateDistributionId();
-        dist.setId(id);
-        dist.setArn(arn("distribution/" + id));
-        dist.setDomainName(domainNameFor(id));
-        dist.setStatus("Deployed");
-        dist.setLastModifiedTime(Instant.now());
-        dist.setEtag(UUID.randomUUID().toString());
-        if (tags != null && !tags.isEmpty()) {
-            dist.setTags(tags);
-            tagStore.put("distribution/" + id, tags);
-        }
-        distStore.put(id, dist);
-        return dist;
+        return whileCertificatesHeld(dist.getConfig(), () -> {
+            validateViewerCertificate(dist.getConfig());
+            String id = generateDistributionId();
+            dist.setId(id);
+            dist.setArn(arn("distribution/" + id));
+            dist.setDomainName(domainNameFor(id));
+            dist.setStatus("Deployed");
+            dist.setLastModifiedTime(Instant.now());
+            dist.setEtag(UUID.randomUUID().toString());
+            if (tags != null && !tags.isEmpty()) {
+                dist.setTags(tags);
+                tagStore.put("distribution/" + id, tags);
+            }
+            distStore.put(id, dist);
+            return dist;
+        });
     }
 
     public Distribution getDistribution(String id) {
@@ -222,16 +225,18 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateOriginCustomHeaders(updated.getConfig());
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
-        validateViewerCertificate(updated.getConfig());
-        updated.setId(id);
-        updated.setArn(existing.getArn());
-        updated.setDomainName(existing.getDomainName());
-        updated.setStatus("Deployed");
-        updated.setLastModifiedTime(Instant.now());
-        updated.setEtag(UUID.randomUUID().toString());
-        updated.setTags(existing.getTags());
-        distStore.put(id, updated);
-        return updated;
+        return whileCertificatesHeld(updated.getConfig(), () -> {
+            validateViewerCertificate(updated.getConfig());
+            updated.setId(id);
+            updated.setArn(existing.getArn());
+            updated.setDomainName(existing.getDomainName());
+            updated.setStatus("Deployed");
+            updated.setLastModifiedTime(Instant.now());
+            updated.setEtag(UUID.randomUUID().toString());
+            updated.setTags(existing.getTags());
+            distStore.put(id, updated);
+            return updated;
+        });
     }
 
     @Override
@@ -262,6 +267,24 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The specified SSL certificate doesn't exist, isn't valid, "
                             + "or doesn't include a valid certificate chain.", 400);
         }
+    }
+
+    /**
+     * Runs a write that may record an IAM server certificate reference while IAM holds the lock
+     * {@code DeleteServerCertificate} takes, so the certificate cannot be deleted between
+     * {@link #validateViewerCertificate} and the store write. Without the guard the delete sees no
+     * reference, because the distribution is not saved yet, and the distribution is left holding a
+     * certificate that is gone.
+     */
+    private <T> T whileCertificatesHeld(DistributionConfig config, Supplier<T> action) {
+        if (iamService == null || iamCertificateId(config) == null) {
+            // Nothing to order. A distribution that names no IAM certificate cannot be left
+            // holding one, and the scan reads a copy of the store rather than a live collection,
+            // so this write cannot disturb it either. Taking the lock anyway would make every
+            // distribution write wait on a certificate delete, and the other way round.
+            return action.get();
+        }
+        return iamService.supplyWithServerCertificatesHeld(action);
     }
 
     private static void validateOriginCustomHeaders(DistributionConfig config) {

@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * Routes each CloudFormation resource to the per-service provisioner that owns its type, through
@@ -31,6 +32,9 @@ import java.util.function.Consumer;
 public class CfnResourceDispatcher {
 
     private static final Logger LOG = Logger.getLogger(CfnResourceDispatcher.class);
+
+    /** The prefix of a stub's {@code Arn} attribute: the mark of a resource nothing was created for. */
+    static final String STUB_ARN_PREFIX = "arn:aws:stub:::"; // partition-literal: stub marker for an unowned type, asserted by tests
 
     private final ObjectMapper objectMapper;
     private final CloudFormationResourceRegistry registry;
@@ -86,6 +90,12 @@ public class CfnResourceDispatcher {
             if (owner != null) {
                 owner.provision(resource, properties,
                         new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
+                // A provisioner that migrated a stub without writing its own Arn would leave the
+                // stub's, and the real resource would read as a stub on its next update.
+                String arn = resource.getAttributes().get("Arn");
+                if (arn != null && arn.startsWith(STUB_ARN_PREFIX)) {
+                    resource.getAttributes().remove("Arn");
+                }
             } else if (!stubUnsupportedResourceTypesAllowed()) {
                 // Before the physical id below is assigned, so the Cloud Control path sees a
                 // resource with none and reports this message rather than a success. On the stack
@@ -106,7 +116,7 @@ public class CfnResourceDispatcher {
                 resource.setStatusReason(unsupportedResourceTypeMessage(resourceType)
                         + " It was stubbed and nothing was created for it.");
                 resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
-                resource.getAttributes().put("Arn", "arn:aws:stub:::" + logicalId); // partition-literal: stub marker for an unowned type, asserted by tests
+                resource.getAttributes().put("Arn", STUB_ARN_PREFIX + logicalId);
             }
             resource.setStatus("CREATE_COMPLETE");
         } catch (Exception e) {
@@ -115,6 +125,29 @@ public class CfnResourceDispatcher {
             resource.setStatusReason(e.getMessage());
         }
         return resource;
+    }
+
+    /**
+     * Whether this resource is a dispatcher stub, which names nothing that exists: a stub {@code Arn},
+     * the stub's own {@code <LogicalId>-<8 hex>} id and internal {@code __Floci} attributes only.
+     * A real resource an older Floci migrated without dropping the stub's {@code Arn} fails the id
+     * or attribute check, so it does not read as one.
+     */
+    static boolean isStub(String physicalId, Map<String, String> attributes) {
+        String arn = attributes.get("Arn");
+        if (arn == null || !arn.startsWith(STUB_ARN_PREFIX)) {
+            return false;
+        }
+        String logicalId = arn.substring(STUB_ARN_PREFIX.length());
+        if (physicalId == null || !physicalId.matches(Pattern.quote(logicalId) + "-[0-9a-f]{8}")) {
+            return false;
+        }
+        for (String key : attributes.keySet()) {
+            if (!"Arn".equals(key) && !key.startsWith("__Floci")) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

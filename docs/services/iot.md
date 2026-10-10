@@ -45,7 +45,7 @@ Current MVP 2 limitations:
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` and `ListSubscriptions` report live in-memory broker state only; offline persistent session subscription reporting is not modeled yet.
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
-- Dynamic thing groups, fleet indexing, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled.
+- Dynamic thing groups, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled. Fleet indexing has its configuration only, see [Fleet Indexing](#fleet-indexing).
 
 ## Domain Configurations
 
@@ -69,22 +69,56 @@ Current limitations:
 
 ## Authorizers
 
-Status: control plane only.
+Status: control plane, `TestInvokeAuthorizer` and MQTT `CONNECT` enforcement.
 
-`CreateAuthorizer`, `DescribeAuthorizer`, `UpdateAuthorizer`, `DeleteAuthorizer`, `ListAuthorizers`, `SetDefaultAuthorizer`, `DescribeDefaultAuthorizer` and `ClearDefaultAuthorizer` are served on the REST-JSON paths the AWS SDKs use, with the shapes, error codes and messages measured against AWS:
+`CreateAuthorizer`, `DescribeAuthorizer`, `UpdateAuthorizer`, `DeleteAuthorizer`, `ListAuthorizers`, `SetDefaultAuthorizer`, `DescribeDefaultAuthorizer`, `ClearDefaultAuthorizer` and `TestInvokeAuthorizer` are served on the REST-JSON paths the AWS SDKs use, with the shapes, error codes and messages measured against AWS:
 
-- A new authorizer is `INACTIVE` with HTTP caching off unless the request says otherwise. Unless `signingDisabled` is `true`, it needs a `tokenKeyName` and one or two RSA-2048 public keys in PEM form; a signing-disabled authorizer takes no keys. The function ARN is checked for ARN syntax only and is never resolved.
+- A new authorizer is `INACTIVE` with HTTP caching off unless the request says otherwise. Unless `signingDisabled` is `true`, it needs a `tokenKeyName` and one or two RSA-2048 public keys in PEM form; a signing-disabled authorizer takes no keys. The function ARN is checked for ARN syntax only; the function is resolved when it is invoked.
 - `DescribeAuthorizer` returns every member; an unset token key name or key map is JSON `null`, and tags are not shown.
 - `UpdateAuthorizer` changes only the members sent and merges signing keys by key name, refusing a third key. Any member sent moves `lastModifiedDate`; an empty body does not.
 - `DeleteAuthorizer` refuses an `ACTIVE` authorizer (`InvalidRequestException`) and the default authorizer (`DeleteConflictException`).
 - `ListAuthorizers` returns the newest authorizer first (`isAscendingOrder=true` reverses it), filters by `status` and pages with `marker` and `pageSize` (1 to 250).
 - Setting the authorizer that already is the default fails with `ResourceAlreadyExistsException`; setting another one replaces it.
 - Tags work through `TagResource`, `UntagResource` and `ListTagsForResource` on the authorizer ARN.
+- CloudFormation provisions `AWS::IoT::Authorizer`: `Ref` is the name and `Fn::GetAtt Arn` the ARN.
+
+The function is invoked synchronously with the event AWS IoT sends (`protocolData`, `protocols`, `token` for a signed authorizer, `signatureVerified`, `connectionMetadata`), and its answer is checked as AWS checks it: `isAuthenticated`, a `principalId` of 1 to 128 letters and digits, at most 10 `policyDocuments` of at most 2048 characters each that parse as JSON objects, and TTLs from 300 to 86400 seconds. Omitted TTLs become 300 (`refreshAfterInSeconds`) and 86400 (`disconnectAfterInSeconds`), and a policy returned as a JSON object becomes one compact string. A signed authorizer verifies the token's SHA256withRSA signature against each of its keys before the function is invoked.
+
+- `TestInvokeAuthorizer` works on `ACTIVE` and `INACTIVE` authorizers. It returns the request errors (`InvalidRequestException`) and answer errors (`InvalidResponseException`) with AWS's messages, and passes the contexts on as given: header case is kept and `queryString` keeps its leading `?`.
+- An MQTT `CONNECT` on the plaintext listener or on [MQTT over WebSocket](#mqtt-over-websocket) that names an authorizer, in the username (`<clientId>?x-amz-customauthorizer-name=<name>`), the WebSocket URL query or the `x-amz-customauthorizer-name` upgrade header, is admitted only when the authorizer exists and is `ACTIVE`, the signature verifies for a signed authorizer, the answer is valid, `isAuthenticated` is `true`, and the returned policies allow `iot:Connect` on `arn:aws:iot:<region>:<account>:client/<clientId>`. The event carries the username with its query, the password in base64, and for WebSocket the lower-cased upgrade headers, the query string without `?` and, over TLS, the server name.
+- A refused MQTT 3.1.1 client is disconnected without a `CONNACK`; an MQTT 5 client gets `CONNACK` reason code `0x87` with the reason string AWS sends, then the connection closes. A `CONNECT` that names no authorizer is handled as before.
 
 Current limitations:
 
-- Authorizers are not evaluated: no connection or HTTP publish invokes the function, and `TestInvokeAuthorizer` is not served (see [MQTT over WebSocket](#mqtt-over-websocket)).
-- CloudFormation `AWS::IoT::Authorizer` is not provisioned.
+- The default authorizer is not used: a `CONNECT` that names no authorizer is not authenticated.
+- HTTPS publish does not invoke authorizers, and `enableCachingForHttp` has no effect.
+- `refreshAfterInSeconds` and `disconnectAfterInSeconds` are returned but do not schedule a re-invocation or a disconnect.
+- The returned policies decide `iot:Connect` only; publish, subscribe and receive are not checked against them.
+- The function's resource policy is not checked, so `AddPermission` for `iot.amazonaws.com` is not required.
+- A WebSocket upgrade without the `mqtt` subprotocol is not answered with AWS's 426.
+- A refused WebSocket client sees a close frame with status `1000`. AWS sends an empty close frame to an MQTT 3.1.1 client and closes the connection without a close frame after the MQTT 5 `CONNACK`.
+- An accepting MQTT 5 `CONNACK` carries no properties.
+- The MQTT over TLS listener (8883) authenticates by device certificate only.
+- On a connection, the authorizer is looked up in Floci's default account and region.
+- The MQTT password reaches the function as the broker decodes it, as UTF-8 text, so password bytes that are not valid UTF-8 arrive altered. The broker library, Vert.x MQTT, exposes the password only as a string.
+
+## Fleet Indexing
+
+Status: configuration only.
+
+`UpdateIndexingConfiguration` and `GetIndexingConfiguration` (`/indexing/config`) and `DescribeIndex` (`/indices/{indexName}`) are served on the REST-JSON paths the AWS SDKs use, with the AWS shapes, error codes and validation messages:
+
+- There is one configuration per account and region. Before the first update both indexes are `OFF`.
+- An update may carry the thing configuration, the thing group configuration, or both; the one it leaves out keeps its value. Turning `thingIndexingMode` to `OFF` clears the whole thing configuration, as on AWS.
+- `managedFields` in `GetIndexingConfiguration` are derived from the modes, as AWS derives them. Managed fields sent in an update are only checked: every entry must be a field AWS manages, with its type, or the update fails with `InvalidRequestException`. A custom shadow path such as `shadow.name.<shadow>.reported.<field>` is rejected this way on AWS too. The thing group's managed fields are checked the same way, also while `thingGroupIndexingMode` is `OFF`.
+- The thing configuration's `customFields` and `filter` (named shadow names, geolocations, socket information) are stored and returned as sent, except that a geolocation without an `order` gets `LatLon`. A thing custom field without a name or a type, or named after a managed field, fails with `InvalidRequestException`.
+- A member of the wrong JSON type, or content after the JSON body, fails with `SerializationException`.
+- `DescribeIndex` reports `AWS_Things` and `AWS_ThingGroups` with the schema the modes select. The index is `ACTIVE` as soon as it is enabled: Floci has no `BUILDING` or `REBUILDING` window. A disabled index is `ResourceNotFoundException`, any other index name `InvalidRequestException`.
+
+Current limitations:
+
+- `SearchIndex`, `ListIndices` and the statistics and aggregation APIs (`GetStatistics`, `GetCardinality`, `GetPercentiles`, `GetBucketsAggregation`) are not modeled yet.
+- `managedFields` and `customFields` sent in the thing group configuration are checked (the custom fields for their types only) but not stored: `GetIndexingConfiguration` reports the managed fields the mode selects and no custom fields.
 
 ## MQTT Broker
 
@@ -99,7 +133,7 @@ Broker scope:
 - Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice.
 - Accept PUBLISH payloads up to 128 KB on 1883, 8883 and `/mqtt`, the AWS IoT Core quota (packets up to 146 KB including the variable header). A larger publish disconnects the client without acknowledgement, delivery or rule evaluation, as on AWS.
 - Serve MQTT over TLS on 8883 next to plaintext 1883 when TLS is enabled, and verify the device certificate and its `iot:Connect` permission there.
-- Keep the plaintext listener permissive; topic-level authorization (`Publish`, `Subscribe`, `Receive`) is follow-up scope.
+- Keep the plaintext listener permissive except for a `CONNECT` that names a [custom authorizer](#authorizers); topic-level authorization (`Publish`, `Subscribe`, `Receive`) is follow-up scope.
 - Keep MQTT broker logging minimal.
 - Validate the relevant IoT compatibility tests against the native binary before considering the phase complete.
 
@@ -168,8 +202,10 @@ request to `/mqtt` gets the usual 404.
 
 No client certificate is requested on this path. On AWS it authenticates by SigV4 (signed query
 string on the upgrade URL) or by a custom authorizer (`<clientId>?x-amz-customauthorizer-name=<name>`
-as the MQTT username with a token as the password); Floci accepts such a CONNECT as is and does
-not evaluate the signature or the authorizer yet.
+as the MQTT username with a token as the password). Floci enforces a custom authorizer named in the
+username, the URL query or the `x-amz-customauthorizer-name` upgrade header, see
+[Authorizers](#authorizers); it does not verify a SigV4 signature, and a CONNECT that names no
+authorizer is accepted as is.
 
 ## Reserved Topics
 

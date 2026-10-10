@@ -1,26 +1,5 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.RequestScopes;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
-import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
-import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
-import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
-import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
-import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
-import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
-import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
-import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,6 +7,28 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -49,9 +50,9 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -70,7 +71,6 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
 
 @ApplicationScoped
 public class DynamoDbService {
@@ -2316,7 +2316,8 @@ public class DynamoDbService {
         if (newAttrDefs != null) {
             knownAttrDefs.addAll(newAttrDefs);
         }
-        validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes, knownAttrDefs,
+        validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes,
+                gsiCreates.size() + gsiDeletes.size(), knownAttrDefs,
                 billingMode != null ? billingMode : table.getBillingMode());
 
         if (readCapacity != null) {
@@ -2372,13 +2373,14 @@ public class DynamoDbService {
      * current lifecycle state.
      *
      * <p>AWS allows one online index operation per table at a time. That limit binds the table,
-     * not the request, so two creates in one request and a create issued while an earlier index
+     * not the request, and GSI creates and deletes count against it too, so two creates in one
+     * request and a create issued while an earlier index
      * still builds are refused the same way. Deleting an index that is still in its resource
      * allocation phase is refused with a different error, and the same delete is accepted once
      * the index reaches backfilling.
      */
     private void validateVectorIndexUpdates(TableDefinition table, List<VectorIndexCreate> creates,
-                                            List<String> deletes,
+                                            List<String> deletes, int gsiOperations,
                                             List<AttributeDefinition> attributeDefinitions,
                                             String billingMode) {
         validateVectorIndexMembers(creates);
@@ -2389,7 +2391,7 @@ public class DynamoDbService {
                     "One or more parameter values were invalid: Vector indexes are only supported "
                     + "for PAY_PER_REQUEST tables", 400);
         }
-        if (creates.isEmpty() && deletes.isEmpty()) {
+        if (creates.isEmpty() && deletes.isEmpty() && gsiOperations == 0) {
             return;
         }
         for (VectorIndexCreate create : creates) {
@@ -2421,7 +2423,8 @@ public class DynamoDbService {
                 .count();
         // Deleting an index that is still backfilling takes over the slot that index already
         // holds, so it does not need one of its own.
-        long onlineOperations = building + creates.size() + deletes.size() - deletesOfBuildingIndexes;
+        long onlineOperations = building + creates.size() + deletes.size() + gsiOperations
+                - deletesOfBuildingIndexes;
         if (onlineOperations > 1) {
             throw new AwsException("LimitExceededException",
                     "Subscriber limit exceeded: Only 1 online index can be created or deleted "
@@ -4725,8 +4728,17 @@ public class DynamoDbService {
                     "Export not found: " + exportArn, 400);
         }
         return exportStore.get(exportArn)
+                .filter(d -> inRequestRegion(d.getExportArn()))
                 .orElseThrow(() -> new AwsException("ExportNotFoundException",
                         "Export not found: " + exportArn, 400));
+    }
+
+    /** Export and import jobs are stored by ARN for every region; a request sees only its own region's. */
+    private boolean inRequestRegion(String jobArn) {
+        if (jobArn == null || !AwsArnUtils.isArn(jobArn)) {
+            return true;
+        }
+        return AwsArnUtils.parse(jobArn).region().equals(regionResolver.getRegion());
     }
 
     public record ListExportsResult(List<ExportSummary> exportSummaries, String nextToken) {}
@@ -4736,6 +4748,7 @@ public class DynamoDbService {
             return new ListExportsResult(List.of(), null);
         }
         var all = exportStore.scan(k -> true).stream()
+                .filter(d -> inRequestRegion(d.getExportArn()))
                 .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
                 .toList();
         requirePageSize(maxResults, "maxResults");
@@ -4842,6 +4855,7 @@ public class DynamoDbService {
             return null;
         }
         var existing = importStore.scan(k -> true).stream()
+                .filter(d -> inRequestRegion(d.getImportArn()))
                 .filter(d -> clientToken.equals(d.getClientToken()))
                 .findFirst()
                 .orElse(null);
@@ -5042,6 +5056,7 @@ public class DynamoDbService {
     public ImportTableDescription describeImport(String importArn) {
         return Optional.ofNullable(importStore)
                 .flatMap(store -> store.get(importArn))
+                .filter(d -> inRequestRegion(d.getImportArn()))
                 .orElseThrow(() -> new AwsException("ImportNotFoundException",
                         "The specified import was not found.", 400));
     }
@@ -5053,6 +5068,7 @@ public class DynamoDbService {
             return new ListImportsResult(List.of(), null);
         }
         var all = importStore.scan(k -> true).stream()
+                .filter(d -> inRequestRegion(d.getImportArn()))
                 .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
                 .toList();
         requirePageSize(pageSize, "pageSize");

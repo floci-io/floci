@@ -18,6 +18,7 @@ class CfnCreateOnlyPropertiesTest {
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::SQS::Queue", "QueueName"));
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::SQS::Queue", "FifoQueue"));
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::S3::Bucket", "BucketName"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::IoT::Authorizer", "SigningDisabled"));
     }
 
     @Test
@@ -25,6 +26,7 @@ class CfnCreateOnlyPropertiesTest {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::SQS::Queue", "VisibilityTimeout"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Redshift::Cluster", "NumberOfNodes"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::S3::Bucket", "VersioningConfiguration"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::IoT::Authorizer", "Status"));
     }
 
     @Test

@@ -8,11 +8,12 @@ import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementRespo
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementResponse;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
-import software.amazon.awssdk.services.redshiftserverless.model.GetCredentialsResponse;
 import software.amazon.awssdk.services.redshiftserverless.model.ConflictException;
+import software.amazon.awssdk.services.redshiftserverless.model.GetCredentialsResponse;
 import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
 import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.redshiftserverless.model.Snapshot;
 import software.amazon.awssdk.services.redshiftserverless.model.Tag;
 import software.amazon.awssdk.services.redshiftserverless.model.Workgroup;
 import software.amazon.awssdk.services.redshiftserverless.model.WorkgroupStatus;
@@ -158,6 +159,54 @@ class RedshiftServerlessTest {
 
             assertThatThrownBy(() -> client.getWorkgroup(request -> request.workgroupName(workgroupName)))
                     .isInstanceOf(ResourceNotFoundException.class);
+        }
+    }
+
+    @Test
+    void snapshotLifecycleUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Creates snapshots instantly and asserts emulator-local behavior");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-snap-ns";
+            String workgroupName = "floci-compat-snap-wg";
+            String snapshotName = "floci-compat-snap";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin")
+                        .adminUserPassword("Secret123!"));
+                client.createWorkgroup(request -> request.workgroupName(workgroupName).namespaceName(namespaceName));
+
+                Snapshot created = client.createSnapshot(request -> request
+                        .snapshotName(snapshotName).namespaceName(namespaceName)).snapshot();
+                assertThat(created.snapshotName()).isEqualTo(snapshotName);
+                assertThat(created.status().toString()).isEqualTo("AVAILABLE");
+                assertThat(created.snapshotCreateTime()).isNotNull();
+
+                assertThat(client.getSnapshot(request -> request.snapshotArn(created.snapshotArn())).snapshot()
+                        .snapshotName()).isEqualTo(snapshotName);
+                assertThat(client.listSnapshots(request -> request.namespaceName(namespaceName)).snapshots())
+                        .extracting(Snapshot::snapshotName)
+                        .containsExactly(snapshotName);
+
+                assertThat(client.restoreFromSnapshot(request -> request
+                        .namespaceName(namespaceName).workgroupName(workgroupName).snapshotName(snapshotName))
+                        .snapshotName()).isEqualTo(snapshotName);
+
+                client.deleteSnapshot(request -> request.snapshotName(snapshotName));
+                assertThatThrownBy(() -> client.getSnapshot(request -> request.snapshotName(snapshotName)))
+                        .isInstanceOf(ResourceNotFoundException.class);
+            } finally {
+                deleteSnapshotBestEffort(client, snapshotName);
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
+    private static void deleteSnapshotBestEffort(RedshiftServerlessClient client, String snapshotName) {
+        try {
+            client.deleteSnapshot(request -> request.snapshotName(snapshotName));
+        } catch (Exception cleanupError) {
+            LOG.warnf(cleanupError, "Best-effort cleanup failed for snapshotName=%s", snapshotName);
         }
     }
 

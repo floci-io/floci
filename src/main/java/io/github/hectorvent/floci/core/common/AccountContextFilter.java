@@ -70,23 +70,35 @@ public class AccountContextFilter implements ContainerRequestFilter {
         Object pinnedAccount = ctx.getProperty(PINNED_ACCOUNT_PROPERTY);
         if (pinnedAccount != null) {
             requestContext.setAccountId(pinnedAccount.toString());
+            requestContext.setAccessKeyId(null);
+            requestContext.setSessionToken(null);
             applyRegion(regionResolver.resolveRegionFromAuth(null));
             return;
         }
+        String sessionToken = extractSessionToken(ctx);
         String auth = ctx.getHeaderString("Authorization");
-        if (auth != null && !auth.isEmpty()) {
-            String akid = accountResolver.extractAccessKeyId(auth);
+        String akid = auth != null && !auth.isEmpty() ? accountResolver.extractAccessKeyId(auth) : null;
+        if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
+            requestContext.setAccessKeyId(akid);
+            requestContext.setSessionToken(sessionToken);
             String region = regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
             rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
             rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
         } else {
-            String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
-            if (credential != null && !credential.isEmpty()) {
-                String akid = accountResolver.extractPresignedAccessKeyId(credential);
+            // A present Authorization header wins, as in IamEnforcementFilter: an unrecognised one
+            // must not let the query string pick an account that IAM then never checks.
+            boolean hasAuthHeader = auth != null && !auth.isBlank();
+            String credential = hasAuthHeader
+                    ? null : ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+            if (credential != null && !credential.isEmpty()
+                    && ctx.getUriInfo().getQueryParameters().containsKey("X-Amz-Algorithm")) {
+                String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
-                        resolveAccount(akid, accountResolver.resolveFromPresignedCredential(credential)));
+                        resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
+                requestContext.setAccessKeyId(presignedAkid);
+                requestContext.setSessionToken(sessionToken);
                 String region = regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));
@@ -94,9 +106,23 @@ public class AccountContextFilter implements ContainerRequestFilter {
                         SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
             } else {
                 requestContext.setAccountId(accountResolver.resolve(null));
+                requestContext.setAccessKeyId(null);
+                requestContext.setSessionToken(null);
                 applyRegion(regionResolver.resolveRegionFromAuth(null));
             }
         }
+    }
+
+    private String extractSessionToken(ContainerRequestContext ctx) {
+        String token = ctx.getHeaderString("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token.trim();
+        }
+        token = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token.trim();
+        }
+        return null;
     }
 
     /**
@@ -148,7 +174,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
 
     /**
      * Strict partition mode. AWS publishes no endpoint for a service outside the partitions it
-     * exists in (CloudFront in GovCloud, IAM in {@code aws-eusc}); a client there never reaches
+     * exists in (CloudFront in GovCloud, Lightsail in China); a client there never reaches
      * an API because the host does not resolve, which the SDKs surface as an
      * {@code UnknownHostException}. Floci cannot fail DNS, so it answers the request with the
      * same 404 shape the unknown-service-scope guard uses. Only a service the published data

@@ -121,10 +121,32 @@ class CodeArtifactNpmDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertArrayEquals(expectedTarballBytes, fetchedTarball);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package=" + PACKAGE_NAME)
+                .then().statusCode(200).body("package.name", equalTo(PACKAGE_NAME))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"));
+    }
+
+    /**
+     * Confirmed against this exact pinned Verdaccio image that
+     * republishing a just-published, byte-identical tarball comes back {@code 409 "this package
+     * is already present"} on its own, never a success, unlike real AWS CodeArtifact's own
+     * documented idempotent-republish contract (the same rule Maven and PyPI already implement).
+     * Republishing the identical fixture a second time against the real sidecar must still
+     * succeed.
+     */
+    @Test
+    @Order(2)
+    void republishingTheSameEnvelopeASecondTimeIsStillIdempotent() {
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
+                .body(publishFixture)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + PACKAGE_NAME)
+                .then().statusCode(anyOf201Or200());
     }
 
     @Test
-    @Order(2)
+    @Order(3)
     void missingPackageAndMissingRepositoryAreNotFound() {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/does-not-exist")
@@ -133,10 +155,14 @@ class CodeArtifactNpmDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/npm/" + DOMAIN + "/no-such-repo/does-not-exist")
                 .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
-    @Order(3)
+    @Order(4)
     void repositoriesAreIsolatedFromEachOther() {
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository?domain=" + DOMAIN + "&repository=other-repo")
@@ -148,7 +174,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void missingOrWrongDomainTokensAreUnauthorized() {
         given().get("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + PACKAGE_NAME)
                 .then().statusCode(401)
@@ -172,7 +198,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void concurrentFirstUseOfANewRepositoryOnlyStartsOneContainer() throws InterruptedException {
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository?domain=" + DOMAIN + "&repository=concurrent-repo")
@@ -208,7 +234,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void recreatingASameNamedRepositoryDoesNotInheritThePreviousOnesPackages() {
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository?domain=" + DOMAIN + "&repository=reused-name")
@@ -231,7 +257,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void aDomainCreatedInANonDefaultRegionIsServedThroughTheTokensOwnRegion() {
         String nonDefaultRegionAuth =
                 "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-west-2/codeartifact/aws4_request";
@@ -259,7 +285,7 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void aDomainCreatedUnderANonDefaultAccountIsServedThroughTheTokensOwnAccount() {
         String otherAccountAuth = "AWS4-HMAC-SHA256 Credential=111122223333/20260904/us-east-1/codeartifact/aws4_request";
         String domain = "npm-sidecar-cross-account-domain";
@@ -293,7 +319,7 @@ class CodeArtifactNpmDockerIntegrationTest {
      * already confirmed is really there, through the real sidecar, not a mock.
      */
     @Test
-    @Order(9)
+    @Order(10)
     void getPackageVersionAssetBridgesToTheRealVerdaccioSidecar() throws IOException {
         byte[] fetched = given().header("Authorization", AUTH)
                 .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
@@ -305,12 +331,46 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void getPackageVersionAssetReturns404ForAnNpmAssetThatWasNeverPublished() {
         given().header("Authorization", AUTH)
                 .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
                         + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=does-not-exist.tgz")
                 .then().statusCode(404);
+    }
+
+    /**
+     * A throwaway package, not {@link #PACKAGE_NAME}: deleting it exercises the real Verdaccio
+     * unpublish-whole-package mechanism (GET the packument's own {@code _rev}, then {@code DELETE}
+     * with that revision), confirmed live before this was built, and must not disturb the package
+     * every other test in this class shares.
+     */
+    @Test
+    @Order(11)
+    void deletePackageRemovesTheWholeVerdaccioPackage() {
+        String packageName = "delete-me-pkg";
+        byte[] tarball = "throwaway tarball".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/" + packageName + "-1.0.0.tgz\""
+                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
+                + "\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package=" + packageName)
+                .then().statusCode(200).body("deletedPackage.package", equalTo(packageName));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package=" + packageName)
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     /**

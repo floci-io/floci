@@ -1,14 +1,16 @@
 package io.github.hectorvent.floci.services.ecr;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
-import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
@@ -17,9 +19,6 @@ import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -225,6 +224,29 @@ class EcrServiceTest {
         assertEquals("PullThroughCacheRuleNotFoundException", assertThrows(AwsException.class,
                 () -> service.updatePullThroughCacheRule(
                         "missing/cache", null, null, null, REGION)).getErrorCode());
+    }
+
+    /**
+     * An ECR upstream is recognised in every partition, as Floci's own registry recognises an ECR
+     * image URI: the host pattern once accepted only the commercial and China suffixes.
+     */
+    @Test
+    void pullThroughCacheRule_acceptsAnEcrUpstreamInEveryPartition() {
+        String[] hosts = {
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+            "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn",
+            "123456789012.dkr.ecr.us-gov-west-1.amazonaws.com",
+            "123456789012.dkr.ecr.us-iso-east-1.c2s.ic.gov",
+            "123456789012.dkr.ecr.eusc-de-east-1.amazonaws.eu",
+        };
+        for (int i = 0; i < hosts.length; i++) {
+            PullThroughCacheRule rule = service.createPullThroughCacheRule("ecr-up-" + i, hosts[i], null,
+                    null, null, null, null, REGION);
+            assertEquals("ecr", rule.getUpstreamRegistry(), hosts[i]);
+        }
+        assertEquals("UnsupportedUpstreamRegistryException", assertThrows(AwsException.class,
+                () -> service.createPullThroughCacheRule("ecr-up-bad", "123456789012.dkr.ecr.us-east-1.example.com",
+                        null, null, null, null, null, REGION)).getErrorCode());
     }
 
     @Test

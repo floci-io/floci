@@ -113,30 +113,21 @@ class RetryingDockerHttpClientTest {
     }
 
     @Test
-    void injectsCanonicalCloseWhilePreservingRequestDataAndHeaders() {
+    void passesTheRequestToTheTransportUnchanged() {
+        // Catches: the wrapper rebuilding requests (it once forced Connection: close on each one, which
+        // stopped the pool from ever reusing a connection).
         Response ok = mock(Response.class);
         FakeTransport delegate = new FakeTransport(attempt -> ok);
         RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
-
-        byte[] body = "{\"Image\":\"busybox\"}".getBytes(StandardCharsets.UTF_8);
         Request create = Request.builder()
                 .method(Request.Method.POST)
-                .path("/containers/create")
-                .bodyBytes(body)
+                .path("/containers/create?name=floci-x")
+                .bodyBytes("{\"Image\":\"busybox\"}".getBytes(StandardCharsets.UTF_8))
                 .putHeader("Content-Type", "application/json")
-                .putHeader("connection", "keep-alive")
                 .build();
 
         assertSame(ok, client.execute(create));
-        Request effective = delegate.seenRequests.get(0);
-        assertEquals(create.method(), effective.method());
-        assertEquals(create.path(), effective.path());
-        assertSame(body, effective.bodyBytes());
-        assertEquals("application/json", effective.headers().get("Content-Type"));
-        assertEquals("close", effective.headers().get("Connection"));
-        assertEquals(1, effective.headers().entrySet().stream()
-                .filter(entry -> "Connection".equalsIgnoreCase(entry.getKey()))
-                .count(), "the transport must receive one unambiguous Connection header");
+        assertSame(create, delegate.seenRequests.get(0));
     }
 
     @Test
@@ -161,8 +152,7 @@ class RetryingDockerHttpClientTest {
         assertEquals(1, delegate.calls.get(),
                 "a one-shot stream body cannot be replayed; the transport must not retry it");
         assertSame(tar, delegate.seenRequests.get(0).body(),
-                "adding Connection: close must preserve the one-shot stream object");
-        assertEquals("close", delegate.seenRequests.get(0).headers().get("Connection"));
+                "the one-shot stream object must reach the transport");
     }
 
     @Test
@@ -205,8 +195,6 @@ class RetryingDockerHttpClientTest {
         assertThrows(RuntimeException.class, () -> startClient.execute(execStart));
         assertEquals(1, startDelegate.calls.get(),
                 "exec-start re-runs the command if replayed; it must surface after one attempt");
-        assertEquals("close", startDelegate.seenRequests.get(0).headers().get("Connection"),
-                "non-replayable exec control calls must still retire their connection");
 
         // The exclusion is contains("/exec"), not startsWith: exec-create
         // (POST /containers/{id}/exec) is also excluded, and this pins that breadth so a later
@@ -285,6 +273,84 @@ class RetryingDockerHttpClientTest {
             assertEquals("Broken pipe", thrown.getCause().getMessage());
             assertEquals(1, delegate.calls.get(), path);
         }
+    }
+
+    @Test
+    void doesNotRetryMutatingPostsOutsideTheAllowlist() {
+        // Catches: replaying a commit (a second image), a pause, unpause or kill (a 409 for a state
+        // that already changed) or a rename (a name conflict) after a lost response. The exclusion
+        // list this replaced named none of them.
+        for (String path : List.of("/commit?container=abc&repo=img", "/containers/abc/pause",
+                "/containers/abc/unpause", "/containers/abc/kill?signal=SIGKILL",
+                "/containers/abc/rename?name=new-name")) {
+            FakeTransport delegate = new FakeTransport(attempt -> {
+                throw brokenPipe();
+            });
+            RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+            Request request = Request.builder()
+                    .method(Request.Method.POST)
+                    .path(path)
+                    .build();
+
+            RuntimeException thrown = assertThrows(RuntimeException.class, () -> client.execute(request));
+            assertEquals("Broken pipe", thrown.getCause().getMessage());
+            assertEquals(1, delegate.calls.get(), path);
+        }
+    }
+
+    @Test
+    void retriesTheAllowlistedPosts() {
+        // Catches: an allowlist too narrow to keep the replays that are safe: a start or stop (304
+        // on replay), a wait and an image pull.
+        for (String path : List.of("/containers/abc/start", "/containers/abc/stop?t=10",
+                "/containers/abc/wait", "/images/create?fromImage=alpine&tag=3")) {
+            Response ok = mock(Response.class);
+            FakeTransport delegate = new FakeTransport(attempt -> {
+                if (attempt == 1) {
+                    throw brokenPipe();
+                }
+                return ok;
+            });
+            RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+            Request request = Request.builder()
+                    .method(Request.Method.POST)
+                    .path(path)
+                    .build();
+
+            assertSame(ok, client.execute(request), path);
+            assertEquals(2, delegate.calls.get(), path);
+        }
+    }
+
+    @Test
+    void retriesOnlyANamedVolumeCreate() {
+        // Catches: replaying an unnamed volume create, which makes a second volume and orphans the
+        // first; a named one is safe because docker returns the existing volume.
+        assertEquals(2, volumeCreateAttempts("{\"Name\":\"floci-aws-data\",\"Labels\":{}}"));
+        assertEquals(1, volumeCreateAttempts("{\"Labels\":{}}"));
+        assertEquals(1, volumeCreateAttempts("{\"Name\":\"\"}"));
+        assertEquals(1, volumeCreateAttempts(null));
+    }
+
+    private static int volumeCreateAttempts(String json) {
+        Response ok = mock(Response.class);
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            if (attempt == 1) {
+                throw brokenPipe();
+            }
+            return ok;
+        });
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+        Request.Builder builder = Request.builder().method(Request.Method.POST).path("/volumes/create");
+        if (json != null) {
+            builder.bodyBytes(json.getBytes(StandardCharsets.UTF_8));
+        }
+        try {
+            client.execute(builder.build());
+        } catch (RuntimeException expected) {
+            // a refused replay surfaces the first attempt's failure; only the attempt count matters
+        }
+        return delegate.calls.get();
     }
 
     @Test

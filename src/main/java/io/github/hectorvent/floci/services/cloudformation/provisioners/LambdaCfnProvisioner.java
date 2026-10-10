@@ -61,6 +61,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private static final String NAME_MODE_GENERATED = "generated";
 
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
+    private static final int LAMBDA_DEFAULT_DURABLE_RETENTION_DAYS = 14;
+    private static final Set<String> DURABLE_CONFIG_MEMBERS = Set.of("ExecutionTimeout", "RetentionPeriodInDays", "KMSKeyArn");
     private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
     private static final String LAMBDA_DEFAULT_TRACING_MODE = "PassThrough";
@@ -107,8 +109,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionLambda(StackResource r, JsonNode props, ProvisionContext ctx) {
         String region = ctx.region();
-        LambdaDesiredState desired = buildLambdaDesiredState(r, props, ctx);
         LambdaFunction existing = getExistingLambda(region, r.getPhysicalId());
+        LambdaDesiredState desired = buildLambdaDesiredState(r, props, ctx, existing);
         boolean replacement = lambdaRequiresReplacement(r, desired, existing);
 
         LambdaFunction func;
@@ -156,7 +158,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx) {
+    private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx,
+                                                       LambdaFunction existing) {
         CloudFormationTemplateEngine engine = ctx.engine();
         String stackName = ctx.stackName();
         String explicitName = ctx.resolveOptional(props, "FunctionName");
@@ -191,6 +194,9 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         boolean packageTypeReplacement = r.getPhysicalId() != null
                 && oldPackageType != null
                 && !Objects.equals(oldPackageType, packageType);
+        Map<String, Object> durableConfig = resolveDurableConfig(props, engine);
+        // Lambda cannot add or remove a DurableConfig, so CloudFormation replaces the function.
+        boolean durableReplacement = existing != null && existing.isDurable() != (durableConfig != null);
         boolean explicitRemoved = r.getPhysicalId() != null
                 && !hasExplicitName
                 && NAME_MODE_EXPLICIT.equals(previousNameMode);
@@ -198,7 +204,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         String functionName;
         if (hasExplicitName) {
             functionName = explicitName;
-        } else if (r.getPhysicalId() != null && !explicitRemoved && !packageTypeReplacement) {
+        } else if (r.getPhysicalId() != null && !explicitRemoved && !packageTypeReplacement && !durableReplacement) {
             functionName = r.getPhysicalId();
         } else {
             functionName = ctx.generatePhysicalName(r.getLogicalId(), 64, false);
@@ -240,8 +246,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         LambdaCodeSpec code = resolveLambdaCode(props, engine, handler, runtime);
         createRequest.put("Code", code.request());
 
-        configRequest.put("Timeout", intOrDefault(ctx.resolveOptional(props, "Timeout"),
-                LAMBDA_DEFAULT_TIMEOUT_SECONDS));
+        String timeout = ctx.resolveOptional(props, "Timeout");
+        configRequest.put("Timeout", intOrDefault(timeout, LAMBDA_DEFAULT_TIMEOUT_SECONDS));
         configRequest.put("MemorySize", intOrDefault(ctx.resolveOptional(props, "MemorySize"),
                 LAMBDA_DEFAULT_MEMORY_MB));
         configRequest.put("Description", ctx.resolveOptional(props, "Description"));
@@ -259,8 +265,15 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         configRequest.put("FileSystemConfigs",
                 resolveObjectListOrEmpty(props, "FileSystemConfigs", engine));
         putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
+        if (durableConfig != null) {
+            configRequest.put("DurableConfig", durableConfig);
+        }
 
         createRequest.putAll(configRequest);
+        if (durableConfig != null && timeout == null) {
+            // Created without one, a durable function gets min(ExecutionTimeout, 900). An update sends 3.
+            createRequest.remove("Timeout");
+        }
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         LambdaService.validateTagKeys(tags);
         if (!tags.isEmpty()) {
@@ -277,7 +290,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        return new LambdaDesiredState(functionName, hasExplicitName, packageType,
+        return new LambdaDesiredState(functionName, hasExplicitName, packageType, durableReplacement,
                 createRequest, code, configRequest, tags, props != null && props.has("ReservedConcurrentExecutions"),
                 reservedConcurrentExecutions);
     }
@@ -381,7 +394,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             return true;
         }
         String existingPackageType = existing.getPackageType() != null ? existing.getPackageType() : "Zip";
-        return !Objects.equals(existingPackageType, desired.packageType());
+        return !Objects.equals(existingPackageType, desired.packageType()) || desired.durableReplacement();
     }
 
     private LambdaFunction updateLambdaFunction(String region,
@@ -572,6 +585,15 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                         return true;
                     }
                 }
+                case "DurableConfig" -> {
+                    Map<?, ?> config = (Map<?, ?>) desired;
+                    if (!Objects.equals(fn.getDurableExecutionTimeout(), config.get("ExecutionTimeout"))
+                            || !Objects.equals(fn.getDurableRetentionPeriodInDays(), config.get("RetentionPeriodInDays"))
+                            || !Objects.equals(Objects.requireNonNullElse(fn.getDurableKmsKeyArn(), ""),
+                                    config.get("KMSKeyArn"))) {
+                        return true;
+                    }
+                }
                 default -> {
                     // Properties outside UpdateFunctionConfiguration are ignored here.
                 }
@@ -683,6 +705,64 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
     private static int intOrDefault(String value, int defaultValue) {
         return value != null ? Integer.parseInt(value) : defaultValue;
+    }
+
+    /**
+     * Null when the template has no DurableConfig, or one that AWS::NoValue removed. As on AWS,
+     * RetentionPeriodInDays takes the schema default, 14, when the template leaves it out, on update
+     * too, and a KMSKeyArn left out clears the key. A number from a parameter arrives as text.
+     */
+    private Map<String, Object> resolveDurableConfig(JsonNode props, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("DurableConfig")) {
+            return null;
+        }
+        JsonNode raw = props.get("DurableConfig");
+        if (raw.isNull()) {
+            return null;
+        }
+        JsonNode node = engine.resolveNode(raw);
+        if (node == null || !node.isObject()) {
+            // The engine yields AWS::NoValue as "". Anything else fails CloudFormation's schema check
+            // before the function is touched.
+            if (!raw.isValueNode() && node != null && node.isTextual() && node.asText().isEmpty()) {
+                return null;
+            }
+            throw new AwsException("ValidationError", "AWS::Lambda::Function DurableConfig must be an object", 400);
+        }
+        // The schema requires ExecutionTimeout and allows no other members, and checks both on update too.
+        node.fieldNames().forEachRemaining(member -> {
+            if (!DURABLE_CONFIG_MEMBERS.contains(member)) {
+                throw new AwsException("ValidationError",
+                        "AWS::Lambda::Function DurableConfig does not allow the member " + member, 400);
+            }
+        });
+        if (!node.hasNonNull("ExecutionTimeout")) {
+            throw new AwsException("ValidationError", "AWS::Lambda::Function DurableConfig requires ExecutionTimeout", 400);
+        }
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("ExecutionTimeout", integerOrRaw(node.get("ExecutionTimeout")));
+        config.put("RetentionPeriodInDays", node.hasNonNull("RetentionPeriodInDays")
+                ? integerOrRaw(node.get("RetentionPeriodInDays")) : LAMBDA_DEFAULT_DURABLE_RETENTION_DAYS);
+        // Lambda keeps a stored key when the update leaves the member out, and clears it on "".
+        config.put("KMSKeyArn", node.path("KMSKeyArn").asText(""));
+        return config;
+    }
+
+    /** A long stays a long so Lambda's range check rejects it. Anything else reaches Lambda as is. */
+    private Object integerOrRaw(JsonNode value) {
+        if (value.isIntegralNumber()) {
+            return value.canConvertToInt() ? (Object) value.intValue() : (Object) value.longValue();
+        }
+        if (value.isTextual()) {
+            try {
+                long number = Long.parseLong(value.asText());
+                return number == (int) number ? (Object) (int) number : (Object) number;
+            } catch (NumberFormatException ignored) {
+                // Not a number. Lambda answers it with the error AWS gives.
+                return value.asText();
+            }
+        }
+        return jsonNodeToValue(value);
     }
 
     private Map<String, String> resolveLambdaEnvironment(JsonNode props, CloudFormationTemplateEngine engine) {
@@ -921,6 +1001,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private record LambdaDesiredState(String functionName,
                                       boolean explicitFunctionName,
                                       String packageType,
+                                      boolean durableReplacement,
                                       Map<String, Object> createRequest,
                                       LambdaCodeSpec code,
                                       Map<String, Object> configRequest,

@@ -20,6 +20,78 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class PostgresBackendSessionTest {
 
     @Test
+    void extendedFailureDoesNotWaitForIgnoredCleanupBeforeClientSync() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<String> names = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    String first = "";
+                    Frame frame;
+                    do {
+                        frame = readFrame(socket.getInputStream());
+                        if (frame.type() == 'P') {
+                            first = new String(frame.body(), StandardCharsets.UTF_8).split("\0", 2)[0];
+                        }
+                    } while (frame.type() != 'H');
+                    send(socket.getOutputStream(), 'E', new byte[]{'C', '4', '2', 'P', '0', '1', 0,
+                        'M', 'm', 'i', 's', 's', 'i', 'n', 'g', 0, 0});
+                    String second = "";
+                    do {
+                        frame = readFrame(socket.getInputStream());
+                        if (frame.type() == 'P') {
+                            second = new String(frame.body(), StandardCharsets.UTF_8).split("\0", 2)[0];
+                        }
+                    } while (frame.type() != 'H');
+                    send(socket.getOutputStream(), 'C', "SELECT 1\0".getBytes(StandardCharsets.UTF_8));
+                    send(socket.getOutputStream(), '3', new byte[0]);
+                    send(socket.getOutputStream(), '3', new byte[0]);
+                    return first.equals(second) ? "reused" : "distinct";
+                }
+            });
+            PostgresExtendedBackendSession sql = new PostgresExtendedBackendSession(backend);
+            assertThrows(SpectrumReadException.class, () -> sql.execute("SELECT missing"));
+            SpectrumReadException cleanup = assertThrows(SpectrumReadException.class,
+                    () -> sql.execute("DROP TABLE t"));
+            assertEquals("25P02", cleanup.sqlState());
+            sql.onSync();
+            sql.execute("SELECT 1");
+            assertEquals("distinct", names.get());
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void extendedPreparationClosesOnlyItsNamedObjectsWithoutSyncOrSimpleQuery() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<String> messages = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    StringBuilder types = new StringBuilder();
+                    Frame frame;
+                    do {
+                        frame = readFrame(socket.getInputStream());
+                        types.append(frame.type());
+                        if (frame.type() == 'P') {
+                            assertEquals('f', (char) frame.body()[0]);
+                        }
+                    } while (frame.type() != 'H');
+                    send(socket.getOutputStream(), '1', new byte[0]);
+                    send(socket.getOutputStream(), '2', new byte[0]);
+                    send(socket.getOutputStream(), 'C', "DO\0".getBytes(StandardCharsets.UTF_8));
+                    send(socket.getOutputStream(), '3', new byte[0]);
+                    send(socket.getOutputStream(), '3', new byte[0]);
+                    return types.toString();
+                }
+            });
+            new PostgresExtendedBackendSession(backend).execute("CREATE TABLE t(id integer); INSERT INTO t VALUES (1)");
+            assertEquals("PBECCH", messages.get());
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void copyReadFailureDrainsCopyFailResponseWithoutReplacingOriginalCause() throws Exception {
         try (ServerSocket listener = new ServerSocket(0);
              Socket backend = new Socket("localhost", listener.getLocalPort())) {
@@ -187,5 +259,14 @@ class PostgresBackendSessionTest {
     }
 
     private record Frame(char type, byte[] body) {
+    }
+
+    @Test
+    void preparationFailsFastAfterTheClientsOwnBackendError() {
+        PostgresExtendedBackendSession session = new PostgresExtendedBackendSession(null);
+        session.onBackendError();
+        SpectrumReadException error = assertThrows(SpectrumReadException.class, () -> session.execute("CREATE TABLE t(id INT)"));
+        assertEquals("25P02", error.sqlState());
+        session.onSync();
     }
 }

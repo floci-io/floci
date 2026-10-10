@@ -18,6 +18,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.sql.Blob;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -41,6 +43,19 @@ import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class RdsDataService implements Resettable {
+
+    /**
+     * The Data API fails an ExecuteStatement whose response is larger than 1 MiB. Only the
+     * serialized records are counted; the small remainder of the body is not.
+     */
+    private static final long MAX_RESPONSE_BYTES = 1024L * 1024L;
+
+    /**
+     * The Data API fails a result set in which any single row the database returns is larger than
+     * 64 KB. A row is measured by its values as the driver returns them, before any JSON escaping or
+     * base64 encoding: see {@link #valueBytes(Object)}.
+     */
+    private static final int MAX_ROW_BYTES = 64 * 1024;
 
     private static final Logger LOG = Logger.getLogger(RdsDataService.class);
 
@@ -533,14 +548,37 @@ public class RdsDataService implements Resettable {
     private ArrayNode records(ResultSet rs, ResultSetMetaData meta) throws SQLException {
         ArrayNode records = objectMapper.createArrayNode();
         int columnCount = meta.getColumnCount();
+        // Serialized size of the records array: its two brackets plus one comma between rows.
+        long responseBytes = 2;
         while (rs.next()) {
             ArrayNode row = objectMapper.createArrayNode();
+            long rawRowBytes = 0;
             for (int i = 1; i <= columnCount; i++) {
-                row.add(RdsDataFieldMapper.toField(objectMapper, rs.getObject(i), meta.getColumnType(i)));
+                Object value = rs.getObject(i);
+                rawRowBytes += valueBytes(value);
+                row.add(RdsDataFieldMapper.toField(objectMapper, value, meta.getColumnType(i)));
+            }
+            if (rawRowBytes > MAX_ROW_BYTES) {
+                LOG.debugv("Rejecting a result row of {0} bytes", rawRowBytes);
+                throw new AwsException("UnsupportedResultException", "Packet for query is too large", 400);
+            }
+            responseBytes += row.toString().getBytes(StandardCharsets.UTF_8).length + (records.isEmpty() ? 0 : 1);
+            if (responseBytes > MAX_RESPONSE_BYTES) {
+                throw new AwsException("UnsupportedResultException", "Database response exceeded size limit", 400);
             }
             records.add(row);
         }
         return records;
+    }
+
+    /** A column value's size as the driver returns it: the raw length of binary, the UTF-8 length of anything else's text. */
+    static long valueBytes(Object value) throws SQLException {
+        return switch (value) {
+            case null -> 0;
+            case byte[] bytes -> bytes.length;
+            case Blob blob -> blob.length();
+            default -> value.toString().getBytes(StandardCharsets.UTF_8).length;
+        };
     }
 
     private Credentials credentials(JsonNode request, RdsDataResourceResolver.DatabaseTarget target, String region) {

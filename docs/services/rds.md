@@ -63,6 +63,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeEventSubscriptions` | List subscriptions, or the one the request names |
 | `ModifyEventSubscription` | Update the members the request names |
 | `DeleteEventSubscription` | Delete a subscription |
+| `CreateDBClusterEndpoint` | Create an Aurora custom endpoint (`READER` or `ANY`) with a static or exclusion member list; see [Cluster endpoints](#cluster-endpoints) |
+| `DescribeDBClusterEndpoints` | List a cluster's built-in writer and reader endpoints and its custom endpoints, with the four documented filters |
+| `ModifyDBClusterEndpoint` | Change a custom endpoint's type or member list |
+| `DeleteDBClusterEndpoint` | Delete a custom endpoint |
 | `AddSourceIdentifierToSubscription` | Add a source id to a subscription |
 | `RemoveSourceIdentifierFromSubscription` | Remove a source id from a subscription |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
@@ -528,6 +532,34 @@ same-region replicas; a cross-region replica keeps its link with the replication
 `terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
 replica drops it from its source's list.
 
+## Cluster endpoints
+
+`CreateDBClusterEndpoint` adds an Aurora custom endpoint to an available cluster. As the Aurora user
+guide describes, its type is `READER` or `ANY` (case-insensitive, as the CLI sends it), it holds either
+a static list or an exclusion list of the cluster's instances but not both
+(`InvalidParameterCombination`), and a `READER` endpoint cannot list the writer. A member that is not
+an instance of the cluster is `DBInstanceNotFound`. The identifier follows the RDS identifier rules
+(at most 63 characters), is stored lower case and is unique in the Region
+(`DBClusterEndpointAlreadyExistsFault`); a cluster holds at most five custom endpoints
+(`DBClusterEndpointQuotaExceededFault`). The endpoint's ARN,
+`arn:aws:rds:<region>:<account>:cluster-endpoint:<id>`, works with the tagging actions.
+
+`DescribeDBClusterEndpoints` lists each cluster's built-in `WRITER` and `READER` endpoints followed by
+its custom endpoints, narrowed by `DBClusterIdentifier`, `DBClusterEndpointIdentifier` and the filters
+`db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`, `db-cluster-endpoint-id` and
+`db-cluster-endpoint-status`. `ModifyDBClusterEndpoint` changes the type or replaces the member list
+(giving static members clears the exclusion list, and the other way round). Deleting a cluster deletes
+its custom endpoints, and a deleted instance drops out of the lists that name it.
+
+A `READER` endpoint leaves out the cluster's current writer, so after a failover the promoted
+instance no longer shows among its members, as Aurora adjusts `READER` membership. Member names match
+the cluster's instances regardless of case and are stored as the cluster spells them.
+
+Custom endpoints are modelled, not routed: a custom endpoint reports the cluster's own endpoint host
+(read from the cluster each time, so it follows a restart onto another proxy port), so it is
+reachable, but connections through it go where the cluster endpoint sends them rather than being
+spread across the chosen members.
+
 ## Point in time restore
 
 `RestoreDBInstanceToPointInTime` and `RestoreDBClusterToPointInTime` check the request as AWS does:
@@ -623,6 +655,8 @@ The RDS auth proxy validates the master username and password at the proxy layer
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
+A token can be signed with an access key or with temporary credentials: an assumed role's, or the execution role credentials Floci hands a Lambda function. A token signed with temporary credentials carries their session token in `X-Amz-Security-Token`, and it is accepted while that session is valid and only with the session token issued alongside the access key.
+
 On RDS, a token is only good for the endpoint it was generated for: the hostname, port and region passed to `generate-db-auth-token` are the ones the instance (or cluster, or RDS Proxy) publishes. MySQL and MariaDB endpoints in Floci always refuse a token generated for another endpoint. PostgreSQL endpoints do the same by default; set `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING=false` to accept a token generated for another name, for clients that generate tokens for a container name or DNS alias the endpoint does not publish. Either way, the username must match the `DBUser` in the token exactly. Because clients on the host reach the same proxy over the loopback interface, a token generated for `localhost` or `127.0.0.1` on the published port is accepted as well. Clients on a Docker network connect by Floci's container name, so set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to that name (see [Docker Compose](#docker-compose)) so it is what the endpoint publishes and tokens are generated for. With [IAM enforcement](iam.md#iam-enforcement-mode) turned on, the token's principal must also be allowed `rds-db:connect` on the database user, scoped the way AWS scopes it:
 
 ```
@@ -634,6 +668,8 @@ Aurora clusters use the `DbClusterResourceId`, and connections through an RDS Pr
 On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
 
 Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
+
+The parameters a PostgreSQL client sends when it connects (`options` such as `-c search_path=app`, `application_name`, and any other run-time parameter) apply to the session as they do on RDS. An IAM session for a role other than the master gets them once the session has been handed over to the token's role, applied with `set_config()` so PostgreSQL checks each one against that role's privileges, and a parameter PostgreSQL refuses fails the login with PostgreSQL's own error, as it would at startup. A `session_authorization` naming any other role is refused with `permission denied to set session authorization` before anything is applied, since PostgreSQL would authorize it against the master the proxy connected as. Because those sessions have already started, three things differ from RDS: `options` may carry only `-c name=value` and `--name=value` switches, a parameter that can only be set at connection start is refused with `cannot be set after connection start`, and `replication` connections are refused. And because the values are set with `set_config()` rather than at startup, `RESET` (and `RESET ALL`) takes such a parameter back to the server default, not to the value the client connected with: after `-c search_path=app`, `RESET search_path` gives `"$user", public` where RDS keeps `app`.
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container

@@ -134,12 +134,12 @@ class AwsPartitionsTest {
     }
 
     @Test
-    void serviceAvailabilityFollowsEndpointsJson() {
+    void serviceAvailabilityFollowsThePublishedData() {
         assertTrue(AwsPartitions.commercial().offers("cloudfront"));
         assertTrue(AwsPartitions.byId("aws-cn").offers("cloudfront"));
         assertFalse(AwsPartitions.byId("aws-us-gov").offers("cloudfront"));
-        assertFalse(AwsPartitions.byId("aws-eusc").offers("iam"));
-        assertFalse(AwsPartitions.byId("aws-iso-e").offers("iam"));
+        assertFalse(AwsPartitions.byId("aws-cn").offers("lightsail"));
+        assertTrue(AwsPartitions.byId("aws-eusc").offers("iam"), "IAM's endpoint ruleset names aws-eusc");
         assertFalse(AwsPartitions.byId("aws-cn").offers("cognito-idp"));
         assertFalse(AwsPartitions.commercial().offers(null));
     }
@@ -156,7 +156,7 @@ class AwsPartitionsTest {
         assertTrue(AwsPartitions.byId("aws-cn").offersSigningName("ecr"));
         assertTrue(AwsPartitions.byId("aws-cn").offersSigningName("sqs"));
         assertFalse(AwsPartitions.byId("aws-us-gov").offersSigningName("cloudfront"));
-        assertFalse(AwsPartitions.byId("aws-eusc").offersSigningName("iam"));
+        assertFalse(AwsPartitions.byId("aws-cn").offersSigningName("lightsail"));
         assertFalse(AwsPartitions.commercial().offersSigningName("no-such-service"));
         assertFalse(AwsPartitions.commercial().offersSigningName(null));
 
@@ -165,6 +165,35 @@ class AwsPartitionsTest {
         assertFalse(AwsPartitions.publishesSomewhere("fis"), "endpoints.json omits the ruleset-only services");
         assertFalse(AwsPartitions.publishesSomewhere("no-such-service"));
         assertFalse(AwsPartitions.publishesSomewhere(null));
+    }
+
+    /**
+     * {@code endpoints.json} leaves IAM, Route 53, Budgets and Cost Explorer out of {@code aws-eusc},
+     * and IAM and Cost Explorer out of {@code aws-iso-e}, but each service's endpoint ruleset has an
+     * explicit branch for the partition ({@code iam.eusc-de-east-1.amazonaws.eu}).
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "aws-eusc, iam",
+        "aws-eusc, route53",
+        "aws-eusc, budgets",
+        "aws-eusc, ce",
+        "aws-iso-e, iam",
+        "aws-iso-e, ce",
+    })
+    void partitionsAServiceRulesetNamesExplicitlyOfferIt(String partitionId, String signingName) {
+        assertTrue(AwsPartitions.byId(partitionId).offersSigningName(signingName));
+    }
+
+    /**
+     * API Gateway's invoke endpoints and its WebSocket management API sign {@code execute-api},
+     * as Connect Participant does, and the published data lists the API Gateway side nowhere, so
+     * the name must not be judged by where Connect Participant is offered.
+     */
+    @Test
+    void executeApiIsNotTiedToConnectParticipant() {
+        assertEquals(Set.of(), AwsPartitions.endpointPrefixes("execute-api"));
+        assertFalse(AwsPartitions.publishesSomewhere("execute-api"));
     }
 
     @Test

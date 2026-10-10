@@ -1,13 +1,13 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import static org.hamcrest.Matchers.containsString;
-import org.junit.jupiter.api.Test;
-
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
-import static io.restassured.RestAssured.given;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 
 /**
  * End-to-end check that CloudFormation provisions an AWS::KinesisFirehose::DeliveryStream for real

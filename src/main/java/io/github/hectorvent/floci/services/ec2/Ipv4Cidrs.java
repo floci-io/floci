@@ -61,6 +61,10 @@ public final class Ipv4Cidrs {
         }
     }
 
+    static long addressValue(String address) {
+        return parse(address + "/32")[0];
+    }
+
     /**
      * The first /{@code netmask} block inside any of the {@code provisioned}
      * CIDRs (in order) that overlaps none of the {@code occupied} CIDRs, or

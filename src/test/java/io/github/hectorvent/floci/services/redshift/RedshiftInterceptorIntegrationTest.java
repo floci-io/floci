@@ -187,6 +187,115 @@ class RedshiftInterceptorIntegrationTest {
     }
 
     @Test
+    void copyAcceptsRegionKeyCredentialsAndNullHandlingOptions() throws Exception {
+        String bucket = "redshift-copy-options";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "people/p1.txt",
+                "1|alice\n2|\n3|   \n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+
+        try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE copy_opts_people (id int, name text)");
+            statement.execute("COPY copy_opts_people FROM 's3://" + bucket + "/people/p1.txt' "
+                    + "ACCESS_KEY_ID 'test' SECRET_ACCESS_KEY 'test' REGION 'us-east-1' "
+                    + "EMPTYASNULL BLANKSASNULL");
+            try (ResultSet rows = statement.executeQuery(
+                    "SELECT count(*) FROM copy_opts_people WHERE name IS NULL")) {
+                assertTrue(rows.next());
+                assertEquals(2, rows.getInt(1));
+            }
+        }
+    }
+
+    @Test
+    void copyTruncateColumnsCutsOverlongValuesOverSimpleQuery() throws Exception {
+        String bucket = "redshift-copy-truncate";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "t.txt",
+                "1|abcdef\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+
+        try (Connection connection = waitForConnection(
+                simpleQueryJdbcUrl(sharedCluster), "admin", "Secret123");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE copy_trunc (id int, name varchar(3))");
+            statement.execute("COPY copy_trunc FROM 's3://" + bucket + "/t.txt' TRUNCATECOLUMNS");
+            try (ResultSet rows = statement.executeQuery("SELECT name FROM copy_trunc")) {
+                assertTrue(rows.next());
+                assertEquals("abc", rows.getString(1));
+            }
+        }
+    }
+
+    @Test
+    void copyTruncateColumnsOverExtendedQueryExplainsTheSimpleQueryRequirement() throws Exception {
+        String bucket = "redshift-copy-truncate-ext";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "t.txt",
+                "1|abcdef\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+
+        try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE copy_trunc_ext (id int, name varchar(3))");
+            SQLException failure = assertThrows(SQLException.class, () -> statement.execute(
+                    "COPY copy_trunc_ext FROM 's3://" + bucket + "/t.txt' TRUNCATECOLUMNS"));
+            assertTrue(failure.getMessage().contains("preferQueryMode=simple"), failure.getMessage());
+        }
+    }
+
+    @Test
+    void unloadAppliesExtensionAndAcceptsRegion() throws Exception {
+        String bucket = "redshift-unload-extension";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
+                Statement statement = connection.createStatement()) {
+            statement.execute("UNLOAD ('select 1') TO 's3://" + bucket + "/ext/' "
+                    + "REGION 'us-east-1' EXTENSION '.csv' ALLOWOVERWRITE");
+        }
+
+        List<S3Object> objects = s3.listObjects(bucket, "ext/", null, 100);
+        assertEquals(1, objects.size());
+        assertEquals("ext/0000_part_00.csv", objects.get(0).getKey());
+    }
+
+    @Test
+    void unloadCleanPathRemovesOnlyObjectsUnderThePrefix() throws Exception {
+        String bucket = "redshift-unload-cleanpath";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "clean/old.txt", "old\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        s3.putObject(bucket, "clean2/keep.txt", "keep\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+
+        try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
+                Statement statement = connection.createStatement()) {
+            statement.execute("UNLOAD ('select 1') TO 's3://" + bucket + "/clean/' CLEANPATH");
+        }
+
+        List<S3Object> cleaned = s3.listObjects(bucket, "clean/", null, 100);
+        assertEquals(1, cleaned.size());
+        assertEquals("clean/0000_part_00", cleaned.get(0).getKey());
+        assertTrue(s3.objectExists(bucket, "clean2/keep.txt"));
+    }
+
+    @Test
+    void unloadEscapeEscapesTheDelimiterInData() throws Exception {
+        String bucket = "redshift-unload-escape";
+        s3.createBucket(bucket, "us-east-1");
+
+        try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE unload_escape (v text)");
+            statement.execute("INSERT INTO unload_escape VALUES ('a|b')");
+            statement.execute("UNLOAD ('select v from unload_escape') TO 's3://" + bucket
+                    + "/esc/' ESCAPE ALLOWOVERWRITE");
+        }
+
+        List<S3Object> objects = s3.listObjects(bucket, "esc/", null, 100);
+        assertEquals(1, objects.size());
+        assertEquals("a\\|b\n", new String(
+                s3.getObject(bucket, objects.get(0).getKey()).getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
     void namedPreparedCopyAndUnloadCanBeExecutedTwice() throws Exception {
         Cluster cluster = sharedCluster;
         String bucket = "redshift-extended-named";

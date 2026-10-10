@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
@@ -164,6 +165,26 @@ class DynamoDbVectorIndexLifecycleTest {
         assertEquals("Subscriber limit exceeded: Only 1 online index can be created or deleted "
                 + "simultaneously per table", refused.getMessage());
         assertTrue(service.describeTable(TABLE, REGION).getVectorIndexes().isEmpty());
+    }
+
+    @Test
+    void gsiCreateAlongsideAVectorIndexCreateExceedsTheOnlineIndexLimit() {
+        // Catches: the online index limit counts GSI and vector index operations separately,
+        // so one of each in a single request gets through
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex("byTitle",
+                List.of(new KeySchemaElement("title", "HASH")), null, "ALL", List.of());
+
+        AwsException refused = assertThrows(AwsException.class, () ->
+                service.updateTable(TABLE, null, null, List.of(gsi), List.of(),
+                        List.of(new AttributeDefinition("title", "S")),
+                        List.of(create("one", "vectorIndexUpdates.1.member.create")),
+                        List.of(), null, REGION));
+
+        assertEquals("LimitExceededException", refused.getErrorCode());
+        assertEquals("Subscriber limit exceeded: Only 1 online index can be created or deleted "
+                + "simultaneously per table", refused.getMessage());
+        assertTrue(service.describeTable(TABLE, REGION).getVectorIndexes().isEmpty());
+        assertTrue(service.describeTable(TABLE, REGION).getGlobalSecondaryIndexes().isEmpty());
     }
 
     @Test

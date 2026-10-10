@@ -230,4 +230,44 @@ class SesContentScanTest {
         }
         return out.toString();
     }
+
+    @Test
+    void blockedExtensionsMatchCaseInsensitivelyOnTheLastExtension() {
+        assertTrue(SesContentScan.isBlockedFileName("setup.exe"));
+        assertTrue(SesContentScan.isBlockedFileName("RUN.BAT"));
+        assertTrue(SesContentScan.isBlockedFileName("report.pdf.js"));
+        assertFalse(SesContentScan.isBlockedFileName("report.pdf"));
+        assertFalse(SesContentScan.isBlockedFileName("setup.exe.txt"));
+        assertFalse(SesContentScan.isBlockedFileName("exe"));
+        assertFalse(SesContentScan.isBlockedFileName(null));
+    }
+
+    @Test
+    void attachmentNamedByDispositionOrContentTypeIsBlocked() {
+        assertTrue(SesContentScan.hasBlockedAttachment(SmtpRelay.parseMime(
+                multipart("Content-Disposition: attachment; filename=\"tool.exe\"\r\n"))));
+        assertTrue(SesContentScan.hasBlockedAttachment(SmtpRelay.parseMime(
+                multipart("Content-Type: application/octet-stream; name=\"macro.vbs\"\r\n"))));
+        assertFalse(SesContentScan.hasBlockedAttachment(SmtpRelay.parseMime(
+                multipart("Content-Disposition: attachment; filename=\"report.pdf\"\r\n"))));
+    }
+
+    @Test
+    void blockedAttachmentInsideAForwardedMessageIsFound() {
+        String inner = new String(multipart("Content-Disposition: attachment; filename=\"x.scr\"\r\n"),
+                StandardCharsets.US_ASCII);
+        String outer = "From: a@example.com\r\nTo: b@example.com\r\nSubject: fwd\r\n"
+                + "MIME-Version: 1.0\r\nContent-Type: message/rfc822\r\n\r\n" + inner;
+
+        assertTrue(SesContentScan.hasBlockedAttachment(
+                SmtpRelay.parseMime(outer.getBytes(StandardCharsets.US_ASCII))));
+    }
+
+    private static byte[] multipart(String attachmentHeaders) {
+        String mime = "From: a@example.com\r\nTo: b@example.com\r\nSubject: x\r\n"
+                + "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n"
+                + "--b\r\nContent-Type: text/plain\r\n\r\nsee attachment\r\n"
+                + "--b\r\n" + attachmentHeaders + "\r\nAAAA\r\n--b--\r\n";
+        return mime.getBytes(StandardCharsets.US_ASCII);
+    }
 }

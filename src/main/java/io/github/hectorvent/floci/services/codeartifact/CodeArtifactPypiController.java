@@ -69,16 +69,16 @@ public class CodeArtifactPypiController {
     private static final Pattern SIMPLE_INDEX_HREF = Pattern.compile("href=\"([^\"]*)\"");
 
     private final CodeArtifactService service;
-    private final PypiserverSidecarManager pypiserver;
+    private final PypiserverSidecarClient pypiserver;
     private final HttpClient httpClient;
     private final ConcurrentHashMap<String, Object> uploadLocks = new ConcurrentHashMap<>();
 
     @Inject
-    public CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarManager pypiserver) {
+    public CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarClient pypiserver) {
         this(service, pypiserver, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
 
-    CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarManager pypiserver,
+    CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarClient pypiserver,
                                 HttpClient httpClient) {
         this.service = service;
         this.pypiserver = pypiserver;

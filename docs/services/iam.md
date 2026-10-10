@@ -65,6 +65,8 @@ type.
 | UntagRole | Removes tags from an IAM role. |
 | ListRoleTags | Lists tags stored for an IAM role. |
 
+`CreateRole` checks `RoleName` as AWS does: 1-64 characters of `[\w+=,.@-]`, otherwise `ValidationError`. A colon is never valid, so no role can take the name of the EC2 instance identity role, `aws:ec2-instance`.
+
 ### Policies
 
 | Action | Description |
@@ -304,13 +306,14 @@ also checked against that policy's length and character-class requirements, with
 echoed back by any of these actions, matching AWS.
 
 `DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
-keys, inline policies, attached managed policies, group memberships, or an
-[enabled MFA device](#multi-factor-authentication): remove those first. Floci has no actions that
-create signing certificates, SSH public keys, or Git credentials, so there is nothing of those
-kinds to block on. Renaming a user with `UpdateUser` carries its login
-profile, access keys, and group membership to the new name. Unlike AWS, Floci does not rewrite
-policy documents that name the user's ARN, so a resource or trust policy that referred to the old
-name still refers to it after a rename.
+keys, inline policies, attached managed policies, group memberships, an
+[enabled MFA device](#multi-factor-authentication), a
+[signing certificate](#signing-certificates), an [SSH public key](#ssh-public-keys) or a
+[service-specific credential](#service-specific-credentials): remove those first. That is every
+item on AWS's own list of what to delete before deleting a user programmatically. Renaming a user
+with `UpdateUser` carries all of them to the new name, along with its login profile, access keys and
+group membership. Unlike AWS, Floci does not rewrite policy documents that name the user's ARN, so a
+resource or trust policy that referred to the old name still refers to it after a rename.
 
 ### Policy Simulation
 
@@ -530,6 +533,68 @@ ready. `GenerateCredentialReport`'s `State`/`Description` for the no-report-exis
 own documented example response (`STARTED` / "No report exists. Starting a new report generation
 task"); the wording for the report-expired case is Floci's own, since AWS does not document it.
 
+### Account Properties and Outbound Federation
+
+| Action | Description |
+|--------|-------------|
+| GetAccountProperties | Returns the account's properties as a `Namespace/PropertyName` to value map. |
+| PutAccountProperties | Sets account properties, all of which must share one namespace. |
+| SetSecurityTokenServicePreferences | Sets the account's global endpoint token version, `v1Token` or `v2Token`. |
+| EnableOutboundWebIdentityFederation | Turns on outbound web identity federation and returns the account's issuer URL. |
+| DisableOutboundWebIdentityFederation | Turns it off. |
+| GetOutboundWebIdentityFederationInfo | Returns the issuer URL and whether JWT vending is on. |
+
+A property key is `Namespace/PropertyName` with exactly one forward slash and neither a leading nor
+a trailing one, 1 to 50 characters matching `^[A-Za-z][A-Za-z0-9/_-]*$`, and a value of 1 to 1024.
+**Every key in one `PutAccountProperties` request must belong to the same namespace**, which AWS
+states directly, so a request mixing namespaces is rejected whole rather than partly applied. Role
+Manager is the only namespace AWS names, and any well-formed key is accepted rather than only that
+one, since an allowlist of one would refuse keys AWS takes.
+
+Those two rules are not the same kind of failure, and they answer differently. The length and the
+pattern are constraints the API Reference publishes on the parameter, and it defines
+`ValidationError` as the common error for input that "doesn't meet the required format or
+constraints", so a key that is too long or outside the pattern, and a value outside 1 to 1024, are
+`ValidationError` with status 400. The `Namespace/PropertyName` rule cannot be expressed in the
+published pattern, which admits a key with no slash, with several, and with a trailing one, so it is
+a rule applied once the format is already satisfied: that, and a request mixing namespaces, are
+`InvalidInput` with status 400, the "invalid or out-of-range value" the operation declares.
+
+Each `ValidationError` here opens with "1 validation error detected: ", which is the envelope the
+IAM front end puts on a constraint report rather than anything specific to this operation. Every
+such message recorded against AWS carries it, including on map members: SNS's recordings show
+`Value null at 'attributes'` and `Value null at 'messageAttributes.attr1.member.dataType'` both
+prefixed. What is not recorded anywhere is how AWS spells a map *key* constraint, so the
+"Map keys must satisfy constraint" tail is a reasonable shape rather than an attested one.
+
+**Enabling federation twice is an error, and so is disabling it twice**, which is the asymmetry
+worth noticing: `EnableOutboundWebIdentityFederation` answers `FeatureEnabled` with status 409,
+while `DisableOutboundWebIdentityFederation` answers `FeatureDisabled` with status **404**. AWS
+documents both, including the message wording. `GetOutboundWebIdentityFederationInfo` answers
+`FeatureDisabled` too when the feature is off, reusing the disable operation's own text, so a getter
+reports that the feature cannot be disabled twice. That reads oddly and is matched rather than
+improved.
+
+The issuer URL is `https://<uuid>.tokens.sts.global.<dual-stack suffix>`, which the API Reference
+shows as `https://a1d2b0fd-1177-4468-9351-2fEXAMPLE723.tokens.sts.global.api.aws`. The suffix comes
+from the request's partition rather than the literal, since `api.aws` is only the commercial
+partition's. It is minted once per account and kept across a disable, so re-enabling returns the
+same URL. AWS does not document which way that goes; the reasoning is that a relying party
+verifying tokens will have pinned the URL, so regenerating it would break verification silently.
+
+Two things the feature references are not modeled. The issuer URL is documented as hosting OIDC
+discovery endpoints at `/.well-known/openid-configuration` and `/.well-known/jwks.json`, and the
+operation's description points at a `GetWebIdentityToken` API for obtaining JWTs. Neither is served
+here: these six are the management operations only. `JwtVendingEnabled` is therefore reported as
+true whenever the feature is enabled, which is the only reading available, since nothing in the API
+toggles it separately.
+
+`SetSecurityTokenServicePreferences` stores the version, and `GetAccountSummary` reports it as
+`GlobalEndpointTokenVersion`, which the operation's own description requires. What does not follow
+it is STS itself: Floci does not vary its token format by account preference, so the setting is
+observable in the summary rather than in a token. `v1Token` is reported as the default for an account
+that has never set one.
+
 ### Organizations Root Access
 
 | Action | Description |
@@ -572,12 +637,35 @@ certificate body, certificate chain, or private key".
 `ServerCertificateId` uses AWS's `ASCA` prefix for certificates. `GetAccountSummary`'s
 `ServerCertificates` count is backed by this store rather than reporting zero.
 
-`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, as AWS does.
+`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, which is an
+intentional deviation rather than a recorded AWS answer. `DeleteConflict` is modeled on the
+operation, but the API Reference describes it only as "attached subordinate entities" without saying
+what counts as one for a certificate, and the operation's own page warns that if Elastic Load
+Balancing "doesn't detect the deletion of bound certificates, it may continue to use the
+certificates", which reads as the delete going through. The refusal is kept because a caller is
+better served by it than by a dangling reference, not because AWS is known to answer it.
 Services that reference a certificate (ELB Classic listeners, ELBv2 listeners, CloudFront
 distributions) report it through `ServerCertificateReferenceProvider`, which IAM consults without
 depending on them. In the other direction, ELB Classic rejects a listener whose `SSLCertificateId`
 names no certificate with `CertificateNotFound`, and CloudFront rejects an unknown
 `ViewerCertificate.IAMCertificateId` with `InvalidViewerCertificate`.
+
+Those two directions have to be one step, not two. A referring service checks the certificate and
+then saves the resource that names it, so a delete running in between sees no reference, removes the
+certificate, and leaves the resource holding something that is gone. CloudFront and ELB Classic
+therefore perform that check and the write while holding the lock the delete takes, which leaves
+only the two orders that make sense: the delete loses and answers `DeleteConflict`, or it wins and
+the create is refused for a certificate that no longer exists. ELBv2 does not validate certificate
+references at all, so a listener there can still name a certificate that was never present, even
+though `CertificateNotFound` is modeled on `CreateListener`, `ModifyListener` and
+`AddListenerCertificates`.
+
+Only a write that names an IAM certificate takes the lock. A listener with no certificate, a
+listener served by ACM, a removal, or a distribution without an `IAMCertificateId` cannot leave a
+resource holding a deleted certificate, and making those wait on a certificate delete, or it on
+them, would buy nothing. The delete reads a snapshot of each load balancer's listeners rather than
+the live list, so an unguarded write cannot end its walk in `ConcurrentModificationException`
+either, which no mapper covers and which would surface as an unmapped 500.
 
 ### SSH Public Keys
 
@@ -675,6 +763,127 @@ Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `
 owning user's ARN, along with every other IAM action except the server-certificate operations. That
 is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979), not something
 specific to signing certificates.
+
+### Service-Specific Credentials
+
+| Action | Description |
+|--------|-------------|
+| CreateServiceSpecificCredential | Generates a credential for one service against an IAM user and returns its generated `ServiceSpecificCredentialId`. |
+| ListServiceSpecificCredentials | Lists a user's credentials, or every user's with `AllUsers`, optionally filtered by `ServiceName`. |
+| UpdateServiceSpecificCredential | Sets a credential's status to `Active`, `Inactive` or `Expired`. |
+| ResetServiceSpecificCredential | Replaces the secret half of a credential and returns the new one. |
+| DeleteServiceSpecificCredential | Deletes one of a user's service-specific credentials. |
+
+These are what AWS calls Git credentials when they are used with CodeCommit. A service that does not
+support them is `NoSuchEntity` with status 404 and the message "No such service `<name>` is
+supported for Service Specific Credentials".
+
+That is not what the wire model would suggest. The model declares `ServiceNotSupportedException`,
+code `NotSupportedService`, on both `CreateServiceSpecificCredential` and
+`ListServiceSpecificCredentials`, and AWS never raises it: recordings validated against AWS answer
+`NoSuchEntity` for a nonexistent service, for a name that is not a service principal at all, and for
+a real service that simply does not support these credentials. A client written against the model,
+catching the modelled exception, would catch nothing.
+
+A bad `ServiceSpecificCredentialId` splits two ways on `UpdateServiceSpecificCredential`,
+`ResetServiceSpecificCredential` and `DeleteServiceSpecificCredential`. The id is matched against
+the model's `[\w]+` before anything goes looking for it, so one carrying characters outside that
+class is a `ValidationError` with status 400 quoting the pattern, while an id that satisfies the
+pattern and names no credential of that user is `NoSuchEntity` with status 404 and the message
+"No such credential `<id>` exists". The published length of 20 to 128 is enforced the same way, and
+an id breaking both constraints is reported as two validation errors rather than one.
+
+A user that still owns a credential cannot be deleted: `DeleteUser` is `DeleteConflict` with status
+409. Where access keys, policies and group memberships each get a message naming what is in the
+way, this case does not, and AWS answers the generic "Cannot delete entity, must remove referenced
+objects first." Deleting the credential first lets the user go.
+
+**A credential has one of two shapes, decided by the service:**
+
+| Service | Shape |
+|---------|-------|
+| `codecommit.amazonaws.com` | `ServiceUserName` + `ServicePassword` |
+| `cassandra.amazonaws.com` | `ServiceUserName` + `ServicePassword` |
+| `bedrock.amazonaws.com` | long-term API key: `ServiceCredentialAlias` + `ServiceCredentialSecret` |
+| `aws-external-anthropic.amazonaws.com` | long-term API key |
+| `cloudwatch.amazonaws.com` | long-term API key |
+| `logs.amazonaws.com` | long-term API key |
+
+That list is the subset AWS's documentation actually names. The User Guide's own enumeration falls
+on a page boundary and is absent from the published PDF, so these come from two other passages: the
+`iam:ServiceSpecificCredentialServiceName` condition-key section, which gives CodeCommit,
+Keyspaces and Bedrock "with their
+exact value formatting", and the worked `create-service-specific-credential` CLI block, which
+creates the four long-term API key services. A service AWS supports that neither passage names would
+be refused here. A legacy per-partition form of a supported principal is accepted and folded to the
+universal one, so `bedrock.amazonaws.com.cn` works and comes back as `bedrock.amazonaws.com`; a bare
+`codecommit` does not, because AWS documents these with their exact formatting.
+
+Only the long-term API key services accept `CredentialAgeDays`, which the model restricts to
+"services that support long-term API keys" and which sets the `ExpirationDate`. It is 1 to 36600
+days. Without it the credential does not expire and no expiry is reported. A present but
+unparseable value is a validation error rather than a silent absence, since answering it with a
+credential that never expires is the opposite of what was asked for.
+
+**A key past its `ExpirationDate` reports `Expired`.** The status is derived when it is read rather
+than written back, so the value a caller set is left alone and an `UpdateServiceSpecificCredential`
+to `Active` cannot make an expired key report as usable. Expiry outranks `Inactive` as well, since a
+key past its expiry is finished either way and `Expired` says more.
+
+This one is a judgement call rather than a sourced behaviour, and worth knowing about. AWS does not
+document the transition: `Expired` is in the `statusType` enum, but that enum is shared with access
+keys, SSH public keys and signing certificates, most of which have no expiry at all, and the API
+Reference's prose describes only `Active` and `Inactive`. Of the two available guesses, reporting an
+expired key as `Active` is the worse one, because it tells a caller the key works while the same
+response carries the date saying it does not. Nothing authenticates with these credentials in Floci
+either way, so the status is the only place the expiry can show.
+
+The secret half, whichever shape it takes, is disclosed by `CreateServiceSpecificCredential` and
+`ResetServiceSpecificCredential` and never again: `ListServiceSpecificCredentials` returns
+`ServiceSpecificCredentialMetadata`, which the model defines without either secret. A reset keeps
+the id, the service and the service user name or alias: only what authenticates with the credential
+changes. Note that the User Guide calls the long-term key's secret `ServiceApiKeyValue` in prose;
+that is not a wire name, and both the API Reference and the model call it
+`ServiceCredentialSecret`.
+
+`ServiceUserName` is derived the way AWS derives it, as the IAM user name, the account, and a `+n`
+between them for the second credential: `anika-at-123456789012` and then
+`anika+1-at-123456789012`, which are the API Reference's own examples. `ServiceCredentialAlias`
+plays the same role for a long-term key, and AWS documents it only as including "the IAM user name
+and a suffix containing version and creation information" without publishing a format, so the one
+here is Floci's: `anika+v1-20261004`.
+
+In both cases the version is the lowest one not currently in use rather than a count of what
+exists, because a count repeats a name as soon as a credential is deleted out of order. Holding
+only `anika+1`, a count of one would mint `anika+1` again and two live credentials would share the
+name the caller authenticates with. It is taken inside the same lock as the write, so two
+concurrent creates cannot both claim the same version.
+
+**The quota is two per service, not two per user**: the User Guide gives "a maximum of two sets of
+service-specific credentials for each supported service per IAM user", so a user may hold two for
+each of the six while a third for any one of them is `LimitExceeded`. Unlike the SSH public key
+limit, this one has no row in the IAM service quotas table, matching the User Guide's framing of it
+as a fixed design limit rather than an adjustable quota.
+
+`AllUsers` cannot be given together with `UserName`, which the model says in as many words, so
+naming both is a validation error rather than one quietly winning.
+
+`UserName` is required on `CreateServiceSpecificCredential` and optional on the other four, where it
+resolves from the access key that signed the request. That is a third pattern again: the
+signing-certificate operations take it optionally throughout, and the SSH key operations require it
+everywhere but the list.
+
+A service-specific credential blocks `DeleteUser` until it is removed, the last of the items AWS
+lists as a prerequisite for deleting a user programmatically, and it follows the user across an
+`UpdateUser` rename: left behind, a credential would be stranded on a name that no longer exists,
+invisible to its owner because listing goes through the user. The `ServiceUserName` is left as it
+was minted rather than re-derived from the new name, because it is what the caller authenticates
+with and rewriting it would break a working credential; AWS does not document which way it goes, so
+this is a choice rather than a sourced behaviour.
+
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
+owning user's ARN, as the general gap in
+[#4979](https://github.com/floci-io/floci/issues/4979) describes.
 
 ## AWS Managed Policies
 
@@ -820,9 +1029,12 @@ These identities always bypass enforcement (backward-compatible defaults):
 | Identity | Behaviour |
 |---|---|
 | Access key `test` (the default dev credential) | Always allowed — no policy lookup |
-| Access key that exists nowhere | **Rejected** with `403`: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services |
+| Access key that exists nowhere | **Rejected** with `403`, `sts:GetCallerIdentity` included: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. A presigned POST, whose credential is in the form body, is left to S3's own presigned-POST check |
+| Inactive access key | **Rejected** the same way, until the key is activated again |
+| Expired session credentials | **Rejected** with `403 ExpiredTokenException`, or `400 ExpiredToken` for S3, rather than as a key that exists nowhere, for as long as Floci still holds the session |
+| `Authorization` header with no readable credential: no access key (a Bearer token, SigV2, a credential without the SigV4 scheme or without its key), or a scope missing a part such as its `aws4_request` terminator, or an empty header. An empty header next to a presigned URL's `X-Amz-Credential` defers to that credential | **Rejected** with `400`: `AuthorizationHeaderMalformed` for S3 (`AuthorizationQueryParametersError` when the credential is a presigned URL's `X-Amz-Credential`), `IncompleteSignature` for Query services, `IncompleteSignatureException` for JSON services. A REST request is rejected only when the header claims SigV4; otherwise it is treated as unsigned (see [Unsigned requests](#unsigned-requests)) |
 | Credential the filter cannot map to policies, such as a session carrying no role ARN | Allowed: it is a real credential, so rejecting it would refuse an authenticated caller |
-| No `Authorization` header | Allowed — unauthenticated path (e.g. health checks) |
+| No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
 **IAM's own resources are mostly not named.** When enforcement evaluates a request, the target
@@ -1045,6 +1257,15 @@ function URLs, CloudFront serving, the Cognito OIDC endpoints and Floci's own he
 of which are unsigned by design, and a REST request does not say which service will serve it. An
 unsigned REST call therefore still reaches the service, including an unsigned S3 call.
 
+**A header with no readable credential does not get around this.** An `Authorization` header that
+names no access key (a Bearer token, SigV2, a credential without the SigV4 scheme or without its
+key), or whose SigV4 scope is missing a part, is refused on the same management calls with
+`400 IncompleteSignature`, the error AWS gives a header it cannot read. A REST request carrying one
+is refused only when the header claims SigV4 and the route maps to an IAM action. Otherwise it is
+treated as unsigned, because AppSync, CodeArtifact's package endpoints, Identity Store's SCIM
+endpoint and API Gateway's authorizers take Bearer and Basic tokens of their own. An empty header
+is refused the same way, unless a presigned URL's `X-Amz-Credential` is there to read instead.
+
 ## Bypass rules
 
 Enforcement is deliberately permissive in a few cases, so that enabling it does not break workloads
@@ -1052,11 +1273,14 @@ the emulator cannot reason about:
 
 | Case | Behaviour |
 | --- | --- |
-| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. |
+| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. The credential is still checked on an RPC call, as in the rows below. A REST request is left alone, as an unsigned one is: the filter cannot tell it from the API Gateway execute path, Lambda function URLs and the other paths it sees that are unsigned by design. |
 | No `Authorization` header, RPC protocol | **Rejected** with `403 MissingAuthenticationToken`, unless the operation is one AWS itself serves without credentials. |
 | No `Authorization` header, REST protocol | Allowed. This filter also sees the API Gateway execute path, Lambda function URLs, CloudFront serving and the Cognito OIDC endpoints, which are unsigned by design. |
-| `sts:GetCallerIdentity` | Always allowed — AWS returns caller identity even when a policy denies it. |
-| Access key that exists nowhere | **Rejected** with `403`, in each protocol's own vocabulary: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. Allowing it would let any string authorize the request. |
+| `sts:GetCallerIdentity` | No policy is evaluated: AWS returns caller identity even when a policy denies it. The credential is still checked: a key that exists nowhere or is inactive, an expired session, or a header with no readable credential is refused as below. |
+| Access key that exists nowhere | **Rejected** with `403`, in each protocol's own vocabulary: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. Allowing it would let any string authorize the request. A presigned POST is the exception: its credential is in the form body, so a key that exists nowhere, or a credential that cannot be read, is left to S3's own presigned-POST check, and uploads as an unsigned request would when that check is off. An inactive key or an expired session is refused there as everywhere else. |
+| Inactive access key | **Rejected** the same way: a deactivated key can no longer be used by API calls until it is activated again. |
+| Expired session credentials | **Rejected** with `403 ExpiredTokenException`, or `400 ExpiredToken` for S3. Once Floci has removed an expired session it no longer knows the key, and answers as for one that exists nowhere. |
+| `Authorization` header with no readable credential | **Rejected** with `400`, in each protocol's own vocabulary: `AuthorizationHeaderMalformed` for S3 (`AuthorizationQueryParametersError` when the credential is a presigned URL's `X-Amz-Credential`), `IncompleteSignature` for Query services, `IncompleteSignatureException` for JSON services. Without a key or a scope there is nothing to check, so allowing it would skip enforcement altogether. As with no header, an operation AWS serves without credentials is left alone, and a REST request is rejected only when the header claims SigV4. |
 | Known credential with no mappable caller context | Allowed. A stored session carrying no role ARN is a real credential, so it is not treated as unauthenticated. |
 | Bare account-id key with no SCP ceiling | Allowed. With no organization or SCP enforcement off, the account root keeps the historical bypass. |
 | Bare account-id key **with** an SCP ceiling | Enforced as the account root, bounded by the SCP chain. |
@@ -1072,13 +1296,28 @@ linked service to go through instead. `TagRole` and `UntagRole` are allowed, as 
 IAM API `DeleteServiceLinkedRole` is the only way to remove such a role — the emulator's own
 `/_floci/state/reset` still clears it along with everything else.
 
-Three deviations to be aware of:
+Four deviations to be aware of:
 
-- **The role name is derived locally and will not match AWS for most services.** AWS lets each
-  linked service choose the name, and it is not computable from the service principal —
-  `lex.amazonaws.com` yields `AWSServiceRoleForLexBots` there, where Floci derives
-  `AWSServiceRoleForLex`. Read the name back from the create response rather than hardcoding
-  it, and do not rely on a name observed locally matching the one AWS mints.
+- **The role name comes from a table of AWS evidence, and is derived only where that table does
+  not reach.** The name is not computable from the service principal: `acm.amazonaws.com` is
+  `AWSServiceRoleForCertificateManager` and `lex.amazonaws.com` is `AWSServiceRoleForLexBots`,
+  where capitalising the principal would give `AWSServiceRoleForAcm` and `AWSServiceRoleForLex`.
+  `src/main/resources/iam/service-linked-roles.tsv` carries the name AWS mints, with the count in
+  its own header where the generator keeps it right, generated by
+  `tools/slr/service_linked_roles.py` and gated by `make slr-check`, and
+  each row records whether it rests on a recorded create, on a role ARN in AWS's own managed policy
+  documents, or on a cited page of AWS documentation. A principal outside the table still gets the
+  derived name, so reading the name back from the create response is still better than computing
+  it, but for a service in the table it now matches AWS.
+- **A `CustomSuffix` is refused for the services AWS is recorded refusing it.** The API Reference
+  says only that "some services do not support the CustomSuffix parameter" without listing them, so
+  the same table carries the recorded answer: 68 services reply `InvalidInput` "Custom suffix is not
+  allowed for `<service>`" and three take one, `autoscaling`, `connect` and `lexv2`. Only a recorded
+  create can establish this, so a service the recordings miss keeps taking a suffix rather than
+  being refused on an inference. Two table names are long enough that a suffix alone breaches the
+  64-character `RoleName` limit, which is `InvalidInput` for the length rather than for the suffix.
+  Creating the same service-linked role twice is `InvalidInput` naming the role, "Service role name
+  `<name>` has been taken in this account, please try a different suffix."
 - **Deletion is synchronous.** `DeleteServiceLinkedRole` completes before it returns, so the
   task id it hands back is already finished and `GetServiceLinkedRoleDeletionStatus` always
   reports `SUCCEEDED`. The `IN_PROGRESS`, `NOT_STARTED` and `FAILED` states never occur, and no
@@ -1087,6 +1326,14 @@ Three deviations to be aware of:
   prefix on `CreateRole`; Floci allows it and treats the result as an ordinary role, since the
   service-linked mark comes from the action that minted the role rather than from its path. Such
   a role stays fully modifiable, and `DeleteServiceLinkedRole` answers `NoSuchEntity` for it.
+
+## Partitions
+
+IAM is global, so its ARNs take the partition of the region a request is signed for:
+`arn:aws-cn:iam::<account>:role/...` for a China-signed request. AWS managed policies keep the
+`aws` owner in every partition (`arn:aws-cn:iam::aws:policy/ReadOnlyAccess`), with the commercial
+catalog's documents rewritten for the partition. An assumed-role session stays in the partition
+of the role it was issued for, whatever region later calls are signed for. See [AWS Partitions](../configuration/partitions.md).
 
 ## Configuration
 

@@ -38,6 +38,24 @@ class CloudFormationTemplateEngineTest {
     }
 
     @Test
+    void selectedNoValueOmitsTheOptionalPropertyWhileKeepingLiteralEmptyText() {
+        JsonNode source = json("""
+                {"Scopes":{"Fn::If":["Include",[],{"Ref":"AWS::NoValue"}]},"Name":""}
+                """);
+        assertEquals(json("{\"Name\":\"\"}"),
+                engineWithCondition("Include", false).resolveNodeOmittingNoValue(source));
+    }
+
+    @Test
+    void selectedNoValueOmitsTheOptionalArrayEntryWhileKeepingLiteralEmptyText() {
+        JsonNode source = json("""
+                ["first",{"Fn::If":["Include","read",{"Ref":"AWS::NoValue"}]},"","last"]
+                """);
+        assertEquals(json("[\"first\",\"\",\"last\"]"),
+                engineWithCondition("Include", false).resolveNodeOmittingNoValue(source));
+    }
+
+    @Test
     void optionalNodeResolutionPreservesTheLegacyNoValueContract() {
         JsonNode noValue = json("{\"Ref\":\"AWS::NoValue\"}");
         assertEquals("", engine().resolveNode(noValue).asText());

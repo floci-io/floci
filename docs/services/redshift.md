@@ -272,6 +272,63 @@ current S3 emulator authorization mode, and role-specific Spectrum access enforc
 future phase. Parquet, JSON, Avro, ORC, partition discovery, `ALTER`, and `DROP` lifecycle
 operations are not supported in Phase 1.
 
+### Relational queries over Glue-backed external CSV tables
+
+An external schema bound to an existing local Glue database supports JOINs between external and
+internal tables, multiple external tables, aliases, bound predicates, GROUP BY, HAVING, ORDER BY
+and LIMIT. PostgreSQL evaluates the original SQL after Floci loads the referenced external
+relations. Simple Query, JDBC Extended Query and the Redshift Data API share this preparation path.
+Extended Query uses native PostgreSQL descriptions and cursors, including fetch-size cursors.
+
+Create the Glue database first, or use `CREATE EXTERNAL DATABASE IF NOT EXISTS`:
+
+```sql
+CREATE EXTERNAL SCHEMA lake FROM DATA CATALOG
+DATABASE 'analytics' IAM_ROLE '<associated-role-arn>'
+CREATE EXTERNAL DATABASE IF NOT EXISTS;
+
+CREATE EXTERNAL TABLE lake.events (customer_id INTEGER, amount INTEGER)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+STORED AS TEXTFILE LOCATION 's3://analytics/events/';
+
+SELECT c.country, SUM(e.amount) AS total
+FROM lake.events e JOIN public.customers c ON e.customer_id = c.id
+GROUP BY c.country ORDER BY total DESC;
+```
+
+This path needs Docker for PostgreSQL and the existing floci-duck runtime used to read external
+data. Use the `floci.duck` configuration described under [Athena](athena.md) to supply a reachable
+runtime when container management is unsuitable. This iteration validates CSV relational reads;
+it does not add new file formats or partition pruning.
+
+Materialized relations are cached in the cluster database. Each new query checks the associated
+role, trust policy and S3 access before using cached data, following the existing S3 enforcement
+configuration. Changes to Glue metadata or S3 objects reload the data. A missing Glue table is an
+error even if its previous contents remain cached. New prepared-statement bindings revalidate
+the data; repeated fetches from one active cursor retain that cursor's result. Loads inside a
+caller transaction do not publish a reusable fingerprint because the transaction may roll back.
+Temporary transfer objects and staging tables are cleaned up independently of cached relations.
+Extended Query loads retain a connection-local fingerprint until its transaction completes;
+the fingerprint becomes shared only after confirmed commit and is discarded on rollback.
+Creating an external schema or table
+inside a transaction, including a Data API batch (which runs as one transaction), is rejected before changing the catalogs: AWS does not allow `CREATE EXTERNAL TABLE` inside a transaction block (SQLSTATE `25001`).
+Cold loads and reloads require database privileges to maintain the materialized table and catalog;
+ordinary users with schema USAGE and table SELECT can read an existing committed cache entry.
+The current floci-duck transfer uses account-scoped development credentials. Cold loads and reloads
+with `FLOCI_SERVICES_S3_ENFORCE_AUTH=true` are not supported by that transfer path yet.
+Role association and trust are still checked before cached reads; S3 policy checks follow the
+configured enforcement mode. This is a Floci limitation, not AWS behavior.
+
+Writes to external relations are rejected. AWS prohibits external UPDATE/DELETE but supports
+some external INSERT operations; external INSERT is an intentional Floci limitation here. Use
+schema-qualified external table names. Full Glue IAM enforcement, Lake Formation, role chaining
+and `IAM_ROLE SESSION` are outside this implementation. Metadata is exposed through
+`svv_external_schemas`, `svv_external_tables`, `svv_external_columns` and `svv_external_partitions`.
+
+Schemas created without a matching Glue database retain the legacy Phase 1 path described above.
+Its single-table query restrictions still apply. PostgreSQL materialization approximates Spectrum
+execution and does not reproduce AWS distributed planning or a cross-service transaction snapshot.
+
 ### COPY from S3
 
 `COPY <table> [(<columns>)] FROM 's3://<bucket>/<keyOrPrefix>' [options]` sent over the Simple
@@ -308,10 +365,27 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
+- `REGION '<region>'` is accepted and ignored: Floci has one S3.
+- `CREDENTIALS 'aws_iam_role=<arn>'` behaves like `IAM_ROLE`. `ACCESS_KEY_ID` with `SECRET_ACCESS_KEY`
+  (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...'`,
+  are accepted but never verified or stored: S3 is read as an unsigned request, the same as with no
+  authorization clause. Combining key credentials with `IAM_ROLE`, or giving only one of the pair, is
+  not intercepted, and neither is a blank key, secret, token or role.
+- `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
+  (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
+  level options need a single-byte `DELIMITER`, are not combined with `FORMAT AS JSON`, and normalise
+  `CRLF` line endings to `LF`. A nulled field is written as the `NULL AS` string, or `\N` in text
+  mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
+  `CHAR`/`VARCHAR` length in bytes (Redshift's meaning of the declared length, so `éééé` into
+  `VARCHAR(3)` loads `é`), never inside a multi-byte character or a backslash escape. Its column
+  lengths come from the database catalog, so it works only over the **Simple Query protocol** (`preferQueryMode=simple`);
+  over Extended Query the COPY fails with an error that names this requirement. A field-level option
+  buffers each decompressed object in memory, so an object over 64 MiB, or a heap budget shared
+  across connections that is used up, fails the COPY instead of exhausting the emulator.
 - Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
-  `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
-  `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, `CREDENTIALS`, and so on) is not
-  recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.
+  `DATEFORMAT`, `TIMEFORMAT`, `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
+  `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL
+  returns its own error.
 - A multi-statement query whose COPY is followed by another statement is not intercepted; send the
   COPY on its own.
 - Extended Query COPY is supported when the complete statement is present in `Parse` and has no
@@ -350,6 +424,32 @@ the result to S3 as one or more objects under `<prefix>`.
 - A zero-row result still writes one object (empty, or the header row alone when
   `HEADER` is set).
 - `GZIP` compresses each object and appends `.gz` to its key.
+- `EXTENSION '<ext>'` is appended to each data object key, with a `.` inserted when the value does not
+  start with one: `EXTENSION 'csv'` and `EXTENSION '.csv'` both give `<prefix>0000_part_00.csv`. As in
+  AWS, the compression suffix is added only when no extension is given, so `EXTENSION 'txt.gz' GZIP`
+  gives `<prefix>0000_part_00.txt.gz`. The value is not validated; an empty value or one containing
+  `/` is not intercepted. AWS does not document whether it inserts the dot itself.
+- `REGION` and the credential clauses (`CREDENTIALS`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`,
+  `SESSION_TOKEN`) behave as described for COPY.
+- `ESCAPE` is accepted and relies on PostgreSQL text framing, which already escapes the backslash,
+  newline, carriage return and the delimiter. It is only valid with text framing: combined with
+  `CSV`, `ADDQUOTES` or `HEADER` (which switch the framing to CSV here) the statement is not
+  intercepted. Unlike Redshift, PostgreSQL also writes a tab as `\t`.
+- `CLEANPATH` deletes every object whose key starts with the target prefix. The objects are listed and
+  every delete is authorized up front, like the writes (with `FLOCI_SERVICES_S3_ENFORCE_AUTH` on, the
+  role needs list and delete permission, and a denial fails the UNLOAD before anything is removed or
+  written). The deletes themselves run when the first output arrives, so a query that PostgreSQL
+  rejects leaves the previous export in place. They run on a fresh listing of the prefix, authorized
+  and deleted under one bucket lock, so an object uploaded in the meantime does not survive. Objects
+  already deleted are not restored if the UNLOAD fails later. The match is a plain string prefix, so `TO 's3://b/sales_' CLEANPATH` also removes
+  `sales_archive/...`; end the prefix with `/` to limit it to one folder. It cannot be combined with
+  `ALLOWOVERWRITE`, and an empty prefix (the bucket root) is not intercepted so a typo cannot wipe a
+  bucket.
+- `ENCRYPTED AUTO` is accepted and writes objects as usual. `ENCRYPTED KMS_KEY_ID '<key>'` stores the
+  data and manifest objects with `aws:kms` server-side encryption and that key id; Floci does not
+  encrypt the data beyond what its S3 service does for those headers. Bare `ENCRYPTED` (server-side
+  encryption with the default S3 key) and the client-side `MASTER_SYMMETRIC_KEY` form are not
+  intercepted.
 - `MANIFEST` writes `<prefix>manifest` listing every object with its
   `content_length`.
 - Without `ALLOWOVERWRITE`, a non-empty target prefix fails with SQL error XX000 and the select
@@ -362,8 +462,8 @@ the result to S3 as one or more objects under `<prefix>`.
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
-- Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `CREDENTIALS`,
-  `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
+- Any other option (`PARQUET`, `JSON`, `FIXEDWIDTH`, `MASTER_SYMMETRIC_KEY`, `MANIFEST VERBOSE`,
+  `ZSTD`, `BZIP2`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
 - Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no
   bind parameters. Parameterized statements are forwarded unchanged.

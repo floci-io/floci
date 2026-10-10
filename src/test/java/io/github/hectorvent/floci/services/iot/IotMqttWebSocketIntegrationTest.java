@@ -128,12 +128,12 @@ public class IotMqttWebSocketIntegrationTest {
     }
 
     @Test
-    void customAuthorizerStyleConnectIsAccepted() throws Exception {
+    void connectNamingAnUnknownCustomAuthorizerIsRefused() {
         String clientId = "tunnel-" + System.nanoTime();
         String username = clientId + "?x-amz-customauthorizer-name=my-authorizer";
-        try (WsClient client = WsClient.connect(wss("/mqtt"), clientId, username, "token-" + System.nanoTime())) {
-            assertTrue(client.isConnected());
-        }
+        MqttException refused = assertThrows(MqttException.class,
+                () -> WsClient.connect(wss("/mqtt"), clientId, username, "token-" + System.nanoTime()));
+        assertEquals(MqttException.REASON_CODE_CONNECTION_LOST, refused.getReasonCode());
     }
 
     @Test
@@ -442,7 +442,7 @@ public class IotMqttWebSocketIntegrationTest {
                 options.setUserName(username);
                 options.setPassword(password.toCharArray());
             }
-            client.connect(options);
+            PahoWebSocketConnect.connect(client, options);
             return wsClient;
         }
 

@@ -77,6 +77,7 @@ class LambdaArnInvocationAccountTest {
                 null,
                 null,
                 null,
+                null,
                 new ObjectMapper());
 
         InvokeResult result = service.invokeArn(functionArn, "{}".getBytes(), InvocationType.Event);
@@ -131,6 +132,7 @@ class LambdaArnInvocationAccountTest {
                 null,
                 aliasStore,
                 new LambdaTargetResolver(functionStore, aliasStore),
+                null,
                 null,
                 null,
                 null,
@@ -304,6 +306,7 @@ class LambdaArnInvocationAccountTest {
                 null,
                 aliasStore,
                 new LambdaTargetResolver(functionStore, aliasStore),
+                null,
                 null,
                 null,
                 null,

@@ -181,16 +181,44 @@ public class RedshiftContainerManager {
         return ContainerStorageHelper.dockerName(config, "redshift-" + accountId + "-" + clusterIdentifier);
     }
 
-    public void takeSnapshot(String accountId, String clusterIdentifier, String username, String dbname, Path outputFile) {
+    private RedshiftContainerHandle requireHandle(String accountId, String clusterIdentifier) {
         RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
         if (handle == null) {
             throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
         }
+        return handle;
+    }
 
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
-        String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
+    private static String userOrDefault(String username) {
+        return (username != null && !username.isBlank()) ? username : "postgres";
+    }
 
-        String[] cmd = new String[]{"pg_dump", "-U", effectiveUser, effectiveDb, "-f", "/tmp/dump.sql"};
+    private static String databaseOrDefault(String dbname) {
+        return (dbname != null && !dbname.isBlank()) ? dbname : DEFAULT_DATABASE;
+    }
+
+    /** Schema {@code bootstrap-catalog.sql} owns; the catalog views read it, so snapshots leave it alone. */
+    public static final String BOOTSTRAP_SCHEMA = "floci_internal";
+
+    public void takeSnapshot(String accountId, String clusterIdentifier, String username, String dbname, Path outputFile) {
+        takeSnapshot(accountId, clusterIdentifier, username, dbname, outputFile, false);
+    }
+
+    /**
+     * Dumps the database with pg_dump. With {@code skipBootstrapSchema} the {@link #BOOTSTRAP_SCHEMA}
+     * is left out, which a dump meant to be replayed into a live, already bootstrapped container needs.
+     */
+    public void takeSnapshot(String accountId, String clusterIdentifier, String username, String dbname,
+                             Path outputFile, boolean skipBootstrapSchema) {
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
+
+        String effectiveUser = userOrDefault(username);
+        String effectiveDb = databaseOrDefault(dbname);
+
+        String[] cmd = skipBootstrapSchema
+                ? new String[]{"pg_dump", "-U", effectiveUser, "--exclude-schema=" + BOOTSTRAP_SCHEMA, effectiveDb,
+                        "-f", "/tmp/dump.sql"}
+                : new String[]{"pg_dump", "-U", effectiveUser, effectiveDb, "-f", "/tmp/dump.sql"};
         try {
             ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 30);
             if (result.exitCode() != 0) {
@@ -222,11 +250,8 @@ public class RedshiftContainerManager {
     /** As the four-argument form, connecting to {@code databaseName} instead of {@code dev}. */
     public void alterUserPassword(String accountId, String clusterIdentifier, String username, String newPassword,
                                   String databaseName) {
-        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
-        if (handle == null) {
-            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
-        }
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
+        String effectiveUser = userOrDefault(username);
         // Validate effectiveUser against safe SQL identifier pattern to prevent SQL injection.
         // psql -c sends the query string to Postgres, which allows multiple ;-separated statements,
         // so even argv-escaping doesn't protect against a username like "postgres; DROP TABLE ..."
@@ -281,18 +306,24 @@ public class RedshiftContainerManager {
     }
 
     public void restoreSnapshot(String accountId, String clusterIdentifier, String username, String dbname, Path sqlDumpFile) {
-        RedshiftContainerHandle handle = containers.get(containerKey(accountId, clusterIdentifier));
-        if (handle == null) {
-            throw new AwsException("ClusterNotFound", "Cluster container for " + clusterIdentifier + " not found", 404);
-        }
+        restoreSnapshot(accountId, clusterIdentifier, username, dbname, sqlDumpFile, false);
+    }
+
+    /**
+     * Replays the dump with psql. With {@code stopOnError} the first failing statement aborts the
+     * replay and fails the call, instead of psql skipping it and exiting successfully.
+     */
+    public void restoreSnapshot(String accountId, String clusterIdentifier, String username, String dbname,
+                                Path sqlDumpFile, boolean stopOnError) {
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
 
         if (sqlDumpFile == null || !Files.exists(sqlDumpFile)) {
             LOG.infov("Empty snapshot dump for cluster {0}, skipping restore", clusterIdentifier);
             return;
         }
 
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
-        String effectiveDb = (dbname != null && !dbname.isBlank()) ? dbname : "dev";
+        String effectiveUser = userOrDefault(username);
+        String effectiveDb = databaseOrDefault(dbname);
         String fileName = sqlDumpFile.getFileName().toString();
 
         try {
@@ -301,7 +332,10 @@ public class RedshiftContainerManager {
                     .withRemotePath("/tmp")
                     .exec();
 
-            String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-f", "/tmp/" + fileName};
+            String[] cmd = stopOnError
+                    ? new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-v", "ON_ERROR_STOP=1",
+                            "-f", "/tmp/" + fileName}
+                    : new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-f", "/tmp/" + fileName};
             ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 60);
             if (result.exitCode() != 0) {
                 LOG.warnv("psql restore failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
@@ -312,6 +346,40 @@ public class RedshiftContainerManager {
         } catch (Exception e) {
             LOG.errorv(e, "Error restoring snapshot for cluster {0}", clusterIdentifier);
             throw new AwsException("InternalFailure", "Failed to restore snapshot for cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
+        }
+    }
+
+    private static final String DROP_USER_SCHEMAS_SQL = "DO $$ DECLARE s text; BEGIN "
+            + "PERFORM lo_unlink(oid) FROM pg_largeobject_metadata; "
+            + "FOR s IN SELECT nspname FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema') "
+            + "AND nspname <> '" + BOOTSTRAP_SCHEMA + "' AND nspname NOT LIKE 'pg\\_%' LOOP EXECUTE format('DROP SCHEMA %I CASCADE', s); END LOOP; "
+            + "CREATE SCHEMA public; END $$;";
+
+    /**
+     * Drops every large object and every user schema except the bootstrap one, and recreates an
+     * empty {@code public} one, so a following {@link #restoreSnapshot} replays into a clean
+     * database rather than appending to what is already there.
+     */
+    public void resetUserSchemas(String accountId, String clusterIdentifier, String username, String dbname) {
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
+        String effectiveUser = userOrDefault(username);
+        String effectiveDb = databaseOrDefault(dbname);
+        String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-c",
+                DROP_USER_SCHEMAS_SQL};
+        try {
+            ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 30);
+            if (result.exitCode() != 0) {
+                LOG.warnv("Schema reset failed for cluster {0} (exit {1}): {2}", clusterIdentifier,
+                        result.exitCode(), result.stderr());
+                throw new AwsException("InternalFailure", "Failed to reset the database of " + clusterIdentifier
+                        + ": " + result.stderr(), 500);
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.errorv(e, "Error resetting the database of cluster {0}", clusterIdentifier);
+            throw new AwsException("InternalFailure", "Failed to reset the database of " + clusterIdentifier
+                    + ": " + e.getMessage(), 500);
         }
     }
 
@@ -344,7 +412,7 @@ public class RedshiftContainerManager {
         return bos.toByteArray();
     }
     private void waitForReady(String containerName, String containerId, String username, String dbName) {
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        String effectiveUser = userOrDefault(username);
         String[] cmd = {
                 "psql",
                 "-h", "127.0.0.1",
@@ -384,7 +452,7 @@ public class RedshiftContainerManager {
      * and migration tooling can inspect metadata without relation-does-not-exist errors.
      */
     void bootstrapCatalog(String containerId, String username, String dbName) {
-        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        String effectiveUser = userOrDefault(username);
         String effectiveDb = (dbName != null && !dbName.isBlank()) ? dbName : "dev";
         try (InputStream in = getClass().getResourceAsStream("/redshift/bootstrap-catalog.sql")) {
             if (in == null) {

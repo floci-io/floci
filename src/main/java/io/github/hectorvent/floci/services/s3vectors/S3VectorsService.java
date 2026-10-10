@@ -1,14 +1,14 @@
 package io.github.hectorvent.floci.services.s3vectors;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorBucket;
-import io.github.hectorvent.floci.services.s3vectors.model.VectorIndex;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorData;
-import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.services.s3vectors.model.VectorIndex;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;

@@ -35,9 +35,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
-import static io.github.hectorvent.floci.services.stepfunctions.AslExecutor.FailStateException;
-
 import static com.dashjoin.jsonata.Jsonata.jsonata;
+import static io.github.hectorvent.floci.services.stepfunctions.AslExecutor.FailStateException;
 
 /**
  * Evaluates JSONata expressions for Step Functions.

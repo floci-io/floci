@@ -66,9 +66,10 @@ public class DocDbContainerManager {
      *
      * @return the container handle, or {@code null} when no Docker daemon is reachable
      */
-    public DocDbContainerHandle tryStart(String clusterId, String image, String masterUsername, String masterPassword) {
+    public DocDbContainerHandle tryStart(String clusterId, String image, String masterUsername, String masterPassword,
+                                         String region) {
         try {
-            DocDbContainerHandle handle = start(clusterId, image, masterUsername, masterPassword);
+            DocDbContainerHandle handle = start(clusterId, image, masterUsername, masterPassword, region);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -100,7 +101,8 @@ public class DocDbContainerManager {
         }
     }
 
-    public DocDbContainerHandle start(String clusterId, String image, String masterUsername, String masterPassword) {
+    public DocDbContainerHandle start(String clusterId, String image, String masterUsername, String masterPassword,
+                                      String region) {
         LOG.infov("Starting DocumentDB container for cluster: {0}", clusterId);
 
         String containerName = ContainerStorageHelper.resourceName(config, "docdb", null, clusterId);
@@ -117,7 +119,7 @@ public class DocDbContainerManager {
                 .withLogRotation()
                 .withEnv(envVars)
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "docdb", clusterId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "docdb", clusterId, regionResolver.getAccountId(), region));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(MONGO_PORT);
@@ -141,7 +143,6 @@ public class DocDbContainerManager {
                 : info.containerId();
         String logGroup = "/aws/docdb/cluster/" + clusterId + "/audit";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = regionResolver.getDefaultRegion();
 
         Closeable logHandle = logStreamer.attach(
                 info.containerId(), logGroup, logStream, region, "docdb:" + clusterId);

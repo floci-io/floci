@@ -64,6 +64,24 @@ class RdsSigV4ValidatorTest {
                 "a valid token from a principal that is not allowed rds-db:connect must be rejected");
     }
 
+    /**
+     * The key IAM authorizes must be the key the signature was verified with. A token that spells
+     * its signer's credential with a percent-encoded name and adds a second credential, of a key
+     * IAM does not know, must not be authorized on that second key.
+     */
+    @Test
+    void validateAuthorizesTheKeyTheSignatureWasVerifiedWith() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
+                "AKIDRDS", "secret-rds", "jane", S3_ONLY_POLICY);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService, () -> true);
+        String token = SigV4TokenTestHelper.createRdsTokenWithASecondCredential(
+                "db.example.local", 3307, "jane_doe", "AKIDRDS", "secret-rds", "AKIDUNKNOWN",
+                Instant.now().minusSeconds(60), 900);
+
+        assertFalse(validator.validate(token, "jane_doe", exampleBinding()),
+                "the signer is not allowed rds-db:connect, whatever other credential the token names");
+    }
+
     @Test
     void validateAcceptsCallerAllowedRdsDbConnectOnTheBoundDbUser() throws Exception {
         // The example policy from the AWS "IAM database authentication" guide.
@@ -513,6 +531,29 @@ class RdsSigV4ValidatorTest {
 
         assertTrue(validator.validate(token, "admin", unboundBinding()),
                 "Validator must accept RDS IAM tokens signed with STS session credentials (ASIA… keys)");
+    }
+
+    /**
+     * What every Lambda that connects with IAM authentication sends: a token presigned with the
+     * function's execution-role credentials, whose session token carries {@code +}, {@code /} and
+     * {@code =}.
+     */
+    @Test
+    void validateAcceptsTokenSignedWithLambdaSessionCredentials() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "lambda+session/secret";
+        String sessionToken = "IQoJb3JpZ2luX2VjEJr+abc/def+ghi/jkl==";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
+                accessKeyId, secretAccessKey, sessionToken, Instant.now().plusSeconds(3600));
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, "admin", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900, sessionToken);
+
+        assertTrue(validator.validate(token, "admin", exampleBinding()));
+        assertFalse(validator.validate(token.replace("%2B", "%20"), "admin", exampleBinding()),
+                "a token whose session token reads a space where the issued one has a + is another token");
     }
 
     @Test

@@ -1,0 +1,234 @@
+# Query actions that a handler dispatches but routing does not send to that handler.
+#
+# Columns: service, action, service it reaches instead.
+#
+# Routing only matters when a request arrives without a usable credential scope, since
+# otherwise the service comes from the SigV4 scope. On that path the action name is all
+# there is, and AwsQueryServiceResolver backs IamEnforcementFilter too, so an entry here
+# is also authorized under the wrong namespace.
+#
+# Two kinds of entry, told apart by the third column:
+#
+#   -> sqs     The name is in no routing set, so it falls through to the sqs default.
+#              Fixable by adding the name to its service's set, as #5032 did for IAM,
+#              once checked that no service earlier in the chain claims it.
+#
+#   -> other   A service earlier in inferServiceFromAction's chain already owns the
+#              name, so adding it to the right set changes nothing. These need the
+#              Version form field to disambiguate, the way isElbClassicRequest already
+#              reads it, which is a cross-service routing change of its own.
+#
+# 189 entries: 171 unrouted, 18 claimed by another service.
+#
+# Shrink this file, never grow it. Removing a line is the point; adding one needs a
+# reason in the PR that adds it. AwsQueryActionRoutingParityTest fails on an entry that
+# is no longer a gap, so a fix cannot leave the list stale.
+
+# autoscaling: 17 (13 unrouted, 4 claimed elsewhere)
+autoscaling	AttachTrafficSources	sqs
+autoscaling	DeletePolicy	iam
+autoscaling	DeleteScheduledAction	sqs
+autoscaling	DeleteTags	ec2
+autoscaling	DeleteWarmPool	sqs
+autoscaling	DescribeAccountLimits	elasticloadbalancing
+autoscaling	DescribeLoadBalancers	elasticloadbalancing
+autoscaling	DescribeScheduledActions	sqs
+autoscaling	DescribeTrafficSources	sqs
+autoscaling	DescribeWarmPool	sqs
+autoscaling	DetachTrafficSources	sqs
+autoscaling	PutScheduledUpdateGroupAction	sqs
+autoscaling	PutWarmPool	sqs
+autoscaling	ResumeProcesses	sqs
+autoscaling	SetInstanceHealth	sqs
+autoscaling	SetInstanceProtection	sqs
+autoscaling	SuspendProcesses	sqs
+
+# cloudformation: 3 (3 unrouted, 0 claimed elsewhere)
+cloudformation	ActivateOrganizationsAccess	sqs
+cloudformation	DescribeOrganizationsAccess	sqs
+cloudformation	ListStackSetAutoDeploymentTargets	sqs
+
+# ec2: 83 (83 unrouted, 0 claimed elsewhere)
+ec2	AcceptVpcPeeringConnection	sqs
+ec2	AllocateHosts	sqs
+ec2	AllocateIpamPoolCidr	sqs
+ec2	AssociateIamInstanceProfile	sqs
+ec2	AssociateIpamByoasn	sqs
+ec2	AssociateTransitGatewayRouteTable	sqs
+ec2	AttachNetworkInterface	sqs
+ec2	CancelSpotInstanceRequests	sqs
+ec2	CreateIpam	sqs
+ec2	CreateIpamPool	sqs
+ec2	CreateManagedPrefixList	sqs
+ec2	CreateNetworkInterface	sqs
+ec2	CreateTransitGateway	sqs
+ec2	CreateTransitGatewayRoute	sqs
+ec2	CreateTransitGatewayRouteTable	sqs
+ec2	CreateTransitGatewayVpcAttachment	sqs
+ec2	CreateVpcPeeringConnection	sqs
+ec2	DeleteIpam	sqs
+ec2	DeleteIpamPool	sqs
+ec2	DeleteManagedPrefixList	sqs
+ec2	DeleteNetworkInterface	sqs
+ec2	DeleteTransitGateway	sqs
+ec2	DeleteTransitGatewayRoute	sqs
+ec2	DeleteTransitGatewayRouteTable	sqs
+ec2	DeleteTransitGatewayVpcAttachment	sqs
+ec2	DeleteVpcPeeringConnection	sqs
+ec2	DescribeEgressOnlyInternetGateways	sqs
+ec2	DescribeHosts	sqs
+ec2	DescribeInstanceCreditSpecifications	sqs
+ec2	DescribeIpamByoasn	sqs
+ec2	DescribeIpamPools	sqs
+ec2	DescribeIpamScopes	sqs
+ec2	DescribeIpams	sqs
+ec2	DescribeManagedPrefixLists	sqs
+ec2	DescribeSpotInstanceRequests	sqs
+ec2	DescribeTransitGatewayAttachments	sqs
+ec2	DescribeTransitGatewayConnects	sqs
+ec2	DescribeTransitGatewayRouteTables	sqs
+ec2	DescribeTransitGatewayVpcAttachments	sqs
+ec2	DescribeTransitGateways	sqs
+ec2	DescribeVolumesModifications	sqs
+ec2	DescribeVpcPeeringConnections	sqs
+ec2	DescribeVpnGateways	sqs
+ec2	DetachNetworkInterface	sqs
+ec2	DisableEbsEncryptionByDefault	sqs
+ec2	DisableIpamOrganizationAdminAccount	sqs
+ec2	DisableTransitGatewayRouteTablePropagation	sqs
+ec2	DisassociateIamInstanceProfile	sqs
+ec2	DisassociateIpamByoasn	sqs
+ec2	DisassociateTransitGatewayRouteTable	sqs
+ec2	EnableEbsEncryptionByDefault	sqs
+ec2	EnableIpamOrganizationAdminAccount	sqs
+ec2	EnableTransitGatewayRouteTablePropagation	sqs
+ec2	ExportTransitGatewayRoutes	sqs
+ec2	GetEbsDefaultKmsKeyId	sqs
+ec2	GetEbsEncryptionByDefault	sqs
+ec2	GetIpamPoolAllocations	sqs
+ec2	GetIpamPoolCidrs	sqs
+ec2	GetManagedPrefixListEntries	sqs
+ec2	GetSecurityGroupsForVpc	sqs
+ec2	GetTransitGatewayRouteTableAssociations	sqs
+ec2	GetTransitGatewayRouteTablePropagations	sqs
+ec2	ModifyEbsDefaultKmsKeyId	sqs
+ec2	ModifyHosts	sqs
+ec2	ModifyInstanceMetadataOptions	sqs
+ec2	ModifyIpam	sqs
+ec2	ModifyIpamPool	sqs
+ec2	ModifyManagedPrefixList	sqs
+ec2	ModifyTransitGateway	sqs
+ec2	ModifyTransitGatewayVpcAttachment	sqs
+ec2	ModifyVolume	sqs
+ec2	ModifyVpcEndpoint	sqs
+ec2	ModifyVpcPeeringConnectionOptions	sqs
+ec2	MonitorInstances	sqs
+ec2	ProvisionIpamPoolCidr	sqs
+ec2	ReleaseHosts	sqs
+ec2	ReleaseIpamPoolAllocation	sqs
+ec2	ReplaceIamInstanceProfileAssociation	sqs
+ec2	ReplaceTransitGatewayRoute	sqs
+ec2	RequestSpotInstances	sqs
+ec2	ResetEbsDefaultKmsKeyId	sqs
+ec2	SearchTransitGatewayRoutes	sqs
+ec2	UnmonitorInstances	sqs
+
+# elasticache: 15 (12 unrouted, 3 claimed elsewhere)
+elasticache	CreateCacheCluster	sqs
+elasticache	CreateCacheParameterGroup	sqs
+elasticache	CreateCacheSubnetGroup	sqs
+elasticache	CreateUser	iam
+elasticache	DeleteCacheCluster	sqs
+elasticache	DeleteCacheParameterGroup	sqs
+elasticache	DeleteCacheSubnetGroup	sqs
+elasticache	DeleteUser	iam
+elasticache	DescribeCacheClusters	sqs
+elasticache	DescribeCacheParameterGroups	sqs
+elasticache	DescribeCacheParameters	sqs
+elasticache	DescribeCacheSubnetGroups	sqs
+elasticache	ListTagsForResource	sns
+elasticache	ModifyCacheParameterGroup	sqs
+elasticache	ModifyCacheSubnetGroup	sqs
+
+# elasticloadbalancing: 4 (3 unrouted, 1 claimed elsewhere)
+elasticloadbalancing	DescribeCapacityReservation	sqs
+elasticloadbalancing	DescribeListenerAttributes	sqs
+elasticloadbalancing	DescribeTags	ec2
+elasticloadbalancing	ModifyListenerAttributes	sqs
+
+# email: 2 (1 unrouted, 1 claimed elsewhere)
+email	GetTemplate	cloudformation
+email	UpdateAccountSendingEnabled	sqs
+
+# monitoring: 3 (0 unrouted, 3 claimed elsewhere)
+monitoring	ListTagsForResource	sns
+monitoring	TagResource	sns
+monitoring	UntagResource	sns
+
+# rds: 48 (47 unrouted, 1 claimed elsewhere)
+rds	AddSourceIdentifierToSubscription	sqs
+rds	CopyDBClusterParameterGroup	sqs
+rds	CopyDBClusterSnapshot	sqs
+rds	CopyDBParameterGroup	sqs
+rds	CopyDBSnapshot	sqs
+rds	CopyOptionGroup	sqs
+rds	CreateDBClusterEndpoint	sqs
+rds	CreateDBClusterSnapshot	sqs
+rds	CreateDBInstanceReadReplica	sqs
+rds	CreateDBSnapshot	sqs
+rds	CreateEventSubscription	sqs
+rds	CreateGlobalCluster	sqs
+rds	DeleteDBClusterEndpoint	sqs
+rds	DeleteDBClusterSnapshot	sqs
+rds	DeleteDBSnapshot	sqs
+rds	DeleteEventSubscription	sqs
+rds	DeleteGlobalCluster	sqs
+rds	DescribeDBClusterEndpoints	sqs
+rds	DescribeDBClusterSnapshotAttributes	sqs
+rds	DescribeDBSnapshotAttributes	sqs
+rds	DescribeEventSubscriptions	sqs
+rds	DescribeEvents	sqs
+rds	FailoverDBCluster	sqs
+rds	FailoverGlobalCluster	sqs
+rds	ListTagsForResource	sns
+rds	ModifyDBClusterEndpoint	sqs
+rds	ModifyDBClusterSnapshotAttribute	sqs
+rds	ModifyDBSnapshot	sqs
+rds	ModifyDBSnapshotAttribute	sqs
+rds	ModifyEventSubscription	sqs
+rds	ModifyGlobalCluster	sqs
+rds	PromoteReadReplica	sqs
+rds	PromoteReadReplicaDBCluster	sqs
+rds	RebootDBCluster	sqs
+rds	RemoveFromGlobalCluster	sqs
+rds	RemoveSourceIdentifierFromSubscription	sqs
+rds	ResetDBClusterParameterGroup	sqs
+rds	ResetDBParameterGroup	sqs
+rds	RestoreDBClusterFromSnapshot	sqs
+rds	RestoreDBClusterToPointInTime	sqs
+rds	RestoreDBInstanceFromDBSnapshot	sqs
+rds	RestoreDBInstanceToPointInTime	sqs
+rds	StartDBCluster	sqs
+rds	StartDBInstance	sqs
+rds	StopDBCluster	sqs
+rds	StopDBInstance	sqs
+rds	SwitchoverGlobalCluster	sqs
+rds	SwitchoverReadReplica	sqs
+
+# redshift: 12 (9 unrouted, 3 claimed elsewhere)
+redshift	CreateIntegration	sqs
+redshift	CreateTags	ec2
+redshift	DeleteIntegration	sqs
+redshift	DeleteTags	ec2
+redshift	DescribeClusterVersions	sqs
+redshift	DescribeIntegrations	sqs
+redshift	DescribeLoggingStatus	sqs
+redshift	DescribeOrderableClusterOptions	sqs
+redshift	DescribeTags	ec2
+redshift	DisableLogging	sqs
+redshift	EnableLogging	sqs
+redshift	ModifyClusterIamRoles	sqs
+
+# sqs: 2 (0 unrouted, 2 claimed elsewhere)
+sqs	AddPermission	sns
+sqs	RemovePermission	sns

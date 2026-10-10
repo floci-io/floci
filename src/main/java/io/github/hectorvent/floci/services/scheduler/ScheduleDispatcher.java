@@ -19,14 +19,12 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -208,9 +206,9 @@ public class ScheduleDispatcher implements Resettable {
 
         // Record the fire before delivering so a failing occurrence never holds back the next one.
         recordFire(schedule, now);
-        String requestBody = invoker.materializeRequest(schedule, nextFire);
+        String executionId = ScheduleInvoker.newExecutionId();
         attempt(schedule, new Occurrence(schedule.getArn(), nextFire),
-                Delivery.first(kind, schedule, requestBody), now);
+                Delivery.first(kind, schedule, executionId), now);
     }
 
     private Instant computeNextFire(Schedule schedule, Kind kind, Instant now) {
@@ -242,8 +240,11 @@ public class ScheduleDispatcher implements Resettable {
     }
 
     private void attempt(Schedule schedule, Occurrence occurrence, Delivery delivery, Instant now) {
+        String requestBody = invoker.materializeRequest(schedule, occurrence.scheduledAt(),
+                delivery.executionId(), delivery.attemptNumber());
+        delivery = delivery.withRequestBody(requestBody);
         try {
-            invoker.invoke(schedule, occurrence.scheduledAt());
+            invoker.invoke(schedule, occurrence.scheduledAt(), delivery.executionId(), delivery.attemptNumber());
         } catch (Exception e) {
             LOG.warnv("Schedule {0} invocation failed: {1}", schedule.getArn(), e.getMessage());
             Delivery failed = delivery.failedWith(e, now);
@@ -304,7 +305,7 @@ public class ScheduleDispatcher implements Resettable {
         attributes.put("IS_PAYLOAD_TRUNCATED", stringAttribute("false"));
         attributes.put("RETRY_ATTEMPTS", stringAttribute(String.valueOf(delivery.retryAttempts())));
         attributes.put("SCHEDULED_TIME", stringAttribute(
-                occurrence.scheduledAt().truncatedTo(ChronoUnit.SECONDS).toString()));
+                ScheduleInvoker.formatScheduledTime(occurrence.scheduledAt())));
         attributes.put("SCHEDULE_ARN", stringAttribute(schedule.getArn()));
         attributes.put("TARGET_ARN", stringAttribute(target.getArn()));
 
@@ -377,15 +378,25 @@ public class ScheduleDispatcher implements Resettable {
                             int retryAttempts, String errorCode, String errorMessage,
                             String requestBody, Instant nextAttemptAt) {
 
-        static Delivery first(Kind kind, Schedule schedule, String requestBody) {
-            String executionId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        static Delivery first(Kind kind, Schedule schedule, String executionId) {
             return new Delivery(kind, schedule.getLastModificationDate(), executionId, 0, null, null,
-                    requestBody, null);
+                    null, null);
         }
 
+        Delivery withRequestBody(String body) {
+            return new Delivery(kind, lastModificationDate, executionId, retryAttempts, errorCode, errorMessage,
+                    body, nextAttemptAt);
+        }
+
+        /** The 1-based number of the attempt this delivery makes: the first attempt plus its retries. */
+        int attemptNumber() {
+            return retryAttempts + 1;
+        }
+
+        /** Each attempted invocation gets its own execution id, as AWS documents for the context attribute. */
         Delivery nextRetry() {
-            return new Delivery(kind, lastModificationDate, executionId, retryAttempts + 1, errorCode, errorMessage,
-                    requestBody, null);
+            return new Delivery(kind, lastModificationDate, ScheduleInvoker.newExecutionId(), retryAttempts + 1,
+                    errorCode, errorMessage, requestBody, null);
         }
 
         Delivery failedWith(Exception e, Instant now) {

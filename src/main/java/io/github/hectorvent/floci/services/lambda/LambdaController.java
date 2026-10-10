@@ -267,8 +267,10 @@ public class LambdaController {
 
         String clientContext = type == InvocationType.RequestResponse
                 ? decodeClientContext(headers.getHeaderString("X-Amz-Client-Context")) : null;
+        String durableExecutionName = headers.getHeaderString("X-Amz-Durable-Execution-Name");
 
-        InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext);
+        InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext,
+                durableExecutionName);
 
         if (type != InvocationType.Event
                 && result.getPayload() != null
@@ -289,6 +291,9 @@ public class LambdaController {
         }
         builder.header("X-Amz-Executed-Version", result.getExecutedVersion());
         builder.header("X-Amz-Request-Id", result.getRequestId());
+        if (result.getDurableExecutionArn() != null) {
+            builder.header("X-Amz-Durable-Execution-Arn", result.getDurableExecutionArn());
+        }
 
         if (result.getPayload() != null && result.getPayload().length > 0) {
             builder.entity(result.getPayload())

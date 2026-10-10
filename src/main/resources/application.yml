@@ -50,10 +50,11 @@ quarkus:
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      # The IAM managed-policy catalog (iam/*) is not listed on purpose.
-      # AwsManagedPolicies parses it while the image is built and the parsed
-      # catalog lives in the image heap, so the 3.5 MB of source files would
-      # only be a second copy of the same data.
+      # The IAM managed-policy catalog is not listed on purpose. AwsManagedPolicies
+      # parses it while the image is built and the parsed catalog lives in the image
+      # heap, so the 3.5 MB of source files would only be a second copy of the same
+      # data. The service-linked role table is listed, because at 13 KB that saving
+      # is not worth depending on the static initialiser running at build time.
       includes:
         - pricing-snapshots/**
         - ui/*.html
@@ -64,7 +65,9 @@ quarkus:
         - kms/*.yaml
         - eks/*.json
         - aws/*.json
+        - iam/service-linked-roles.tsv
         - cloudformation/*.json
+        - redshift/*.sql
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
@@ -112,6 +115,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.dms.DmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
@@ -145,7 +149,7 @@ floci:
     # id: aws  # Partition served (aws, aws-cn, aws-us-gov, aws-iso, aws-iso-b, aws-iso-e, aws-iso-f, aws-eusc).
                # Derived from default-region when unset. Env: FLOCI_PARTITIONS_ID
     strict: false  # true rejects requests signed for a service AWS does not publish in the request's
-                   # partition (CloudFront in aws-us-gov, IAM in aws-eusc). Env: FLOCI_PARTITIONS_STRICT
+                   # partition (CloudFront in aws-us-gov, Lightsail in aws-cn). Env: FLOCI_PARTITIONS_STRICT
     allow-unknown-regions: false  # true accepts a SigV4 scope region no partition publishes or admits by its
                                   # region pattern, giving it its own namespace. Env: FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS
   # Shared mock-response config for Textract/Comprehend/Rekognition/Translate. See AiMockConfigLoader.
@@ -318,6 +322,10 @@ floci:
     # they never starve create/start/stop/remove. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
     streaming-max-connections: 512
+    # FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS: how long a Docker call waits for a free pooled
+    # connection before failing, for both pools. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
+    connection-request-timeout-seconds: 30
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -384,6 +392,8 @@ floci:
       # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
       # code-volume-populate-concurrency:     # FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY — max concurrent first-time code-volume populates (default max(2, cpus/2), which a CPU-constrained container collapses to 2)
       executor: docker                        # docker | kubernetes (run Lambda environments as pods)
+      durable-sweep-enabled: true             # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_ENABLED - fire durable execution timers (waits, step retries, execution timeouts, retention)
+      durable-sweep-interval-seconds: 1       # FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_INTERVAL_SECONDS
       # kubernetes:
       #   namespace: default                  # Namespace Lambda pods are created in
       #   labels:                             # Extra pod labels, key=value entries
@@ -801,6 +811,8 @@ floci:
       enabled: true
     cloudcontrol:
       enabled: true
+      create-worker-threads: 4             # Threads that run CreateResource provisioning
+      create-queue-capacity: 64            # Creates that may wait for a thread before ThrottlingException
     resourceexplorer2:
       enabled: true
     cloudfront:

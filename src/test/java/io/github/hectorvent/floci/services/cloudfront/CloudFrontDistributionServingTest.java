@@ -274,6 +274,7 @@ class CloudFrontDistributionServingTest {
                 .header("x-amz-meta-source", equalTo("origin"))
                 .header("x-amz-server-side-encryption", nullValue())
                 .header("x-amz-checksum-sha256", nullValue())
+                .header("Content-Length", equalTo(Integer.toString(body.getBytes(StandardCharsets.UTF_8).length)))
                 .body(equalTo(body));
 
         given().header("Host", dist.getDomainName()).when().head("/asset.txt")

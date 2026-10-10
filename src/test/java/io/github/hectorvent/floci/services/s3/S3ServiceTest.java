@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
@@ -15,7 +16,6 @@ import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
 import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
-import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.s3.model.WebsiteConfiguration;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,15 +25,20 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -833,6 +838,98 @@ class S3ServiceTest {
         assertNull(lambdaInvoker.payload);
     }
 
+    @Test
+    void eventRecordKeyIsFormUrlEncodedLikeS3() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(lambdaInvoker, "notif-s3-encoded-key");
+
+        service.putObject("test-bucket", "my folder/a+b=c (1).txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+
+        JsonNode record = onlyRecordedS3Event(lambdaInvoker);
+        assertEquals("my+folder/a%2Bb%3Dc+%281%29.txt", record.path("s3").path("object").path("key").asText());
+        assertEquals("my folder/a+b=c (1).txt", URLDecoder.decode(
+                record.path("s3").path("object").path("key").asText(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void successiveEventsForOneKeyCarryIncreasingSequencers() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(lambdaInvoker, "notif-s3-sequencer");
+
+        service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        String first = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+        service.putObject("test-bucket", "k.txt", "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        String second = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+
+        assertTrue(first.matches("[0-9A-F]{18}"), first);
+        assertTrue(second.matches("[0-9A-F]{18}"), second);
+        assertTrue(second.compareTo(first) > 0, first + " then " + second);
+    }
+
+    @Test
+    void createdEventCarriesTheSequencerAssignedWhenTheObjectWasStored() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(lambdaInvoker, "notif-s3-sequencer-stored");
+
+        S3Object stored = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+
+        assertNotNull(stored.getEventSequencer());
+        assertEquals(stored.getEventSequencer(),
+                onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText());
+    }
+
+    @Test
+    void removalOfAStoredVersionGetsANewerSequencerThanItsCreation() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-sequencer-removal");
+
+        S3Object stored = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+        service.deleteObject("test-bucket", "k.txt", stored.getVersionId());
+        String removed = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+
+        assertTrue(removed.compareTo(stored.getEventSequencer()) > 0,
+                stored.getEventSequencer() + " then " + removed);
+    }
+
+    @Test
+    void annotationEventsCarrySequencersAfterTheObjectTheyAnnotate() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOn(lambdaInvoker, "notif-s3-sequencer-annotation",
+                "s3:ObjectAnnotation:*");
+
+        S3Object stored = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+        service.putObjectAnnotation("test-bucket", "k.txt", "note", null,
+                "{}".getBytes(StandardCharsets.UTF_8), null, null);
+        String put = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+        service.deleteObjectAnnotation("test-bucket", "k.txt", "note", null, null, false);
+        String deleted = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+
+        assertTrue(put.compareTo(stored.getEventSequencer()) > 0, stored.getEventSequencer() + " then " + put);
+        assertTrue(deleted.compareTo(put) > 0, put + " then " + deleted);
+    }
+
+    private S3Service bucketNotifyingOnCreation(RecordingLambdaInvoker lambdaInvoker, String dataDir) {
+        return bucketNotifyingOn(lambdaInvoker, dataDir, "s3:ObjectCreated:*");
+    }
+
+    private S3Service bucketNotifyingOn(RecordingLambdaInvoker lambdaInvoker, String dataDir, String event) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve(dataDir),
+                false, lambdaInvoker, new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "us-east-1");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "lambda-notif",
+                "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of(event),
+                List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+        return service;
+    }
+
     private S3Service versionedBucketNotifyingOnRemoval(RecordingLambdaInvoker lambdaInvoker, String dataDir) {
         S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve(dataDir),
                 false, lambdaInvoker, new RegionResolver("us-east-1", "000000000000"));
@@ -1540,5 +1637,73 @@ class S3ServiceTest {
     @Test
     void authorizeSignedDeleteObjectIsANoOpWhenEnforceAuthIsOff() {
         assertDoesNotThrow(() -> s3Service.authorizeSignedDeleteObject("ASIAFAKEKEY00000001", "sessiontoken", "signed-del-bucket", "some/key"));
+    }
+
+    @Test
+    void deleteObjectsWithPrefixRemovesOnlyTheMatchingKeys() {
+        s3Service.createBucket("prefix-del", "us-east-1");
+        s3Service.putObject("prefix-del", "out/a", new byte[]{1}, "text/plain", Map.of());
+        s3Service.putObject("prefix-del", "out/b", new byte[]{2}, "text/plain", Map.of());
+        s3Service.putObject("prefix-del", "keep/c", new byte[]{3}, "text/plain", Map.of());
+
+        int deleted = s3Service.deleteObjectsWithPrefix("prefix-del", "out/", key -> { });
+
+        assertEquals(2, deleted);
+        assertFalse(s3Service.objectExists("prefix-del", "out/a"));
+        assertFalse(s3Service.objectExists("prefix-del", "out/b"));
+        assertTrue(s3Service.objectExists("prefix-del", "keep/c"));
+    }
+
+    @Test
+    void deleteObjectsWithPrefixRemovesNothingWhenAnyKeyIsDenied() {
+        s3Service.createBucket("prefix-deny", "us-east-1");
+        s3Service.putObject("prefix-deny", "out/a", new byte[]{1}, "text/plain", Map.of());
+        s3Service.putObject("prefix-deny", "out/b", new byte[]{2}, "text/plain", Map.of());
+
+        assertThrows(AwsException.class, () -> s3Service.deleteObjectsWithPrefix("prefix-deny", "out/", key -> {
+            if (key.equals("out/b")) {
+                throw new AwsException("AccessDenied", "denied", 403);
+            }
+        }));
+
+        assertTrue(s3Service.objectExists("prefix-deny", "out/a"));
+        assertTrue(s3Service.objectExists("prefix-deny", "out/b"));
+    }
+
+    @Test
+    void deleteObjectsWithPrefixHoldsOffAConcurrentPutUntilItIsDone() throws Exception {
+        s3Service.createBucket("prefix-lock", "us-east-1");
+        s3Service.putObject("prefix-lock", "out/old", new byte[]{1}, "text/plain", Map.of());
+        CountDownLatch authorizing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+
+        CompletableFuture<Integer> delete = CompletableFuture.supplyAsync(() ->
+                s3Service.deleteObjectsWithPrefix("prefix-lock", "out/", key -> {
+                    authorizing.countDown();
+                    try {
+                        assertTrue(release.await(10, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    }
+                }));
+        assertTrue(authorizing.await(10, TimeUnit.SECONDS));
+
+        FutureTask<S3Object> put = new FutureTask<>(() ->
+                s3Service.putObject("prefix-lock", "out/late", new byte[]{2}, "text/plain", Map.of()));
+        Thread putThread = new Thread(put);
+        putThread.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (putThread.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertEquals(Thread.State.BLOCKED, putThread.getState());
+        assertFalse(put.isDone());
+
+        release.countDown();
+        assertEquals(1, delete.get(10, TimeUnit.SECONDS));
+        put.get(10, TimeUnit.SECONDS);
+        assertFalse(s3Service.objectExists("prefix-lock", "out/old"));
+        assertTrue(s3Service.objectExists("prefix-lock", "out/late"));
     }
 }

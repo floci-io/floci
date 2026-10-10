@@ -17,12 +17,15 @@ import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.net.UnknownHostException;
 import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.Security;
@@ -30,12 +33,18 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CloudFrontOriginHttpClientTest {
 
@@ -47,8 +56,7 @@ class CloudFrontOriginHttpClientTest {
                 resolver(InetAddress.getByName("127.0.0.1")), List.of())) {
             HttpRequest request = request("http://blocked.invalid:" + server.getAddress().getPort() + "/");
 
-            assertThrows(UnknownHostException.class,
-                    () -> client.send(request, HttpResponse.BodyHandlers.ofByteArray()));
+            assertThrows(UnknownHostException.class, () -> get(client, request));
             assertEquals(0, hits.get());
         } finally {
             server.stop(0);
@@ -61,9 +69,7 @@ class CloudFrontOriginHttpClientTest {
                 InetAddress.getByName("8.8.8.8"),
                 InetAddress.getByName("127.0.0.1"));
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(resolver, List.of())) {
-            assertThrows(UnknownHostException.class, () -> client.send(
-                    request("http://mixed.invalid:8080/"),
-                    HttpResponse.BodyHandlers.ofByteArray()));
+            assertThrows(UnknownHostException.class, () -> get(client, request("http://mixed.invalid:8080/")));
         }
     }
 
@@ -100,12 +106,11 @@ class CloudFrontOriginHttpClientTest {
 
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
                 resolver, List.of("rebind.invalid"))) {
-            HttpResponse<byte[]> response = client.send(
-                    request("http://rebind.invalid:" + server.getAddress().getPort() + "/"),
-                    HttpResponse.BodyHandlers.ofByteArray());
+            CloudFrontOriginHttpClient.OpenResponse response = get(client,
+                    request("http://rebind.invalid:" + server.getAddress().getPort() + "/"));
 
             assertEquals(200, response.statusCode());
-            assertArrayEquals("origin-ok".getBytes(StandardCharsets.UTF_8), response.body());
+            assertArrayEquals("origin-ok".getBytes(StandardCharsets.UTF_8), readAll(response));
             assertEquals(1, resolutions.get());
             assertEquals(1, hits.get());
             assertEquals("rebind.invalid:" + server.getAddress().getPort(), hostHeader.get());
@@ -132,9 +137,9 @@ class CloudFrontOriginHttpClientTest {
 
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("redirect.invalid"))) {
-            HttpResponse<byte[]> response = client.send(
-                    request("http://redirect.invalid:" + server.getAddress().getPort() + "/start"),
-                    HttpResponse.BodyHandlers.ofByteArray());
+            CloudFrontOriginHttpClient.OpenResponse response = get(client,
+                    request("http://redirect.invalid:" + server.getAddress().getPort() + "/start"));
+            readAll(response);
 
             assertEquals(302, response.statusCode());
             assertEquals(0, redirectedHits.get());
@@ -163,10 +168,7 @@ class CloudFrontOriginHttpClientTest {
                     .GET()
                     .build();
 
-            client.send(
-                    request,
-                    Map.of("X-Origin-Verify", "configured-value"),
-                    HttpResponse.BodyHandlers.ofByteArray());
+            readAll(client.open(request, List.of(), Map.of("X-Origin-Verify", "configured-value"), null, -1));
 
             assertEquals(List.of("configured-value"), receivedValues.get());
         } finally {
@@ -201,8 +203,9 @@ class CloudFrontOriginHttpClientTest {
                     .method("PUT", HttpRequest.BodyPublishers.noBody())
                     .build();
 
-            HttpResponse<byte[]> response = client.send(
-                    request, List.of(), Map.of(), payload, HttpResponse.BodyHandlers.ofByteArray());
+            CloudFrontOriginHttpClient.OpenResponse response = client.open(
+                    request, List.of(), Map.of(), new ByteArrayInputStream(payload), payload.length);
+            readAll(response);
 
             assertEquals(204, response.statusCode());
             assertEquals("PUT", method.get());
@@ -250,18 +253,122 @@ class CloudFrontOriginHttpClientTest {
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
                 resolver, List.of("origin.invalid", "wrong.invalid"), clientContext)) {
             int port = server.getAddress().getPort();
-            HttpResponse<byte[]> response = client.send(
-                    request("https://origin.invalid:" + port + "/"),
-                    HttpResponse.BodyHandlers.ofByteArray());
+            CloudFrontOriginHttpClient.OpenResponse response = get(client,
+                    request("https://origin.invalid:" + port + "/"));
+            readAll(response);
 
             assertEquals(200, response.statusCode());
             assertEquals("origin.invalid:" + port, hostHeader.get());
             assertEquals("origin.invalid", requestedSni.get());
-            assertThrows(IOException.class, () -> client.send(
-                    request("https://wrong.invalid:" + port + "/"),
-                    HttpResponse.BodyHandlers.ofByteArray()));
+            assertThrows(IOException.class, () -> get(client, request("https://wrong.invalid:" + port + "/")));
         } finally {
             server.stop(0);
+        }
+    }
+
+    @Test
+    void streamsARequestBodyChunkedWhenItsLengthIsUnknown() throws Exception {
+        AtomicReference<String> transferEncoding = new AtomicReference<>();
+        AtomicReference<byte[]> body = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            transferEncoding.set(exchange.getRequestHeaders().getFirst("Transfer-Encoding"));
+            body.set(exchange.getRequestBody().readAllBytes());
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.start();
+
+        byte[] payload = new byte[100_000];
+        new Random(1).nextBytes(payload);
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
+                            "http://origin.invalid:" + server.getAddress().getPort() + "/items"))
+                    .timeout(Duration.ofSeconds(5))
+                    .method("POST", HttpRequest.BodyPublishers.noBody())
+                    .build();
+
+            readAll(client.open(request, List.of(), Map.of(), new ByteArrayInputStream(payload), -1));
+
+            assertEquals("chunked", transferEncoding.get());
+            assertArrayEquals(payload, body.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void closingAResponseBeforeItsEndDoesNotReadTheRestOfIt() throws Exception {
+        long size = 512L * 1024 * 1024;
+        AtomicLong sent = new AtomicLong();
+        CountDownLatch done = new CountDownLatch(1);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            byte[] chunk = new byte[64 * 1024];
+            exchange.sendResponseHeaders(200, size);
+            try (OutputStream out = exchange.getResponseBody()) {
+                for (long written = 0; written < size; written += chunk.length) {
+                    out.write(chunk);
+                    sent.addAndGet(chunk.length);
+                }
+            } catch (IOException expected) {
+                // The client went away mid-body, which is what the test does.
+            } finally {
+                done.countDown();
+            }
+        });
+        server.start();
+
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            CloudFrontOriginHttpClient.OpenResponse response = get(client,
+                    request("http://origin.invalid:" + server.getAddress().getPort() + "/big"));
+            assertEquals(size, response.contentLength());
+            response.body().readNBytes(1024);
+            response.body().close();
+
+            assertTrue(done.await(30, TimeUnit.SECONDS), "the origin is still sending");
+            assertTrue(sent.get() < size / 2, "closing read " + (sent.get() >> 20) + " MiB of " + (size >> 20));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void aResponseReadToItsEndLeavesItsConnectionForTheNextRequest() throws Exception {
+        List<InetSocketAddress> peers = new CopyOnWriteArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            peers.add(exchange.getRemoteAddress());
+            byte[] body = "origin-ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            String uri = "http://origin.invalid:" + server.getAddress().getPort() + "/";
+            readAll(get(client, request(uri)));
+            readAll(get(client, request(uri)));
+
+            assertEquals(2, peers.size());
+            assertEquals(peers.get(0), peers.get(1), "the second request opened a new connection");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static CloudFrontOriginHttpClient.OpenResponse get(CloudFrontOriginHttpClient client,
+                                                               HttpRequest request) throws Exception {
+        return client.open(request, List.of(), Map.of(), null, -1);
+    }
+
+    private static byte[] readAll(CloudFrontOriginHttpClient.OpenResponse response) throws IOException {
+        try (InputStream body = response.body()) {
+            return body.readAllBytes();
         }
     }
 

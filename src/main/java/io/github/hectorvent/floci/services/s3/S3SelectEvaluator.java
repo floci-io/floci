@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.s3;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -7,15 +10,24 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import org.jboss.logging.Logger;
 
+import java.io.BufferedReader;
+import java.io.FilterReader;
+import java.io.IOException;
+import java.io.Reader;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
 class S3SelectEvaluator {
 
     private static final Logger LOG = Logger.getLogger(S3SelectEvaluator.class);
+
+    // S3 Select's limit on the length of a record in the input or the result, its maxCharsPerRecord of 1 MB.
+    static final int MAX_RECORD_CHARS = 1024 * 1024;
+    // A JSON parser reads ahead of the element it is on; past the record limit by this much, the
+    // element is too long whatever the read-ahead holds.
+    private static final int PARSER_READ_AHEAD = 64 * 1024;
 
     private static final Pattern SELECT_PATTERN = Pattern.compile(
             "SELECT\\s+(.+?)\\s+FROM\\s+S3OBJECT(?:\\s+(\\w+))?\\s*(?:WHERE\\s+(.+?))?\\s*(?:LIMIT\\s+(\\d+))?\\s*$",
@@ -206,6 +218,11 @@ class S3SelectEvaluator {
         private void advance() { if (pos < tokens.size()) pos++; }
     }
 
+    static AwsException overMaxRecordSize() {
+        return new AwsException("OverMaxRecordSize",
+                "The length of a record in the input or result is greater than the maxCharsPerRecord limit of 1 MB.", 400);
+    }
+
     private static AwsException unsupportedWhereExpression(String expression) {
         return new AwsException(
                 "ExternalEvalException",
@@ -218,63 +235,98 @@ class S3SelectEvaluator {
         return new Parser(tokenize(where)).parse();
     }
 
-    // ── CSV evaluation ─────────────────────────────────────────────────────
+    // ── Query ──────────────────────────────────────────────────────────────
 
-    static String evaluateCsv(String content, String expression, String fileHeaderInfo, String outputFormat) {
+    /** A parsed {@code SELECT ... FROM S3Object} statement, checked before any of the object is read. */
+    static final class Query {
+        private final String[] columns;
+        private final WhereNode where;
+        private final Integer limit;
+
+        private Query(String[] columns, WhereNode where, Integer limit) {
+            this.columns = columns;
+            this.where = where;
+            this.limit = limit;
+        }
+
+        private boolean limitReached(int selected) {
+            return limit != null && selected >= limit;
+        }
+    }
+
+    /** Where an evaluation hands each selected record, without its line break. */
+    @FunctionalInterface
+    interface RecordSink {
+        void accept(String record) throws IOException;
+    }
+
+    /**
+     * Parses {@code expression}, or returns {@code null} for one this evaluator does not read, whose
+     * object is then returned as it is. A WHERE clause it cannot evaluate fails here.
+     */
+    static Query parse(String expression) {
         Matcher matcher = SELECT_PATTERN.matcher(expression.trim());
         if (!matcher.find()) {
             LOG.debugv("SQL pattern did not match: {0}", expression);
-            return content;
+            return null;
         }
         String projection = matcher.group(1).trim();
         String alias = matcher.group(2);
         String whereClause = matcher.group(3);
         String limitStr = matcher.group(4);
 
-        String[] lines = content.split("\\r?\\n");
-        if (lines.length == 0) return "";
-
-        List<String> headerList = new ArrayList<>();
-        int dataStart = 0;
-        if ("USE".equalsIgnoreCase(fileHeaderInfo)) {
-            headerList = CsvParser.parseLine(lines[0]);
-            dataStart = 1;
-        } else if ("IGNORE".equalsIgnoreCase(fileHeaderInfo)) {
-            dataStart = 1;
-        }
-
-        List<String[]> rows = new ArrayList<>();
-        for (int i = dataStart; i < lines.length; i++) {
-            if (lines[i].trim().isEmpty()) continue;
-            rows.add(CsvParser.parseLine(lines[i]).toArray(String[]::new));
-        }
-
+        WhereNode where = null;
         if (whereClause != null) {
-            rows = filterCsvRows(rows, headerList, alias, whereClause);
+            String processed = whereClause;
+            if (alias != null) {
+                processed = processed.replaceAll("(?i)" + Pattern.quote(alias) + "\\.", "");
+            }
+            try {
+                where = parseWhere(processed);
+            } catch (AwsException e) {
+                throw e;
+            } catch (Exception e) {
+                LOG.warnv("WHERE parse error: {0}", e.getMessage());
+                throw unsupportedWhereExpression(processed);
+            }
         }
-
-        if (limitStr != null) {
-            int limit = Integer.parseInt(limitStr);
-            if (rows.size() > limit) rows = rows.subList(0, limit);
-        }
-
-        return projectCsvRows(rows, headerList, projection, outputFormat);
+        String[] columns = "*".equals(projection) ? null
+                : Arrays.stream(projection.split(",")).map(String::trim).toArray(String[]::new);
+        return new Query(columns, where, limitStr != null ? Integer.parseInt(limitStr) : null);
     }
 
-    private static List<String[]> filterCsvRows(List<String[]> rows, List<String> headers,
-                                                  String alias, String where) {
-        String processed = where;
-        if (alias != null) {
-            processed = processed.replaceAll("(?i)" + Pattern.quote(alias) + "\\.", "");
+    // ── CSV evaluation ─────────────────────────────────────────────────────
+
+    /**
+     * Evaluates {@code query} over CSV read from {@code in} one line at a time, handing each selected
+     * record to {@code out}, and stops reading once the LIMIT is reached.
+     */
+    static void evaluateCsv(BufferedReader reader, Query query, String fileHeaderInfo, String outputFormat,
+                            RecordSink out) throws IOException {
+        LineReader in = new LineReader(reader);
+        List<String> headers = new ArrayList<>();
+        if ("USE".equalsIgnoreCase(fileHeaderInfo) || "IGNORE".equalsIgnoreCase(fileHeaderInfo)) {
+            String header = in.readLine();
+            if (header == null) {
+                return;
+            }
+            if ("USE".equalsIgnoreCase(fileHeaderInfo)) {
+                headers = CsvParser.parseLine(header);
+            }
         }
-        try {
-            WhereNode tree = parseWhere(processed);
-            return rows.stream().filter(row -> evalCsv(tree, row, headers)).toList();
-        } catch (AwsException e) {
-            throw e;
-        } catch (Exception e) {
-            LOG.warnv("WHERE parse error: {0}", e.getMessage());
-            throw unsupportedWhereExpression(processed);
+        boolean toJson = "JSON".equalsIgnoreCase(outputFormat);
+        int selected = 0;
+        String line;
+        while (!query.limitReached(selected) && (line = in.readLine()) != null) {
+            if (line.trim().isEmpty()) {
+                continue;
+            }
+            String[] row = CsvParser.parseLine(line).toArray(String[]::new);
+            if (query.where != null && !evalCsv(query.where, row, headers)) {
+                continue;
+            }
+            out.accept(projectCsvRow(row, headers, query.columns, toJson));
+            selected++;
         }
     }
 
@@ -306,30 +358,28 @@ class S3SelectEvaluator {
         };
     }
 
-    private static String projectCsvRows(List<String[]> rows, List<String> headers,
-                                          String projection, String outputFormat) {
-        boolean toJson = "JSON".equalsIgnoreCase(outputFormat);
-        if ("*".equals(projection)) {
-            return rows.stream()
-                    .map(row -> toJson ? rowToJson(row, headers) : String.join(",", row))
-                    .collect(Collectors.joining("\n")) + (rows.isEmpty() ? "" : "\n");
+    private static String projectCsvRow(String[] row, List<String> headers, String[] columns, boolean toJson) {
+        if (columns == null) {
+            return toJson ? rowToJson(row, headers) : String.join(",", row);
         }
-        String[] cols = Arrays.stream(projection.split(",")).map(String::trim).toArray(String[]::new);
-        return rows.stream().map(row -> {
-            List<String> vals = Arrays.stream(cols)
-                    .map(col -> { String v = getCellValue(row, headers, col); return v != null ? v : ""; })
-                    .toList();
-            if (toJson) {
-                StringBuilder json = new StringBuilder("{");
-                for (int i = 0; i < cols.length; i++) {
-                    if (i > 0) json.append(",");
-                    json.append('"').append(jsonEscape(cols[i])).append("\":\"")
-                            .append(jsonEscape(vals.get(i))).append('"');
+        List<String> vals = Arrays.stream(columns)
+                .map(col -> {
+                    String v = getCellValue(row, headers, col);
+                    return v != null ? v : "";
+                })
+                .toList();
+        if (toJson) {
+            StringBuilder json = new StringBuilder("{");
+            for (int i = 0; i < columns.length; i++) {
+                if (i > 0) {
+                    json.append(",");
                 }
-                return json.append("}").toString();
+                json.append('"').append(jsonEscape(columns[i])).append("\":\"")
+                        .append(jsonEscape(vals.get(i))).append('"');
             }
-            return String.join(",", vals);
-        }).collect(Collectors.joining("\n")) + (rows.isEmpty() ? "" : "\n");
+            return json.append("}").toString();
+        }
+        return String.join(",", vals);
     }
 
     // ── Duck rows formatting ───────────────────────────────────────────────
@@ -357,65 +407,81 @@ class S3SelectEvaluator {
 
     // ── JSON evaluation ────────────────────────────────────────────────────
 
-    static String evaluateJson(String content, String expression, ObjectMapper mapper, String outputFormat) {
-        Matcher matcher = SELECT_PATTERN.matcher(expression.trim());
-        if (!matcher.find()) {
-            LOG.debugv("SQL pattern did not match for JSON: {0}", expression);
-            return content;
-        }
-        String projection = matcher.group(1).trim();
-        String alias = matcher.group(2);
-        String whereClause = matcher.group(3);
-        String limitStr = matcher.group(4);
-
-        WhereNode tree = null;
-        if (whereClause != null) {
-            String processed = whereClause;
-            if (alias != null) {
-                processed = processed.replaceAll("(?i)" + Pattern.quote(alias) + "\\.", "");
-            }
+    /**
+     * Evaluates {@code query} over JSON read from {@code in}, a record at a time: the elements of a
+     * top-level array, or else one JSON value per line. Each selected record goes to {@code out}, and
+     * reading stops once the LIMIT is reached.
+     */
+    static void evaluateJson(BufferedReader in, Query query, ObjectMapper mapper, String outputFormat,
+                             RecordSink out) throws IOException {
+        boolean toCsv = "CSV".equalsIgnoreCase(outputFormat);
+        int selected = 0;
+        if (startsWithArray(in)) {
+            ElementLimitedReader limited = new ElementLimitedReader(in);
+            JsonParser parser = mapper.getFactory().createParser(limited);
             try {
-                tree = parseWhere(processed);
-            } catch (AwsException e) {
-                throw e;
-            } catch (Exception e) {
-                LOG.warnv("JSON WHERE parse error: {0}", e.getMessage());
-                throw unsupportedWhereExpression(processed);
+                parser.nextToken();
+                while (!query.limitReached(selected)) {
+                    JsonToken token = parser.nextToken();
+                    if (token == null || token == JsonToken.END_ARRAY) {
+                        break;
+                    }
+                    limited.startElement();
+                    long start = parser.currentTokenLocation().getCharOffset();
+                    JsonNode row = mapper.readTree(parser);
+                    limited.endElement();
+                    if (parser.currentLocation().getCharOffset() - start > MAX_RECORD_CHARS) {
+                        throw overMaxRecordSize();
+                    }
+                    if (query.where == null || evalJson(query.where, row)) {
+                        out.accept(projectJsonRow(row, query.columns, toCsv, mapper));
+                        selected++;
+                    }
+                }
+            } catch (JsonProcessingException e) {
+                // An element the parser gave up on past the record limit is over it, whatever stopped
+                // the parser: a number, for one, it reads whole before checking its own length limit.
+                if (limited.overRecordLimit()) {
+                    throw overMaxRecordSize();
+                }
+                // The records before the malformed part have been returned; the rest cannot be read.
+                LOG.debugv("Stopped reading a malformed JSON array for S3 Select: {0}", e.getOriginalMessage());
+            }
+            return;
+        }
+        LineReader lines = new LineReader(in);
+        String line;
+        while (!query.limitReached(selected) && (line = lines.readLine()) != null) {
+            if (line.trim().isEmpty()) {
+                continue;
+            }
+            JsonNode row;
+            try {
+                row = mapper.readTree(line);
+            } catch (JsonProcessingException ignored) {
+                // A line that is not JSON is not a record; it is skipped, as it always has been.
+                continue;
+            }
+            if (query.where == null || evalJson(query.where, row)) {
+                out.accept(projectJsonRow(row, query.columns, toCsv, mapper));
+                selected++;
             }
         }
-
-        List<JsonNode> rows = parseJsonInput(content, mapper);
-
-        if (tree != null) {
-            final WhereNode finalTree = tree;
-            rows = rows.stream().filter(row -> evalJson(finalTree, row)).toList();
-        }
-
-        if (limitStr != null) {
-            int limit = Integer.parseInt(limitStr);
-            if (rows.size() > limit) rows = rows.subList(0, limit);
-        }
-
-        return projectJsonRows(rows, projection, outputFormat, mapper);
     }
 
-    private static List<JsonNode> parseJsonInput(String content, ObjectMapper mapper) {
-        // Try JSON array first (starts with '['), then JSON Lines, then single object.
-        if (content.trim().startsWith("[")) {
-            try {
-                JsonNode root = mapper.readTree(content);
-                if (root.isArray()) {
-                    return StreamSupport.stream(root.spliterator(), false).toList();
-                }
-            } catch (Exception ignored) {}
+    /** Whether the first character after any leading whitespace opens an array; nothing is consumed. */
+    private static boolean startsWithArray(BufferedReader in) throws IOException {
+        while (true) {
+            in.mark(1);
+            int c = in.read();
+            if (c < 0) {
+                return false;
+            }
+            if (!Character.isWhitespace(c)) {
+                in.reset();
+                return c == '[';
+            }
         }
-        // JSON Lines: parse each non-empty line independently.
-        List<JsonNode> rows = new ArrayList<>();
-        for (String line : content.split("\\r?\\n")) {
-            if (line.trim().isEmpty()) continue;
-            try { rows.add(mapper.readTree(line)); } catch (Exception ignored) {}
-        }
-        return rows;
     }
 
     private static boolean evalJson(WhereNode node, JsonNode row) {
@@ -447,37 +513,146 @@ class S3SelectEvaluator {
         };
     }
 
-    private static String projectJsonRows(List<JsonNode> rows, String projection,
-                                           String outputFormat, ObjectMapper mapper) {
-        boolean toCsv = "CSV".equalsIgnoreCase(outputFormat);
-        String[] cols = "*".equals(projection) ? null
-                : Arrays.stream(projection.split(",")).map(String::trim).toArray(String[]::new);
-        StringBuilder sb = new StringBuilder();
-        for (JsonNode row : rows) {
-            if (cols == null) {
-                if (toCsv) {
-                    List<String> vals = new ArrayList<>();
-                    row.fields().forEachRemaining(e -> vals.add(csvEscape(e.getValue().asText(""))));
-                    sb.append(String.join(",", vals)).append("\n");
-                } else {
-                    try { sb.append(mapper.writeValueAsString(row)).append("\n"); } catch (Exception ignored) {}
-                }
-            } else {
-                if (toCsv) {
-                    sb.append(Arrays.stream(cols)
-                            .map(col -> csvEscape(row.path(col).asText("")))
-                            .collect(Collectors.joining(","))).append("\n");
-                } else {
-                    ObjectNode projected = mapper.createObjectNode();
-                    for (String col : cols) {
-                        JsonNode v = row.path(col);
-                        if (!v.isMissingNode()) projected.set(col, v);
+    private static String projectJsonRow(JsonNode row, String[] columns, boolean toCsv, ObjectMapper mapper)
+            throws JsonProcessingException {
+        if (columns == null) {
+            if (toCsv) {
+                List<String> vals = new ArrayList<>();
+                row.fields().forEachRemaining(e -> vals.add(csvEscape(e.getValue().asText(""))));
+                return String.join(",", vals);
+            }
+            return mapper.writeValueAsString(row);
+        }
+        if (toCsv) {
+            return Arrays.stream(columns)
+                    .map(col -> csvEscape(row.path(col).asText("")))
+                    .collect(Collectors.joining(","));
+        }
+        ObjectNode projected = mapper.createObjectNode();
+        for (String col : columns) {
+            JsonNode v = row.path(col);
+            if (!v.isMissingNode()) {
+                projected.set(col, v);
+            }
+        }
+        return mapper.writeValueAsString(projected);
+    }
+
+    // ── Bounded reading ────────────────────────────────────────────────────
+
+    /**
+     * Reads the lines of an object, split at {@code \n} with a {@code \r} before it dropped, the way
+     * the object has always been split, and fails a line longer than the record limit before holding
+     * more of it.
+     */
+    private static final class LineReader {
+
+        private final Reader in;
+        private final char[] buffer = new char[8192];
+        private int position;
+        private int limit;
+
+        LineReader(Reader in) {
+            this.in = in;
+        }
+
+        /** The next line, or {@code null} at the end of the object. */
+        String readLine() throws IOException {
+            StringBuilder line = null;
+            while (true) {
+                if (position == limit) {
+                    int read = in.read(buffer, 0, buffer.length);
+                    if (read < 0) {
+                        if (line != null && line.length() > MAX_RECORD_CHARS) {
+                            throw overMaxRecordSize();
+                        }
+                        return line == null ? null : line.toString();
                     }
-                    try { sb.append(mapper.writeValueAsString(projected)).append("\n"); } catch (Exception ignored) {}
+                    position = 0;
+                    limit = read;
+                }
+                int start = position;
+                while (position < limit && buffer[position] != '\n') {
+                    position++;
+                }
+                if (line == null) {
+                    line = new StringBuilder();
+                }
+                line.append(buffer, start, position - start);
+                // One character over the limit can still be the \r of a \r\n.
+                if (line.length() > MAX_RECORD_CHARS + 1) {
+                    throw overMaxRecordSize();
+                }
+                if (position < limit) {
+                    position++;
+                    int length = line.length();
+                    if (length > 0 && line.charAt(length - 1) == '\r') {
+                        line.setLength(length - 1);
+                    }
+                    if (line.length() > MAX_RECORD_CHARS) {
+                        throw overMaxRecordSize();
+                    }
+                    return line.toString();
                 }
             }
         }
-        return sb.toString();
+    }
+
+    /**
+     * Counts what a JSON parser reads towards the array element it is on, so an element cannot grow
+     * past the record limit, by more than the parser's read-ahead, before it is rejected. Everything
+     * read inside an element counts. Between elements only what is not whitespace counts: whitespace
+     * there is skipped without being held, while anything else is the next element, which a parser
+     * can read whole before it is handed over, as it does a number.
+     */
+    private static final class ElementLimitedReader extends FilterReader {
+
+        private boolean inElement;
+        private long counted;
+
+        ElementLimitedReader(Reader in) {
+            super(in);
+        }
+
+        void startElement() {
+            inElement = true;
+        }
+
+        void endElement() {
+            inElement = false;
+            counted = 0;
+        }
+
+        boolean overRecordLimit() {
+            return counted > MAX_RECORD_CHARS;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int c = super.read();
+            if (c >= 0) {
+                count((char) c);
+            }
+            return c;
+        }
+
+        @Override
+        public int read(char[] buffer, int offset, int length) throws IOException {
+            int read = super.read(buffer, offset, length);
+            for (int i = offset; i < offset + read; i++) {
+                count(buffer[i]);
+            }
+            return read;
+        }
+
+        private void count(char c) {
+            if (inElement || !Character.isWhitespace(c)) {
+                counted++;
+                if (counted > MAX_RECORD_CHARS + PARSER_READ_AHEAD) {
+                    throw overMaxRecordSize();
+                }
+            }
+        }
     }
 
     // ── Shared helpers ─────────────────────────────────────────────────────

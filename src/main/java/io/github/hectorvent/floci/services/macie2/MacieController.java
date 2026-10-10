@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
+import io.github.hectorvent.floci.services.iam.ServiceLinkedRoles;
 import io.github.hectorvent.floci.services.macie2.model.MacieMember;
 import io.github.hectorvent.floci.services.macie2.model.MacieState;
 import jakarta.inject.Inject;
@@ -65,7 +66,8 @@ public class MacieController {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("status", "ENABLED");
         response.put("serviceRole", regionResolver.buildGlobalArn("iam",
-                "role/aws-service-role/" + ServicePrincipals.of("macie") + "/AWSServiceRoleForAmazonMacie"));
+                "role/aws-service-role/" + ServicePrincipals.of("macie") + "/"
+                        + ServiceLinkedRoles.roleName(ServicePrincipals.of("macie")).orElseThrow()));
         return Response.ok(response).build();
     }
 

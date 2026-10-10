@@ -662,6 +662,173 @@ public class CodeArtifactService implements Resettable {
                         + "' was not found.", version, "package-version"));
     }
 
+    /**
+     * Floci never ingests packages from an upstream source, so every package it holds was first
+     * published directly. That is the one case where CodeArtifact's default origin controls are
+     * publish ALLOW and upstream BLOCK.
+     */
+    public record PackageDescription(String format, String namespace, String packageName,
+                                     String publishRestriction, String upstreamRestriction) {}
+
+    public PackageDescription describePackage(String region, String domain, String domainOwner, String repository,
+                                              String format, String namespace, String packageName) {
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        validatePackageToken("package", packageName);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        // The API reference's own namespace parameter doc for this action: "The namespace is
+        // required when requesting packages of the following formats: Maven, Swift, generic."
+        // pypi, nuget, ruby, and cargo packages have no namespace at all, so a supplied one can
+        // never be real; echoing it back in the response would misrepresent a package that way.
+        if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
+            throw validation("namespace is required when describing a " + format + " package.");
+        }
+        if ("pypi".equals(format) && namespace != null) {
+            throw validation("pypi packages do not have a namespace.");
+        }
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        boolean exists = CONTAINER_BACKED_FORMATS.contains(format)
+                ? containerBackedPackageExists(region, domain, owner, repository, format, namespace, packageName)
+                : genericPackageExists(region, domain, owner, repository, format, namespace, packageName);
+        if (!exists) {
+            throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+        }
+        return new PackageDescription(format, namespace, packageName, "ALLOW", "BLOCK");
+    }
+
+    private boolean containerBackedPackageExists(String region, String domain, String owner, String repository,
+            String format, String namespace, String packageName) {
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        return sidecarRegistry.forFormat(format)
+                .map(manager -> manager.packageExists(repoId, domain, repository, namespace, packageName))
+                .orElse(false);
+    }
+
+    private boolean genericPackageExists(String region, String domain, String owner, String repository,
+            String format, String namespace, String packageName) {
+        return !genericPackageVersions(region, domain, owner, repository, format, namespace, packageName).isEmpty();
+    }
+
+    private List<CodeArtifactPackageVersion> genericPackageVersions(String region, String domain, String owner,
+            String repository, String format, String namespace, String packageName) {
+        String prefix = packageVersionKey(region, domain, repository, format, namespace, packageName, "");
+        String wantedNamespace = namespace == null ? "" : namespace;
+        return packageVersions.scanForAccount(owner, key -> key.startsWith(prefix)).stream()
+                .filter(pv -> format.equals(pv.getFormat())
+                        && packageName.equals(pv.getPackageName())
+                        && wantedNamespace.equals(pv.getNamespace() == null ? "" : pv.getNamespace()))
+                .toList();
+    }
+
+    /**
+     * Deletes a package and every one of its versions. A deleted package cannot be restored,
+     * matching the real API's own documented behavior. Existence is checked where the package
+     * actually lives, the same way {@link #describePackage} checks it, so a nonexistent package
+     * answers {@code ResourceNotFoundException} rather than silently succeeding.
+     *
+     * <p>{@code synchronized} for the same reason {@link #publishPackageVersion} is: without a
+     * shared lock, a publish and a delete racing the same generic package could interleave (a
+     * version restored after its asset bytes are already gone, or a version published mid-scan
+     * silently surviving or being dropped).
+     */
+    public synchronized PackageDescription deletePackage(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName) {
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        validatePackageToken("package", packageName);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        // Same boundary as describePackage's own namespace rules (see its comment there for the
+        // API reference citation): a missing generic/maven namespace would delete under a
+        // null-namespace key nothing real ever publishes to, and a supplied pypi namespace would
+        // be silently ignored by the sidecar's existence check rather than rejected.
+        if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
+            throw validation("namespace is required when deleting a " + format + " package.");
+        }
+        if ("pypi".equals(format) && namespace != null) {
+            throw validation("pypi packages do not have a namespace.");
+        }
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            deleteContainerBackedPackage(region, domain, owner, repository, format, namespace, packageName);
+        } else {
+            List<CodeArtifactPackageVersion> versions = genericPackageVersions(region, domain, owner, repository,
+                    format, namespace, packageName);
+            if (versions.isEmpty()) {
+                throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+            }
+            for (CodeArtifactPackageVersion pv : versions) {
+                String versionKey = packageVersionKey(region, domain, repository, format, namespace, packageName,
+                        pv.getVersion());
+                // Metadata goes first: once the version record is gone, no caller can reach a
+                // deleted asset's bytes through it regardless of whether the cleanup below
+                // succeeds. Deleting bytes first and metadata last, if a later asset in the same
+                // version failed to delete, would leave a surviving record pointing at bytes
+                // already gone.
+                packageVersions.deleteForAccount(owner, versionKey);
+                for (PackageAsset asset : pv.getAssets().values()) {
+                    try {
+                        deleteAssetContent(owner, versionKey, asset.getName());
+                    } catch (UncheckedIOException e) {
+                        LOG.warnv(e, "Could not delete CodeArtifact asset file for {0}/{1}: {2}", versionKey,
+                                asset.getName(), e.getMessage());
+                    }
+                }
+            }
+        }
+        return new PackageDescription(format, namespace, packageName, "ALLOW", "BLOCK");
+    }
+
+    /**
+     * Each sidecar's delete capability differs enough that there is no honest shared implementation:
+     * Verdaccio and Reposilite remove a whole package in one call, while pypiserver's own management
+     * endpoint only deletes one exact name/version pair per call, so {@code PypiserverSidecarClient}
+     * lists every file first and removes each one in turn; all three are confirmed against live
+     * containers. {@link RepositorySidecarManager#deletePackage}'s default still throws
+     * {@link UnsupportedOperationException} for a sidecar that genuinely cannot do this, rather than
+     * silently leaving the package in place or claiming a success it cannot back up; that becomes a
+     * real, if deliberately blunt, AWS error here instead of an unhandled 500.
+     */
+    private void deleteContainerBackedPackage(String region, String domain, String owner, String repository,
+            String format, String namespace, String packageName) {
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName, "package"));
+        if (!manager.packageExists(repoId, domain, repository, namespace, packageName)) {
+            throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+        }
+        try {
+            manager.deletePackage(repoId, domain, repository, namespace, packageName);
+        } catch (UnsupportedOperationException e) {
+            throw new AwsException("InternalServerException",
+                    "Deleting a " + format + " package is not yet supported by this emulator.", 500);
+        }
+    }
+
+    private void deleteAssetContent(String owner, String packageVersionKey, String assetName) {
+        if (inMemory) {
+            memoryAssetStore.remove(assetStoreKey(owner, packageVersionKey, assetName));
+            return;
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try {
+            Files.deleteIfExists(filePath);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to delete CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
     public PackageVersionAssetResult getPackageVersionAsset(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, String version,
             String assetName, String packageVersionRevision) {
@@ -676,7 +843,7 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
 
         // Maven, npm, and pypi are metadata-free passthroughs straight to their own sidecar
-        // (ReposiliteSidecarClient/VerdaccioSidecarManager/PypiserverSidecarManager): publish for
+        // (ReposiliteSidecarClient/VerdaccioSidecarClient/PypiserverSidecarClient): publish for
         // these formats never goes through publishPackageVersion (it only ever accepts "generic"),
         // so packageVersions can never hold a record for them. Bridge straight to the sidecar
         // that actually has the asset instead of always 404ing here.

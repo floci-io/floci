@@ -32,6 +32,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.net.KeyCertOptions;
 import io.vertx.core.net.PemKeyCertOptions;
+import io.vertx.core.net.SocketAddress;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttTopicSubscription;
 import io.vertx.mqtt.messages.MqttSubscribeMessage;
@@ -68,6 +69,7 @@ import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
@@ -93,6 +95,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -130,6 +133,7 @@ class IotMqttBrokerServiceTest {
     private final TlsConfiguration tls = mock(TlsConfiguration.class);
     @SuppressWarnings("unchecked")
     private final Instance<IotService> iotService = mock(Instance.class);
+    private final IotCustomAuthorizer customAuthorizer = mock(IotCustomAuthorizer.class);
     private int plainPort;
     private int tlsPort;
     private IotMqttBrokerService broker;
@@ -162,7 +166,7 @@ class IotMqttBrokerServiceTest {
         when(config.tls().enabled()).thenReturn(true);
         when(registry.getDefault()).thenReturn(Optional.of(tls));
         when(tls.getKeyStoreOptions()).thenReturn(pem(bootLeaf));
-        broker = new IotMqttBrokerService(config, vertx, iotService, registry);
+        broker = new IotMqttBrokerService(config, vertx, iotService, customAuthorizer, registry);
     }
 
     @AfterEach
@@ -479,6 +483,29 @@ class IotMqttBrokerServiceTest {
         } finally {
             disconnect(subscriber);
         }
+    }
+
+    /**
+     * A WebSocket client's CONNECT reaches the broker from the bridge's loopback socket, so the
+     * policies its custom authorizer returns are evaluated against the address the bridge recorded
+     * for the WebSocket client.
+     */
+    @Test
+    void aWebSocketConnectThroughACustomAuthorizerIsEvaluatedAgainstTheWebSocketClientsAddress() {
+        IotService service = mock(IotService.class);
+        when(iotService.get()).thenReturn(service);
+        when(customAuthorizer.connectPolicies(eq("ws-auth"), eq("ws-client"), any(), any(), any()))
+                .thenReturn(List.of("{}"));
+        SocketAddress bridge = SocketAddress.inetSocketAddress(50123, "127.0.0.1");
+        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(
+                Map.of(), IotCustomAuthorizer.NAME_PARAM + "=ws-auth", null, "203.0.113.7"));
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("ws-client");
+        when(endpoint.remoteAddress()).thenReturn(bridge);
+
+        broker.handleEndpoint(endpoint, false);
+
+        verify(service, timeout(10_000)).isConnectAllowedBy(List.of("{}"), "ws-client", "203.0.113.7", null);
     }
 
     /**

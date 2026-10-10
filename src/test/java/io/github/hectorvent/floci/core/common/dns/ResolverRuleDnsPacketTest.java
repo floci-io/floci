@@ -1,10 +1,11 @@
 package io.github.hectorvent.floci.core.common.dns;
 
+// Vert.x's DatagramSocket is the one used most here; the JDK's is qualified inline where the
+// test needs a plain blocking socket to stand in for the rule's target resolver.
+
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
-// Vert.x's DatagramSocket is the one used most here; the JDK's is qualified inline where the
-// test needs a plain blocking socket to stand in for the rule's target resolver.
 import io.vertx.core.datagram.DatagramSocket;
 import io.vertx.core.datagram.DatagramSocketOptions;
 import jakarta.inject.Inject;

@@ -1,9 +1,8 @@
 package io.github.hectorvent.floci.services.cognito.model;
 
-import io.quarkus.runtime.annotations.RegisterForReflection;
-
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
  * Information about a revoked token for tracking and validation purposes.

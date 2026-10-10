@@ -15,6 +15,7 @@ import java.util.TreeSet;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -44,17 +45,50 @@ class PartitionStrictModeIntegrationTest {
             .body("message", containsString("cloudfront has no endpoint in partition aws-us-gov"));
     }
 
-    /** IAM speaks the Query protocol, so the refusal is the Query XML error a Query client parses. */
+    /** Elastic Beanstalk speaks the Query protocol, so the refusal is the Query XML error a Query client parses. */
     @Test
-    void iamIsRefusedInEuscWithAQueryError() {
+    void elasticBeanstalkIsRefusedInEuscWithAQueryError() {
         given()
-            .header("Authorization", PartitionMatrix.sigV4Auth("eusc-de-east-1", "iam"))
-            .formParam("Action", "ListRoles")
-            .formParam("Version", "2010-05-08")
+            .header("Authorization", PartitionMatrix.sigV4Auth("eusc-de-east-1", "elasticbeanstalk"))
+            .formParam("Action", "DescribeApplications")
+            .formParam("Version", "2010-12-01")
         .when().post("/").then().statusCode(404)
             .contentType(containsString("xml"))
             .body("ErrorResponse.Error.Code", equalTo("UnknownOperationException"))
-            .body("ErrorResponse.Error.Message", containsString("iam has no endpoint in partition aws-eusc"));
+            .body("ErrorResponse.Error.Message",
+                    containsString("elasticbeanstalk has no endpoint in partition aws-eusc"));
+    }
+
+    /**
+     * {@code endpoints.json} leaves IAM out of {@code aws-eusc} and {@code aws-iso-e}, but IAM's
+     * endpoint ruleset publishes {@code iam.eusc-de-east-1.amazonaws.eu} and
+     * {@code iam.eu-isoe-west-1.cloud.adc-e.uk}, so a client there reaches IAM.
+     */
+    @Test
+    void iamIsServedInTheEuscAndIsoEPartitionsItsRulesetNames() {
+        for (String region : new String[] {"eusc-de-east-1", "eu-isoe-west-1"}) {
+            given()
+                .header("Authorization", PartitionMatrix.sigV4Auth(region, "iam"))
+                .formParam("Action", "ListRoles")
+                .formParam("Version", "2010-05-08")
+            .when().post("/").then().statusCode(200);
+        }
+    }
+
+    /**
+     * An IAM-authorized API Gateway invoke signs {@code execute-api}, a name Connect Participant
+     * shares. China offers API Gateway but not Connect Participant, so the invoke must reach API
+     * Gateway, which answers for the missing API itself.
+     */
+    @Test
+    void executeApiInvokesAreNotRefusedWhereConnectParticipantIsAbsent() {
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "execute-api"))
+        .when().get("/execute-api/nosuchapi/prod/items").then()
+            .statusCode(404)
+            .header("X-Amzn-Errortype", not(equalTo("UnknownOperationException")))
+            .body("message", equalTo("Invalid API id specified"))
+            .body(not(containsString("has no endpoint in partition")));
     }
 
     @Test

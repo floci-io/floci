@@ -1,13 +1,13 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.emrserverless.model.Application;
 import io.github.hectorvent.floci.services.emrserverless.model.ApplicationSummary;
 import io.github.hectorvent.floci.services.emrserverless.model.CreateApplicationRequest;
 import io.github.hectorvent.floci.services.emrserverless.model.CreateApplicationResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.DeleteApplicationResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.GetApplicationResponse;
-import io.github.hectorvent.floci.core.common.PaginatedResult;
-import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.emrserverless.model.ListApplicationsRequest;
 import io.github.hectorvent.floci.services.emrserverless.model.ListApplicationsResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.StartApplicationResponse;

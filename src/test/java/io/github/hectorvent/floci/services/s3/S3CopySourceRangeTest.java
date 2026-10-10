@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.s3.S3Service.CopySourceRange;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -91,10 +92,10 @@ class S3CopySourceRangeTest {
     }
 
     @Test
-    void readRangeSkipsToAnOffsetPastTwoGibibytes() throws IOException {
+    void aRangeSkipsToAnOffsetPastTwoGibibytes() throws IOException {
         CopySourceRange range = new CopySourceRange(2_500_000_000L, 2_500_000_015L);
 
-        byte[] data = S3Service.readRange(patternStream(3L * 1024 * 1024 * 1024), range);
+        byte[] data = new CopyRangeInputStream(patternStream(3L * 1024 * 1024 * 1024), range).readAllBytes();
 
         assertEquals(16, data.length);
         for (int i = 0; i < data.length; i++) {
@@ -103,7 +104,7 @@ class S3CopySourceRangeTest {
     }
 
     @Test
-    void readRangeSkipsPastTwoGibibytesInTheFileStreamDiskObjectsAreReadThrough() throws IOException {
+    void aRangeSkipsPastTwoGibibytesInTheFileStreamDiskObjectsAreReadThrough() throws IOException {
         long offset = 2_500_000_000L;
         byte[] written = new byte[16];
         for (int i = 0; i < written.length; i++) {
@@ -118,16 +119,40 @@ class S3CopySourceRangeTest {
 
         byte[] data;
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            data = S3Service.readRange(Channels.newInputStream(channel),
-                    new CopySourceRange(offset, offset + written.length - 1));
+            data = new CopyRangeInputStream(Channels.newInputStream(channel),
+                    new CopySourceRange(offset, offset + written.length - 1)).readAllBytes();
         }
 
         assertArrayEquals(written, data);
     }
 
     @Test
-    void readRangeFailsWhenTheSourceEndsBeforeTheRange() {
-        assertThrows(IOException.class, () -> S3Service.readRange(patternStream(10), new CopySourceRange(5, 14)));
+    void aRangeFailsWhenTheSourceEndsBeforeIt() {
+        assertThrows(IOException.class,
+                () -> new CopyRangeInputStream(patternStream(10), new CopySourceRange(5, 14)).readAllBytes());
+        assertThrows(IOException.class,
+                () -> new CopyRangeInputStream(patternStream(10), new CopySourceRange(12, 14)).readAllBytes(),
+                "a source that ends before the range starts");
+    }
+
+    @Test
+    void aRangeEndsAfterItsLastByteWhateverTheReadSize() throws IOException {
+        CopySourceRange range = new CopySourceRange(3, 1002);
+        for (int readSize : List.of(1, 7, 1000, 4096)) {
+            try (InputStream in = new CopyRangeInputStream(patternStream(5000), range)) {
+                ByteArrayOutputStream copied = new ByteArrayOutputStream();
+                byte[] buffer = new byte[readSize];
+                for (int read = in.read(buffer); read >= 0; read = in.read(buffer)) {
+                    copied.write(buffer, 0, read);
+                }
+                byte[] data = copied.toByteArray();
+                assertEquals(range.length(), data.length, "read size " + readSize);
+                for (int i = 0; i < data.length; i++) {
+                    assertEquals(patternByte(range.first() + i), data[i], "byte " + i + ", read size " + readSize);
+                }
+                assertEquals(-1, in.read(), "the range stays at its end");
+            }
+        }
     }
 
     private static byte patternByte(long position) {

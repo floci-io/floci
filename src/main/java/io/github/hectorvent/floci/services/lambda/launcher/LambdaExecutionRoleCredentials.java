@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -74,7 +75,8 @@ public class LambdaExecutionRoleCredentials {
         }
 
         String roleAccountId = AwsArnUtils.accountOrDefault(roleArn, functionAccountId);
-        if (iamService.findRole(roleAccountId, roleName).isEmpty()) {
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        if (role.isEmpty()) {
             return Optional.empty();
         }
 
@@ -82,9 +84,11 @@ public class LambdaExecutionRoleCredentials {
                 "ASIA" + random(UPPER_ALPHANUMERIC, 16),
                 random(SECRET_CHARACTERS, 40),
                 random(SECRET_CHARACTERS, 200));
+        String functionName = function.getFunctionName();
+        String assumedRoleId = role.get().getRoleId() != null ? role.get().getRoleId() + ":" + functionName : null;
         iamService.registerLambdaExecutionRoleSession(
                 functionAccountId, credentials.accessKeyId(), credentials.secretAccessKey(),
-                credentials.sessionToken(), roleArn);
+                credentials.sessionToken(), roleArn, functionName, assumedRoleId);
         return Optional.of(credentials);
     }
 

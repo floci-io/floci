@@ -6,6 +6,8 @@ name: PR Limit
 #
 # pull_request_target gives the token write access on fork PRs. Neither this workflow
 # nor the reusable one checks out or runs PR code; they only call the GitHub API.
+# contents: write is needed only for converting a PR back to a draft (the GitHub API
+# refuses the token without it). Never add a checkout of the PR head here.
 
 on:
   pull_request_target:
@@ -23,6 +25,7 @@ on:
         default: true
 
 permissions:
+  contents: write
   issues: write
   pull-requests: write
 

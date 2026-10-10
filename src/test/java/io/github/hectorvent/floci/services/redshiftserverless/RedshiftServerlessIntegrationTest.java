@@ -8,15 +8,20 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
@@ -183,6 +188,83 @@ class RedshiftServerlessIntegrationTest {
         String absent = "arn:aws:redshift-serverless:us-east-1:000000000000:"
                 + "namespace/00000000-0000-0000-0000-000000000000";
         call("ListTagsForResource", "{\"resourceArn\":\"" + absent + "\"}")
+                .statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void snapshotLifecycleIsVisibleThroughSeparateReads() {
+        doAnswer(invocation -> {
+            Files.writeString(invocation.getArgument(5, Path.class), "-- dump");
+            return null;
+        }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
+        call("CreateNamespace", "{\"namespaceName\":\"snap-life-ns\",\"adminUsername\":\"admin\"}").statusCode(200);
+        call("CreateWorkgroup", "{\"workgroupName\":\"snap-life-wg\",\"namespaceName\":\"snap-life-ns\"}")
+                .statusCode(200);
+
+        String snapshotArn = call("CreateSnapshot",
+                "{\"snapshotName\":\"snap-life\",\"namespaceName\":\"snap-life-ns\",\"retentionPeriod\":7,"
+                        + "\"tags\":[{\"key\":\"env\",\"value\":\"dev\"}]}")
+                .statusCode(200)
+                .body("snapshot.snapshotName", equalTo("snap-life"))
+                .body("snapshot.snapshotRetentionPeriod", equalTo(7))
+                .body("snapshot.snapshotRemainingDays", equalTo(7))
+                .body("snapshot.adminUsername", equalTo("admin"))
+                .body("snapshot.kmsKeyId", equalTo("AWS_OWNED_KMS_KEY"))
+                .body("snapshot.namespaceName", equalTo("snap-life-ns"))
+                .body("snapshot.status", equalTo("AVAILABLE"))
+                .body("snapshot.snapshotCreateTime", matchesPattern("\\d{4}-\\d{2}-\\d{2}T.*Z"))
+                .extract().path("snapshot.snapshotArn");
+
+        call("CreateSnapshot", "{\"snapshotName\":\"snap-life\",\"namespaceName\":\"snap-life-ns\"}")
+                .statusCode(409)
+                .body("__type", equalTo("ConflictException"));
+
+        call("GetSnapshot", "{\"snapshotName\":\"snap-life\"}")
+                .statusCode(200)
+                .body("snapshot.snapshotArn", equalTo(snapshotArn));
+        call("GetSnapshot", "{\"snapshotArn\":\"" + snapshotArn + "\"}")
+                .statusCode(200)
+                .body("snapshot.snapshotName", equalTo("snap-life"));
+        call("GetSnapshot", "{\"snapshotArn\":\"arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/snap-life\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
+        call("ListSnapshots", "{\"namespaceName\":\"snap-life-ns\",\"maxResults\":1}")
+                .statusCode(200)
+                .body("snapshots.snapshotName", hasItem("snap-life"));
+        call("ListTagsForResource", "{\"resourceArn\":\"" + snapshotArn + "\"}")
+                .statusCode(200)
+                .body("tags.key", hasItem("env"));
+        call("ListSnapshots", "{\"ownerAccount\":\"999999999999\"}")
+                .statusCode(200)
+                .body("snapshots", hasSize(0));
+        call("ListSnapshots", "{\"startTime\":4102444800}")
+                .statusCode(200)
+                .body("snapshots", hasSize(0));
+        call("RestoreFromSnapshot", "{\"namespaceName\":\"snap-life-ns\",\"workgroupName\":\"snap-life-wg\","
+                + "\"snapshotName\":\"snap-life\",\"snapshotArn\":\"" + snapshotArn + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("ListSnapshots", "{\"namespaceName\":\"no-such-ns\"}")
+                .statusCode(200)
+                .body("snapshots", hasSize(0));
+
+        call("RestoreFromSnapshot", "{\"namespaceName\":\"snap-life-ns\",\"workgroupName\":\"snap-life-wg\","
+                + "\"snapshotArn\":\"" + snapshotArn + "\"}")
+                .statusCode(200)
+                .body("snapshotName", equalTo("snap-life"))
+                .body("namespace.namespaceName", equalTo("snap-life-ns"))
+                .body("namespace.status", equalTo("AVAILABLE"))
+                .body("ownerAccount", matchesPattern("\\d{12}"));
+        call("RestoreFromSnapshot", "{\"workgroupName\":\"snap-life-wg\",\"snapshotName\":\"snap-life\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
+        call("DeleteSnapshot", "{\"snapshotName\":\"snap-life\"}")
+                .statusCode(200)
+                .body("snapshot.snapshotName", equalTo("snap-life"));
+        call("GetSnapshot", "{\"snapshotName\":\"snap-life\"}")
                 .statusCode(404)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }

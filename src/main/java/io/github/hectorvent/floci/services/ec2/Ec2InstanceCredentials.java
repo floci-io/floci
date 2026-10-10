@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -18,9 +20,12 @@ import java.util.Optional;
 
 /** Owns credentials for the lifetime of each registered EC2 guest. */
 final class Ec2InstanceCredentials {
+    private static final String IDENTITY_ROLE_NAME = "aws:ec2-instance";
+
     private final IamService iam;
     private final SecureRandom random = new SecureRandom();
     private final Map<Instance, List<Issued>> sessions = new IdentityHashMap<>();
+    private final Map<Instance, List<SessionCredential>> identitySessions = new IdentityHashMap<>();
 
     Ec2InstanceCredentials(IamService iam) {
         this.iam = iam;
@@ -35,11 +40,51 @@ final class Ec2InstanceCredentials {
         if (issued != null) {
             issued.forEach(this::revoke);
         }
+        List<SessionCredential> identities = identitySessions.remove(instance);
+        if (identities != null) {
+            identities.forEach(this::revoke);
+        }
     }
 
     synchronized void clear() {
         sessions.values().forEach(issued -> issued.forEach(this::revoke));
         sessions.clear();
+        identitySessions.values().forEach(identities -> identities.forEach(this::revoke));
+        identitySessions.clear();
+    }
+
+    /**
+     * Credentials of the instance identity role, which every registered instance has whether or not
+     * it carries an instance profile. They are a session of the {@code aws:ec2-instance} role named
+     * after the instance. No IAM role can carry that name, so no policy ever grants the session
+     * anything: as on AWS, it only identifies the instance. Its user id is the principal id AWS
+     * records for these credentials, {@code <account>:aws:ec2-instance:<instance-id>}.
+     */
+    synchronized Optional<SessionCredential> identity(Instance instance, String accountId, Instant now) {
+        if (!sessions.containsKey(instance)) {
+            return Optional.empty();
+        }
+        List<SessionCredential> history = identitySessions.computeIfAbsent(instance, ignored -> new ArrayList<>());
+        history.removeIf(issued -> {
+            boolean expired = !issued.getExpiration().isAfter(now);
+            if (expired) {
+                revoke(issued);
+            }
+            return expired;
+        });
+        if (!history.isEmpty() && history.getLast().getExpiration().isAfter(now.plusSeconds(300))) {
+            return Optional.of(history.getLast());
+        }
+        String partition = AwsRegions.partitionFor(instance.getRegion());
+        String roleArn = AwsArnUtils.Arn.global(partition, "iam", accountId, "role/" + IDENTITY_ROLE_NAME).toString();
+        SessionCredential session = new SessionCredential(newAccessKey(), randomString(30), randomString(48),
+                roleArn, now.plusSeconds(3600), null, accountId);
+        session.setRoleSessionName(instance.getInstanceId());
+        session.setEc2InstanceId(instance.getInstanceId());
+        session.setAssumedRoleId(accountId + ":" + IDENTITY_ROLE_NAME + ":" + instance.getInstanceId());
+        iam.registerEc2InstanceSession(session);
+        history.add(session);
+        return Optional.of(session);
     }
 
     synchronized Optional<IamRole> role(Instance instance) {
@@ -89,16 +134,20 @@ final class Ec2InstanceCredentials {
         }
         IamRole role = resolved.get();
         String account = role.getArn().split(":", 6)[4];
-        byte[] key = new byte[10];
-        random.nextBytes(key);
-        String accessKey = "ASIA" + HexFormat.of().withUpperCase().formatHex(key).substring(0, 16);
-        SessionCredential session = new SessionCredential(accessKey, randomString(30), randomString(48),
+        SessionCredential session = new SessionCredential(newAccessKey(), randomString(30), randomString(48),
                 role.getArn(), now.plusSeconds(3600), null, account);
         session.setEc2InstanceId(instance.getInstanceId());
         session.setEc2RoleId(role.getRoleId());
+        session.setAssumedRoleId(role.getRoleId() + ":" + instance.getInstanceId());
         iam.registerEc2InstanceSession(session);
         history.add(new Issued(session, role.getRoleId(), instance.getIamInstanceProfileArn()));
         return Optional.of(session);
+    }
+
+    private String newAccessKey() {
+        byte[] key = new byte[10];
+        random.nextBytes(key);
+        return "ASIA" + HexFormat.of().withUpperCase().formatHex(key).substring(0, 16);
     }
 
     private String randomString(int size) {
@@ -108,7 +157,11 @@ final class Ec2InstanceCredentials {
     }
 
     private void revoke(Issued issued) {
-        iam.unregisterSession(issued.session().getOriginAccountId(), issued.session().getAccessKeyId());
+        revoke(issued.session());
+    }
+
+    private void revoke(SessionCredential session) {
+        iam.unregisterSession(session.getOriginAccountId(), session.getAccessKeyId());
     }
 
     private record Issued(SessionCredential session, String roleId, String profileArn) {}

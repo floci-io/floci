@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.docdb.container;
 
+import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -7,7 +8,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
-import com.github.dockerjava.api.DockerClient;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -46,7 +46,7 @@ class DocDbContainerManagerTest {
         DocDbContainerManager manager = newManager(lifecycleManager);
 
         for (int attempt = 0; attempt < 3; attempt++) {
-            assertNull(manager.tryStart("cluster1", "mongo:7.0", "admin", "secret"),
+            assertNull(manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1"),
                     "attempt " + attempt + " should report unavailable");
         }
         assertFalse(manager.isDockerReachable());
@@ -65,7 +65,7 @@ class DocDbContainerManagerTest {
         DocDbContainerManager manager = newManager(lifecycleManager);
 
         RuntimeException failure = assertThrows(RuntimeException.class,
-                () -> manager.tryStart("cluster1", "mongo:7.0", "admin", "secret"));
+                () -> manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1"));
         assertEquals("no such image: mongo:7.0", failure.getMessage());
     }
 
@@ -92,7 +92,7 @@ class DocDbContainerManagerTest {
 
             DocDbContainerManager manager = newManager(lifecycleManager);
 
-            DocDbContainerHandle handle = manager.tryStart("cluster1", "mongo:7.0", "admin", "secret");
+            DocDbContainerHandle handle = manager.tryStart("cluster1", "mongo:7.0", "admin", "secret", "us-east-1");
 
             assertEquals("container-id", handle.getContainerId());
             assertEquals(serverSocket.getLocalPort(), handle.getPort());
@@ -138,14 +138,14 @@ class DocDbContainerManagerTest {
                     logStreamer, mock(ContainerDetector.class), config,
                     new RegionResolver("us-east-1", "000000000000"));
 
-            manager.start("cluster1", "mongo:7.0", "admin", "secret");
+            manager.start("cluster1", "mongo:7.0", "admin", "secret", "eu-west-1");
 
             verify(builder).withLabels(Map.of(
                     "io.floci", "aws",
                     "io.floci.service", "docdb",
                     "io.floci.resource-id", "cluster1",
                     "io.floci.account", "000000000000",
-                    "io.floci.region", "us-east-1"));
+                    "io.floci.region", "eu-west-1"));
         }
     }
 

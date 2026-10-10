@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
@@ -150,12 +151,14 @@ class SnsServiceTest {
         service.subscribe(topic.getTopicArn(), "sqs", queueArn, REGION, Map.of());
         doThrow(new AwsException("ServiceUnavailable", "temporarily unavailable", 503))
                 .doReturn(new Message("delivered"))
-                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(),
+                        isNull(), eq(ServicePrincipals.of("sns")), eq(REGION));
 
         String messageId = service.publish(topic.getTopicArn(), null, "payload", null, REGION);
 
         assertNotNull(messageId);
-        verify(sqs, times(2)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        verify(sqs, times(2)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(),
+                isNull(), eq(ServicePrincipals.of("sns")), eq(REGION));
     }
 
     @Test
@@ -171,15 +174,18 @@ class SnsServiceTest {
         service.subscribe(topic.getTopicArn(), "sqs", queueArn, REGION,
                 Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + dlqArn + "\"}"));
         doThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue", "unavailable", 400))
-                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(),
+                        isNull(), eq(ServicePrincipals.of("sns")), eq(REGION));
 
         String messageId = service.publish(topic.getTopicArn(), null,
                 "payload", "subject", REGION);
 
         assertNotNull(messageId, "SNS Publish acceptance is independent of downstream SQS delivery");
-        verify(sqs, times(3)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        verify(sqs, times(3)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(),
+                isNull(), eq(ServicePrincipals.of("sns")), eq(REGION));
         ArgumentCaptor<String> deadLetterBody = ArgumentCaptor.forClass(String.class);
-        verify(sqs).sendMessage(eq(dlqUrl), deadLetterBody.capture(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        verify(sqs).sendMessage(eq(dlqUrl), deadLetterBody.capture(), isNull(), isNull(), isNull(), anyMap(),
+                isNull(), eq(ServicePrincipals.of("sns")), eq(REGION));
         JsonNode envelope = new ObjectMapper().readTree(deadLetterBody.getValue());
         assertEquals("Notification", envelope.path("Type").asText());
         assertEquals(topic.getTopicArn(), envelope.path("TopicArn").asText());

@@ -79,9 +79,9 @@ public class ElastiCacheContainerManager {
      * @return the container handle, or {@code null} when no Docker daemon is reachable and no
      *         container was created
      */
-    public ElastiCacheContainerHandle tryStart(String groupId, String image) {
+    public ElastiCacheContainerHandle tryStart(String groupId, String image, String region) {
         try {
-            ElastiCacheContainerHandle handle = start(groupId, image);
+            ElastiCacheContainerHandle handle = start(groupId, image, region);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -118,8 +118,8 @@ public class ElastiCacheContainerManager {
         }
     }
 
-    public ElastiCacheContainerHandle start(String groupId, String image) {
-        return start(groupId, image, List.of());
+    public ElastiCacheContainerHandle start(String groupId, String image, String region) {
+        return start(groupId, image, List.of(), region);
     }
 
     /**
@@ -127,7 +127,8 @@ public class ElastiCacheContainerManager {
      * to the Valkey server command line (via the image's {@code VALKEY_EXTRA_FLAGS} hook).
      * Cluster-mode nodes use this to pass {@code --cluster-enabled} and announce settings.
      */
-    public ElastiCacheContainerHandle start(String groupId, String image, List<String> extraServerFlags) {
+    public ElastiCacheContainerHandle start(String groupId, String image, List<String> extraServerFlags,
+                                            String region) {
         LOG.infov("Starting ElastiCache backend container for group: {0}", groupId);
 
         String containerName = containerName(groupId);
@@ -149,7 +150,7 @@ public class ElastiCacheContainerManager {
                 .withDockerNetwork(config.services().elasticache().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "elasticache", groupId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "elasticache", groupId, regionResolver.getAccountId(), region));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
@@ -182,7 +183,6 @@ public class ElastiCacheContainerManager {
                 : info.containerId();
         String logGroup = "/aws/elasticache/cluster/" + groupId + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = regionResolver.getDefaultRegion();
 
         Closeable logHandle = logStreamer.attach(
                 info.containerId(), logGroup, logStream, region, "elasticache:" + groupId);

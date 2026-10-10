@@ -11,10 +11,10 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.jboss.logging.Logger;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -123,6 +123,7 @@ public class LambdaLayerService {
 
         String description = (String) request.get("Description");
         String licenseInfo = (String) request.get("LicenseInfo");
+        LambdaService.validateMaxLength(licenseInfo, "licenseInfo", 512);
 
         LambdaService.validateEnumList(request.get("CompatibleRuntimes"), "compatibleRuntimes",
                 LambdaService.RUNTIME_VALUES, 15);

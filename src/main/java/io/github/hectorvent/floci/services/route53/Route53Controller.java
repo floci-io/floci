@@ -464,7 +464,7 @@ public class Route53Controller {
                 throw new AwsException("InvalidInput", "CallerReference is required.", 400);
             }
             HealthCheckConfig cfg = parseHealthCheckConfig(body);
-            HealthCheck hc = service.createHealthCheck(callerRef, cfg);
+            HealthCheck hc = service.createHealthCheck(callerRef, cfg, healthCheckSettings(body));
             String xml = new XmlBuilder()
                     .start("CreateHealthCheckResponse", NS)
                     .raw(xmlHealthCheck(hc))
@@ -1107,21 +1107,63 @@ public class Route53Controller {
         HealthCheckConfig cfg = new HealthCheckConfig();
         cfg.setType(XmlParser.extractFirst(body, "Type", null));
         cfg.setIpAddress(XmlParser.extractFirst(body, "IPAddress", null));
-        String portStr = XmlParser.extractFirst(body, "Port", null);
-        if (portStr != null) {
-            try { cfg.setPort(Integer.parseInt(portStr)); } catch (NumberFormatException ignored) {}
-        }
+        cfg.setPort(integerElement(body, "Port"));
         cfg.setResourcePath(XmlParser.extractFirst(body, "ResourcePath", null));
         cfg.setFullyQualifiedDomainName(XmlParser.extractFirst(body, "FullyQualifiedDomainName", null));
-        String riStr = XmlParser.extractFirst(body, "RequestInterval", null);
-        if (riStr != null) {
-            try { cfg.setRequestInterval(Integer.parseInt(riStr)); } catch (NumberFormatException ignored) {}
-        }
-        String ftStr = XmlParser.extractFirst(body, "FailureThreshold", null);
-        if (ftStr != null) {
-            try { cfg.setFailureThreshold(Integer.parseInt(ftStr)); } catch (NumberFormatException ignored) {}
-        }
+        cfg.setRequestInterval(integerElement(body, "RequestInterval"));
+        cfg.setFailureThreshold(integerElement(body, "FailureThreshold"));
         return cfg;
+    }
+
+    private static Integer integerElement(String body, String name) {
+        String value = XmlParser.extractFirst(body, name, null);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInput", "Invalid value for " + name + ": " + value, 400);
+        }
+    }
+
+    /**
+     * The create request's settings in a canonical form, so a retry can be told from a different
+     * request: every value under {@code HealthCheckConfig} as {@code path=value}, sorted, because
+     * {@code Regions} and {@code ChildHealthChecks} are sets. An omitted {@code RequestInterval} or
+     * {@code FailureThreshold} counts as AWS's default (30 and 3), except for {@code RECOVERY_CONTROL},
+     * which takes neither, so stating the default explicitly is still the same request.
+     */
+    static String healthCheckSettings(String body) {
+        // Null for malformed XML as well as a missing element; HealthCheckConfig is required either way.
+        XmlParser.XmlElement config = XmlParser.extractElementTree(body, "HealthCheckConfig");
+        if (config == null) {
+            throw new AwsException("InvalidInput", "Could not parse the request body.", 400);
+        }
+        List<String> entries = new ArrayList<>();
+        collectSettings(config, "", entries);
+        if (!entries.contains("Type=RECOVERY_CONTROL")) {
+            addDefault(entries, "RequestInterval", "30");
+            addDefault(entries, "FailureThreshold", "3");
+        }
+        entries.sort(null);
+        return String.join("\n", entries);
+    }
+
+    private static void collectSettings(XmlParser.XmlElement element, String prefix, List<String> entries) {
+        for (XmlParser.XmlElement child : element.children()) {
+            String path = prefix + child.name();
+            if (!child.text().isEmpty()) {
+                entries.add(path + "=" + child.text());
+            }
+            collectSettings(child, path + "/", entries);
+        }
+    }
+
+    private static void addDefault(List<String> entries, String name, String value) {
+        if (entries.stream().noneMatch(entry -> entry.startsWith(name + "="))) {
+            entries.add(name + "=" + value);
+        }
     }
 
     /**

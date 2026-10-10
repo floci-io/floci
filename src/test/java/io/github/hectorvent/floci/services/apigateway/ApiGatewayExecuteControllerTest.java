@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -14,9 +15,16 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.TimeZone;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -37,7 +45,7 @@ class ApiGatewayExecuteControllerTest {
         return new ApiGatewayExecuteController(
                 null, null, null, null,
                 regionResolver, objectMapper, null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
     }
 
     @Test
@@ -352,7 +360,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
 
         Response response = controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
@@ -382,7 +390,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
 
         controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
@@ -416,7 +424,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
 
         controller.dispatch("GET", "restapi1", "prod", "hello", headers, null, null);
 
@@ -485,5 +493,173 @@ class ApiGatewayExecuteControllerTest {
                     response.getStringHeaders().get(HttpHeaders.SET_COOKIE));
             assertEquals("rest-v1", response.getHeaderString("X-Trace"));
         }
+    }
+
+    // ── HTTP API (v2) payload format 2.0 response inference ──────
+    //
+    // https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
+    // "Lambda function response for format 2.0": valid JSON without a statusCode is answered with
+    // statusCode 200, content-type application/json, and the function's response as the body.
+
+    private static InvokeResult functionError(String payloadJson) {
+        return new InvokeResult(200, "Unhandled", payloadJson.getBytes(StandardCharsets.UTF_8), null, "req-1");
+    }
+
+    private static String bodyOf(Response response) {
+        Object entity = response.getEntity();
+        return entity instanceof byte[] bytes ? new String(bytes, StandardCharsets.UTF_8) : (String) entity;
+    }
+
+    @Test
+    void httpApiV2ObjectWithoutStatusCodeIsTheBody() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(
+                proxyPayload("{\"message\":\"Hello from Lambda!\"}"), true)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("application/json", String.valueOf(response.getMediaType()));
+            assertEquals("{\"message\":\"Hello from Lambda!\"}", bodyOf(response));
+        }
+    }
+
+    @Test
+    void httpApiV2StringResultIsTheBody() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(
+                proxyPayload("\"Hello from Lambda!\""), true)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("application/json", String.valueOf(response.getMediaType()));
+            assertEquals("Hello from Lambda!", bodyOf(response));
+        }
+    }
+
+    @Test
+    void httpApiV2ResponseFieldsWithoutStatusCodeAreReturnedAsTheBody() {
+        // Without a statusCode nothing is interpreted: headers and body are part of the JSON body.
+        String payload = "{\"headers\":{\"X-Trace\":\"inferred\"},\"body\":\"inner\"}";
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(proxyPayload(payload), true)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("application/json", String.valueOf(response.getMediaType()));
+            assertEquals(payload, bodyOf(response));
+            assertNull(response.getHeaderString("X-Trace"));
+        }
+    }
+
+    @Test
+    void httpApiV2FunctionErrorAnswersInternalServerErrorMessage() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(functionError(
+                "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), true)) {
+            assertEquals(502, response.getStatus());
+            assertEquals("application/json", String.valueOf(response.getMediaType()));
+            assertEquals("{\"message\":\"Internal Server Error\"}", bodyOf(response));
+        }
+    }
+
+    @Test
+    void httpApiPayloadV1ResponseWithoutStatusCodeIsNotInferred() {
+        // An HTTP API integration configured with payloadFormatVersion 1.0 keeps the 1.0 response rules.
+        String payload = "{\"headers\":{\"X-Trace\":\"value\"},\"body\":\"inner\"}";
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(proxyPayload(payload), true, false)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("inner", bodyOf(response));
+            assertEquals("value", response.getHeaderString("X-Trace"));
+        }
+    }
+
+    @Test
+    void httpApiPayloadV1FunctionErrorAnswersInternalServerErrorMessage() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(functionError(
+                "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), true, false)) {
+            assertEquals(502, response.getStatus());
+            assertEquals("{\"message\":\"Internal Server Error\"}", bodyOf(response));
+        }
+    }
+
+    @Test
+    void restApiV1ResponseWithoutStatusCodeIsNotInferred() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(proxyPayload("{\"body\":\"inner\"}"), false)) {
+            assertEquals(200, response.getStatus());
+            assertEquals("inner", bodyOf(response));
+        }
+    }
+
+    @Test
+    void restApiV1FunctionErrorKeepsEmptyBody() {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        try (Response response = controller.buildProxyResponse(functionError(
+                "{\"errorType\":\"Error\",\"errorMessage\":\"boom\",\"trace\":[]}"), false)) {
+            assertEquals(502, response.getStatus());
+            assertNull(response.getEntity());
+        }
+    }
+
+    @Test
+    void requestTimeUsesEnglishMonthUnderNonEnglishDefaultLocale() {
+        // The formatter is built at class initialisation, so switching the default locale here
+        // cannot reach it: pinning its locale is what keeps the month ASCII on any machine.
+        assertEquals(Locale.ENGLISH, ApiGatewayExecuteController.GATEWAY_REQUEST_TIME.getLocale());
+        Locale original = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.JAPAN);
+            assertEquals("05/Oct/2026:13:45:30 +0000", ApiGatewayExecuteController.GATEWAY_REQUEST_TIME
+                    .format(Instant.parse("2026-10-05T13:45:30Z").atZone(ZoneOffset.UTC)));
+        } finally {
+            Locale.setDefault(original);
+        }
+    }
+
+    @Test
+    void v2ProxyEventTimeIsEnglishUtcUnderNonUtcHost() throws Exception {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        assertEnglishUtcTimeUnderNonUtcHost(() -> controller.buildV2ProxyEvent("GET", "/items", "GET /items",
+                "api1", "us-east-1", "$default", emptyHeaders(), uriInfoFor("http://localhost/items"),
+                new byte[0], "req-1", null, null, null, null));
+    }
+
+    @Test
+    void v2RequestAuthorizerEventTimeIsEnglishUtcUnderNonUtcHost() throws Exception {
+        ApiGatewayExecuteController controller = controller(new ObjectMapper());
+        assertEnglishUtcTimeUnderNonUtcHost(() -> controller.buildRequestAuthorizerEventV2("GET", "/items",
+                "GET /items", "api1", "$default", "us-east-1", emptyHeaders(),
+                uriInfoFor("http://localhost/items")));
+    }
+
+    private static HttpHeaders emptyHeaders() {
+        HttpHeaders headers = mock(HttpHeaders.class);
+        when(headers.getRequestHeaders()).thenReturn(new MultivaluedHashMap<>());
+        return headers;
+    }
+
+    private static UriInfo uriInfoFor(String uri) {
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(URI.create(uri));
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        return uriInfo;
+    }
+
+    private static void assertEnglishUtcTimeUnderNonUtcHost(Supplier<String> buildEvent) throws Exception {
+        Locale originalLocale = Locale.getDefault();
+        TimeZone originalZone = TimeZone.getDefault();
+        String event;
+        try {
+            Locale.setDefault(Locale.JAPAN);
+            TimeZone.setDefault(TimeZone.getTimeZone("Asia/Tokyo"));
+            event = buildEvent.get();
+        } finally {
+            Locale.setDefault(originalLocale);
+            TimeZone.setDefault(originalZone);
+        }
+
+        JsonNode ctx = new ObjectMapper().readTree(event).path("requestContext");
+        String time = ctx.path("time").asText();
+        assertTrue(time.matches("\\d{2}/[A-Z][a-z]{2}/\\d{4}:\\d{2}:\\d{2}:\\d{2} \\+0000"), time);
+        long timeMillis = ZonedDateTime.parse(time, ApiGatewayExecuteController.GATEWAY_REQUEST_TIME)
+                .toInstant().toEpochMilli();
+        long timeEpoch = ctx.path("timeEpoch").asLong();
+        assertTrue(timeEpoch >= timeMillis && timeEpoch - timeMillis < 2000, time + " vs " + timeEpoch);
     }
 }

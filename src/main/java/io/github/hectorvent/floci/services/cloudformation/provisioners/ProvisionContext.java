@@ -212,6 +212,20 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
         return stale;
     }
 
+    /**
+     * Whether {@code name} has the shape {@link #generatePhysicalName} gives this logical id: the
+     * same prefix and length, ending in a 12-character lowercase hex suffix.
+     */
+    public boolean isGeneratedPhysicalName(String name, String logicalId, int maxLength, boolean lowercase) {
+        String sample = generatePhysicalName(logicalId, maxLength, lowercase);
+        if (name == null || name.length() != sample.length()) {
+            return false;
+        }
+        int prefixLength = sample.length() - 12;
+        return name.startsWith(sample.substring(0, prefixLength))
+                && name.substring(prefixLength).matches("[0-9a-f]{12}");
+    }
+
     /** Generates a CloudFormation-style physical name: {@code <stack>-<logicalId>-<suffix>}. */
     public String generatePhysicalName(String logicalId, int maxLength, boolean lowercase) {
         String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);

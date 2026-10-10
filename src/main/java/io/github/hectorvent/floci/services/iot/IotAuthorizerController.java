@@ -1,11 +1,8 @@
 package io.github.hectorvent.floci.services.iot;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iot.model.IotAuthorizer;
 import jakarta.inject.Inject;
@@ -26,7 +23,8 @@ import jakarta.ws.rs.core.Response;
 /**
  * REST-JSON routes for AWS IoT custom authorizers: CreateAuthorizer, DescribeAuthorizer,
  * UpdateAuthorizer, DeleteAuthorizer, ListAuthorizers, SetDefaultAuthorizer,
- * DescribeDefaultAuthorizer and ClearDefaultAuthorizer, on the paths and shapes the AWS SDKs use.
+ * DescribeDefaultAuthorizer, ClearDefaultAuthorizer and TestInvokeAuthorizer, on the paths and
+ * shapes the AWS SDKs use.
  */
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -34,13 +32,15 @@ import jakarta.ws.rs.core.Response;
 public class IotAuthorizerController {
 
     private final IotAuthorizerService authorizerService;
+    private final IotCustomAuthorizer customAuthorizer;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public IotAuthorizerController(IotAuthorizerService authorizerService, RegionResolver regionResolver,
-                                   ObjectMapper objectMapper) {
+    public IotAuthorizerController(IotAuthorizerService authorizerService, IotCustomAuthorizer customAuthorizer,
+                                   RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.authorizerService = authorizerService;
+        this.customAuthorizer = customAuthorizer;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -50,7 +50,8 @@ public class IotAuthorizerController {
     public Response createAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName,
                                      String body) {
         return Response.ok(nameAndArn(authorizerService.createAuthorizer(
-                authorizerName, readJson(body), regionResolver.resolveRegion(headers)))).build();
+                authorizerName, IotRequestBody.read(objectMapper, body), regionResolver.resolveRegion(headers))))
+                .build();
     }
 
     @GET
@@ -64,7 +65,8 @@ public class IotAuthorizerController {
     public Response updateAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName,
                                      String body) {
         return Response.ok(nameAndArn(authorizerService.updateAuthorizer(
-                authorizerName, readJson(body), regionResolver.resolveRegion(headers)))).build();
+                authorizerName, IotRequestBody.read(objectMapper, body), regionResolver.resolveRegion(headers))))
+                .build();
     }
 
     @DELETE
@@ -73,6 +75,14 @@ public class IotAuthorizerController {
     public Response deleteAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName) {
         authorizerService.deleteAuthorizer(authorizerName, regionResolver.resolveRegion(headers));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/authorizer/{authorizerName}/test")
+    public Response testInvokeAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName,
+                                         String body) {
+        return Response.ok(customAuthorizer.testInvoke(authorizerName, IotRequestBody.read(objectMapper, body),
+                regionResolver.resolveRegion(headers))).build();
     }
 
     @GET
@@ -95,7 +105,8 @@ public class IotAuthorizerController {
     @Path("/default-authorizer")
     public Response setDefaultAuthorizer(@Context HttpHeaders headers, String body) {
         return Response.ok(nameAndArn(authorizerService.setDefaultAuthorizer(
-                readJson(body).path("authorizerName").asText(null), regionResolver.resolveRegion(headers)))).build();
+                IotRequestBody.read(objectMapper, body).path("authorizerName").asText(null),
+                regionResolver.resolveRegion(headers)))).build();
     }
 
     @GET
@@ -134,13 +145,5 @@ public class IotAuthorizerController {
         description.put("tokenKeyName", authorizer.getTokenKeyName());
         description.set("tokenSigningPublicKeys", objectMapper.valueToTree(authorizer.getTokenSigningPublicKeys()));
         return Response.ok(response).build();
-    }
-
-    private JsonNode readJson(String body) {
-        try {
-            return objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
-        }
     }
 }

@@ -2,12 +2,12 @@ package io.github.hectorvent.floci.services.rds;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
-import io.github.hectorvent.floci.services.rds.model.DbCluster;
-import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
-import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
+import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
@@ -26,6 +26,10 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -57,6 +61,110 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "CreateDBInstance, MultiAZ",
+            "CreateDBInstance, EnableIAMDatabaseAuthentication",
+            "CreateDBInstance, ManageMasterUserPassword",
+            "CreateDBInstance, StorageEncrypted",
+            "CreateDBInstance, CopyTagsToSnapshot",
+            "CreateDBInstance, EnablePerformanceInsights",
+            "ModifyDBInstance, MultiAZ",
+            "ModifyDBInstance, ManageMasterUserPassword",
+            "ModifyDBInstance, EnableIAMDatabaseAuthentication",
+            "ModifyDBInstance, CopyTagsToSnapshot",
+            "ModifyDBInstance, EnablePerformanceInsights"
+    })
+    void instanceBooleanFlagsRejectMalformedValuesBeforeServiceCalls(String action, String parameter) {
+        for (String invalid : List.of("yes", "", "not-a-boolean")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBInstanceIdentifier", "mydb");
+            p.putSingle("Engine", "postgres");
+            p.putSingle(parameter, invalid);
+
+            Response response = handler.handle(action, p);
+
+            assertEquals(400, response.getStatus());
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(body.contains(parameter + " must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void createInstanceBooleanFlagsPreserveValuesAndDefaults(String value) {
+        boolean enabled = Boolean.parseBoolean(value);
+        Boolean setting = value == null ? null : enabled;
+        ArgumentCaptor<DbInstanceSettings> settings = ArgumentCaptor.forClass(DbInstanceSettings.class);
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                isNull(), isNull(), isNull(), eq("db.t3.micro"), eq(20), eq(enabled),
+                isNull(), isNull(), isNull(), isNull(), eq(enabled), eq(enabled), isNull(),
+                eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), settings.capture(),
+                isNull(), isNull(), isNull())).thenReturn(makeInstance("mydb"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "mydb");
+        p.putSingle("Engine", "postgres");
+        if (value != null) {
+            for (String name : List.of("MultiAZ", "EnableIAMDatabaseAuthentication", "ManageMasterUserPassword",
+                    "StorageEncrypted", "CopyTagsToSnapshot", "EnablePerformanceInsights")) {
+                p.putSingle(name, value);
+            }
+        }
+
+        assertEquals(200, handler.handle("CreateDBInstance", p).getStatus());
+        assertEquals(setting, settings.getValue().storageEncrypted());
+        assertEquals(setting, settings.getValue().copyTagsToSnapshot());
+        assertEquals(setting, settings.getValue().performanceInsightsEnabled());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"true", "false", "TrUe", "FaLsE"})
+    void modifyInstanceBooleanFlagsPreserveValuesAndOmission(String value) {
+        Boolean enabled = value == null ? null : Boolean.parseBoolean(value);
+        ArgumentCaptor<DbInstanceSettings> settings = ArgumentCaptor.forClass(DbInstanceSettings.class);
+        when(service.modifyDbInstance(eq("mydb"), isNull(), eq(enabled), isNull(), any(), isNull(), any(),
+                isNull(), settings.capture(), isNull(), any(DbInstanceScalingChanges.class), isNull()))
+                .thenReturn(makeInstance("mydb"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "mydb");
+        // Encryption is not a ModifyDBInstance request member and remains ignored.
+        p.putSingle("StorageEncrypted", "yes");
+        if (value != null) {
+            for (String name : List.of("MultiAZ", "ManageMasterUserPassword", "EnableIAMDatabaseAuthentication",
+                    "CopyTagsToSnapshot", "EnablePerformanceInsights")) {
+                p.putSingle(name, value);
+            }
+        }
+
+        assertEquals(200, handler.handle("ModifyDBInstance", p).getStatus());
+        assertNull(settings.getValue().storageEncrypted());
+        assertEquals(enabled, settings.getValue().copyTagsToSnapshot());
+        assertEquals(enabled, settings.getValue().performanceInsightsEnabled());
+    }
+
+    @Test
+    void invalidAutoMinorVersionUpgradeIsRejectedBeforeCreateOrModify() {
+        for (String action : List.of("CreateDBInstance", "ModifyDBInstance")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBInstanceIdentifier", "invalid-boolean");
+            p.putSingle("Engine", "postgres");
+            p.putSingle("MasterUsername", "admin");
+            p.putSingle("MasterUserPassword", "password");
+            p.putSingle("AutoMinorVersionUpgrade", "invalid");
+
+            Response response = handler.handle(action, p);
+
+            assertEquals(400, response.getStatus());
+            assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(((String) response.getEntity()).contains("AutoMinorVersionUpgrade must be true or false."));
+            verifyNoInteractions(service);
+        }
     }
 
     @Test

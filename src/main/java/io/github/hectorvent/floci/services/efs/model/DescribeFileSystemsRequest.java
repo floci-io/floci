@@ -1,10 +1,8 @@
 package io.github.hectorvent.floci.services.efs.model;
 
-import io.quarkus.runtime.annotations.RegisterForReflection;
-
-import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
-
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.ws.rs.QueryParam;
 
 @JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)

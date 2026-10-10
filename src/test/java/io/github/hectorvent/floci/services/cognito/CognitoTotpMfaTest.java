@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -20,8 +22,6 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -119,7 +119,8 @@ class CognitoTotpMfaTest {
         AwsException disabled = assertThrows(AwsException.class,
                 () -> service.respondToAuthChallenge(client.getClientId(), "MFA_SETUP", verifiedSession,
                         Map.of("USERNAME", USERNAME)));
-        assertEquals("UserNotConfirmedException", disabled.getErrorCode());
+        assertEquals("NotAuthorizedException", disabled.getErrorCode());
+        assertEquals("User is disabled.", disabled.getMessage());
     }
 
     @Test
@@ -138,7 +139,8 @@ class CognitoTotpMfaTest {
         AwsException disabled = assertThrows(AwsException.class,
                 () -> service.respondToAuthChallenge(client.getClientId(), "SOFTWARE_TOKEN_MFA", challengeSession,
                         Map.of("USERNAME", USERNAME, "SOFTWARE_TOKEN_MFA_CODE", code)));
-        assertEquals("UserNotConfirmedException", disabled.getErrorCode());
+        assertEquals("NotAuthorizedException", disabled.getErrorCode());
+        assertEquals("User is disabled.", disabled.getMessage());
     }
 
     @Test

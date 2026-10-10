@@ -7,7 +7,6 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.ConfigurationSet;
 import software.amazon.awssdk.services.ses.model.ConfigurationSetDoesNotExistException;
@@ -15,7 +14,6 @@ import software.amazon.awssdk.services.ses.model.CreateConfigurationSetRequest;
 import software.amazon.awssdk.services.ses.model.DeleteConfigurationSetRequest;
 import software.amazon.awssdk.services.ses.model.DeliveryOptions;
 import software.amazon.awssdk.services.ses.model.PutConfigurationSetDeliveryOptionsRequest;
-
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetResponse;

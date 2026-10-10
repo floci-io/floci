@@ -112,6 +112,33 @@ class Ec2VpcCfnProvisionerTest {
     }
 
     @Test
+    void anUnchangedVpcWhoseTemplateCidrHasHostBitsIsReused() {
+        // The backend stores the canonical block, so the template's spelling must be compared in
+        // that form or every update would replace the VPC.
+        when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of()))
+                .thenReturn(List.of(vpc("vpc-existing", "10.0.0.0/16")));
+
+        StackResource r = provision("vpc-existing", """
+                {"CidrBlock": "10.0.0.5/16"}""");
+
+        verify(ec2, never()).createVpc(anyString(), anyString(), anyBoolean());
+        assertEquals("vpc-existing", r.getPhysicalId());
+    }
+
+    @Test
+    void aVpcSavedWithHostBitsBeforeCanonicalizationIsReused() {
+        // State persisted by an older build can still hold the template's spelling, host bits and all.
+        when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of()))
+                .thenReturn(List.of(vpc("vpc-existing", "10.0.0.5/16")));
+
+        StackResource r = provision("vpc-existing", """
+                {"CidrBlock": "10.0.0.5/16"}""");
+
+        verify(ec2, never()).createVpc(anyString(), anyString(), anyBoolean());
+        assertEquals("vpc-existing", r.getPhysicalId());
+    }
+
+    @Test
     void aChangedCidrBlockCreatesAReplacement() {
         when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of()))
                 .thenReturn(List.of(vpc("vpc-existing", "10.0.0.0/16")));

@@ -89,14 +89,32 @@ public class RegionResolver {
     /**
      * The region label the SigV4 credential scope names, unvalidated: {@code AccountContextFilter}
      * decides whether an unknown label is served or refused (see {@link #isKnownRegion}), and
-     * needs the raw label either way so the rejection can name it.
+     * needs the raw label either way so the rejection can name it. A {@code <partition>-global}
+     * pseudo-region is the one exception, see {@link #withoutPseudoRegion}.
      */
     public String resolveRegionFromAuth(String authorizationHeader) {
         if (authorizationHeader == null || authorizationHeader.isEmpty()) {
             return defaultRegion;
         }
         Matcher matcher = CREDENTIAL_REGION_PATTERN.matcher(authorizationHeader);
-        return matcher.find() ? matcher.group(1) : defaultRegion;
+        return matcher.find() ? withoutPseudoRegion(matcher.group(1)) : defaultRegion;
+    }
+
+    /**
+     * A {@code <partition>-global} pseudo-region named as a signing region becomes that
+     * partition's implicit global region ({@code aws-cn-global} is served as
+     * {@code cn-northwest-1}). AWS never signs with a pseudo-region: botocore's
+     * {@code endpoints.json} maps each to a real {@code credentialScope} region, so serving the
+     * label as-is would give a hand-rolled client a storage namespace and ARNs
+     * ({@code arn:aws-cn:sqs:aws-cn-global:...}) for a region that does not exist. Every other
+     * label, an unknown one included, is returned untouched.
+     */
+    static String withoutPseudoRegion(String label) {
+        if (label == null) {
+            return null;
+        }
+        String normalized = AwsPartitions.normalizeRegion(label);
+        return normalized.equals(label.trim().toLowerCase(Locale.ROOT)) ? label : normalized;
     }
 
     /**
@@ -122,7 +140,7 @@ public class RegionResolver {
         }
         String[] parts = credentialValue.split("/");
         if (parts.length >= 3) {
-            return parts[2];
+            return withoutPseudoRegion(parts[2]);
         }
         return defaultRegion;
     }
@@ -139,7 +157,7 @@ public class RegionResolver {
             return null;
         }
         Matcher matcher = CREDENTIAL_REGION_PATTERN.matcher(authorizationHeader);
-        return matcher.find() ? matcher.group(1) : null;
+        return matcher.find() ? withoutPseudoRegion(matcher.group(1)) : null;
     }
 
     /**
@@ -249,15 +267,18 @@ public class RegionResolver {
     }
 
     /**
-     * Mints a regional ARN, deriving the partition from {@code region}. A blank region means a
-     * global service, whose partition is the request's rather than something the region can
-     * say, so it routes to {@link #buildGlobalArn(String, String)}.
+     * Mints a regional ARN, deriving the partition from {@code region} the same way
+     * {@link #partitionForRegion} scopes the request, so a region no partition publishes (served
+     * only with {@code floci.partitions.allow-unknown-regions}) gets the deployment's partition
+     * here too rather than {@code aws}. A blank region means a global service, whose partition is
+     * the request's rather than something the region can say, so it routes to
+     * {@link #buildGlobalArn(String, String)}.
      */
     public String buildArn(String service, String region, String resource) {
         if (region == null || region.isBlank()) {
             return buildGlobalArn(service, resource);
         }
-        return AwsArnUtils.Arn.of(service, region, getAccountId(), resource).toString();
+        return new AwsArnUtils.Arn(partitionForRegion(region), service, region, getAccountId(), resource).toString();
     }
 
     /** Mints a regionless ARN ({@code arn:<partition>:iam::<account>:...}) in the request's partition. */

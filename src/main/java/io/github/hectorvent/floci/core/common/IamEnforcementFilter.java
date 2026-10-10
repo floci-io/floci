@@ -33,6 +33,7 @@ import org.jboss.logging.Logger;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -53,9 +54,12 @@ import java.util.regex.Pattern;
  *   <li>Enforcement is disabled (default)</li>
  *   <li>Access key is {@code "test"} (root/admin stand-in)</li>
  *   <li>Access key is a real credential this filter cannot map to policies, such as a session
- *       carrying no role ARN. An access key that exists nowhere is rejected, not bypassed.</li>
+ *       carrying no role ARN. An access key that exists nowhere or is inactive, an expired
+ *       session, and an {@code Authorization} header with no readable credential are rejected,
+ *       not bypassed.</li>
  *   <li>The action cannot be resolved (unknown mapping → permissive)</li>
- *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions</li>
+ *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions. The
+ *       key itself is still checked.</li>
  * </ul>
  *
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
@@ -79,6 +83,25 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /** AWS's wording for a credential it does not recognise. */
     private static final String INVALID_SECURITY_TOKEN = "The security token included in the request is invalid.";
+
+    /** S3's wording for an access key it does not recognise. */
+    private static final String S3_INVALID_ACCESS_KEY_ID =
+            "The AWS Access Key Id you provided does not exist in our records.";
+
+    /** AWS's wording for temporary credentials past their expiration. */
+    private static final String EXPIRED_TOKEN = "The security token included in the request has expired.";
+
+    /** S3's wording for the same. */
+    private static final String S3_EXPIRED_TOKEN = "The provided token has expired.";
+
+    /** AWS's wording for a signature that does not follow its format. */
+    private static final String INCOMPLETE_SIGNATURE = "The request signature does not conform to AWS standards.";
+
+    /** The IAM User Guide's "Troubleshoot SigV4" wording for an empty header. */
+    private static final String EMPTY_AUTHORIZATION = "Authorization header cannot be empty.";
+
+    /** The same guide's wording for a SigV4 header without its credential. */
+    private static final String MISSING_CREDENTIAL = "Authorization header requires 'Credential' parameter.";
 
     /** AWS's wording for a request that carries no credentials at all. */
     private static final String MISSING_AUTHENTICATION_TOKEN =
@@ -257,21 +280,29 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         String auth = ctx.getHeaderString("Authorization");
-        if (auth == null) {
+        boolean emptyHeader = auth != null && auth.isBlank();
+        if (auth == null || emptyHeader) {
             auth = requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
         }
         if (auth == null) {
-            refuseUnsignedManagementCall(ctx);
+            if (emptyHeader) {
+                // An empty header is not a missing one: "Authorization header cannot be empty" is
+                // among the failures the IAM User Guide's "Troubleshoot SigV4" lists.
+                refuseUnreadableCredential(ctx, "");
+            } else {
+                refuseUnsignedManagementCall(ctx);
+            }
             return;
         }
 
         String akid = accountResolver.extractAccessKeyId(auth);
-        if (akid == null || "test".equals(akid)) {
+        if ("test".equals(akid)) {
             return; // root bypass
         }
 
-        String rawScope = extractCredentialScope(auth);
+        String rawScope = akid == null ? null : extractCredentialScope(auth);
         if (rawScope == null) {
+            refuseUnreadableCredential(ctx, auth);
             return;
         }
         // Normalise signing aliases (s3express → s3) before anything keyed by scope runs:
@@ -285,11 +316,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             if (!"OPTIONS".equalsIgnoreCase(ctx.getMethod())
                     && iamService.presignedScope(akid).isPresent()) {
                 ctx.abortWith(accessDeniedForRequest("Unknown", credentialScope, ctx));
+                return;
             }
-            return; // unknown action → ALLOW for ordinary credentials (permissive)
-        }
-        if ("sts:GetCallerIdentity".equals(action)) {
-            return; // AWS returns caller identity even when an identity policy explicitly denies it
+            if (!isRpcCall(ctx)) {
+                return; // REST route no rule maps → ALLOW, as an unsigned REST request is
+            }
         }
 
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
@@ -297,41 +328,66 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 ? accountResolver.resolve(auth)
                 : requestContext.getAccountId();
 
+        // The key is checked before the action is used: an API call needs a usable key whatever it
+        // asks for, even one that needs no permission, such as GetCallerIdentity. A bare 12-digit
+        // account-id key is floci's account-root principal, never an IAM user's key.
+        boolean accountRootKey = akid.equals(accountId);
+        if (!accountRootKey && iamService.isInactiveAccessKey(akid)) {
+            LOG.debugv("Rejecting request signed with an inactive access key id {0}", akid);
+            ctx.abortWith(unrecognizedClientResponse(credentialScope, ctx));
+            return;
+        }
+        // Both lookups are asked about one moment, so a session that expires between them is not
+        // deleted and then answered as a key that exists nowhere.
+        Instant now = Instant.now();
+        if (iamService.isExpiredSession(akid, now)) {
+            LOG.debugv("Rejecting request signed with an expired session {0}", akid);
+            ctx.abortWith(expiredTokenResponse(credentialScope, ctx));
+            return;
+        }
+        CallerContext caller = iamService.resolveCallerContext(akid, now);
+        if (caller == null && !accountRootKey && !iamService.isKnownAccessKey(akid)) {
+            // No such credential anywhere. Enforcement is on and the caller is unauthenticated,
+            // so allowing it would hand an arbitrary access key id every permission there is.
+            LOG.debugv("Rejecting request signed with an unknown access key id {0}", akid);
+            ctx.abortWith(unrecognizedClientResponse(credentialScope, ctx));
+            return;
+        }
+        if (action == null) {
+            return; // unknown action → ALLOW for ordinary credentials (permissive)
+        }
+        if ("sts:GetCallerIdentity".equals(action)) {
+            return; // AWS returns caller identity even when an identity policy explicitly denies it
+        }
+
         // Service control policies from the caller's organization, when the Organizations
         // service is present and SCP enforcement is enabled. Resolved lazily via Instance
         // to avoid a hard IAM → Organizations dependency.
         //
-        // Resolved before resolveCallerContext because the account-root branch below needs to
-        // know whether a ceiling exists in order to decide between enforcing and bypassing. That
-        // costs an organization lookup on requests that then bypass; both flags are opt-in, and
-        // effectiveScpLevels returns null immediately when SCP enforcement is off.
+        // Resolved before the account-root branch below, which needs to know whether a ceiling
+        // exists in order to decide between enforcing and bypassing. That costs an organization
+        // lookup on requests that then bypass; both flags are opt-in, and effectiveScpLevels
+        // returns null immediately when SCP enforcement is off.
         List<List<String>> scpLevels = scpProvider.isResolvable()
                 ? scpProvider.get().effectiveScpLevels(accountId)
                 : null;
 
         boolean accountRootPrincipal = false;
-        CallerContext caller = iamService.resolveCallerContext(akid);
         if (caller == null) {
+            if (!accountRootKey) {
+                // A real credential this filter cannot map to policies, such as a session Floci mints
+                // for its own presigned URLs with no policy to scope it. Denying it would reject an
+                // authenticated caller.
+                return;
+            }
             // A bare 12-digit account-id key is floci's account-root principal: not a registered
             // IAM identity (resolveCallerContext → null), but in AWS the account root is still
             // bounded by SCPs. Enforce them when the account actually has an SCP ceiling.
-            if (akid.equals(accountId)) {
-                if (scpLevels == null) {
-                    return; // account root with no ceiling → nothing to enforce
-                }
-                caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
-                accountRootPrincipal = true;
-            } else if (iamService.isKnownAccessKey(akid)) {
-                // A real credential this filter cannot map to policies, such as a session with no
-                // role ARN. Denying it would reject an authenticated caller, so it stays allowed.
-                return;
-            } else {
-                // No such credential anywhere. Enforcement is on and the caller is unauthenticated,
-                // so allowing it would hand an arbitrary access key id every permission there is.
-                LOG.debugv("Rejecting request signed with an unknown access key id {0}", akid);
-                ctx.abortWith(unrecognizedClientResponse(credentialScope, ctx.getMediaType()));
-                return;
+            if (scpLevels == null) {
+                return; // account root with no ceiling → nothing to enforce
             }
+            caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
+            accountRootPrincipal = true;
         }
         if (scpLevels != null) {
             caller = caller.withScpLevels(scpLevels);
@@ -479,22 +535,102 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return new ResolvedAuthorization(servingScope, servingScope + ":" + queryAction);
         }
 
-        boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
-        if (rest && resourceInfo != null && resourceInfo.getResourceClass() != null) {
-            ServiceDescriptor descriptor = catalog.byResourceClass(resourceInfo.getResourceClass()).orElse(null);
-            if (descriptor != null) {
-                ResolvedAuthorization routeAuthorization = resolveRestAuthorization(descriptor, ctx);
-                if (routeAuthorization != null) {
-                    return routeAuthorization;
-                }
-            }
+        ResolvedAuthorization routeAuthorization = restRouteAuthorization(ctx);
+        if (routeAuthorization != null) {
+            return routeAuthorization;
         }
 
         // A REST request is authorized by its route alone, never by an X-Amz-Target it carries.
+        boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
         String servingScope = servingCredentialScope(claimedScope, ctx);
         return new ResolvedAuthorization(servingScope, rest
                 ? actionRegistry.resolveRoute(servingScope, ctx)
                 : actionRegistry.resolve(servingScope, ctx));
+    }
+
+    /**
+     * The action a REST request's matched route maps to, read from the route alone. Null for any
+     * other request, and for a route no rule maps.
+     */
+    private ResolvedAuthorization restRouteAuthorization(ContainerRequestContext ctx) {
+        if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
+                || claim.protocol() != WireProtocol.REST
+                || resourceInfo == null || resourceInfo.getResourceClass() == null) {
+            return null;
+        }
+        return catalog.byResourceClass(resourceInfo.getResourceClass())
+                .map(descriptor -> resolveRestAuthorization(descriptor, ctx))
+                .orElse(null);
+    }
+
+    /**
+     * Refuses a request whose {@code Authorization} header this filter cannot read a credential
+     * from: an empty one, one naming no access key (a Bearer token, SigV2, a credential without the
+     * SigV4 scheme or without its key, see {@link AccountResolver#extractAccessKeyId}), or a SigV4
+     * credential scope missing a part, such as its {@code aws4_request} terminator. With no key or
+     * no scope there is nothing to check, so letting it through would skip enforcement, the key
+     * checks included, for any action. The IAM User Guide's "Troubleshoot SigV4" lists these
+     * failures (an empty header, a missing credential, a header that does not start with an
+     * algorithm name) under {@code IncompleteSignatureException}. The other services' common errors
+     * call it {@code IncompleteSignature}, and S3's error list {@code AuthorizationHeaderMalformed},
+     * or {@code AuthorizationQueryParametersError} for a presigned URL, all 400.
+     *
+     * <p>Otherwise it is treated as an unsigned request is. An operation AWS serves without
+     * credentials is left alone. A REST request is refused only when it claims SigV4 and its route
+     * maps to an action: AppSync, CodeArtifact's package endpoints, Identity Store's SCIM endpoint
+     * and API Gateway's authorizers take Bearer and Basic tokens of their own, and this filter
+     * cannot tell the API Gateway execute path, Lambda function URLs and the other paths it sees
+     * that are unsigned by design from the rest. A SigV4a scope, which has no region segment, does
+     * not get here: {@link AccountContextFilter} reads its service name as the region and refuses
+     * it, unless unknown regions are allowed.
+     */
+    private void refuseUnreadableCredential(ContainerRequestContext ctx, String auth) {
+        if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.protocol() != WireProtocol.REST
+                && servesWithoutCredentials(claim, ctx)) {
+            return;
+        }
+        ResolvedAuthorization routeAuthorization = claimsSigV4(auth) ? restRouteAuthorization(ctx) : null;
+        if (routeAuthorization == null && !isRpcCall(ctx)) {
+            return;
+        }
+        LOG.debugv("Rejecting a {0} request whose Authorization header carries no readable credential",
+                ctx.getMethod());
+        ctx.abortWith(incompleteSignatureResponse(
+                routeAuthorization == null ? null : routeAuthorization.credentialScope(), ctx,
+                incompleteSignatureMessage(auth)));
+    }
+
+    /**
+     * The guide's own wording where it gives one: for an empty header, and for a SigV4 header
+     * without its credential. It gives none for the other shapes, which get the common errors' text.
+     */
+    private static String incompleteSignatureMessage(String auth) {
+        if (auth.isEmpty()) {
+            return EMPTY_AUTHORIZATION;
+        }
+        if (auth.startsWith("AWS4-") && !auth.contains("Credential=")) {
+            return MISSING_CREDENTIAL;
+        }
+        return INCOMPLETE_SIGNATURE;
+    }
+
+    /**
+     * A SigV4 {@code Authorization} header, or the {@code Credential=} string
+     * {@link #requestAuthorization} builds from a presigned URL.
+     */
+    private static boolean claimsSigV4(String auth) {
+        return auth.startsWith("AWS4-") || auth.contains("Credential=");
+    }
+
+    /**
+     * Whether this is a Query, JSON or CBOR call. Only an AWS API client sends one, whereas a REST
+     * request may be one of the unsigned-by-design paths this filter also sees.
+     */
+    private static boolean isRpcCall(ContainerRequestContext ctx) {
+        return IamActionRegistry.isQueryRequest(ctx)
+                || ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                        && claim.protocol() != WireProtocol.REST;
     }
 
     private ResolvedAuthorization resolveRestAuthorization(ServiceDescriptor descriptor,
@@ -635,7 +771,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * <p>Returns normally when the action is allowed, or when enforcement does not
      * apply to this request (enforcement disabled, no Authorization header, root or
      * unknown access key). Throws {@link AwsException} with the same AccessDenied
-     * shape as {@link #filter} when the caller's policies deny the action.
+     * shape as {@link #filter} when the caller's policies deny the action, and with the
+     * codes {@link #filter} answers when the access key is inactive or the session has expired.
      *
      * <p>The account used for policy evaluation is always re-resolved from {@code akid} here
      * (see {@link #resolveCredentialAccountId}) rather than trusted from {@link RequestContext},
@@ -712,11 +849,28 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         String previousAccountId = requestContext.getAccountId();
         requestContext.setAccountId(accountId);
         try {
+            // A presigned POST carries its credential only in the form body, which filter() never
+            // sees, so a key IAM holds but that can no longer be used is refused here as filter()
+            // refuses it. Otherwise an inactive key would act with its user's policies, and
+            // resolveCallerContext would delete an expired session, which would then read as a key
+            // that exists nowhere. For a second resource of a request filter() has seen, the key
+            // has already passed these checks.
+            boolean accountRootKey = akid.equals(accountId);
+            if (!accountRootKey && iamService.isInactiveAccessKey(akid)) {
+                throw unrecognizedClientException(credentialScope);
+            }
+            // One moment for both lookups, as in filter(): a session expiring between them would
+            // otherwise be deleted and then allowed below as a credential with no context.
+            Instant now = Instant.now();
+            if (iamService.isExpiredSession(akid, now)) {
+                throw expiredTokenException(credentialScope);
+            }
+
             List<List<String>> scpLevels = scpProvider.isResolvable()
                     ? scpProvider.get().effectiveScpLevels(accountId) : null;
 
             boolean accountRootPrincipal = false;
-            CallerContext caller = iamService.resolveCallerContext(akid);
+            CallerContext caller = iamService.resolveCallerContext(akid, now);
             if (caller == null) {
                 // No unknown-key rejection here, unlike filter(), and none is needed. For a second
                 // resource of a request filter() has seen (CopyObject's source, RotateSecret's
@@ -725,7 +879,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 // presigned POST carries its credential only in the form body, which filter() never
                 // sees: an unknown key there is refused by S3's presigned-POST signature check when
                 // S3 auth enforcement is on, and otherwise uploads as an unsigned request would.
-                if (scpLevels == null || !akid.equals(accountId)) {
+                if (scpLevels == null || !accountRootKey) {
                     return;
                 }
                 caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
@@ -943,7 +1097,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return authorizationHeader;
         }
         String credential = queryParameters == null ? null : queryParameters.getFirst("X-Amz-Credential");
-        return credential == null || credential.isBlank() ? null : "Credential=" + credential;
+        if (credential == null || credential.isBlank()) {
+            return null;
+        }
+        // The scheme makes AccountResolver recognise a credential that did not come from the header.
+        return AccountResolver.SIGV4_SCHEME + " Credential=" + credential;
     }
 
     /**
@@ -990,6 +1148,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      *   <li>{@code application/x-www-form-urlencoded} body → AWS Query
      *       {@code <ErrorResponse>...</ErrorResponse>} (IAM/STS/EC2/SQS/SNS/...)</li>
      *   <li>JSON 1.x: JSON with HTTP 400; REST-JSON: JSON with HTTP 403</li>
+     *   <li>CBOR: the request's own encoding with HTTP 403, from {@link #accessDeniedForRequest},
+     *       which has the request to read it from</li>
      * </ul>
      */
     // Package-private for unit testing.
@@ -1007,14 +1167,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     private static Response accessDeniedForRequest(String action, String credentialScope,
                                                  ContainerRequestContext ctx, String resourceArn) {
-        WireProtocol protocol = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
-                ? claim.protocol() : WireProtocol.REST;
+        WireProtocol protocol = claimedProtocol(ctx);
+        if (isCbor(protocol)) {
+            // 403, the status the Kinesis and CloudWatch common errors give AccessDeniedException.
+            return cborError(ctx, "AccessDeniedException", accessDeniedMessage(action), 403);
+        }
         return accessDeniedResponse(action, credentialScope, ctx.getMediaType(), resourceArn, protocol);
+    }
+
+    private static String accessDeniedMessage(String action) {
+        return "User is not authorized to perform: " + action;
     }
 
     static Response accessDeniedResponse(String action, String credentialScope, MediaType requestMediaType,
                                          String resourceArn, WireProtocol protocol) {
-        String message = "User is not authorized to perform: " + action;
+        String message = accessDeniedMessage(action);
         if ("s3".equals(credentialScope)) {
             String resourcePath = formatS3ResourcePath(resourceArn);
             return s3XmlAccessDenied(message, resourcePath);
@@ -1045,6 +1212,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     private static Response queryXmlError(String code, String message) {
+        return queryXmlError(code, message, 403);
+    }
+
+    private static Response queryXmlError(String code, String message, int status) {
         String xml = new XmlBuilder()
                 .start("ErrorResponse")
                   .start("Error")
@@ -1055,22 +1226,22 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                   .elem("RequestId", UUID.randomUUID().toString())
                 .end("ErrorResponse")
                 .build();
-        return Response.status(403).type(MediaType.APPLICATION_XML).entity(xml).build();
+        return Response.status(status).type(MediaType.APPLICATION_XML).entity(xml).build();
     }
 
     private static Response s3XmlAccessDenied(String message) {
         return s3XmlAccessDenied(message, null);
     }
 
-    private static Response s3XmlError(String code, String message) {
-        return s3Xml(code, message, null);
+    private static Response s3XmlError(String code, String message, int status) {
+        return s3Xml(code, message, null, status);
     }
 
     private static Response s3XmlAccessDenied(String message, String resourcePath) {
-        return s3Xml("AccessDenied", message, resourcePath);
+        return s3Xml("AccessDenied", message, resourcePath, 403);
     }
 
-    private static Response s3Xml(String code, String message, String resourcePath) {
+    private static Response s3Xml(String code, String message, String resourcePath, int status) {
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")
@@ -1081,7 +1252,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         xml.elem("RequestId", UUID.randomUUID().toString())
            .end("Error");
-        return Response.status(403).type(MediaType.APPLICATION_XML).entity(xml.build()).build();
+        return Response.status(status).type(MediaType.APPLICATION_XML).entity(xml.build()).build();
     }
 
     /**
@@ -1094,16 +1265,66 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * {@code UnrecognizedClientException}, the only place botocore models it (CloudWatch Logs)
      * and what the API Gateway execute path already returns.
      */
-    static Response unrecognizedClientResponse(String credentialScope, MediaType requestMediaType) {
+    static Response unrecognizedClientResponse(String credentialScope, ContainerRequestContext ctx) {
         if ("s3".equals(credentialScope)) {
-            return s3XmlError("InvalidAccessKeyId",
-                    "The AWS Access Key Id you provided does not exist in our records.");
+            return s3XmlError("InvalidAccessKeyId", S3_INVALID_ACCESS_KEY_ID, 403);
         }
-        if (isFormEncoded(requestMediaType)) {
-            return queryXmlError("InvalidClientTokenId", INVALID_SECURITY_TOKEN);
+        return protocolError(claimedProtocol(ctx), ctx, "InvalidClientTokenId", "UnrecognizedClientException",
+                INVALID_SECURITY_TOKEN, 403);
+    }
+
+    /** {@link #unrecognizedClientResponse} for a caller that renders the error itself. */
+    private static AwsException unrecognizedClientException(String credentialScope) {
+        return "s3".equals(credentialScope)
+                ? new AwsException("InvalidAccessKeyId", S3_INVALID_ACCESS_KEY_ID, 403)
+                : new AwsException("UnrecognizedClientException", INVALID_SECURITY_TOKEN, 403);
+    }
+
+    /**
+     * The response for a session whose temporary credentials have expired. S3's error list names it
+     * {@code ExpiredToken}, 400. The other services' common errors name it
+     * {@code ExpiredTokenException}, 403, under the same name for Query services as for JSON ones.
+     */
+    static Response expiredTokenResponse(String credentialScope, ContainerRequestContext ctx) {
+        if ("s3".equals(credentialScope)) {
+            return s3XmlError("ExpiredToken", S3_EXPIRED_TOKEN, 400);
         }
-        String body = "{\"__type\":\"UnrecognizedClientException\",\"message\":\"" + INVALID_SECURITY_TOKEN + "\"}";
-        return Response.status(403).type(MediaType.APPLICATION_JSON).entity(body).build();
+        return protocolError(claimedProtocol(ctx), ctx, "ExpiredTokenException", "ExpiredTokenException",
+                EXPIRED_TOKEN, 403);
+    }
+
+    /** {@link #expiredTokenResponse} for a caller that renders the error itself. */
+    private static AwsException expiredTokenException(String credentialScope) {
+        return "s3".equals(credentialScope)
+                ? new AwsException("ExpiredToken", S3_EXPIRED_TOKEN, 400)
+                : new AwsException("ExpiredTokenException", EXPIRED_TOKEN, 403);
+    }
+
+    /**
+     * The response for a signature that does not follow AWS's format, from
+     * {@link #refuseUnreadableCredential}. S3 answers with {@code AuthorizationHeaderMalformed}
+     * and the wording {@code S3HeaderSignatureFilter} uses for a mal-formed credential, so S3 answers
+     * the same whichever check catches it. A presigned URL sends no header: its credential is the
+     * {@code X-Amz-Credential} parameter, and S3 answers a mal-formed one with
+     * {@code AuthorizationQueryParametersError}. Other services answer with
+     * {@code IncompleteSignature}, spelled with the {@code Exception} suffix outside Query as the
+     * other codes here are, and the {@code message} the caller picked. All 400.
+     */
+    static Response incompleteSignatureResponse(String credentialScope, ContainerRequestContext ctx,
+                                                String message) {
+        if ("s3".equals(credentialScope)) {
+            String header = ctx.getHeaderString("Authorization");
+            if (header == null || header.isBlank()) {
+                return s3XmlError("AuthorizationQueryParametersError", "Error parsing the X-Amz-Credential "
+                        + "parameter; the Credential is mal-formed; expecting "
+                        + "\"<YOUR-AKID>/YYYYMMDD/REGION/SERVICE/aws4_request\".", 400);
+            }
+            return s3XmlError("AuthorizationHeaderMalformed", "The authorization header is malformed; "
+                    + "the Credential is mal-formed; expecting "
+                    + "\"<YOUR-AKID>/YYYYMMDD/REGION/SERVICE/aws4_request\".", 400);
+        }
+        return protocolError(claimedProtocol(ctx), ctx, "IncompleteSignature", "IncompleteSignatureException",
+                message, 400);
     }
 
     /**
@@ -1161,27 +1382,56 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * returns for the same failure on its own path.
      */
     static Response missingAuthenticationTokenResponse(WireProtocol protocol, ContainerRequestContext ctx) {
-        if (protocol == WireProtocol.RPCV2_CBOR || protocol == WireProtocol.AWS_CBOR_TARGET) {
-            // A CBOR client cannot read a JSON body, so the rejection has to arrive in the encoding
-            // the request used, the same shape the rpcv2 controller returns for its own errors.
-            String requestContentType = ctx.getHeaderString(AwsCborContentTypeFilter.ORIGINAL_CONTENT_TYPE_HEADER);
-            if (requestContentType == null) {
-                requestContentType = ctx.getHeaderString("Content-Type");
-            }
-            return CborErrorResponses.of(
-                    new AwsException("MissingAuthenticationTokenException", MISSING_AUTHENTICATION_TOKEN, 403),
-                    CborErrorResponses.mediaTypeFor(requestContentType));
+        return protocolError(protocol, ctx, "MissingAuthenticationToken", "MissingAuthenticationTokenException",
+                MISSING_AUTHENTICATION_TOKEN, 403);
+    }
+
+    private static WireProtocol claimedProtocol(ContainerRequestContext ctx) {
+        return ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                ? claim.protocol() : WireProtocol.REST;
+    }
+
+    /**
+     * An authentication failure outside S3, in the shape the caller's protocol reads: a Query
+     * {@code ErrorResponse} for a form-encoded request, the request's own encoding for a CBOR
+     * call, and JSON otherwise. Query names some failures without the {@code Exception} suffix, and
+     * some differently altogether, so it takes its own code.
+     */
+    private static Response protocolError(WireProtocol protocol, ContainerRequestContext ctx, String queryCode,
+                                          String code, String message, int status) {
+        if (isCbor(protocol)) {
+            return cborError(ctx, code, message, status);
         }
         if (isFormEncoded(ctx.getMediaType())) {
-            return queryXmlError("MissingAuthenticationToken", MISSING_AUTHENTICATION_TOKEN);
+            return queryXmlError(queryCode, message, status);
         }
-        String body = "{\"__type\":\"MissingAuthenticationTokenException\",\"message\":\""
-                + MISSING_AUTHENTICATION_TOKEN + "\"}";
-        return Response.status(403).type(MediaType.APPLICATION_JSON).entity(body).build();
+        return jsonError(code, message, status);
+    }
+
+    private static boolean isCbor(WireProtocol protocol) {
+        return protocol == WireProtocol.RPCV2_CBOR || protocol == WireProtocol.AWS_CBOR_TARGET;
+    }
+
+    /**
+     * A CBOR client cannot read a JSON body, so a rejection has to arrive in the encoding the
+     * request used, the same shape the rpcv2 controller returns for its own errors.
+     */
+    private static Response cborError(ContainerRequestContext ctx, String code, String message, int status) {
+        String requestContentType = ctx.getHeaderString(AwsCborContentTypeFilter.ORIGINAL_CONTENT_TYPE_HEADER);
+        if (requestContentType == null) {
+            requestContentType = ctx.getHeaderString("Content-Type");
+        }
+        return CborErrorResponses.of(new AwsException(code, message, status),
+                CborErrorResponses.mediaTypeFor(requestContentType));
     }
 
     private static Response jsonAccessDenied(String message, int status) {
-        String body = "{\"__type\":\"AccessDeniedException\",\"message\":\"" + message + "\"}";
-        return Response.status(status).type(MediaType.APPLICATION_JSON).entity(body).build();
+        return jsonError("AccessDeniedException", message, status);
+    }
+
+    /** A JSON error in the shape {@link AwsExceptionMapper} gives every other JSON failure. */
+    private static Response jsonError(String code, String message, int status) {
+        return Response.status(status).type(MediaType.APPLICATION_JSON)
+                .entity(new AwsErrorResponse(code, message)).build();
     }
 }

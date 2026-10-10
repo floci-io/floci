@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.route53.model.AliasTarget;
+import io.github.hectorvent.floci.services.route53.model.HealthCheck;
+import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
@@ -364,5 +366,41 @@ class Route53ServiceTest {
         assertFalse(service.isCoveredByPrivateZone("public.com"));
         assertFalse(service.isCoveredByPrivateZone("othercorp.internal"));
         assertFalse(service.isCoveredByPrivateZone("example.org"));
+    }
+
+    private static HealthCheckConfig httpsCheck(String path) {
+        HealthCheckConfig cfg = new HealthCheckConfig();
+        cfg.setType("HTTPS");
+        cfg.setFullyQualifiedDomainName("example.com");
+        cfg.setPort(443);
+        cfg.setResourcePath(path);
+        cfg.setRequestInterval(30);
+        cfg.setFailureThreshold(3);
+        return cfg;
+    }
+
+    // Catches: an SDK retry of CreateHealthCheck (same caller reference, same settings) refused with
+    // HealthCheckAlreadyExists, which fails a Terraform or OpenTofu apply.
+    @Test
+    void createHealthCheck_retryWithSameReferenceAndSettings_returnsTheExistingHealthCheck() {
+        Route53Service service = newService();
+        HealthCheck first = service.createHealthCheck("tf-ref-1", httpsCheck("/health"), "ResourcePath=/health");
+
+        HealthCheck retried = service.createHealthCheck("tf-ref-1", httpsCheck("/health"), "ResourcePath=/health");
+
+        assertEquals(first.getId(), retried.getId());
+        assertThat(service.listHealthChecks(null, 0), hasSize(1));
+    }
+
+    @Test
+    void createHealthCheck_sameReferenceWithDifferentSettings_isHealthCheckAlreadyExists() {
+        Route53Service service = newService();
+        service.createHealthCheck("tf-ref-2", httpsCheck("/health"), "ResourcePath=/health");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createHealthCheck("tf-ref-2", httpsCheck("/other"), "ResourcePath=/other"));
+
+        assertEquals("HealthCheckAlreadyExists", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
     }
 }

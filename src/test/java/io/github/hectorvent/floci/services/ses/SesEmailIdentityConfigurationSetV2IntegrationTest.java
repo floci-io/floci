@@ -388,7 +388,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
                 .body("{\"EmailIdentity\":\"" + id + "\",\"ConfigurationSetName\":\"   \"}")
         .when().post("/v2/email/identities").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
-                .body("message", equalTo("ConfigurationSetName is required."));
+                .body("message", equalTo("Invalid configuration set name <   >: only alphanumeric ASCII characters, '_', and '-' are allowed."));
         given().header("Authorization", SES_AUTH)
         .when().get("/v2/email/identities/" + id).then().statusCode(404);
     }

@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.datasync.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
-
 import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;

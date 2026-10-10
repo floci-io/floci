@@ -196,6 +196,33 @@ class S3ChecksumTest {
     }
 
     @Test
+    void calculatorFedInPiecesMatchesTheOneShotChecksumForEveryAlgorithm() {
+        Random random = new Random(5064);
+        byte[] data = new byte[300_007];
+        random.nextBytes(data);
+        int[] pieces = {1, 7, 8, 9, 1023, 65_537, 3, 0, 233_419};
+        for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
+            S3Checksum.Calculator calculator = S3Checksum.calculator(algorithm);
+            int offset = 0;
+            for (int piece : pieces) {
+                calculator.update(data, offset, piece);
+                offset += piece;
+            }
+            assertEquals(data.length, offset, "test setup: the pieces cover the data");
+
+            S3Checksum fullObject = calculator.fullObject();
+
+            assertEquals(algorithm.compute(data), fullObject.valueFor(algorithm), algorithm.name());
+            assertEquals(ChecksumType.FULL_OBJECT, fullObject.getChecksumType());
+        }
+    }
+
+    @Test
+    void calculatorWithoutADeclaredAlgorithmIsCrc64Nvme() {
+        assertEquals(ChecksumAlgorithm.CRC64NVME, S3Checksum.calculator(null).algorithm());
+    }
+
+    @Test
     void objectAttributesViewDropsTheSuffixOfCompositeValuesOnly() {
         S3Checksum composite = S3Checksum.composite(ChecksumAlgorithm.CRC32, List.of("W0QpDQ==", "anCi7Q=="));
         assertEquals("R/nORQ==-2", composite.getChecksumCRC32());
@@ -228,6 +255,13 @@ class S3ChecksumTest {
         assertEquals("InvalidRequest", knownButUnsupported.getErrorCode());
         AwsException unknown = assertThrows(AwsException.class, () -> ChecksumAlgorithm.fromWireValue("MURMUR3"));
         assertEquals("InvalidArgument", unknown.getErrorCode());
+
+        assertEquals(ChecksumAlgorithm.CRC32, ChecksumAlgorithm.fromChecksumHeader("x-amz-checksum-crc32"));
+        assertEquals(ChecksumAlgorithm.SHA256, ChecksumAlgorithm.fromChecksumHeader("X-Amz-Checksum-SHA256"));
+        assertNull(ChecksumAlgorithm.fromChecksumHeader("x-amz-checksum-sha512"));
+        assertNull(ChecksumAlgorithm.fromChecksumHeader("x-amz-checksum-murmur3"));
+        assertNull(ChecksumAlgorithm.fromChecksumHeader("x-amz-trailer-signature"));
+        assertNull(ChecksumAlgorithm.fromChecksumHeader(null));
     }
 
     @Test

@@ -243,6 +243,17 @@ class GlobalSignOutIntegrationTest {
                 "GlobalSignOut with no AccessToken must fail with InvalidParameterException, body was: " + body);
     }
 
+    @Test
+    @Order(13)
+    void globalSignOutRejectsExplicitNullAccessToken() throws Exception {
+        JsonNode body = cognitoJsonAny("GlobalSignOut", """
+                {"AccessToken":null}
+                """);
+
+        assertEquals("InvalidParameterException", body.path("__type").asText(),
+                "GlobalSignOut with a null AccessToken must fail with InvalidParameterException, body was: " + body);
+    }
+
     /** Build an unsigned JWT-shaped access token — the emulator decodes the payload without verifying the signature. */
     private static String forgeAccessToken(String poolId, String username) {
         long nowSeconds = System.currentTimeMillis() / 1000L;

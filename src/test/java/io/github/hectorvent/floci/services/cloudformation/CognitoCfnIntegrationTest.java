@@ -513,7 +513,7 @@ class CognitoCfnIntegrationTest {
     private static void assertDomainIsGone(String domain) {
         cognitoAction("DescribeUserPoolDomain", "{\"Domain\": \"" + domain + "\"}")
             .then()
-            .statusCode(404)
+            .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 

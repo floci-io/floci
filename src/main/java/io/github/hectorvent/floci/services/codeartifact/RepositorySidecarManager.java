@@ -56,4 +56,24 @@ public interface RepositorySidecarManager {
      */
     Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version, String assetName);
+
+    /**
+     * {@code true} when this sidecar holds at least one version of the named package. {@code namespace}
+     * follows the same convention as {@link #fetchPackageVersionAsset}: {@code null} for a format that
+     * has none. A repository that was never started for this format holds nothing, so it is {@code false}.
+     */
+    boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName);
+
+    /**
+     * Deletes every version of the named package from this sidecar's own backing storage. Every
+     * sidecar Floci currently backs (Reposilite, Verdaccio, pypiserver) can do this; the default
+     * throws {@link UnsupportedOperationException} rather than silently leaving the package in place
+     * or claiming a success it cannot back up, for a future format whose sidecar genuinely cannot. An
+     * implementation that can delete overrides this.
+     */
+    default void deletePackage(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName) {
+        throw new UnsupportedOperationException(format() + " packages cannot be deleted through this sidecar");
+    }
 }

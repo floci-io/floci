@@ -22,9 +22,9 @@ import jakarta.ws.rs.core.Response;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.function.Function;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * Translates the SWF JSON 1.0 wire protocol to and from {@link SwfService}.

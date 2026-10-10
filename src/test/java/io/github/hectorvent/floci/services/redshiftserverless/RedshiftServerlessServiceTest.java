@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -11,11 +12,15 @@ import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
+import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +29,7 @@ import java.util.UUID;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -34,6 +40,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -52,6 +59,9 @@ class RedshiftServerlessServiceTest {
     private RedshiftServerlessRuntime runtime;
     private int nextPort;
 
+    @TempDir
+    Path dumpDir;
+
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
     void setUp() {
@@ -67,7 +77,11 @@ class RedshiftServerlessServiceTest {
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-workgroups.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) workgroupStore);
 
+        when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-snapshots.json"),
+                any(TypeReference.class))).thenReturn(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+
         RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
         when(regionResolver.buildArn(eq("redshift-serverless"), any(String.class), any(String.class)))
                 .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
                         + invocation.getArgument(1, String.class) + ":" + ACCOUNT_ID + ":"
@@ -80,7 +94,9 @@ class RedshiftServerlessServiceTest {
         when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
                 any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
                 .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
-        service = new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime);
+        EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(config.storage().persistentPath()).thenReturn(dumpDir.toString());
+        service = new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
     }
 
     @Test
@@ -789,6 +805,218 @@ class RedshiftServerlessServiceTest {
         service.clear();
 
         verify(runtime).stop(ACCOUNT_ID, REGION, "clr-wg");
+    }
+
+    @Test
+    void listSnapshotsFiltersByNamespace() {
+        create("snap-a");
+        create("snap-b");
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("snap-one", "snap-a", null, null, REGION);
+        service.createSnapshot("snap-two", "snap-b", null, null, REGION);
+
+        assertEquals("AVAILABLE", snapshot.getStatus());
+        assertEquals(ACCOUNT_ID, snapshot.getOwnerAccount());
+        assertEquals(List.of("snap-one"), service.listSnapshots("snap-a", null, null, null, null, REGION, null, null).items().stream()
+                .map(RedshiftServerlessSnapshot::getSnapshotName).toList());
+        assertEquals(2, service.listSnapshots(null, null, null, null, null, REGION, null, null).items().size());
+
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.createSnapshot("snap-one", "snap-a", null, null, REGION));
+        assertEquals("ConflictException", conflict.getErrorCode());
+    }
+
+    @Test
+    void restoreRequiresAnExistingNamespaceWorkgroupAndSnapshot() {
+        create("restore-ns");
+        service.createSnapshot("restore-snap", "restore-ns", null, null, REGION);
+
+        AwsException noWorkgroup = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot("restore-ns", "restore-wg", "restore-snap", null, REGION));
+        assertEquals("ResourceNotFoundException", noWorkgroup.getErrorCode());
+
+        createWorkgroup("restore-wg", "restore-ns");
+        RedshiftServerlessService.RestoreResult restored =
+                service.restoreFromSnapshot("restore-ns", "restore-wg", "restore-snap", null, REGION);
+        assertEquals("AVAILABLE", restored.namespace().getStatus());
+        assertEquals("restore-snap", restored.snapshot().getSnapshotName());
+
+        AwsException noSnapshot = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot("restore-ns", "restore-wg", "missing-snap", null, REGION));
+        assertEquals("ResourceNotFoundException", noSnapshot.getErrorCode());
+    }
+
+    @Test
+    void restoreRejectsAWorkgroupOfAnotherNamespace() {
+        create("rest-a");
+        create("rest-b");
+        service.createSnapshot("rest-snap", "rest-a", null, null, REGION);
+        createWorkgroup("rest-b-wg", "rest-b");
+
+        AwsException mismatch = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot("rest-a", "rest-b-wg", "rest-snap", null, REGION));
+        assertEquals("ValidationException", mismatch.getErrorCode());
+    }
+
+    @Test
+    void snapshotNameFromArnRejectsAnArnOutsideThisAccountAndRegion() {
+        create("arn-ns");
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("arn-snap", "arn-ns", null, null, REGION);
+
+        assertEquals("arn-snap", service.snapshotNameFromArn(snapshot.getSnapshotArn(), REGION));
+        for (String foreign : List.of(
+                "arn:aws:redshift-serverless:eu-west-1:" + ACCOUNT_ID + ":snapshot/arn-snap",
+                "arn:aws:redshift-serverless:us-east-1:999999999999:snapshot/arn-snap",
+                "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":workgroup/arn-snap")) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.snapshotNameFromArn(foreign, REGION));
+            assertEquals("ValidationException", rejected.getErrorCode());
+        }
+    }
+
+    @Test
+    void restoreWithoutANamespaceNameIsAValidationError() {
+        create("nullns-ns");
+        service.createSnapshot("nullns-snap", "nullns-ns", null, null, REGION);
+        createWorkgroup("nullns-wg", "nullns-ns");
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot(null, "nullns-wg", "nullns-snap", null, REGION));
+        assertEquals("ValidationException", missing.getErrorCode());
+    }
+
+    @Test
+    void snapshotNamesAreValidated() {
+        create("names-ns");
+        for (String bad : new String[] {null, "", "ab", "has/slash", "has::colons", "UPPER"}) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.createSnapshot(bad, "names-ns", null, null, REGION));
+            assertEquals("ValidationException", rejected.getErrorCode());
+        }
+        AwsException missing = assertThrows(AwsException.class, () -> service.getSnapshot(null, REGION));
+        assertEquals("ValidationException", missing.getErrorCode());
+        assertThrows(AwsException.class, () -> service.deleteSnapshot(null, REGION));
+    }
+
+    @Test
+    void createSnapshotDumpsALiveWorkgroupAndRestoreReplaysIt() throws Exception {
+        create("dump-ns");
+        createWorkgroup("dump-wg", "dump-ns");
+        doAnswer(invocation -> {
+            Files.writeString(invocation.getArgument(5, Path.class), "-- dump");
+            return null;
+        }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
+
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("dump-snap", "dump-ns", null, null, REGION);
+
+        assertTrue(Files.exists(Path.of(snapshot.getSqlDump())));
+        service.restoreFromSnapshot("dump-ns", "dump-wg", "dump-snap", null, REGION);
+        verify(runtime).restoreSnapshot(eq(ACCOUNT_ID), eq(REGION), eq("dump-wg"), any(), eq("dev"),
+                eq(Path.of(snapshot.getSqlDump())));
+
+        service.deleteSnapshot("dump-snap", REGION);
+        assertFalse(Files.exists(Path.of(snapshot.getSqlDump())));
+    }
+
+    @Test
+    void restoreFailsWhenTheDumpFileIsGone() throws Exception {
+        create("gone-ns");
+        createWorkgroup("gone-wg", "gone-ns");
+        doAnswer(invocation -> {
+            Files.writeString(invocation.getArgument(5, Path.class), "-- dump");
+            return null;
+        }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("gone-snap", "gone-ns", null, null, REGION);
+        Files.delete(Path.of(snapshot.getSqlDump()));
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot("gone-ns", "gone-wg", "gone-snap", null, REGION));
+        assertEquals("InternalServerException", missing.getErrorCode());
+        verify(runtime, never()).restoreSnapshot(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void createSnapshotWithoutALiveWorkgroupIsMetadataOnly() {
+        create("meta-ns");
+        createWorkgroup("meta-wg", "meta-ns");
+        Workgroup stopped = new Workgroup(service.getWorkgroup("meta-wg", REGION));
+        stopped.setRuntimeHost(null);
+        stopped.setRuntimePort(0);
+        workgroupStore.put(REGION + "::meta-wg", stopped);
+
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("meta-snap", "meta-ns", null, null, REGION);
+        service.restoreFromSnapshot("meta-ns", "meta-wg", "meta-snap", null, REGION);
+
+        assertNull(snapshot.getSqlDump());
+        verify(runtime, never()).takeSnapshot(any(), any(), any(), any(), any(), any());
+        verify(runtime, never()).restoreSnapshot(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void snapshotCarriesRetentionNamespaceDetailsAndTags() {
+        create("meta-fields-ns");
+
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("fields-snap", "meta-fields-ns", 30,
+                Map.of("env", "dev"), REGION);
+
+        assertEquals(30, snapshot.getRetentionPeriod());
+        assertEquals("admin", snapshot.getAdminUsername());
+        assertEquals("AWS_OWNED_KMS_KEY", snapshot.getKmsKeyId());
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(snapshot.getSnapshotArn(), REGION));
+
+        service.tagResource(snapshot.getSnapshotArn(), Map.of("team", "data"), REGION);
+        service.untagResource(snapshot.getSnapshotArn(), List.of("env"), REGION);
+        assertEquals(Map.of("team", "data"), service.listTagsForResource(snapshot.getSnapshotArn(), REGION));
+
+        assertNull(service.createSnapshot("indef-snap", "meta-fields-ns", -1, null, REGION).getRetentionPeriod());
+        for (int bad : new int[] {0, 3654, -2}) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.createSnapshot("bad-ret-snap", "meta-fields-ns", bad, null, REGION));
+            assertEquals("ValidationException", rejected.getErrorCode());
+        }
+    }
+
+    @Test
+    void listSnapshotsAppliesEveryFilter() throws Exception {
+        create("filt-a");
+        create("filt-b");
+        RedshiftServerlessSnapshot first = service.createSnapshot("filt-one", "filt-a", null, null, REGION);
+        service.createSnapshot("filt-two", "filt-b", null, null, REGION);
+        Instant created = first.getSnapshotCreateTime();
+
+        assertEquals(1, service.listSnapshots(null, first.getNamespaceArn(), null, null, null, REGION, null, null)
+                .items().size());
+        assertEquals(2, service.listSnapshots(null, null, ACCOUNT_ID, null, null, REGION, null, null).items().size());
+        assertEquals(0, service.listSnapshots(null, null, "999999999999", null, null, REGION, null, null)
+                .items().size());
+        assertEquals(0, service.listSnapshots(null, null, null, created.plusSeconds(3600), null, REGION, null, null)
+                .items().size());
+        assertEquals(0, service.listSnapshots(null, null, null, null, created.minusSeconds(3600), REGION, null, null)
+                .items().size());
+        assertEquals(2, service.listSnapshots(null, null, null, created.minusSeconds(3600),
+                created.plusSeconds(3600), REGION, null, null).items().size());
+    }
+
+    @Test
+    void restoreRejectsASnapshotOwnedByAnotherAccount() {
+        create("owner-ns");
+        service.createSnapshot("owner-snap", "owner-ns", null, null, REGION);
+        createWorkgroup("owner-wg", "owner-ns");
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot("owner-ns", "owner-wg", "owner-snap", "999999999999", REGION));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        service.restoreFromSnapshot("owner-ns", "owner-wg", "owner-snap", ACCOUNT_ID, REGION);
+    }
+
+    @Test
+    void deleteSnapshotRemovesIt() {
+        create("snapdel-ns");
+        service.createSnapshot("snapdel", "snapdel-ns", null, null, REGION);
+
+        service.deleteSnapshot("snapdel", REGION);
+
+        AwsException missing = assertThrows(AwsException.class, () -> service.getSnapshot("snapdel", REGION));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
     }
 
     private Namespace create(String namespaceName) {

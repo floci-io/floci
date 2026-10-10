@@ -359,6 +359,62 @@ WHERE c.relkind IN ('r', 'm')
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast');
 
 -- Grant access to all database users (including IAM temporary users)
+CREATE SCHEMA IF NOT EXISTS floci_internal;
+CREATE TABLE IF NOT EXISTS floci_internal.external_catalog (
+    schema_name text PRIMARY KEY,
+    payload jsonb NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION floci_internal.refresh_external_catalog(schema_name text, payload jsonb)
+RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    INSERT INTO floci_internal.external_catalog VALUES ($1, $2)
+    ON CONFLICT (schema_name) DO UPDATE SET payload = EXCLUDED.payload;
+$$;
+
+CREATE OR REPLACE FUNCTION floci_internal.purge_external_schema(schema_name text)
+RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    DELETE FROM floci_internal.external_catalog WHERE schema_name = $1;
+$$;
+
+CREATE OR REPLACE VIEW pg_catalog.svv_external_schemas AS
+SELECT n.oid AS esoid, 1::smallint AS eskind, n.nspname AS schemaname,
+       n.nspowner::integer AS esowner, c.payload->>'databasename' AS databasename,
+       c.payload->>'esoptions' AS esoptions
+FROM floci_internal.external_catalog c
+JOIN pg_catalog.pg_namespace n ON n.nspname = c.schema_name
+WHERE has_schema_privilege(n.oid, 'USAGE');
+
+CREATE OR REPLACE VIEW pg_catalog.svv_external_tables AS
+SELECT current_database()::text AS redshift_database_name, c.schema_name AS schemaname,
+       t->>'tablename' AS tablename, t->>'tabletype' AS tabletype, t->>'location' AS location,
+       t->>'input_format' AS input_format, t->>'output_format' AS output_format,
+       t->>'serialization_lib' AS serialization_lib, t->>'serde_parameters' AS serde_parameters,
+       (t->>'compressed')::integer AS compressed, t->>'parameters' AS parameters
+FROM floci_internal.external_catalog c
+JOIN pg_catalog.pg_namespace n ON n.nspname = c.schema_name
+CROSS JOIN LATERAL jsonb_array_elements(c.payload->'tables') t
+WHERE has_schema_privilege(n.oid, 'USAGE');
+
+CREATE OR REPLACE VIEW pg_catalog.svv_external_columns AS
+SELECT current_database()::text AS redshift_database_name, c.schema_name AS schemaname,
+       t->>'tablename' AS tablename, t->>'columnname' AS columnname, t->>'external_type' AS external_type,
+       (t->>'columnnum')::integer AS columnnum, (t->>'part_key')::integer AS part_key,
+       t->>'is_nullable' AS is_nullable
+FROM floci_internal.external_catalog c
+JOIN pg_catalog.pg_namespace n ON n.nspname = c.schema_name
+CROSS JOIN LATERAL jsonb_array_elements(c.payload->'columns') t
+WHERE has_schema_privilege(n.oid, 'USAGE');
+
+CREATE OR REPLACE VIEW pg_catalog.svv_external_partitions AS
+SELECT c.schema_name AS schemaname, t->>'tablename' AS tablename, t->>'values' AS values,
+       t->>'location' AS location, t->>'input_format' AS input_format, t->>'output_format' AS output_format,
+       t->>'serialization_lib' AS serialization_lib, t->>'serde_parameters' AS serde_parameters,
+       (t->>'compressed')::integer AS compressed, t->>'parameters' AS parameters
+FROM floci_internal.external_catalog c
+JOIN pg_catalog.pg_namespace n ON n.nspname = c.schema_name
+CROSS JOIN LATERAL jsonb_array_elements(c.payload->'partitions') t
+WHERE has_schema_privilege(n.oid, 'USAGE');
+
 GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;
 GRANT ALL ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;

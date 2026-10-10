@@ -46,6 +46,9 @@ public class ConfigurationSet {
     @JsonProperty("VdmOptions")
     private VdmOptions vdmOptions;
 
+    @JsonProperty("MessageSecurityOptions")
+    private MessageSecurityOptions messageSecurityOptions;
+
     public ConfigurationSet() {}
 
     public ConfigurationSet(String name) {
@@ -121,5 +124,10 @@ public class ConfigurationSet {
     public VdmOptions getVdmOptions() { return vdmOptions; }
     public void setVdmOptions(VdmOptions vdmOptions) {
         this.vdmOptions = vdmOptions;
+    }
+
+    public MessageSecurityOptions getMessageSecurityOptions() { return messageSecurityOptions; }
+    public void setMessageSecurityOptions(MessageSecurityOptions messageSecurityOptions) {
+        this.messageSecurityOptions = messageSecurityOptions;
     }
 }

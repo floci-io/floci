@@ -13,12 +13,15 @@ import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
+import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -76,6 +79,11 @@ public class RedshiftServerlessJsonHandler {
                 case "ListWorkgroups" -> handleListWorkgroups(request, region);
                 case "UpdateWorkgroup" -> handleUpdateWorkgroup(request, region);
                 case "DeleteWorkgroup" -> handleDeleteWorkgroup(request, region);
+                case "CreateSnapshot" -> handleCreateSnapshot(request, region);
+                case "GetSnapshot" -> handleGetSnapshot(request, region);
+                case "ListSnapshots" -> handleListSnapshots(request, region);
+                case "DeleteSnapshot" -> handleDeleteSnapshot(request, region);
+                case "RestoreFromSnapshot" -> handleRestoreFromSnapshot(request, region);
                 case "GetCredentials" -> handleGetCredentials(request, region, authorizationHeader);
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
                 case "TagResource" -> handleTagResource(request, region);
@@ -199,6 +207,59 @@ public class RedshiftServerlessJsonHandler {
         return Response.ok(response).build();
     }
 
+    private Response handleCreateSnapshot(JsonNode request, String region) {
+        return snapshotResponse(service.createSnapshot(
+                text(request, "snapshotName"), text(request, "namespaceName"),
+                parseInteger(request, "retentionPeriod"), parseTagList(request.path("tags"), "tags"), region));
+    }
+
+    /**
+     * GetSnapshot also accepts {@code snapshotArn}, which must name a snapshot of this account
+     * and Region.
+     */
+    private Response handleGetSnapshot(JsonNode request, String region) {
+        return snapshotResponse(service.getSnapshot(snapshotNameOf(request, region), region));
+    }
+
+    private Response handleListSnapshots(JsonNode request, String region) {
+        PaginatedResult<RedshiftServerlessSnapshot> page = service.listSnapshots(
+                text(request, "namespaceName"), text(request, "namespaceArn"), text(request, "ownerAccount"),
+                parseEpochSeconds(request, "startTime"), parseEpochSeconds(request, "endTime"), region,
+                parseMaxResults(request), text(request, "nextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("snapshots");
+        page.items().forEach(snapshot -> items.add(snapshotNode(snapshot)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteSnapshot(JsonNode request, String region) {
+        return snapshotResponse(service.deleteSnapshot(text(request, "snapshotName"), region));
+    }
+
+    private Response handleRestoreFromSnapshot(JsonNode request, String region) {
+        RedshiftServerlessService.RestoreResult result = service.restoreFromSnapshot(
+                text(request, "namespaceName"), text(request, "workgroupName"),
+                snapshotNameOf(request, region), text(request, "ownerAccount"), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("namespace", namespaceNode(result.namespace()));
+        response.put("ownerAccount", result.snapshot().getOwnerAccount());
+        response.put("snapshotName", result.snapshot().getSnapshotName());
+        return Response.ok(response).build();
+    }
+
+    /** The snapshot name from {@code snapshotName}, or recovered from {@code snapshotArn} when absent. */
+    private String snapshotNameOf(JsonNode request, String region) {
+        String snapshotName = text(request, "snapshotName");
+        String snapshotArn = text(request, "snapshotArn");
+        if (snapshotName != null && snapshotArn != null) {
+            throw validation("snapshotName and snapshotArn cannot both be specified.");
+        }
+        return snapshotArn == null ? snapshotName : service.snapshotNameFromArn(snapshotArn, region);
+    }
+
     private Response handleListTagsForResource(JsonNode request, String region) {
         Map<String, String> tags = service.listTagsForResource(text(request, "resourceArn"), region);
         ObjectNode response = objectMapper.createObjectNode();
@@ -257,6 +318,35 @@ public class RedshiftServerlessJsonHandler {
         namespace.getIamRoles().forEach(iamRoles::add);
         ArrayNode logExports = node.putArray("logExports");
         namespace.getLogExports().forEach(logExports::add);
+        return node;
+    }
+
+    private Response snapshotResponse(RedshiftServerlessSnapshot snapshot) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("snapshot", snapshotNode(snapshot));
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode snapshotNode(RedshiftServerlessSnapshot snapshot) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("snapshotName", snapshot.getSnapshotName());
+        node.put("snapshotArn", snapshot.getSnapshotArn());
+        node.put("namespaceName", snapshot.getNamespaceName());
+        node.put("namespaceArn", snapshot.getNamespaceArn());
+        node.put("ownerAccount", snapshot.getOwnerAccount());
+        node.put("status", snapshot.getStatus());
+        node.put("adminUsername", snapshot.getAdminUsername());
+        if (snapshot.getKmsKeyId() != null) {
+            node.put("kmsKeyId", snapshot.getKmsKeyId());
+        }
+        if (snapshot.getRetentionPeriod() != null) {
+            node.put("snapshotRetentionPeriod", snapshot.getRetentionPeriod());
+            long elapsedDays = Duration.between(snapshot.getSnapshotCreateTime(), Instant.now()).toDays();
+            node.put("snapshotRemainingDays", Math.max(0, snapshot.getRetentionPeriod() - elapsedDays));
+        }
+        if (snapshot.getSnapshotCreateTime() != null) {
+            node.put("snapshotCreateTime", CREATION_DATE_FORMAT.format(snapshot.getSnapshotCreateTime()));
+        }
         return node;
     }
 
@@ -385,6 +475,18 @@ public class RedshiftServerlessJsonHandler {
             throw validation("pricePerformanceTarget must be an object.");
         }
         return new PricePerformanceTarget(text(node, "status"), parseInteger(node, "level"));
+    }
+
+    /** A timestamp request member, which awsJson1.1 sends as epoch seconds unless the model says otherwise. */
+    private Instant parseEpochSeconds(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isNumber()) {
+            throw validation(field + " must be a timestamp.");
+        }
+        return Instant.ofEpochMilli(Math.round(node.asDouble() * 1000));
     }
 
     private Integer parseMaxResults(JsonNode request) {

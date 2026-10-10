@@ -59,8 +59,9 @@ public class ServiceLastAccessedService {
                                            List<ServiceLastAccessedEntity> entities) {
         if (granularity != null && !GRANULARITIES.contains(granularity)) {
             throw new AwsException("ValidationError",
-                    "Value '" + granularity + "' at 'granularity' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [SERVICE_LEVEL, ACTION_LEVEL]", 400);
+                    "1 validation error detected: Value '" + granularity + "' at 'granularity' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: "
+                            + "[SERVICE_LEVEL, ACTION_LEVEL]", 400);
         }
         Instant now = Instant.now();
         // jobIDType is min 36 / max 36, which is exactly a UUID string.

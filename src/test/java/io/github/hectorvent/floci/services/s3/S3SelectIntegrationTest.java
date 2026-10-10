@@ -1,11 +1,16 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.s3.EventStreamMessages.Message;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class S3SelectIntegrationTest {
@@ -72,6 +77,44 @@ class S3SelectIntegrationTest {
     private static final String CSV_NONE = "<CSV><FileHeaderInfo>NONE</FileHeaderInfo></CSV>";
     private static final String CSV_IGNORE = "<CSV><FileHeaderInfo>IGNORE</FileHeaderInfo></CSV>";
     private static final String JSON_IN = "<JSON/>";
+
+    // ── Streamed responses ────────────────────────────────────────────────
+
+    @Test
+    void select_largeResultArrivesAsSeveralRecordsEvents() {
+        String bucket = "sel-streamed-result";
+        StringBuilder csv = new StringBuilder();
+        for (int i = 0; i < 20_000; i++) {
+            csv.append("row").append(i).append(',').append(i).append('\n');
+        }
+        createBucketAndPut(bucket, "big.csv", csv.toString());
+
+        byte[] response = select(bucket, "big.csv", "SELECT * FROM S3Object", CSV_NONE, CSV_OUT)
+                .contentType("application/octet-stream")
+                .extract().asByteArray();
+
+        List<Message> messages = EventStreamMessages.decode(response);
+        List<Message> records = messages.stream().filter(message -> "Records".equals(message.type())).toList();
+        assertTrue(records.size() > 1, "one Records event for a result of " + csv.length() + " bytes");
+        assertEquals(csv.toString(), String.join("", records.stream().map(Message::text).toList()));
+        assertEquals(List.of("Stats", "End"), messages.subList(messages.size() - 2, messages.size()).stream()
+                .map(Message::type).toList());
+        assertTrue(messages.get(messages.size() - 2).text().contains("<BytesReturned>" + csv.length() + "</BytesReturned>"));
+    }
+
+    @Test
+    void select_recordOverTheLimitEndsTheStreamWithAnErrorMessage() {
+        String bucket = "sel-record-limit";
+        createBucketAndPut(bucket, "wide.csv", "a,1\n" + "x".repeat(S3SelectEvaluator.MAX_RECORD_CHARS + 1) + "\nb,2\n");
+
+        byte[] response = select(bucket, "wide.csv", "SELECT * FROM S3Object", CSV_NONE, CSV_OUT)
+                .extract().asByteArray();
+
+        List<Message> messages = EventStreamMessages.decode(response);
+        assertEquals(List.of("Records", "error"), messages.stream().map(Message::type).toList());
+        assertEquals("a,1\n", messages.get(0).text());
+        assertEquals("OverMaxRecordSize", messages.get(1).headers().get(":error-code"));
+    }
 
     // ── Existing tests (preserved) ────────────────────────────────────────
 

@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.core.common;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
+import java.util.Arrays;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -50,6 +52,15 @@ public final class CidrCanonicalizer {
     }
 
     /**
+     * Reports whether two CIDR blocks name the same network once both are canonical, so
+     * {@code 10.0.1.9/24} and {@code 10.0.1.0/24} are the same block. A side that cannot be
+     * parsed is compared as its raw string, and two nulls are the same block.
+     */
+    public static boolean sameBlock(String a, String b) {
+        return Objects.equals(canonicalize(a).orElse(a), canonicalize(b).orElse(b));
+    }
+
+    /**
      * Reports whether {@code cidr} is both parseable and already in canonical form,
      * i.e. {@code canonicalize(cidr)} would return the identical string.
      *
@@ -59,6 +70,31 @@ public final class CidrCanonicalizer {
      */
     public static boolean isCanonical(String cidr) {
         return parse(cidr).map(parsed -> render(parsed).equals(cidr)).orElse(false);
+    }
+
+    /**
+     * Tests whether a literal address belongs to an IPv4 or IPv6 CIDR block.
+     * Malformed inputs and addresses from a different address family do not match.
+     * Neither input triggers DNS resolution.
+     */
+    public static boolean contains(String cidr, String ip) {
+        Optional<ParsedCidr> parsed = parse(cidr);
+        if (parsed.isEmpty() || ip == null || ip.isBlank()) {
+            return false;
+        }
+        InetAddress address;
+        try {
+            address = InetAddress.ofLiteral(ip);
+        } catch (IllegalArgumentException ignored) {
+            // A malformed address cannot belong to a CIDR block.
+            return false;
+        }
+        ParsedCidr block = parsed.get();
+        byte[] networkBytes = block.address().getAddress();
+        byte[] addressBytes = address.getAddress();
+        return networkBytes.length == addressBytes.length
+                && Arrays.equals(maskHostBits(networkBytes, block.prefixLength()),
+                        maskHostBits(addressBytes, block.prefixLength()));
     }
 
     private static Optional<ParsedCidr> parse(String cidr) {

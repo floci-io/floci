@@ -6,9 +6,9 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
-import org.mockito.Answers;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Answers;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
@@ -139,6 +139,22 @@ class LambdaLayerCodePathIsolationTest {
 
     private static LambdaLayerService serviceFor(Path baseDir, String account) {
         return serviceFor(baseDir, account, new LambdaLayerStore(AccountAwareStorageBackend.inMemory(account)));
+    }
+
+    @Test
+    void publishLayerVersion_licenseInfoLongerThan512_isRejected(@TempDir Path baseDir) throws Exception {
+        // Catches: PublishLayerVersion storing a LicenseInfo over the model's 512-character maximum
+        LambdaLayerService service = serviceFor(baseDir, "111111111111",
+                new LambdaLayerStore(AccountAwareStorageBackend.inMemory("111111111111")));
+        Map<String, Object> request = Map.of("Content", Map.of("ZipFile", zipBase64("layer")),
+                "LicenseInfo", "l".repeat(513));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.publishLayerVersion("us-east-1", LAYER_NAME, request));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'licenseInfo' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 512", error.getMessage());
     }
 
     private static LambdaLayerService serviceFor(Path baseDir, String account, LambdaLayerStore store) {
