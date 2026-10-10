@@ -136,7 +136,10 @@ public class EksPodIdentityCredentialsController {
 
         String sessionName = podIdentitySessionName(cluster.getName(), association.serviceAccount());
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
-        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        // The lookup is by name only. A role recreated under another path is not the role the
+        // association names, so it must not lend the session its id or its ARN.
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName)
+                .filter(found -> IamService.roleArnMatches(roleArn, found));
         String assumedRoleId = role.map(IamRole::getRoleId).filter(id -> !id.isBlank())
                 .map(id -> id + ":" + sessionName)
                 .orElse(null);

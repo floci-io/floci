@@ -165,6 +165,19 @@ class EksPodIdentityCredentialsControllerTest {
     }
 
     @Test
+    void aRoleRecreatedUnderAnotherPathDoesNotLendTheSessionItsIdentity() throws Exception {
+        String replacementArn = "arn:aws:iam::" + ACCOUNT_ID + ":role/team/app-role";
+        when(iamService.findRole(ACCOUNT_ID, "app-role"))
+                .thenReturn(Optional.of(new IamRole("AROA-replacement", "app-role", "/team/", replacementArn, "{}")));
+
+        Response response = controller.getCredentials("Bearer " + validToken());
+
+        assertEquals(200, response.getStatus());
+        verify(iamService).registerSession(any(), any(), any(), eq(ROLE_ARN), any(Instant.class), eq(null),
+                eq(ACCOUNT_ID), any(), eq(null));
+    }
+
+    @Test
     void supportsRawTokenWithoutBearerPrefix() throws Exception {
         Response response = controller.getCredentials(validToken());
         assertEquals(200, response.getStatus());

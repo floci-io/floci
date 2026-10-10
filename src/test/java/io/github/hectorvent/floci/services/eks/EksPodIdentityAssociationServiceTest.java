@@ -308,6 +308,7 @@ class EksPodIdentityAssociationServiceTest {
                     created.associationId(), new UpdatePodIdentityAssociationRequest(rejected, null, null, null, null)),
                     rejected);
             assertEquals("InvalidParameterException", ex.getErrorCode(), rejected);
+            assertEquals(ROLE, fixture.service.describe(fixture.cluster, created.associationId()).roleArn(), rejected);
         }
     }
 
