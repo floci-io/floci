@@ -21,7 +21,7 @@ regenerated:
   reference (https://docs.aws.amazon.com/aws-managed-policy/latest/reference/). A policy new to
   the catalog takes the dataset's date when it is on `v1`, which is then its creation date too;
   on a later version it has no recorded creation date until one is sourced from its reference
-  page (`--fetch-create-dates` reads the page for exactly those policies).
+  page (`--fetch-create-dates` reads the page of every policy past `v1` that still has none).
 - `description`, kept for the policies Floci seeded before the catalog was generated.
 
 Nothing is hand-typed. When the checkout is absent (CI), `--check` only verifies the vendored
@@ -37,6 +37,7 @@ import argparse
 import json
 import re
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -142,9 +143,15 @@ def parse_creation_time(html: str) -> str | None:
 
 
 def fetch_creation_time(name: str) -> str | None:
+    """The creation time on the policy's reference page, or None when the page cannot be read:
+    a policy AWS no longer documents has none, and it must not stop the other policies."""
     request = urllib.request.Request(REFERENCE_PAGE.format(name=name), headers={"User-Agent": "floci-regen"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return parse_creation_time(response.read().decode("utf-8", "replace"))
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return parse_creation_time(response.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, TimeoutError) as e:
+        print(f"warning: no creation date for {name}: its reference page could not be read ({e})", file=sys.stderr)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -188,9 +195,10 @@ def build(dataset: Path, vendored_catalog: list[dict], vendored_versions: dict,
         update_date = instant(policy.get("updatedate")) or instant(policy.get("createdate"))
         version = {"defaultVersionId": version_id}
         create_date = vendored_versions.get(name, {}).get("createDate")
-        if create_date is None and name not in vendored_versions:
+        if create_date is None:
             if version_id == "v1":
-                create_date = instant(policy.get("createdate"))
+                if name not in vendored_versions:
+                    create_date = instant(policy.get("createdate"))
             elif fetch_create_date is not None:
                 create_date = fetch_create_date(name)
         if create_date is not None:
@@ -240,10 +248,12 @@ def self_check(resources: Path) -> list[str]:
         return [f"{resources}: a vendored file is not valid JSON ({e})"]
 
     names = [entry["name"] for entry in catalog]
-    policy_lines = sum(1 for line in (resources / CATALOG).read_text(encoding="utf-8").splitlines()
-                       if line.startswith("  - name: "))
+    catalog_text = (resources / CATALOG).read_text(encoding="utf-8")
+    policy_lines = sum(1 for line in catalog_text.splitlines() if line.startswith("  - name: "))
     if policy_lines != len(catalog):
         problems.append(f"{CATALOG}: {policy_lines - len(catalog)} entries do not have the generated layout")
+    elif render_catalog(catalog) != catalog_text:
+        problems.append(f"{CATALOG}: has content other than the generated header and policy entries")
     if not catalog:
         problems.append(f"{CATALOG}: no policies")
     if names != sorted(names):
@@ -286,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored files differ from a fresh generation")
     parser.add_argument("--dataset", type=Path, default=LOCAL_DATASET, help="iam-dataset checkout")
     parser.add_argument("--fetch-create-dates", action="store_true",
-                        help="read the AWS managed policy reference page of a new policy past v1 for its creation time")
+                        help="read the AWS managed policy reference page of each policy past v1 that has no creation time")
     parser.add_argument("--resources", type=Path, default=RESOURCES, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     rel = args.resources.relative_to(REPO_ROOT) if args.resources.is_relative_to(REPO_ROOT) else args.resources

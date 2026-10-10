@@ -5,6 +5,7 @@ Run with: pytest tools/aws -q  (or: make aws-data-test)
 from __future__ import annotations
 
 import json
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,15 @@ def test_creation_time_is_read_from_the_reference_page():
     assert m.parse_creation_time("<p>no dates here</p>") is None
 
 
+def test_an_unreadable_reference_page_leaves_the_policy_undated(monkeypatch, capsys):
+    def not_found(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", not_found)
+    assert m.fetch_creation_time("RetiredPolicy") is None
+    assert "no creation date for RetiredPolicy" in capsys.readouterr().err
+
+
 def test_catalog_round_trips_through_render_and_parse():
     catalog = [{"name": "A", "path": "/"}, {"name": "B", "path": "/x/", "description": 'Says "hi".'}]
     rendered = m.render_catalog(catalog)
@@ -137,6 +147,25 @@ def test_a_new_policy_past_v1_gets_its_creation_date_only_from_the_reference_pag
     online = json.loads(generate(dataset, vendored, lambda name: fetched.append(name) or "2014-11-11T00:00:00Z")[m.VERSIONS])
     assert fetched == ["AmazonSQSFullAccess"]
     assert online["AmazonSQSFullAccess"]["createDate"] == "2014-11-11T00:00:00Z"
+
+
+def test_a_vendored_policy_past_v1_without_a_creation_date_is_filled_in_by_a_later_fetch(tmp_path: Path, vendored: Path):
+    dataset = write_dataset(tmp_path / "ds", [
+        policy("AmazonS3ReadOnlyAccess", version="v3", updated="2023-08-10T21:31:39+00:00"),
+        policy("AmazonEC2RoleforSSM", path="/service-role/"),
+        policy("AWSLambdaFullAccess", version="v8", created="2017-11-27T23:22:38Z", updated=None, deprecated=True),
+        policy("AmazonSQSFullAccess", version="v2", updated="2026-09-01T10:00:00+00:00"),
+    ], {"AmazonS3ReadOnlyAccess": READ_ONLY, "AmazonEC2RoleforSSM": SERVICE_ROLE,
+        "AWSLambdaFullAccess": LEGACY, "AmazonSQSFullAccess": NEW_POLICY})
+    for name, text in generate(dataset, vendored).items():
+        (vendored / name).write_text(text)
+    assert "createDate" not in json.loads((vendored / m.VERSIONS).read_text())["AmazonSQSFullAccess"]
+
+    fetched = []
+    online = json.loads(generate(dataset, vendored, lambda name: fetched.append(name) or "2014-11-11T00:00:00Z")[m.VERSIONS])
+    assert fetched == ["AmazonSQSFullAccess"]
+    assert online["AmazonSQSFullAccess"]["createDate"] == "2014-11-11T00:00:00Z"
+    assert "createDate" not in online["AmazonEC2RoleforSSM"]
 
 
 def test_a_document_or_version_change_is_picked_up_and_curated_fields_are_kept(tmp_path: Path, vendored: Path):
@@ -204,6 +233,12 @@ def test_shape_check_catches_an_entry_out_of_the_generated_layout(vendored: Path
     text = (vendored / m.CATALOG).read_text().replace('    path: "/service-role/"\n', "    path: /service-role/\n")
     (vendored / m.CATALOG).write_text(text)
     assert any("do not have the generated layout" in p for p in m.self_check(vendored))
+
+
+def test_shape_check_catches_content_outside_the_policy_entries(vendored: Path):
+    with (vendored / m.CATALOG).open("a") as catalog:
+        catalog.write("unclosed: [\n")
+    assert any("content other than the generated header and policy entries" in p for p in m.self_check(vendored))
 
 
 def test_the_vendored_catalog_passes_the_shape_check():
