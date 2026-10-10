@@ -1509,13 +1509,57 @@ public class CodeArtifactService implements Resettable {
     private static String packageVersionKey(String region, String domain, String repository, String format,
                                              String namespace, String packageName, String version) {
         return region + "::" + domain + "::" + repository + "::" + format + "::"
-                + (namespace == null ? "" : namespace) + "::" + packageName + "::" + version;
+                + escapeKeySegment(namespace) + "::" + escapeKeySegment(packageName) + "::"
+                + escapeKeySegment(version);
     }
 
     private static String packageKey(String region, String domain, String repository, String format,
                                       String namespace, String packageName) {
         return region + "::" + domain + "::" + repository + "::" + format + "::"
-                + (namespace == null ? "" : namespace) + "::" + packageName;
+                + escapeKeySegment(namespace) + "::" + escapeKeySegment(packageName);
+    }
+
+    /**
+     * Escapes a namespace/package/version segment before it goes into a {@code ::}-joined storage
+     * key. {@code region}/{@code domain}/{@code repository}/{@code format} never need this: they're
+     * each validated against a pattern that already excludes {@code :}. Namespace, package name, and
+     * version are different, {@link #PACKAGE_TOKEN} only excludes {@code #}, {@code /}, and
+     * whitespace, so {@code ::} itself is a legal character sequence in any of them. Without
+     * escaping, namespace {@code "a::b"} + package {@code "c"} and namespace {@code "a"} + package
+     * {@code "b::c"} join to the identical key, so one package's stored origin configuration (or
+     * published version) silently answers for the other.
+     *
+     * <p>{@code #} is the escape introducer, not {@code \}: every {@code \} becomes {@code #b} and
+     * every {@code :} becomes {@code #c}. {@code #} is itself one of the three characters
+     * {@link #PACKAGE_TOKEN} (and AWS's own {@code PackageName}/{@code PackageNamespace} wire
+     * pattern) forbids, so no namespace/package/version ever validated through this service, before
+     * or after this method existed, can contain one. An escaped segment therefore never collides
+     * with a pre-existing stored key built from a segment that happened to contain a literal
+     * backslash: that old raw key cannot contain {@code #}, and this method's output only does when
+     * it actually escaped something. For the overwhelming majority of packages, whose
+     * namespace/name/version never contain a backslash or colon, this returns the input unchanged,
+     * so the key built from those segments is byte-identical to the one built before this method
+     * existed.
+     */
+    private static String escapeKeySegment(String value) {
+        if (value == null) {
+            return "";
+        }
+        if (value.indexOf(':') < 0 && value.indexOf('\\') < 0) {
+            return value;
+        }
+        StringBuilder escaped = new StringBuilder(value.length() + 4);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\\') {
+                escaped.append("#b");
+            } else if (c == ':') {
+                escaped.append("#c");
+            } else {
+                escaped.append(c);
+            }
+        }
+        return escaped.toString();
     }
 
     private static AwsException validation(String message) {
