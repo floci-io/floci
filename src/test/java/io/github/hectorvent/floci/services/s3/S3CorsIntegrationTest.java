@@ -165,7 +165,8 @@ class S3CorsIntegrationTest {
             .options("/" + BUCKET + "/some-key")
         .then()
             .statusCode(200)
-            .header("Access-Control-Allow-Origin", equalTo("*"));
+            .header("Access-Control-Allow-Origin", equalTo("*"))
+            .header("Access-Control-Allow-Credentials", nullValue());
     }
 
     @Test
@@ -260,7 +261,8 @@ class S3CorsIntegrationTest {
             .get("/" + BUCKET + "/hello.txt")
         .then()
             .statusCode(200)
-            .header("Access-Control-Allow-Origin", equalTo("*"));
+            .header("Access-Control-Allow-Origin", equalTo("*"))
+            .header("Access-Control-Allow-Credentials", nullValue());
     }
 
     @Test
@@ -324,7 +326,21 @@ class S3CorsIntegrationTest {
         .then()
             .statusCode(200)
             .header("Access-Control-Allow-Origin", equalTo("https://example.com"))
+            .header("Access-Control-Allow-Credentials", equalTo("true"))
             .header("Access-Control-Max-Age", equalTo("600"));
+    }
+
+    @Test
+    @Order(38)
+    void actualGetRequestSpecificOriginReceivesAllowCredentials() {
+        given()
+            .header("Origin", "https://example.com")
+        .when()
+            .get("/" + BUCKET + "/hello.txt")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", equalTo("https://example.com"))
+            .header("Access-Control-Allow-Credentials", equalTo("true"));
     }
 
     @Test
@@ -478,7 +494,8 @@ class S3CorsIntegrationTest {
             .options("/" + BUCKET + "/k")
         .then()
             .statusCode(200)
-            .header("Access-Control-Allow-Origin", equalTo("http://foo.example.com"));
+            .header("Access-Control-Allow-Origin", equalTo("http://foo.example.com"))
+            .header("Access-Control-Allow-Credentials", equalTo("true"));
     }
 
     @Test
