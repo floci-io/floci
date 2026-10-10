@@ -141,7 +141,7 @@ class CloudFormationLogsMetricFilterTest {
         assertThat(filters()).hasSize(1);
         List<StackEvent> events = newEvents();
         int changed = indexOf(events, "Filter", "UPDATE_COMPLETE", target);
-        int failed = indexOf(events, "BadSecret", "UPDATE_FAILED", null);
+        int failed = indexOf(events, "BadSecret", "CREATE_FAILED", null);
         assertThat(changed).as("filter update completed before dependent failure").isGreaterThanOrEqualTo(0);
         assertThat(failed).isGreaterThan(changed);
         assertSample("WARN", 2, null);

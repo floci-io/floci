@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -28,6 +30,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>Regression cover for "CloudFormation update recreates unchanged named resources"
  * (floci-io/floci#2134).
+ *
+ * <p>The other side of the same loop is covered too: a resource the update adds is created, not
+ * updated, so it reports CREATE_* events and status like AWS does.
  */
 @QuarkusTest
 class CfnUnchangedResourceUpdateIntegrationTest {
@@ -625,6 +630,145 @@ class CfnUnchangedResourceUpdateIntegrationTest {
         assertFalse(queueStatuses.contains("UPDATE_COMPLETE"));
 
         deleteStack(stackName);
+    }
+
+    /**
+     * A resource an update adds is created, not updated: AWS reports only CREATE_IN_PROGRESS and
+     * CREATE_COMPLETE for it, and DescribeStackResource shows it CREATE_COMPLETE.
+     */
+    @Test
+    void anUpdateThatAddsAQueueReportsOnlyCreateEventsForIt() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "probe-added-queue-" + suffix;
+        String added = """
+                "Added": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {"QueueName": "probe-added-%s"}
+                }""".formatted(suffix);
+
+        createStack(stackName, queueStackWith("probe-kept-" + suffix, null));
+        updateStack(stackName, queueStackWith("probe-kept-" + suffix, added));
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
+
+        assertEquals(List.of("CREATE_IN_PROGRESS", "CREATE_COMPLETE"),
+                resourceStatusesOldestFirst(stackName, "Added"));
+        assertEquals("CREATE_COMPLETE", describedResourceStatus(stackName, "Added"));
+
+        deleteStack(stackName);
+    }
+
+    /**
+     * An added resource that fails reports CREATE_FAILED, as AWS does, and the update still rolls
+     * back over the live stack. A nested stack with no TemplateURL is the resource that fails.
+     */
+    @Test
+    void anUpdateThatAddsAFailingResourceReportsCreateFailedAndRollsBack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "probe-added-broken-" + suffix;
+        String added = """
+                "Broken": {"Type": "AWS::CloudFormation::Stack", "Properties": {}}""";
+
+        createStack(stackName, queueStackWith("probe-kept-" + suffix, null));
+        updateStack(stackName, queueStackWith("probe-kept-" + suffix, added));
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName, CFN_AUTH);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
+
+        List<String> statuses = resourceStatusesOldestFirst(stackName, "Broken");
+        assertEquals(List.of("CREATE_IN_PROGRESS", "CREATE_FAILED"), statuses.subList(0, 2), statuses.toString());
+        assertTrue(statuses.stream().noneMatch(status -> status.startsWith("UPDATE_")), statuses.toString());
+
+        deleteStack(stackName);
+    }
+
+    /** A nested stack an update adds is created too, so the parent reports CREATE_* for it. */
+    @Test
+    void anUpdateThatAddsANestedStackReportsCreateEventsForIt() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "probe-added-nested-" + suffix;
+        String bucket = "probe-added-nested-" + suffix;
+        String childTemplate = """
+                {
+                  "Resources": {
+                    "ChildQueue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"QueueName": "probe-child-%s"}
+                    }
+                  }
+                }
+                """.formatted(suffix);
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().contentType("application/json").body(childTemplate)
+            .when().put("/" + bucket + "/child.json").then().statusCode(200);
+        String added = """
+                "Child": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": {"TemplateURL": "http://localhost/%s/child.json"}
+                }""".formatted(bucket);
+
+        createStack(stackName, queueStackWith("probe-kept-" + suffix, null));
+        updateStack(stackName, queueStackWith("probe-kept-" + suffix, added));
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName, CFN_AUTH);
+        assertEquals("UPDATE_COMPLETE", state.status(), state.reason());
+
+        assertEquals(List.of("CREATE_IN_PROGRESS", "CREATE_COMPLETE"),
+                resourceStatusesOldestFirst(stackName, "Child"));
+        assertEquals("CREATE_COMPLETE", describedResourceStatus(stackName, "Child"));
+
+        deleteStack(stackName);
+    }
+
+    /** A stack of one queue, plus the resource an update adds when {@code addedResourceJson} is set. */
+    private static String queueStackWith(String queueName, String addedResourceJson) {
+        return """
+                {
+                  "Resources": {
+                    "Kept": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"QueueName": "%s"}
+                    }%s
+                  }
+                }
+                """.formatted(queueName, addedResourceJson == null ? "" : ",\n" + addedResourceJson);
+    }
+
+    private void createStack(String stackName, String templateBody) {
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", templateBody)
+        .when().post("/").then().statusCode(200);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
+    }
+
+    private void updateStack(String stackName, String templateBody) {
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", templateBody)
+        .when().post("/").then().statusCode(200);
+    }
+
+    /** DescribeStackEvents lists the newest event first; this hands one resource's back in order. */
+    private List<String> resourceStatusesOldestFirst(String stackName, String logicalId) {
+        String body = given()
+                .contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStackEvents").formParam("StackName", stackName)
+            .when().post("/").then().statusCode(200)
+            .extract().body().asString();
+        List<String> statuses = new ArrayList<>(XmlParser.extractGroups(body, "member").stream()
+                .filter(member -> logicalId.equals(member.get("LogicalResourceId")))
+                .map(member -> member.get("ResourceStatus"))
+                .toList());
+        Collections.reverse(statuses);
+        return statuses;
+    }
+
+    private String describedResourceStatus(String stackName, String logicalId) {
+        String body = given()
+                .contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStackResource").formParam("StackName", stackName)
+                .formParam("LogicalResourceId", logicalId)
+            .when().post("/").then().statusCode(200)
+            .extract().body().asString();
+        return XmlParser.extractFirst(body, "ResourceStatus", null);
     }
 
     @Test

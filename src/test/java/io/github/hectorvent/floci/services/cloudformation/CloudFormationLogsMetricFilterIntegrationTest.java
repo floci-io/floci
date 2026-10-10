@@ -606,7 +606,7 @@ class CloudFormationLogsMetricFilterIntegrationTest {
                     && "UPDATE_COMPLETE".equals(e.get("ResourceStatus")) && mutation == -1) {
                 mutation = i;
             }
-            if ("BadSecret".equals(e.get("LogicalResourceId")) && "UPDATE_FAILED".equals(e.get("ResourceStatus"))) {
+            if ("BadSecret".equals(e.get("LogicalResourceId")) && "CREATE_FAILED".equals(e.get("ResourceStatus"))) {
                 failure = i;
             }
         }
