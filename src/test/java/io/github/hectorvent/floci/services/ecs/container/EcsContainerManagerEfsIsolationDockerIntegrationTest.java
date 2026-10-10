@@ -148,7 +148,7 @@ class EcsContainerManagerEfsIsolationDockerIntegrationTest {
 
         volumesToCleanUp.add("floci-aws-" + EcsContainerManager.efsVolumeToken(fileSystemId, accessPointId, rootDirectory));
 
-        EcsTaskHandle handle = containerManager.startTask(task, taskDef, List.of(), "us-east-1");
+        EcsTaskHandle handle = containerManager.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
         String dockerId = handle.getContainerIds().get("app");
         try {
             return dockerClient.waitContainerCmd(dockerId)

@@ -133,7 +133,7 @@ class EcsContainerManagerFirelensTest {
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
         task.setClusterArn("arn:aws:ecs:us-east-1:000000000000:cluster/test-cluster");
 
-        EcsTaskHandle handle = manager.startTask(task, taskDef, null, "us-east-1");
+        EcsTaskHandle handle = manager.startTask(task, taskDef, null, List.of(), "us-east-1");
 
         InOrder order = inOrder(lifecycleManager);
         order.verify(lifecycleManager).create(any(ContainerSpec.class));
@@ -187,7 +187,7 @@ class EcsContainerManagerFirelensTest {
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
         task.setClusterArn("arn:aws:ecs:us-east-1:000000000000:cluster/test-cluster");
 
-        manager.startTask(task, taskDef, null, "us-east-1");
+        manager.startTask(task, taskDef, null, List.of(), "us-east-1");
 
         InOrder order = inOrder(lifecycleManager);
         order.verify(lifecycleManager).create(any(ContainerSpec.class));
@@ -241,7 +241,7 @@ class EcsContainerManagerFirelensTest {
         object.setData(extra.getBytes(StandardCharsets.UTF_8));
         when(s3Service.getObject("firelens-configs", "extra.conf")).thenReturn(object);
 
-        manager.startTask(task, taskDef, null, "us-east-1");
+        manager.startTask(task, taskDef, null, List.of(), "us-east-1");
 
         verify(s3Service).getObject("firelens-configs", "extra.conf");
         verify(copyCmd).withRemotePath("/fluent-bit/etc");
@@ -282,7 +282,7 @@ class EcsContainerManagerFirelensTest {
         object.setData("<match **>\n    @type stdout\n</match>\n".getBytes(StandardCharsets.UTF_8));
         when(s3Service.getObject("firelens-configs", "extra.conf")).thenReturn(object);
 
-        manager.startTask(task, taskDef, null, "us-east-1");
+        manager.startTask(task, taskDef, null, List.of(), "us-east-1");
 
         verify(copyCmd).withRemotePath("/fluentd/etc");
         ArgumentCaptor<InputStream> configArchive = ArgumentCaptor.forClass(InputStream.class);
@@ -316,7 +316,7 @@ class EcsContainerManagerFirelensTest {
                 .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
 
         AwsException failure = assertThrows(AwsException.class,
-                () -> manager.startTask(task, taskDef, null, "us-east-1"));
+                () -> manager.startTask(task, taskDef, null, List.of(), "us-east-1"));
         assertEquals("ResourceInitializationError", failure.getErrorCode());
         assertEquals("Unable to download firelens s3 config file: unable to download s3 config "
                 + "missing.conf from bucket firelens-configs: The specified key does not exist.",
@@ -333,7 +333,7 @@ class EcsContainerManagerFirelensTest {
         app.setLogConfiguration(new LogConfiguration("awsfirelens", Map.of(), null));
 
         AwsException failure = assertThrows(AwsException.class,
-                () -> manager.startTask(task(), taskDefinition(List.of(app)), null, "us-east-1"));
+                () -> manager.startTask(task(), taskDefinition(List.of(app)), null, List.of(), "us-east-1"));
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("awsfirelens log driver requires a firelensConfiguration container",
@@ -348,7 +348,7 @@ class EcsContainerManagerFirelensTest {
                 taskDefinition(List.of(
                         router("fluentbit", List.of()),
                         router("fluentd", List.of()))),
-                null, "us-east-1"));
+                null, List.of(), "us-east-1"));
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("A task definition can have only one FireLens log router.", failure.getMessage());
@@ -361,7 +361,7 @@ class EcsContainerManagerFirelensTest {
         AwsException failure = assertThrows(AwsException.class, () -> manager.startTask(
                 task(),
                 taskDefinition(List.of(router("fluentbit", List.of(new PortMapping(24224, 0, "tcp"))))),
-                null, "us-east-1"));
+                null, List.of(), "us-east-1"));
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("FireLens port 24224 must not be exposed.", failure.getMessage());
@@ -373,7 +373,7 @@ class EcsContainerManagerFirelensTest {
         AwsException failure = assertThrows(AwsException.class, () -> manager.startTask(
                 task(),
                 taskDefinition(List.of(router("fluent-plugin", List.of()))),
-                null, "us-east-1"));
+                null, List.of(), "us-east-1"));
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("FireLens configuration type must be fluentbit or fluentd.", failure.getMessage());

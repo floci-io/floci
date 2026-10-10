@@ -122,7 +122,7 @@ class EcsContainerManagerSecurityGroupTest {
                 .thenReturn(List.of(sg));
 
         EcsTaskHandle handle = manager.startTask(awsvpcTask(), awsvpcTaskDef(List.of(new PortMapping(80, 80, "tcp"))),
-                List.of(), "us-east-1");
+                List.of(), List.of(), "us-east-1");
 
         verify(builder).withNetworkMode("container:helper-id");
         verify(builder).withLabels(Map.of("io.floci.security-group.workload", "true"));
@@ -144,7 +144,7 @@ class EcsContainerManagerSecurityGroupTest {
         when(firewallManager.enabled()).thenReturn(false);
 
         manager.startTask(awsvpcTask(), awsvpcTaskDef(List.of(new PortMapping(80, 80, "tcp"))),
-                List.of(), "us-east-1");
+                List.of(), List.of(), "us-east-1");
 
         verify(builder, never()).withNetworkMode(anyString());
         verify(builder, never()).withLabels(Map.of("io.floci.security-group.workload", "true"));
@@ -176,7 +176,7 @@ class EcsContainerManagerSecurityGroupTest {
 
         EcsTask task = awsvpcTask();
         EcsTaskHandle handle = manager.startTask(task, awsvpcTaskDef(List.of()),
-                List.of(), "us-east-1");
+                List.of(), List.of(), "us-east-1");
         manager.stopTaskAndCollectExitCodes(handle);
 
         // Stopping the containers tears down their firewall registration, but the ENI belongs to
@@ -235,7 +235,7 @@ class EcsContainerManagerSecurityGroupTest {
         taskDef.setNetworkMode(NetworkMode.awsvpc);
         taskDef.setContainerDefinitions(List.of(app, router));
 
-        manager.startTask(awsvpcTask(), taskDef, List.of(), "us-east-1");
+        manager.startTask(awsvpcTask(), taskDef, List.of(), List.of(), "us-east-1");
 
         verify(builder, times(2)).withNetworkMode("container:helper-id");
         verify(builder, times(2)).withLabels(Map.of("io.floci.security-group.workload", "true"));

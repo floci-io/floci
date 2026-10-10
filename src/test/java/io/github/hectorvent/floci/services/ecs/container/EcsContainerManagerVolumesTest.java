@@ -115,7 +115,7 @@ class EcsContainerManagerVolumesTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        manager.startTask(task, taskDef, List.of(), "us-east-1");
+        manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
 
         // Read-only mountPoint -> withReadOnlyBind(hostSourcePath, containerPath).
         ArgumentCaptor<String> roHost = ArgumentCaptor.forClass(String.class);
@@ -161,7 +161,7 @@ class EcsContainerManagerVolumesTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/efs1");
 
-        manager.startTask(task, taskDef, List.of(), "us-east-1");
+        manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
 
         // Each EFS volume -> a shared local Docker named volume under the current prefix (no
         // legacy-named volume exists here), read-write or read-only per the mountPoint.
@@ -205,7 +205,7 @@ class EcsContainerManagerVolumesTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/efsown");
 
-        configured.startTask(task, taskDef, List.of(), "us-east-1");
+        configured.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
 
         verify(lifecycleManager, times(1)).ensureSharedVolume(
                 "floci-aws-" + EcsContainerManager.efsVolumeToken("fs-abc", null, "/dps"),
@@ -241,7 +241,7 @@ class EcsContainerManagerVolumesTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/efsposix");
 
-        configured.startTask(task, taskDef, List.of(), "us-east-1");
+        configured.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
 
         verify(builder, times(1)).withUser("1001:1001");
         verify(builder, times(1)).withGroupAdd("2000");
@@ -270,7 +270,7 @@ class EcsContainerManagerVolumesTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/socket1");
 
-        assertThrows(AwsException.class, () -> manager.startTask(task, taskDef, List.of(), "us-east-1"));
+        assertThrows(AwsException.class, () -> manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1"));
 
         verify(builder, never()).withBind(any(), any());
         verify(builder, never()).withReadOnlyBind(any(), any());

@@ -753,7 +753,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
             handle.getContainerIds().keySet().forEach(handle::recordContainerRemoved);
             return Map.of("app", 0);
         });
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenAnswer(invocation -> {
             Boolean scripted = launches.poll();
             if (scripted != null ? !scripted : !healthy) {
                 throw new RuntimeException("CannotPullContainerError: image not found");

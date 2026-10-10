@@ -80,7 +80,7 @@ class EcsExecChannelDockerIntegrationTest {
         task.setTaskArn(TASK_ARN + suffix);
         task.setEnableExecuteCommand(true);
 
-        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), "us-east-1");
+        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), List.of(), "us-east-1");
         try {
             // The agent is reported as running, which is what a client checks before connecting.
             assertEquals(ManagedAgentStatus.RUNNING, ManagedAgentStatus.of(task));
@@ -136,7 +136,7 @@ class EcsExecChannelDockerIntegrationTest {
         task.setTaskArn(TASK_ARN + suffix);
         task.setEnableExecuteCommand(true);
 
-        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), "us-east-1");
+        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), List.of(), "us-east-1");
         try {
             String runtimeId = handle.getContainerIds().get("app");
             assertEquals("1000:1000",

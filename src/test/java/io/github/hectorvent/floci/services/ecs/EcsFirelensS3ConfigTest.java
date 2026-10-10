@@ -105,7 +105,7 @@ class EcsFirelensS3ConfigTest {
         // EcsContainerManager reads the object before creating any container and reports the
         // failure with the agent's wording under a ResourceInitializationError code; EcsService
         // keys off that code to use the message as the stopped reason verbatim.
-        when(containerManager.startTask(any(), any(), any(), eq("us-east-1")))
+        when(containerManager.startTask(any(), any(), any(), any(), eq("us-east-1")))
                 .thenThrow(new AwsException("ResourceInitializationError",
                         "Unable to download firelens s3 config file: unable to download s3 config "
                                 + "extra.conf from bucket firelens-configs: The specified key does not exist.",

@@ -56,7 +56,7 @@ class EcsServiceTeardownTest {
         CountDownLatch startEntered = new CountDownLatch(1);
         CountDownLatch finishStart = new CountDownLatch(1);
         AtomicReference<EcsTask> startingTask = new AtomicReference<>();
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenAnswer(invocation -> {
             EcsTask task = invocation.getArgument(0);
             startingTask.set(task);
             startEntered.countDown();
@@ -115,7 +115,7 @@ class EcsServiceTeardownTest {
         CountDownLatch finishStart = new CountDownLatch(1);
         AtomicReference<String> taskArn = new AtomicReference<>();
         EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenAnswer(invocation -> {
             EcsTask task = invocation.getArgument(0);
             taskArn.set(task.getTaskArn());
             startEntered.countDown();
@@ -167,7 +167,7 @@ class EcsServiceTeardownTest {
 
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         EcsTaskHandle original = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenAnswer(invocation -> {
             EcsTask task = invocation.getArgument(0);
             Container container = new Container();
             container.setName("app");
@@ -212,7 +212,7 @@ class EcsServiceTeardownTest {
 
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenReturn(handle);
         Map<String, Integer> failed = new HashMap<>();
         failed.put("app", null);
         AtomicInteger attempts = new AtomicInteger();
@@ -251,7 +251,7 @@ class EcsServiceTeardownTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenAnswer(invocation -> {
             EcsTask task = invocation.getArgument(0);
             Container container = new Container();
             container.setName("app");
@@ -292,7 +292,7 @@ class EcsServiceTeardownTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenReturn(handle);
         CountDownLatch teardownEntered = new CountDownLatch(1);
         CountDownLatch finishTeardown = new CountDownLatch(1);
         when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
@@ -357,7 +357,7 @@ class EcsServiceTeardownTest {
 
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         EcsTaskHandle handle = mock(EcsTaskHandle.class);
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenReturn(handle);
 
         EcsService service = new EcsService(
                 new RegionResolver(REGION, "000000000000"),
@@ -426,7 +426,7 @@ class EcsServiceTeardownTest {
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"),
                 Map.of("docker-id", mock(Closeable.class)));
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenReturn(handle);
         AtomicInteger teardownAttempts = new AtomicInteger();
         when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
             handle.recordContainerRemoved("app");

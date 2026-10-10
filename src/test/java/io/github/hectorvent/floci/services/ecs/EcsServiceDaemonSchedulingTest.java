@@ -81,7 +81,7 @@ class EcsServiceDaemonSchedulingTest {
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
-        when(containerManager.startTask(any(), any(), any(), anyString()))
+        when(containerManager.startTask(any(), any(), any(), any(), anyString()))
                 .thenThrow(new RuntimeException("no docker here"));
         EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
                 config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory(), null);
@@ -330,7 +330,7 @@ class EcsServiceDaemonSchedulingTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         when(containerManager.removeLeftoverContainers()).thenReturn(true);
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(inv ->
+        when(containerManager.startTask(any(), any(), any(), any(), anyString())).thenAnswer(inv ->
                 new EcsTaskHandle(inv.<EcsTask>getArgument(0).getTaskArn(), Map.of("agent", "cid"), Map.of()));
         when(containerManager.stopTaskAndCollectExitCodes(any()))
                 .thenThrow(new RuntimeException("docker unavailable"));

@@ -57,6 +57,7 @@ public record ContainerSpec(
         List<Integer> loopbackPortBindings,
         List<Integer> exposedPorts,
         String networkMode,
+        List<String> networkAliases,
         List<Mount> mounts,
         List<Bind> binds,
         List<VolumesFrom> volumesFrom,
@@ -92,7 +93,7 @@ public record ContainerSpec(
      * All other fields will be null or empty lists.
      */
     public ContainerSpec(String image) {
-        this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
+        this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null, List.of(),
                 List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(),
                 null, null, List.of(), List.of(), null, null, false, List.of(), Map.of());
     }
@@ -124,7 +125,7 @@ public record ContainerSpec(
             List<String> groupAdd
     ) {
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, List.of(), exposedPorts,
-                networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig, privileged,
+                networkMode, List.of(), mounts, binds, List.of(), extraHosts, labels, logConfig, privileged,
                 cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(), null, null, false,
                 List.of(), Map.of());
     }
@@ -158,7 +159,7 @@ public record ContainerSpec(
             List<String> groupAdd
     ) {
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
-                exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
+                exposedPorts, networkMode, List.of(), mounts, binds, List.of(), extraHosts, labels, logConfig,
                 privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(),
                 null, null, false, List.of(), Map.of());
     }
@@ -192,7 +193,7 @@ public record ContainerSpec(
             List<DeviceRequest> deviceRequests
     ) {
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
-                exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
+                exposedPorts, networkMode, List.of(), mounts, binds, List.of(), extraHosts, labels, logConfig,
                 privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
                 null, null, false, List.of(), Map.of());
     }
@@ -270,6 +271,6 @@ public record ContainerSpec(
      * Returns true when the configured network must be attached with endpoint settings before start.
      */
     public boolean hasNetworkConfiguration() {
-        return networkMode != null && !networkMode.isBlank() && hasLinkLocalIps();
+        return networkMode != null && !networkMode.isBlank() && (hasLinkLocalIps() || (networkAliases != null && !networkAliases.isEmpty()));
     }
 }

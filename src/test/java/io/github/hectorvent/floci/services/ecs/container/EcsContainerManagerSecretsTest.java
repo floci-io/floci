@@ -95,7 +95,7 @@ class EcsContainerManagerSecretsTest {
         override.setName("app");
         override.setEnvironment(List.of(new KeyValuePair("PASSWORD", "override")));
 
-        manager.startTask(task(), taskDef(app), List.of(override), "us-east-1");
+        manager.startTask(task(), taskDef(app), List.of(override), List.of(), "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
@@ -113,7 +113,7 @@ class EcsContainerManagerSecretsTest {
                 .thenReturn(new Parameter("/foo/bar", "path-value", "String"));
 
         manager.startTask(task(), taskDef(containerDef("app", List.of(new Secret("PATH_VALUE", ssmArn)))),
-                List.of(), "us-east-1");
+                List.of(), List.of(), "us-east-1");
 
         verify(ssmService).getParameter("/foo/bar", "us-east-1");
     }
@@ -140,7 +140,7 @@ class EcsContainerManagerSecretsTest {
         manager.startTask(task(), taskDef(containerDef("app", List.of(
                 new Secret("TOKEN", ssmArn),
                 new Secret("PASSWORD", secretArn)))),
-                List.of(), region);
+                List.of(), List.of(), region);
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
@@ -165,7 +165,7 @@ class EcsContainerManagerSecretsTest {
         manager.startTask(task(), taskDef(containerDef("app", List.of(
                 new Secret("TOKEN", ssmArn),
                 new Secret("PASSWORD", secretArn)))),
-                List.of(), "us-east-1");
+                List.of(), List.of(), "us-east-1");
 
         verify(ssmService).getParameter("/app/token", "eu-west-1");
         verify(secretsManagerService).getSecretValue(secretArn, null, null, "eu-west-1");
@@ -181,7 +181,7 @@ class EcsContainerManagerSecretsTest {
                 .thenThrow(new AwsException("ParameterNotFound", "Parameter /missing not found.", 400));
 
         AwsException thrown = assertThrows(AwsException.class,
-                () -> manager.startTask(task(), taskDef(first, second), List.of(), "us-east-1"));
+                () -> manager.startTask(task(), taskDef(first, second), List.of(), List.of(), "us-east-1"));
 
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains("/missing"));
@@ -201,7 +201,7 @@ class EcsContainerManagerSecretsTest {
         AwsException thrown = assertThrows(AwsException.class,
                 () -> manager.startTask(task(),
                         taskDef(containerDef("app", List.of(new Secret("BIN", secretArn)))),
-                        List.of(), "us-east-1"));
+                        List.of(), List.of(), "us-east-1"));
 
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains(secretArn));
@@ -217,7 +217,7 @@ class EcsContainerManagerSecretsTest {
 
         manager.startTask(task(),
                 taskDef(containerDef("app", List.of(new Secret("PROBE", secretArn + ":token::")))),
-                List.of(), "us-east-1");
+                List.of(), List.of(), "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
@@ -236,7 +236,7 @@ class EcsContainerManagerSecretsTest {
 
         manager.startTask(task(),
                 taskDef(containerDef("app", List.of(new Secret("WHOLE", secretArn + ":::v123")))),
-                List.of(), "us-east-1");
+                List.of(), List.of(), "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
@@ -254,7 +254,7 @@ class EcsContainerManagerSecretsTest {
         manager.startTask(task(),
                 taskDef(containerDef("app",
                         List.of(new Secret("PROBE", secretArn + ":token:AWSPREVIOUS:v123")))),
-                List.of(), "us-east-1");
+                List.of(), List.of(), "us-east-1");
 
         verify(secretsManagerService).getSecretValue(secretArn, "v123", "AWSPREVIOUS", "us-east-1");
     }
@@ -268,7 +268,7 @@ class EcsContainerManagerSecretsTest {
         AwsException thrown = assertThrows(AwsException.class,
                 () -> manager.startTask(task(),
                         taskDef(containerDef("app", List.of(new Secret("PROBE", secretArn + ":token::")))),
-                        List.of(), "us-east-1"));
+                        List.of(), List.of(), "us-east-1"));
 
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains("did not contain json key token"));
@@ -284,7 +284,7 @@ class EcsContainerManagerSecretsTest {
         AwsException thrown = assertThrows(AwsException.class,
                 () -> manager.startTask(task(),
                         taskDef(containerDef("app", List.of(new Secret("PROBE", secretArn + ":token::")))),
-                        List.of(), "us-east-1"));
+                        List.of(), List.of(), "us-east-1"));
 
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains("not valid JSON"));
@@ -299,7 +299,7 @@ class EcsContainerManagerSecretsTest {
         AwsException thrown = assertThrows(AwsException.class,
                 () -> manager.startTask(task(),
                         taskDef(containerDef("app", List.of(new Secret("PROBE", secretArn + ":token")))),
-                        List.of(), "us-east-1"));
+                        List.of(), List.of(), "us-east-1"));
 
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains(

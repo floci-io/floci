@@ -123,7 +123,7 @@ class EcsContainerManagerPortMappingsTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        manager.startTask(task, taskDef, List.of(), "us-east-1");
+        manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
     }
 
     @Test
@@ -142,7 +142,7 @@ class EcsContainerManagerPortMappingsTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        manager.startTask(task, taskDef, List.of(), "us-east-1");
+        manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1");
 
         verify(builder).withLabels(Map.of(
                 "io.floci", "aws",
@@ -321,7 +321,7 @@ class EcsContainerManagerPortMappingsTest {
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
         AwsException failure = assertThrows(AwsException.class,
-                () -> manager.startTask(task, taskDef, List.of(), "us-east-1"));
+                () -> manager.startTask(task, taskDef, List.of(), List.of(), "us-east-1"));
 
         assertEquals("FireLens port 24224 must not be exposed.", failure.getMessage());
         verify(builder, never()).withDynamicPort(24224);

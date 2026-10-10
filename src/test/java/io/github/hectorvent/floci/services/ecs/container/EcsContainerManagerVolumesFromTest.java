@@ -100,7 +100,7 @@ class EcsContainerManagerVolumesFromTest {
         ContainerDefinition source = definition("source", "sidecar:latest");
 
         EcsTask ecsTask = task();
-        manager.startTask(ecsTask, taskDefinition(List.of(app, source)), List.of(), "us-east-1");
+        manager.startTask(ecsTask, taskDefinition(List.of(app, source)), List.of(), List.of(), "us-east-1");
 
         InOrder order = inOrder(containerBuilder);
         order.verify(containerBuilder).newContainer("sidecar:latest");
@@ -117,7 +117,7 @@ class EcsContainerManagerVolumesFromTest {
         app.setVolumesFrom(List.of(new VolumeFrom("source", false)));
         ContainerDefinition source = definition("source", "sidecar:latest");
 
-        manager.startTask(task(), taskDefinition(List.of(source, app)), List.of(), "us-east-1");
+        manager.startTask(task(), taskDefinition(List.of(source, app)), List.of(), List.of(), "us-east-1");
 
         verify(appBuilder).withVolumesFrom("source-id", false);
     }
@@ -152,7 +152,7 @@ class EcsContainerManagerVolumesFromTest {
 
         EcsTask ecsTask = task();
         EcsTaskHandle handle = manager.startTask(
-                ecsTask, taskDefinition(List.of(app, router, source)), List.of(), "us-east-1");
+                ecsTask, taskDefinition(List.of(app, router, source)), List.of(), List.of(), "us-east-1");
 
         InOrder order = inOrder(containerBuilder);
         order.verify(containerBuilder).newContainer("sidecar:latest");
@@ -201,7 +201,7 @@ class EcsContainerManagerVolumesFromTest {
 
         assertThrows(IllegalArgumentException.class,
                 () -> manager.startTask(task(), taskDefinition(List.of(source, router, app)),
-                        List.of(), "us-east-1"));
+                        List.of(), List.of(), "us-east-1"));
 
         verify(containerBuilder, never()).newContainer(anyString());
         verify(lifecycleManager, never()).create(any());
@@ -225,7 +225,7 @@ class EcsContainerManagerVolumesFromTest {
 
         AwsException failure = assertThrows(AwsException.class,
                 () -> manager.startTask(task(), taskDefinition(List.of(app, router, source)),
-                        List.of(), "us-east-1"));
+                        List.of(), List.of(), "us-east-1"));
 
         assertEquals("ResourceInitializationError", failure.getErrorCode());
         assertEquals("Unable to download firelens s3 config file: unable to download s3 config "
@@ -244,7 +244,7 @@ class EcsContainerManagerVolumesFromTest {
         app.setVolumesFrom(List.of(new VolumeFrom("missing", false)));
 
         assertThrows(IllegalArgumentException.class,
-                () -> manager.startTask(task(), taskDefinition(List.of(app)), List.of(), "us-east-1"));
+                () -> manager.startTask(task(), taskDefinition(List.of(app)), List.of(), List.of(), "us-east-1"));
 
         verify(lifecycleManager, never()).createAndStart(any());
     }
@@ -257,7 +257,7 @@ class EcsContainerManagerVolumesFromTest {
         source.setVolumesFrom(List.of(new VolumeFrom("app", false)));
 
         assertThrows(IllegalArgumentException.class,
-                () -> manager.startTask(task(), taskDefinition(List.of(app, source)), List.of(), "us-east-1"));
+                () -> manager.startTask(task(), taskDefinition(List.of(app, source)), List.of(), List.of(), "us-east-1"));
 
         verify(lifecycleManager, never()).createAndStart(any());
     }

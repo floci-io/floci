@@ -1527,7 +1527,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                 "the containers a previous run of Floci left on the Docker daemon could not be removed yet");
                     }
                     task.setPullStartedAt(Instant.now());
-                    EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, region);
+                    List<String> aliases = java.util.List.of();
+                    if (discoveryRegistrar != null && task.getOwningServiceArn() != null) {
+                        EcsServiceModel svc = owningService(task, cluster);
+                        if (svc != null) {
+                            aliases = discoveryRegistrar.networkAliases(svc);
+                        }
+                    }
+                    EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, aliases, region);
                     task.setPullStoppedAt(Instant.now());
                     boolean stopRequested;
                     synchronized (task) {

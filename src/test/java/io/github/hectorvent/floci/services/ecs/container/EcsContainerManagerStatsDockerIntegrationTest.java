@@ -54,7 +54,7 @@ class EcsContainerManagerStatsDockerIntegrationTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/stats/" + suffix);
 
-        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), "us-east-1");
+        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), List.of(), "us-east-1");
         try {
             Optional<EcsContainerManager.ContainerStats> sample =
                     containerManager.sampleContainerStats(handle.getContainerIds().get("app"));
@@ -90,7 +90,7 @@ class EcsContainerManagerStatsDockerIntegrationTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/stats/" + suffix);
 
-        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), "us-east-1");
+        EcsTaskHandle handle = containerManager.startTask(task, taskDefinition, List.of(), List.of(), "us-east-1");
         try {
             List<String> dockerIds = List.of(handle.getContainerIds().get("app"),
                     handle.getContainerIds().get("sidecar"),

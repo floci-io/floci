@@ -86,7 +86,7 @@ class EcsContainerManagerImagePullTest {
                 .thenReturn(new LaunchImage(SIDECAR_IMAGE_ID, null));
         EcsTask task = task();
 
-        manager.startTask(task, taskDefinition(), List.of(), "us-east-1");
+        manager.startTask(task, taskDefinition(), List.of(), List.of(), "us-east-1");
 
         InOrder order = inOrder(lifecycleManager);
         order.verify(lifecycleManager).resolveImageForLaunch(APP_IMAGE, ImagePullBehavior.ALWAYS);
@@ -105,7 +105,7 @@ class EcsContainerManagerImagePullTest {
         when(lifecycleManager.resolveImageForLaunch(SIDECAR_IMAGE, ImagePullBehavior.ALWAYS))
                 .thenReturn(new LaunchImage(SIDECAR_IMAGE_ID, null));
 
-        manager.startTask(task(), taskDefinition(), List.of(), "us-east-1");
+        manager.startTask(task(), taskDefinition(), List.of(), List.of(), "us-east-1");
 
         verify(containerBuilder).newContainer(APP_IMAGE_ID);
         verify(containerBuilder).newContainer(SIDECAR_IMAGE_ID);
@@ -120,7 +120,7 @@ class EcsContainerManagerImagePullTest {
         when(lifecycleManager.resolveImageForLaunch(anyString(), any()))
                 .thenReturn(new LaunchImage(APP_IMAGE_ID, null));
 
-        manager.startTask(task(), taskDefinition(), List.of(), "us-east-1");
+        manager.startTask(task(), taskDefinition(), List.of(), List.of(), "us-east-1");
 
         verify(lifecycleManager).resolveImageForLaunch("mirror.example/" + APP_IMAGE, ImagePullBehavior.ALWAYS);
         verify(lifecycleManager).resolveImageForLaunch("mirror.example/" + SIDECAR_IMAGE, ImagePullBehavior.ALWAYS);
@@ -134,7 +134,7 @@ class EcsContainerManagerImagePullTest {
                 .thenThrow(new NotFoundException("pull access denied for sidecar"));
 
         assertThrows(NotFoundException.class,
-                () -> manager.startTask(task(), taskDefinition(), List.of(), "us-east-1"));
+                () -> manager.startTask(task(), taskDefinition(), List.of(), List.of(), "us-east-1"));
 
         verify(lifecycleManager, never()).createAndStart(any());
     }
