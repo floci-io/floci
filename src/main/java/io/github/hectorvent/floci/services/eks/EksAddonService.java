@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eks;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -120,7 +121,7 @@ public class EksAddonService {
         }
 
         if (request.serviceAccountRoleArn() != null && !request.serviceAccountRoleArn().isBlank()) {
-            validateRoleArn(cluster, request.serviceAccountRoleArn(), "serviceAccountRoleArn");
+            validateRoleArn(request.serviceAccountRoleArn(), "serviceAccountRoleArn");
         }
 
         if (request.resolveConflicts() != null && !request.resolveConflicts().isBlank()) {
@@ -221,7 +222,7 @@ public class EksAddonService {
 
             if (request.serviceAccountRoleArn() != null) {
                 if (!request.serviceAccountRoleArn().isBlank()) {
-                    validateRoleArn(cluster, request.serviceAccountRoleArn(), "serviceAccountRoleArn");
+                    validateRoleArn(request.serviceAccountRoleArn(), "serviceAccountRoleArn");
                 }
                 params.add(new UpdateParam("ServiceAccountRoleArn", request.serviceAccountRoleArn()));
             }
@@ -383,7 +384,7 @@ public class EksAddonService {
                 throw new AwsException("InvalidParameterException",
                         "roleArn and serviceAccount are required for podIdentityAssociations", 400);
             }
-            validateRoleArn(cluster, assoc.roleArn(), "roleArn");
+            validateRoleArn(assoc.roleArn(), "roleArn");
         }
     }
 
@@ -469,13 +470,12 @@ public class EksAddonService {
         }
     }
 
-    private void validateRoleArn(Cluster cluster, String roleArn, String fieldName) {
+    private void validateRoleArn(String roleArn, String fieldName) {
         if (roleArn == null || roleArn.isBlank()) {
             throw new AwsException("InvalidParameterException", fieldName + " is required", 400);
         }
         String[] arn = roleArn.split(":", 6);
-        String[] clusterArn = cluster.getArn().split(":", 6);
-        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(clusterArn[1])
+        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].matches(AwsArnUtils.PARTITION_REGEX)
                 || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
                 || !arn[5].startsWith("role/") || arn[5].startsWith("role/aws-service-role/")
                 || roleArn.endsWith("/")) {
@@ -484,7 +484,7 @@ public class EksAddonService {
         if (iam != null) {
             String roleName = roleArn.substring(roleArn.lastIndexOf('/') + 1);
             iam.findRole(arn[4], roleName)
-                    .filter(role -> roleArn.equals(role.getArn()))
+                    .filter(role -> IamService.roleArnMatches(roleArn, role))
                     .orElseThrow(() -> new AwsException("InvalidParameterException", "Role not found: " + roleArn, 400));
         }
     }

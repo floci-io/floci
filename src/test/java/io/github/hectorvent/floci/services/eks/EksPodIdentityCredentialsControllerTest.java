@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
 import io.github.hectorvent.floci.services.eks.model.EksPodIdentityCredentialsResponse;
 import io.github.hectorvent.floci.services.eks.model.PodIdentityAssociation;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -143,6 +144,24 @@ class EksPodIdentityCredentialsControllerTest {
                 sessionNameCaptor.capture(), any());
         assertEquals(creds.accessKeyId(), akidCaptor.getValue());
         assertTrue(sessionNameCaptor.getValue().startsWith("eks-" + CLUSTER_NAME + "-" + SERVICE_ACCOUNT + "-"));
+    }
+
+    @Test
+    void aSessionOnARoleArnFromAnotherPartitionNamesTheStoredRoleLikeSts() throws Exception {
+        String chinaRoleArn = "arn:aws-cn:iam::123456789012:role/app-role";
+        PodIdentityAssociation association = new PodIdentityAssociation(CLUSTER_NAME, NAMESPACE, SERVICE_ACCOUNT,
+                chinaRoleArn, "arn:aws:eks:us-east-1:" + ACCOUNT_ID + ":podidentityassociation/" + CLUSTER_NAME
+                + "/assoc-1", "assoc-1", null, 1000.0, 1000.0, null, null, false, null, null);
+        when(associationService.findAssociation(cluster, NAMESPACE, SERVICE_ACCOUNT))
+                .thenReturn(Optional.of(association));
+        when(iamService.findRole(ACCOUNT_ID, "app-role"))
+                .thenReturn(Optional.of(new IamRole("AROA-app", "app-role", "/", ROLE_ARN, "{}")));
+
+        Response response = controller.getCredentials("Bearer " + validToken());
+
+        assertEquals(200, response.getStatus());
+        verify(iamService).registerSession(any(), any(), any(), eq(ROLE_ARN), any(Instant.class), eq(null),
+                eq(ACCOUNT_ID), any(), any());
     }
 
     @Test

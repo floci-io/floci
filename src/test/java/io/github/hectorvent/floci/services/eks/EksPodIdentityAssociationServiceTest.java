@@ -286,6 +286,31 @@ class EksPodIdentityAssociationServiceTest {
                 + created.associationId(), created.associationArn());
     }
 
+    @Test
+    void aRoleArnFromAnotherPartitionResolvesTheAccountsRoleTheWayStsDoes() {
+        Fixture fixture = fixture();
+        String chinaRole = "arn:aws-cn:iam::123456789012:role/pod-role";
+        String govTarget = "arn:aws-us-gov:iam::210987654321:role/target-role";
+
+        PodIdentityAssociation created = fixture.service.create(fixture.cluster, new CreatePodIdentityAssociationRequest(
+                fixture.cluster.getName(), NAMESPACE, SERVICE_ACCOUNT, chinaRole, null, Map.of(), govTarget,
+                null, null));
+
+        assertEquals(chinaRole, created.roleArn());
+        assertEquals(govTarget, created.targetRoleArn());
+        PodIdentityAssociation updated = fixture.service.update(fixture.cluster, created.associationId(),
+                new UpdatePodIdentityAssociationRequest(ROLE, null, null, null, null));
+        assertEquals(ROLE, updated.roleArn());
+
+        for (String rejected : List.of("arn:aws-cn:iam::123456789012:role/team/pod-role",
+                "arn:aws-cn:iam::111111111111:role/pod-role", "arn:bogus:iam::123456789012:role/pod-role")) {
+            AwsException ex = assertThrows(AwsException.class, () -> fixture.service.update(fixture.cluster,
+                    created.associationId(), new UpdatePodIdentityAssociationRequest(rejected, null, null, null, null)),
+                    rejected);
+            assertEquals("InvalidParameterException", ex.getErrorCode(), rejected);
+        }
+    }
+
     private static Fixture fixture() {
         Cluster cluster = new Cluster();
         cluster.setName("test-cluster");

@@ -177,7 +177,7 @@ public class StsQueryHandler {
                 .orElse(regionResolver.buildGlobalArn("iam", callerAccount, "root"));
         String principalArn = callerArns.map(IamService.CallerArns::principalArn).orElse(callerArn);
 
-        if (role == null || !roleArnMatches(roleArn, role)) {
+        if (role == null || !IamService.roleArnMatches(roleArn, role)) {
             return AwsQueryResponse.error("AccessDenied",
                     "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
                     AwsNamespaces.STS, 403);
@@ -208,26 +208,6 @@ public class StsQueryHandler {
         }
         return regionResolver.buildGlobalArn("iam", accountId,
                 "role" + IamService.normalizePath(role.getPath()) + roleName);
-    }
-
-    static boolean roleArnMatches(String requestedRoleArn, IamRole role) {
-        if (requestedRoleArn == null || role == null || !AwsArnUtils.isArn(requestedRoleArn)) {
-            return false;
-        }
-        AwsArnUtils.Arn requested = AwsArnUtils.parse(requestedRoleArn);
-        if (!"iam".equals(requested.service())
-                || !requested.partition().matches(AwsArnUtils.PARTITION_REGEX)) {
-            return false;
-        }
-        String storedArn = role.getArn();
-        if (storedArn != null && AwsArnUtils.isArn(storedArn)) {
-            AwsArnUtils.Arn stored = AwsArnUtils.parse(storedArn);
-            return requested.accountId().equals(stored.accountId())
-                    && requested.region().equals(stored.region())
-                    && requested.resource().equals(stored.resource());
-        }
-        String expectedResource = "role" + IamService.normalizePath(role.getPath()) + role.getRoleName();
-        return requested.region().isEmpty() && requested.resource().equals(expectedResource);
     }
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
@@ -298,7 +278,7 @@ public class StsQueryHandler {
         IamRole role = outcome.role();
         if (role == null) {
             role = iamService.findRole(accountId, roleName).orElse(null);
-            if (role == null || !roleArnMatches(roleArn, role)) {
+            if (role == null || !IamService.roleArnMatches(roleArn, role)) {
                 return accessDenied(roleArn);
             }
         }
@@ -406,7 +386,7 @@ public class StsQueryHandler {
         }
 
         Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
-        if (role.isEmpty() || !roleArnMatches(roleArn, role.get())) {
+        if (role.isEmpty() || !IamService.roleArnMatches(roleArn, role.get())) {
             return WebIdentityOutcome.deny(accessDenied(roleArn));
         }
 

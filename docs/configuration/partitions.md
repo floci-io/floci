@@ -211,7 +211,9 @@ partition.
   namespace, and `ListBuckets` lists buckets created from every partition; IAM, Organizations,
   Route 53, CloudFront and the IAM Identity Center instance keep one set of resources per account,
   whichever partition a request is signed for. AWS keeps them per partition. A deployment that serves one partition is
-  unaffected.
+  unaffected. For the same reason, STS `AssumeRole`, EKS Pod Identity and EKS add-ons accept a role ARN from
+  any partition and resolve it to the account's role of that path and name; the session is named
+  with the role's own ARN.
 - **AWS managed policies** are the commercial catalog in every partition, with their ARNs and
   regional hosts rewritten; AWS publishes no per-partition list.
 - **Client tooling** that computes partition values itself (CDK bootstrap and

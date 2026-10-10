@@ -1079,6 +1079,34 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * Whether {@code requestedRoleArn} names {@code role}: same account, same path and name, no region.
+     *
+     * <p>The ARN's partition only has to be well formed. One process serves several partitions but
+     * keeps one IAM namespace per account, so a role ARN from another partition resolves to the
+     * account's one role (see the partitions guide). STS AssumeRole and EKS Pod Identity both match
+     * role ARNs through here so they accept the same ARNs.
+     */
+    public static boolean roleArnMatches(String requestedRoleArn, IamRole role) {
+        if (requestedRoleArn == null || role == null || !AwsArnUtils.isArn(requestedRoleArn)) {
+            return false;
+        }
+        AwsArnUtils.Arn requested = AwsArnUtils.parse(requestedRoleArn);
+        if (!"iam".equals(requested.service())
+                || !requested.partition().matches(AwsArnUtils.PARTITION_REGEX)) {
+            return false;
+        }
+        String storedArn = role.getArn();
+        if (storedArn != null && AwsArnUtils.isArn(storedArn)) {
+            AwsArnUtils.Arn stored = AwsArnUtils.parse(storedArn);
+            return requested.accountId().equals(stored.accountId())
+                    && requested.region().equals(stored.region())
+                    && requested.resource().equals(stored.resource());
+        }
+        String expectedResource = "role" + normalizePath(role.getPath()) + role.getRoleName();
+        return requested.region().isEmpty() && requested.resource().equals(expectedResource);
+    }
+
+    /**
      * AWS publishes UnmodifiableEntity on twelve role actions, and its message names the linked
      * service the caller has to go through instead. This guards the eleven of them the emulator
      * implements; UpdateRoleDescription is the twelfth and has no handler here. TagRole and

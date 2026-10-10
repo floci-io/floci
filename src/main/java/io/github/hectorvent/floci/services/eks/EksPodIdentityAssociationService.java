@@ -84,10 +84,10 @@ public class EksPodIdentityAssociationService {
         if (roleArn == null || roleArn.isBlank()) {
             throw invalid("roleArn is required");
         }
-        validateRoleArn(cluster, roleArn, "roleArn");
+        validateRoleArn(roleArn, "roleArn");
 
         if (request.targetRoleArn() != null && !request.targetRoleArn().isBlank()) {
-            validateTargetRoleArn(cluster, request.targetRoleArn());
+            validateTargetRoleArn(request.targetRoleArn());
         }
 
         Map<String, String> tags = request.tags() == null ? Map.of() : request.tags();
@@ -194,12 +194,12 @@ public class EksPodIdentityAssociationService {
 
         String newRoleArn = current.roleArn();
         if (request.roleArn() != null) {
-            validateRoleArn(cluster, request.roleArn(), "roleArn");
+            validateRoleArn(request.roleArn(), "roleArn");
             newRoleArn = request.roleArn();
         }
         String newTargetRoleArn = current.targetRoleArn();
         if (request.targetRoleArn() != null) {
-            validateTargetRoleArn(cluster, request.targetRoleArn());
+            validateTargetRoleArn(request.targetRoleArn());
             newTargetRoleArn = request.targetRoleArn();
         }
         Boolean newDisableSessionTags = request.disableSessionTags() != null
@@ -313,16 +313,14 @@ public class EksPodIdentityAssociationService {
         }
     }
 
-    /** The partition role ARNs must share with the cluster: its own, or the deployment's without an ARN. */
-    private String clusterPartition(Cluster cluster) {
-        return AwsArnUtils.partitionOrDefault(cluster != null ? cluster.getArn() : null,
-                regionResolver.getDefaultPartition());
-    }
-
-    private void validateRoleArn(Cluster cluster, String roleArn, String fieldName) {
+    /**
+     * The role must exist in the account the ARN names. Its partition only has to be well formed:
+     * an account keeps one IAM namespace whichever partition a request is for, and STS AssumeRole
+     * accepts the same role ARNs through {@link IamService#roleArnMatches}.
+     */
+    private void validateRoleArn(String roleArn, String fieldName) {
         String[] arn = roleArn.split(":", 6);
-        String expectedPartition = clusterPartition(cluster);
-        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(expectedPartition)
+        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].matches(AwsArnUtils.PARTITION_REGEX)
                 || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
                 || !arn[5].startsWith("role/") || arn[5].startsWith("role/aws-service-role/")
                 || roleArn.endsWith("/")) {
@@ -330,14 +328,13 @@ public class EksPodIdentityAssociationService {
         }
         String roleName = roleArn.substring(roleArn.lastIndexOf('/') + 1);
         iam.findRole(arn[4], roleName)
-                .filter(role -> roleArn.equals(role.getArn()))
+                .filter(role -> IamService.roleArnMatches(roleArn, role))
                 .orElseThrow(() -> invalid("IAM role does not exist"));
     }
 
-    private void validateTargetRoleArn(Cluster cluster, String targetRoleArn) {
+    private static void validateTargetRoleArn(String targetRoleArn) {
         String[] arn = targetRoleArn.split(":", 6);
-        String expectedPartition = clusterPartition(cluster);
-        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(expectedPartition)
+        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].matches(AwsArnUtils.PARTITION_REGEX)
                 || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
                 || !arn[5].startsWith("role/") || targetRoleArn.endsWith("/")) {
             throw invalid("targetRoleArn must identify an IAM role");
