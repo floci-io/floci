@@ -615,6 +615,10 @@ public class RedshiftServerlessService implements Resettable {
                 .findFirst();
     }
 
+    public Optional<Workgroup> findWorkgroupByArn(String resourceArn, String region) {
+        return workgroupByArn(resourceArn, region);
+    }
+
     private Optional<Workgroup> workgroupByArn(String resourceArn, String region) {
         return workgroups.scan(key -> key.startsWith(region + "::")).stream()
                 .filter(workgroup -> resourceArn.equals(workgroup.getWorkgroupArn()))

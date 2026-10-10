@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParame
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
 import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
+import io.github.hectorvent.floci.services.redshiftserverless.model.UsageLimit;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -52,13 +53,16 @@ public class RedshiftServerlessJsonHandler {
     private final RedshiftServerlessService service;
     private final ObjectMapper objectMapper;
     private final RedshiftIamDbUserResolver iamDbUserResolver;
+    private final RedshiftServerlessUsageLimitService usageLimits;
 
     @Inject
     public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper,
-                                         RedshiftIamDbUserResolver iamDbUserResolver) {
+                                         RedshiftIamDbUserResolver iamDbUserResolver,
+                                         RedshiftServerlessUsageLimitService usageLimits) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamDbUserResolver = iamDbUserResolver;
+        this.usageLimits = usageLimits;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -84,6 +88,11 @@ public class RedshiftServerlessJsonHandler {
                 case "ListSnapshots" -> handleListSnapshots(request, region);
                 case "DeleteSnapshot" -> handleDeleteSnapshot(request, region);
                 case "RestoreFromSnapshot" -> handleRestoreFromSnapshot(request, region);
+                case "CreateUsageLimit" -> handleCreateUsageLimit(request, region);
+                case "GetUsageLimit" -> handleGetUsageLimit(request, region);
+                case "ListUsageLimits" -> handleListUsageLimits(request, region);
+                case "UpdateUsageLimit" -> handleUpdateUsageLimit(request, region);
+                case "DeleteUsageLimit" -> handleDeleteUsageLimit(request, region);
                 case "GetCredentials" -> handleGetCredentials(request, region, authorizationHeader);
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
                 case "TagResource" -> handleTagResource(request, region);
@@ -258,6 +267,64 @@ public class RedshiftServerlessJsonHandler {
             throw validation("snapshotName and snapshotArn cannot both be specified.");
         }
         return snapshotArn == null ? snapshotName : service.snapshotNameFromArn(snapshotArn, region);
+    }
+
+    private Response handleCreateUsageLimit(JsonNode request, String region) {
+        return usageLimitResponse(usageLimits.createUsageLimit(
+                text(request, "resourceArn"),
+                text(request, "usageType"),
+                parseLong(request, "amount"),
+                text(request, "period"),
+                text(request, "breachAction"),
+                region));
+    }
+
+    private Response handleGetUsageLimit(JsonNode request, String region) {
+        return usageLimitResponse(usageLimits.getUsageLimit(text(request, "usageLimitId"), region));
+    }
+
+    private Response handleListUsageLimits(JsonNode request, String region) {
+        PaginatedResult<UsageLimit> page = usageLimits.listUsageLimits(
+                text(request, "resourceArn"), text(request, "usageType"), region,
+                parseMaxResults(request), text(request, "nextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("usageLimits");
+        page.items().forEach(limit -> items.add(usageLimitNode(limit)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateUsageLimit(JsonNode request, String region) {
+        return usageLimitResponse(usageLimits.updateUsageLimit(
+                text(request, "usageLimitId"),
+                parseLong(request, "amount"),
+                text(request, "breachAction"),
+                region));
+    }
+
+    private Response handleDeleteUsageLimit(JsonNode request, String region) {
+        return usageLimitResponse(usageLimits.deleteUsageLimit(text(request, "usageLimitId"), region));
+    }
+
+    private Response usageLimitResponse(UsageLimit limit) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("usageLimit", usageLimitNode(limit));
+        return Response.ok(response).build();
+    }
+
+    /** {@code UsageLimit} has no timestamp member, so the creation date the store keeps is not emitted. */
+    private ObjectNode usageLimitNode(UsageLimit limit) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("usageLimitId", limit.getUsageLimitId());
+        node.put("usageLimitArn", limit.getUsageLimitArn());
+        node.put("resourceArn", limit.getResourceArn());
+        node.put("usageType", limit.getUsageType());
+        node.put("amount", limit.getAmount());
+        node.put("period", limit.getPeriod());
+        node.put("breachAction", limit.getBreachAction());
+        return node;
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
@@ -487,6 +554,17 @@ public class RedshiftServerlessJsonHandler {
             throw validation(field + " must be a timestamp.");
         }
         return Instant.ofEpochMilli(Math.round(node.asDouble() * 1000));
+    }
+
+    private Long parseLong(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToLong()) {
+            throw validation(field + " must be an integer.");
+        }
+        return node.asLong();
     }
 
     private Integer parseMaxResults(JsonNode request) {

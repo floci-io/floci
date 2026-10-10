@@ -77,9 +77,62 @@ class RedshiftServerlessJsonHandlerTest {
         when(iamDbUserResolver.resolveDbUser("AUTH")).thenReturn("IAM:alice");
         EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
         when(config.storage().persistentPath()).thenReturn(System.getProperty("java.io.tmpdir"));
-        handler = new RedshiftServerlessJsonHandler(
-                new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config), mapper,
-                iamDbUserResolver);
+        when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-usagelimits.json"),
+                any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        RedshiftServerlessService service =
+                new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
+        handler = new RedshiftServerlessJsonHandler(service, mapper, iamDbUserResolver,
+                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service));
+    }
+
+    @Test
+    void usageLimitShapeFollowsTheApiModel() {
+        create("limit-ns");
+        String workgroupArn = body(handler.handle("CreateWorkgroup",
+                parse("{\"workgroupName\":\"limit-wg\",\"namespaceName\":\"limit-ns\"}"), REGION))
+                .get("workgroup").get("workgroupArn").textValue();
+
+        JsonNode created = body(handler.handle("CreateUsageLimit", parse("{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":60}"), REGION)).get("usageLimit");
+
+        assertTrue(created.get("amount").isIntegralNumber());
+        assertEquals(60, created.get("amount").longValue());
+        assertEquals("monthly", created.get("period").textValue());
+        assertEquals("log", created.get("breachAction").textValue());
+        assertEquals(workgroupArn, created.get("resourceArn").textValue());
+        assertTrue(created.get("usageLimitArn").textValue().contains(":usagelimit/"));
+        assertEquals(7, created.size());
+
+        String id = created.get("usageLimitId").textValue();
+        JsonNode updated = body(handler.handle("UpdateUsageLimit",
+                parse("{\"usageLimitId\":\"" + id + "\",\"amount\":90,\"breachAction\":\"deactivate\"}"), REGION))
+                .get("usageLimit");
+        assertEquals(90, updated.get("amount").longValue());
+        assertEquals("deactivate", updated.get("breachAction").textValue());
+
+        JsonNode listed = body(handler.handle("ListUsageLimits",
+                parse("{\"resourceArn\":\"" + workgroupArn + "\"}"), REGION));
+        assertEquals(1, listed.get("usageLimits").size());
+        assertFalse(listed.has("nextToken"));
+
+        assertEquals(id, body(handler.handle("DeleteUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
+                REGION)).get("usageLimit").get("usageLimitId").textValue());
+        assertEquals(404, handler.handle("GetUsageLimit", parse("{\"usageLimitId\":\"" + id + "\"}"),
+                REGION).getStatus());
+    }
+
+    @Test
+    void usageLimitAmountMustBeAnInteger() {
+        assertEquals(400, handler.handle("CreateUsageLimit", parse(
+                "{\"resourceArn\":\"arn\",\"usageType\":\"serverless-compute\",\"amount\":\"60\"}"),
+                REGION).getStatus());
+        assertEquals(400, handler.handle("CreateUsageLimit", parse(
+                "{\"resourceArn\":\"arn\",\"usageType\":\"serverless-compute\",\"amount\":1.5}"),
+                REGION).getStatus());
+        assertEquals(400, handler.handle("CreateUsageLimit", parse(
+                "{\"resourceArn\":\"arn\",\"usageType\":\"serverless-compute\",\"amount\":18446744073709551621}"),
+                REGION).getStatus());
     }
 
     @Test

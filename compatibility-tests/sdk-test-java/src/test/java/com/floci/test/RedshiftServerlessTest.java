@@ -15,6 +15,10 @@ import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.redshiftserverless.model.Snapshot;
 import software.amazon.awssdk.services.redshiftserverless.model.Tag;
+import software.amazon.awssdk.services.redshiftserverless.model.UsageLimit;
+import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitBreachAction;
+import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitPeriod;
+import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitUsageType;
 import software.amazon.awssdk.services.redshiftserverless.model.Workgroup;
 import software.amazon.awssdk.services.redshiftserverless.model.WorkgroupStatus;
 
@@ -196,6 +200,58 @@ class RedshiftServerlessTest {
                         .isInstanceOf(ResourceNotFoundException.class);
             } finally {
                 deleteSnapshotBestEffort(client, snapshotName);
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
+    @Test
+    void usageLimitLifecycleUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Creates a workgroup and asserts emulator-local behavior");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-limit-ns";
+            String workgroupName = "floci-compat-limit-wg";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin")
+                        .adminUserPassword("Secret123!"));
+                String workgroupArn = client.createWorkgroup(request -> request
+                        .workgroupName(workgroupName).namespaceName(namespaceName)).workgroup().workgroupArn();
+
+                UsageLimit created = client.createUsageLimit(request -> request
+                        .resourceArn(workgroupArn)
+                        .usageType(UsageLimitUsageType.SERVERLESS_COMPUTE)
+                        .amount(60L)).usageLimit();
+                assertThat(created.amount()).isEqualTo(60L);
+                assertThat(created.period()).isEqualTo(UsageLimitPeriod.MONTHLY);
+                assertThat(created.breachAction()).isEqualTo(UsageLimitBreachAction.LOG);
+                assertThat(created.resourceArn()).isEqualTo(workgroupArn);
+                assertThat(created.usageLimitArn()).contains(":usagelimit/");
+
+                assertThatThrownBy(() -> client.createUsageLimit(request -> request
+                                .resourceArn(workgroupArn)
+                                .usageType(UsageLimitUsageType.SERVERLESS_COMPUTE)
+                                .amount(1L)))
+                        .isInstanceOf(ConflictException.class);
+
+                UsageLimit updated = client.updateUsageLimit(request -> request
+                        .usageLimitId(created.usageLimitId())
+                        .amount(90L)
+                        .breachAction(UsageLimitBreachAction.DEACTIVATE)).usageLimit();
+                assertThat(updated.amount()).isEqualTo(90L);
+                assertThat(updated.breachAction()).isEqualTo(UsageLimitBreachAction.DEACTIVATE);
+
+                assertThat(client.getUsageLimit(request -> request.usageLimitId(created.usageLimitId()))
+                        .usageLimit().amount()).isEqualTo(90L);
+                assertThat(client.listUsageLimits(request -> request.resourceArn(workgroupArn)).usageLimits())
+                        .extracting(UsageLimit::usageLimitId)
+                        .containsExactly(created.usageLimitId());
+
+                client.deleteUsageLimit(request -> request.usageLimitId(created.usageLimitId()));
+                assertThatThrownBy(() -> client.getUsageLimit(request -> request.usageLimitId(created.usageLimitId())))
+                        .isInstanceOf(ResourceNotFoundException.class);
+            } finally {
                 deleteWorkgroupBestEffort(client, workgroupName);
                 deleteBestEffort(client, namespaceName);
             }

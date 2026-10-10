@@ -363,6 +363,110 @@ class RedshiftServerlessIntegrationTest {
         call("DeleteNamespace", "{\"namespaceName\":\"wg-err-ns\"}").statusCode(200);
     }
 
+    @Test
+    void usageLimitLifecycleFollowsTheApiModel() {
+        call("CreateNamespace", "{\"namespaceName\":\"limit-ns\",\"adminUserPassword\":\"Secret123!\"}")
+                .statusCode(200);
+        String workgroupArn = call("CreateWorkgroup", "{\"workgroupName\":\"limit-wg\",\"namespaceName\":\"limit-ns\"}")
+                .statusCode(200)
+                .extract().path("workgroup.workgroupArn");
+
+        String limitId = call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":120,\"period\":\"daily\"}")
+                .statusCode(200)
+                .body("usageLimit.amount", equalTo(120))
+                .body("usageLimit.period", equalTo("daily"))
+                .body("usageLimit.breachAction", equalTo("log"))
+                .body("usageLimit.usageLimitArn", matchesPattern(
+                        "arn:aws:redshift-serverless:us-east-1:\\d{12}:usagelimit/.+"))
+                .extract().path("usageLimit.usageLimitId");
+
+        call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}")
+                .statusCode(409)
+                .body("__type", equalTo("ConflictException"));
+
+        call("UpdateUsageLimit", "{\"usageLimitId\":\"" + limitId + "\",\"amount\":240,\"breachAction\":\"deactivate\"}")
+                .statusCode(200)
+                .body("usageLimit.amount", equalTo(240))
+                .body("usageLimit.breachAction", equalTo("deactivate"))
+                .body("usageLimit.period", equalTo("daily"));
+
+        call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\"}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(1))
+                .body("usageLimits[0].usageLimitId", equalTo(limitId));
+
+        call("DeleteWorkgroup", "{\"workgroupName\":\"limit-wg\"}").statusCode(200);
+        call("GetUsageLimit", "{\"usageLimitId\":\"" + limitId + "\"}")
+                .statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void listUsageLimitsPaginatesAndRejectsAnOutOfRangePageSize() {
+        call("CreateNamespace", "{\"namespaceName\":\"page-limit-ns\",\"adminUserPassword\":\"Secret123!\"}")
+                .statusCode(200);
+        String workgroupArn = call("CreateWorkgroup",
+                "{\"workgroupName\":\"page-limit-wg\",\"namespaceName\":\"page-limit-ns\"}")
+                .statusCode(200)
+                .extract().path("workgroup.workgroupArn");
+        call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}").statusCode(200);
+        call("CreateUsageLimit", "{\"resourceArn\":\"" + workgroupArn
+                + "\",\"usageType\":\"cross-region-datasharing\",\"amount\":2}").statusCode(200);
+
+        String nextToken = call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\",\"maxResults\":1}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(1))
+                .body("nextToken", notNullValue())
+                .extract().path("nextToken");
+        call("ListUsageLimits", "{\"resourceArn\":\"" + workgroupArn + "\",\"maxResults\":1,\"nextToken\":\""
+                + nextToken + "\"}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(1))
+                .body("nextToken", nullValue());
+
+        call("ListUsageLimits", "{\"maxResults\":0}")
+                .statusCode(400)
+                .body("__type", equalTo("InvalidPaginationException"));
+    }
+
+    @Test
+    void aWorkgroupRecreatedUnderTheSameNameDoesNotInheritUsageLimits() {
+        call("CreateNamespace", "{\"namespaceName\":\"again-limit-ns\",\"adminUserPassword\":\"Secret123!\"}")
+                .statusCode(200);
+        String firstArn = call("CreateWorkgroup",
+                "{\"workgroupName\":\"again-limit-wg\",\"namespaceName\":\"again-limit-ns\"}")
+                .statusCode(200)
+                .extract().path("workgroup.workgroupArn");
+        String oldLimitId = call("CreateUsageLimit", "{\"resourceArn\":\"" + firstArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}")
+                .statusCode(200)
+                .extract().path("usageLimit.usageLimitId");
+
+        call("DeleteWorkgroup", "{\"workgroupName\":\"again-limit-wg\"}").statusCode(200);
+        String secondArn = call("CreateWorkgroup",
+                "{\"workgroupName\":\"again-limit-wg\",\"namespaceName\":\"again-limit-ns\"}")
+                .statusCode(200)
+                .extract().path("workgroup.workgroupArn");
+
+        call("GetUsageLimit", "{\"usageLimitId\":\"" + oldLimitId + "\"}").statusCode(404);
+        call("ListUsageLimits", "{\"resourceArn\":\"" + secondArn + "\"}")
+                .statusCode(200)
+                .body("usageLimits", hasSize(0));
+        call("CreateUsageLimit", "{\"resourceArn\":\"" + secondArn
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}").statusCode(200);
+    }
+
+    @Test
+    void createUsageLimitRejectsAnUnknownWorkgroup() {
+        call("CreateUsageLimit", "{\"resourceArn\":\"arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/none"
+                + "\",\"usageType\":\"serverless-compute\",\"amount\":1}")
+                .statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     private static io.restassured.response.ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)
