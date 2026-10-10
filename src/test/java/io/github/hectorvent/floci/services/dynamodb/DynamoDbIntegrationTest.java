@@ -5876,16 +5876,7 @@ given()
             .body("Table.GlobalSecondaryIndexes.size()", equalTo(1))
             .body("Table.BillingModeSummary.BillingMode", equalTo("PAY_PER_REQUEST"));
 
-        given()
-            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
-            .contentType(DYNAMODB_CONTENT_TYPE)
-            .body("""
-                {"TableName": "%s"}
-                """.formatted(tableName))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        deleteTable(tableName);
     }
 
     @Test
@@ -5957,16 +5948,7 @@ given()
             .statusCode(200)
             .body("Table.GlobalSecondaryIndexes.size()", equalTo(2));
 
-        given()
-            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
-            .contentType(DYNAMODB_CONTENT_TYPE)
-            .body("""
-                {"TableName": "%s"}
-                """.formatted(tableName))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        deleteTable(tableName);
     }
 
     @Test
@@ -6007,6 +5989,8 @@ given()
         .then()
             .statusCode(200)
             .body("Table.GlobalSecondaryIndexes", nullValue());
+
+        deleteTable(tableName);
     }
 
     @Test
@@ -6047,6 +6031,8 @@ given()
             .statusCode(200)
             .body("Table.GlobalSecondaryIndexes", nullValue())
             .body("Table.OnDemandThroughput", nullValue());
+
+        deleteTable(tableName);
     }
 
     @Test
@@ -6074,6 +6060,8 @@ given()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("You cannot create or delete index while updating table IOPS"));
+
+        deleteTable(tableName);
     }
 
     private void createOnDemandTableForGsiUpdates(String tableName) {
