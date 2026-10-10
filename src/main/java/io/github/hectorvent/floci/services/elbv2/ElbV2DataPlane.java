@@ -738,9 +738,9 @@ public class ElbV2DataPlane {
                         }
                         responseStarted.set(true);
                         req.response().setStatusCode(resp.statusCode());
-                        resp.headers().forEach(entry -> {
-                            if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                req.response().putHeader(entry.getKey(), entry.getValue());
+                        resp.headers().names().forEach(name -> {
+                            if (!HOP_BY_HOP_HEADERS.contains(name.toLowerCase())) {
+                                req.response().putHeader(name, resp.headers().getAll(name));
                             }
                         });
                         if (resp.getHeader("Content-Length") == null) {
