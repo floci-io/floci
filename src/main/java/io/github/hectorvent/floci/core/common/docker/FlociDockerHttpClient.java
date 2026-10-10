@@ -45,6 +45,7 @@ import org.apache.hc.core5.util.Timeout;
 import org.jboss.logging.Logger;
 
 import javax.net.ssl.SSLContext;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.Socket;
@@ -64,10 +65,12 @@ import java.util.stream.Stream;
  * docker-java's settings (npipe and tcp hosts, TLS from the SSL config, a pool of
  * {@code maxConnections} for one route, no socket read timeout on the pool, hijacked exec/attach
  * upgrades through {@link HijackingHttpRequestExecutor}), validates a pooled connection idle over a
- * second before reusing it and evicts idle ones, where docker-java disabled both, and differs in two
- * more ways: a {@code unix://} host connects through {@link UnixDomainSocket}, which honours read
- * timeouts where docker-java's socket ignored them, and requests that hold a stream open get no
- * response timeout ({@link #isLongLivedStream}), while every other call keeps it.
+ * second before reuse on transports that honour socket read timeouts, and evicts idle ones, where
+ * docker-java disabled both. A {@code unix://} host connects through {@link UnixDomainSocket},
+ * which honours read timeouts where docker-java's socket ignored them. Named pipes skip stale
+ * validation because docker-java's {@link NamedPipeSocket} read can block despite the 1 ms timeout
+ * used by httpclient5's validation check. Requests that hold a stream open get no response timeout
+ * ({@link #isLongLivedStream}), while every other call keeps it.
  */
 public final class FlociDockerHttpClient implements DockerHttpClient {
 
@@ -117,11 +120,12 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                 .build());
         connectionManager.setMaxTotal(maxConnections);
         connectionManager.setDefaultMaxPerRoute(maxConnections);
-        connectionManager.setDefaultConnectionConfig(ConnectionConfig.custom()
-                .setValidateAfterInactivity(VALIDATE_AFTER_INACTIVITY)
+        ConnectionConfig connectionConfig = ConnectionConfig.custom()
+                .setValidateAfterInactivity(staleConnectionValidationFor(dockerHost))
                 .setConnectTimeout(connectionTimeout != null
                         ? Timeout.of(connectionTimeout.toNanos(), TimeUnit.NANOSECONDS) : null)
-                .build());
+                .build();
+        connectionManager.setDefaultConnectionConfig(connectionConfig);
 
         RequestConfig requestConfig = RequestConfig.custom()
                 .setResponseTimeout(responseTimeout != null
@@ -166,6 +170,12 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                 DefaultSchemePortResolver.INSTANCE,
                 SystemDefaultDnsResolver.INSTANCE,
                 name -> "https".equalsIgnoreCase(name) ? tlsSocketStrategy : null);
+    }
+
+    /** Selects stale validation only when the socket honours its short read timeout. */
+    static TimeValue staleConnectionValidationFor(URI dockerHost) {
+        return "npipe".equalsIgnoreCase(dockerHost.getScheme())
+                ? TimeValue.NEG_ONE_MILLISECOND : VALIDATE_AFTER_INACTIVITY;
     }
 
     @Override
