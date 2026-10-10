@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -70,6 +71,8 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         }
         String description = ctx.resolveOptional(props, "Description");
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
+        // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
+        String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
 
         IamRole role;
         boolean createdRole = false;
@@ -80,8 +83,11 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         // replacement that took the name in the meantime.
         String priorAssumeRolePolicyDocument = null;
         String priorAssumeRoleId = null;
+        // The adopted role's boundary before this attempt, restored on failure like the trust policy.
+        String priorPermissionsBoundary = null;
         try {
-            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, 3600, Map.of());
+            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, 3600, Map.of(),
+                    permissionsBoundary);
             createdRole = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         } catch (AwsException e) {
@@ -114,6 +120,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             // meant for the role this stack actually owns.
             priorAssumeRolePolicyDocument = role.getAssumeRolePolicyDocument();
             priorAssumeRoleId = existingRoleId;
+            priorPermissionsBoundary = role.getPermissionsBoundaryArn();
             iamService.updateAssumeRolePolicy(resolvedRoleName, assumeDoc, existingRoleId);
         }
 
@@ -138,7 +145,21 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         LinkedHashSet<String> inlineWrittenByThisAttempt = new LinkedHashSet<>();
         final String documentToRestore = priorAssumeRolePolicyDocument;
         final String roleIdToRestore = priorAssumeRoleId;
+        final String boundaryToRestore = priorPermissionsBoundary;
+        boolean boundaryChangedByThisAttempt = false;
         try {
+            // createRole() only applies PermissionsBoundary on first create. On adoption, set a
+            // changed boundary, and remove one only if the role has one and the template dropped it.
+            // ID-verified like the trust-policy write, here and in the rollback restore.
+            if (!createdRole && !Objects.equals(permissionsBoundary, boundaryToRestore)) {
+                if (permissionsBoundary != null) {
+                    iamService.putRolePermissionsBoundary(resolvedRoleName, permissionsBoundary, roleIdToRestore);
+                } else {
+                    iamService.deleteRolePermissionsBoundary(resolvedRoleName, roleIdToRestore);
+                }
+                boundaryChangedByThisAttempt = true;
+            }
+
             for (String policyArn : managedPolicyArns) {
                 iamService.attachRolePolicy(resolvedRoleName, policyArn);
                 if (!originalPolicyArns.contains(policyArn)) {
@@ -236,6 +257,18 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 String cleanupDescription = "detach policy " + policyArn + " from role " + resolvedRoleName;
                 if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
                         () -> iamService.detachRolePolicy(resolvedRoleName, policyArn))) {
+                    cleanupSucceeded = false;
+                }
+            }
+            if (boundaryChangedByThisAttempt) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "restore prior permissions boundary on role " + resolvedRoleName, () -> {
+                            if (boundaryToRestore == null) {
+                                iamService.deleteRolePermissionsBoundary(resolvedRoleName, roleIdToRestore);
+                            } else {
+                                iamService.putRolePermissionsBoundary(resolvedRoleName, boundaryToRestore, roleIdToRestore);
+                            }
+                        })) {
                     cleanupSucceeded = false;
                 }
             }

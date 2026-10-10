@@ -4815,26 +4815,56 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn) {
+        putUserPermissionsBoundary(userName, permissionsBoundaryArn, null);
+    }
+
+    /**
+     * Same as {@link #putUserPermissionsBoundary(String, String)}, but refuses the write if the user
+     * named here is no longer the one with {@code expectedUserId}, like
+     * {@link #updateUser(String, String, String, String)}. A null ID skips the check.
+     */
+    public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn, String expectedUserId) {
         requirePolicy(permissionsBoundaryArn); // validate policy exists
-        IamUser user = getUser(userName);
-        user.setPermissionsBoundaryArn(permissionsBoundaryArn);
-        users.put(userName, user);
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            requireSameUser(user, userName, expectedUserId);
+            user.setPermissionsBoundaryArn(permissionsBoundaryArn);
+            users.put(userName, user);
+        }
         LOG.infov("Set permissions boundary for user {0}: {1}", userName, permissionsBoundaryArn);
     }
 
     public void deleteUserPermissionsBoundary(String userName) {
-        IamUser user = getUser(userName);
-        if (user.getPermissionsBoundaryArn() == null) {
-            throw new AwsException("NoSuchEntity",
-                    "User " + userName + " does not have a permissions boundary.", 404);
+        deleteUserPermissionsBoundary(userName, null);
+    }
+
+    /** ID-verified like {@link #putUserPermissionsBoundary(String, String, String)}. */
+    public void deleteUserPermissionsBoundary(String userName, String expectedUserId) {
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            requireSameUser(user, userName, expectedUserId);
+            if (user.getPermissionsBoundaryArn() == null) {
+                throw new AwsException("NoSuchEntity",
+                        "User " + userName + " does not have a permissions boundary.", 404);
+            }
+            user.setPermissionsBoundaryArn(null);
+            users.put(userName, user);
         }
-        user.setPermissionsBoundaryArn(null);
-        users.put(userName, user);
         LOG.infov("Deleted permissions boundary for user: {0}", userName);
     }
 
     public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn) {
+        putRolePermissionsBoundary(roleName, permissionsBoundaryArn, null);
+    }
+
+    /**
+     * Same as {@link #putRolePermissionsBoundary(String, String)}, but refuses the write if the role
+     * named here is no longer the one with {@code expectedRoleId}, like
+     * {@link #updateAssumeRolePolicy(String, String, String)}. A null ID skips the check.
+     */
+    public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn, String expectedRoleId) {
         IamRole role = getRole(roleName);
+        requireSameRole(role, roleName, expectedRoleId);
         requireNotServiceLinked(role, roleName);
         requirePolicy(permissionsBoundaryArn); // validate policy exists
         role.setPermissionsBoundaryArn(permissionsBoundaryArn);
@@ -4843,7 +4873,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteRolePermissionsBoundary(String roleName) {
+        deleteRolePermissionsBoundary(roleName, null);
+    }
+
+    /** ID-verified like {@link #putRolePermissionsBoundary(String, String, String)}. */
+    public void deleteRolePermissionsBoundary(String roleName, String expectedRoleId) {
         IamRole role = getRole(roleName);
+        requireSameRole(role, roleName, expectedRoleId);
         requireNotServiceLinked(role, roleName);
         if (role.getPermissionsBoundaryArn() == null) {
             throw new AwsException("NoSuchEntity",
@@ -4852,6 +4888,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         role.setPermissionsBoundaryArn(null);
         roles.put(roleName, role);
         LOG.infov("Deleted permissions boundary for role: {0}", roleName);
+    }
+
+    private static void requireSameUser(IamUser user, String userName, String expectedUserId) {
+        if (expectedUserId != null && !expectedUserId.equals(user.getUserId())) {
+            throw new AwsException("EntityAlreadyExists",
+                    "User " + userName + " was replaced by a different user of the same name; "
+                            + "refusing to apply an update meant for the original user.", 409);
+        }
+    }
+
+    private static void requireSameRole(IamRole role, String roleName, String expectedRoleId) {
+        if (expectedRoleId != null && !expectedRoleId.equals(role.getRoleId())) {
+            throw new AwsException("EntityAlreadyExists",
+                    "Role " + roleName + " was replaced by a different role of the same name; "
+                            + "refusing to apply an update meant for the original role.", 409);
+        }
     }
 
     /**

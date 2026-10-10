@@ -60,7 +60,7 @@ class CloudFormationIamAttachmentProvisionerTest {
     @Test
     void newRoleAttachmentFailureDetachesPolicyThenDeletesRole() {
         IamRole role = role("new-role");
-        when(iamService.createRole("new-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+        when(iamService.createRole("new-role", "/", emptyTrustPolicy(), null, 3600, Map.of(), null))
                 .thenReturn(role);
         doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
                 .when(iamService).attachRolePolicy("new-role", MISSING_POLICY);
@@ -78,7 +78,7 @@ class CloudFormationIamAttachmentProvisionerTest {
     void sameStackRoleRetryPreservesOriginalPoliciesAndRole() {
         IamRole role = role("existing-role");
         role.getAttachedPolicyArns().add(EXISTING_POLICY);
-        when(iamService.createRole("existing-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+        when(iamService.createRole("existing-role", "/", emptyTrustPolicy(), null, 3600, Map.of(), null))
                 .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
         when(iamService.getRole("existing-role")).thenReturn(role);
         doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
@@ -103,7 +103,7 @@ class CloudFormationIamAttachmentProvisionerTest {
         String newTrustPolicyJson =
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
-        when(iamService.createRole(eq("existing-role"), eq("/"), anyString(), eq(null), eq(3600), eq(Map.of())))
+        when(iamService.createRole(eq("existing-role"), eq("/"), anyString(), eq(null), eq(3600), eq(Map.of()), eq(null)))
                 .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
         when(iamService.getRole("existing-role")).thenReturn(role);
 
@@ -128,7 +128,7 @@ class CloudFormationIamAttachmentProvisionerTest {
         String newTrustPolicyJson =
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
-        when(iamService.createRole(eq("existing-role"), eq("/"), anyString(), eq(null), eq(3600), eq(Map.of())))
+        when(iamService.createRole(eq("existing-role"), eq("/"), anyString(), eq(null), eq(3600), eq(Map.of()), eq(null)))
                 .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
         when(iamService.getRole("existing-role")).thenReturn(role);
         doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
@@ -155,7 +155,7 @@ class CloudFormationIamAttachmentProvisionerTest {
     @Test
     void freshRoleCreationDoesNotRedundantlyUpdateTrustPolicy() {
         IamRole role = role("new-role");
-        when(iamService.createRole("new-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+        when(iamService.createRole("new-role", "/", emptyTrustPolicy(), null, 3600, Map.of(), null))
                 .thenReturn(role);
 
         provisionRole("new-role", List.of());
@@ -166,7 +166,7 @@ class CloudFormationIamAttachmentProvisionerTest {
 
     @Test
     void freshRoleCollisionDoesNotAdoptUserOwnedRole() {
-        when(iamService.createRole("external-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+        when(iamService.createRole("external-role", "/", emptyTrustPolicy(), null, 3600, Map.of(), null))
                 .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
 
         StackResource result = provisionRole("external-role", List.of(NEW_POLICY));
@@ -181,7 +181,7 @@ class CloudFormationIamAttachmentProvisionerTest {
     @Test
     void generatedRoleNameRemainsStableOnUpdate() {
         IamRole role = role("generated-role");
-        when(iamService.createRole("generated-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+        when(iamService.createRole("generated-role", "/", emptyTrustPolicy(), null, 3600, Map.of(), null))
                 .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
         when(iamService.getRole("generated-role")).thenReturn(role);
 
@@ -196,7 +196,7 @@ class CloudFormationIamAttachmentProvisionerTest {
     @Test
     void sameNameRoleWithDifferentIdIsNotAdopted() {
         IamRole replacement = role("same-name");
-        when(iamService.createRole("same-name", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+        when(iamService.createRole("same-name", "/", emptyTrustPolicy(), null, 3600, Map.of(), null))
                 .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
         when(iamService.getRole("same-name")).thenReturn(replacement);
 
@@ -223,12 +223,12 @@ class CloudFormationIamAttachmentProvisionerTest {
         assertEquals("Updating RoleName requires resource replacement, which is not supported.",
                 result.getStatusReason());
         verify(iamService, never()).createRole(
-                "new-role", "/", emptyTrustPolicy(), null, 3600, Map.of());
+                "new-role", "/", emptyTrustPolicy(), null, 3600, Map.of(), null);
     }
 
     @Test
     void unexpectedRoleCreationFailureIsNotTreatedAsAnExistingRole() {
-        when(iamService.createRole("denied-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+        when(iamService.createRole("denied-role", "/", emptyTrustPolicy(), null, 3600, Map.of(), null))
                 .thenThrow(new AwsException("AccessDenied", "denied", 403));
 
         StackResource result = provisionRole("denied-role", List.of());
@@ -288,7 +288,7 @@ class CloudFormationIamAttachmentProvisionerTest {
     @Test
     void cleanupFailureDoesNotMaskPrimaryFailureOrSkipDeletion() {
         IamRole role = role("cleanup-role");
-        when(iamService.createRole("cleanup-role", "/", emptyTrustPolicy(), null, 3600, Map.of()))
+        when(iamService.createRole("cleanup-role", "/", emptyTrustPolicy(), null, 3600, Map.of(), null))
                 .thenReturn(role);
         doThrow(new AwsException("NoSuchEntity", "primary failure", 404))
                 .when(iamService).attachRolePolicy("cleanup-role", MISSING_POLICY);

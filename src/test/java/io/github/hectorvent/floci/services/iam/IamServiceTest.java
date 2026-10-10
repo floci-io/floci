@@ -1026,6 +1026,40 @@ class IamServiceTest {
     }
 
     @Test
+    void permissionsBoundaryWritesRefuseARoleRecreatedUnderTheSameName() {
+        String boundary = iamService.createPolicy("Bound", "/", null, "{}", null).getArn();
+        String staleId = iamService.createRole("Reused", "/", "{}", null, 3600, null).getRoleId();
+        iamService.deleteRole("Reused");
+        iamService.createRole("Reused", "/", "{}", null, 3600, null);
+        iamService.putRolePermissionsBoundary("Reused", boundary);
+
+        assertEquals("EntityAlreadyExists", assertThrows(AwsException.class,
+                () -> iamService.deleteRolePermissionsBoundary("Reused", staleId)).getErrorCode());
+        assertEquals("EntityAlreadyExists", assertThrows(AwsException.class,
+                () -> iamService.putRolePermissionsBoundary("Reused", "arn:aws:iam::aws:policy/ReadOnlyAccess",
+                        staleId)).getErrorCode());
+        assertEquals(boundary, iamService.getRole("Reused").getPermissionsBoundaryArn(),
+                "the replacement role's boundary must survive a write meant for the original");
+    }
+
+    @Test
+    void permissionsBoundaryWritesRefuseAUserRecreatedUnderTheSameName() {
+        String boundary = iamService.createPolicy("Bound", "/", null, "{}", null).getArn();
+        String staleId = iamService.createUser("reused", "/").getUserId();
+        iamService.deleteUser("reused");
+        iamService.createUser("reused", "/");
+        iamService.putUserPermissionsBoundary("reused", boundary);
+
+        assertEquals("EntityAlreadyExists", assertThrows(AwsException.class,
+                () -> iamService.deleteUserPermissionsBoundary("reused", staleId)).getErrorCode());
+        assertEquals("EntityAlreadyExists", assertThrows(AwsException.class,
+                () -> iamService.putUserPermissionsBoundary("reused", "arn:aws:iam::aws:policy/ReadOnlyAccess",
+                        staleId)).getErrorCode());
+        assertEquals(boundary, iamService.getUser("reused").getPermissionsBoundaryArn(),
+                "the replacement user's boundary must survive a write meant for the original");
+    }
+
+    @Test
     void createServiceLinkedRoleForAccessAnalyzer() {
         IamRole role = iamService.createServiceLinkedRole(
                 "access-analyzer.amazonaws.com", null, "Access Analyzer SLR");

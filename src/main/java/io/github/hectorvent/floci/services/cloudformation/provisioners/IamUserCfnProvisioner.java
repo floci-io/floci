@@ -18,6 +18,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -65,13 +66,16 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
         List<String> groups = ctx.resolveStringList(props, "Groups");
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
+        String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
 
         IamUser user;
         boolean createdUser = false;
         String priorPath = null;
         String priorUserId = null;
+        String priorPermissionsBoundary = null;
         try {
-            user = iamService.createUser(resolvedUserName, resolvedPath);
+            user = iamService.createUser(resolvedUserName, resolvedPath, permissionsBoundary);
             createdUser = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         } catch (AwsException e) {
@@ -87,6 +91,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
             }
             priorPath = user.getPath();
             priorUserId = existingUserId;
+            priorPermissionsBoundary = user.getPermissionsBoundaryArn();
             if (!resolvedPath.equals(user.getPath())) {
                 iamService.updateUser(resolvedUserName, null, resolvedPath, existingUserId);
                 user = iamService.getUser(resolvedUserName);
@@ -130,8 +135,22 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
 
         final String pathToRestore = priorPath;
         final String userIdToRestore = priorUserId;
+        final String boundaryToRestore = priorPermissionsBoundary;
+        boolean boundaryChangedByThisAttempt = false;
 
         try {
+            // createUser() only applies PermissionsBoundary on first create. On adoption, set a
+            // changed boundary, and remove one only if the user has one and the template dropped it.
+            // ID-verified like the path write, here and in the rollback restore.
+            if (!createdUser && !Objects.equals(permissionsBoundary, boundaryToRestore)) {
+                if (permissionsBoundary != null) {
+                    iamService.putUserPermissionsBoundary(resolvedUserName, permissionsBoundary, userIdToRestore);
+                } else {
+                    iamService.deleteUserPermissionsBoundary(resolvedUserName, userIdToRestore);
+                }
+                boundaryChangedByThisAttempt = true;
+            }
+
             for (String groupName : groups) {
                 iamService.addUserToGroup(groupName, resolvedUserName);
                 if (!originalGroups.contains(groupName)) {
@@ -273,6 +292,19 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
                 String cleanupDescription = "remove user " + resolvedUserName + " from group " + groupName;
                 if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
                         () -> iamService.removeUserFromGroup(groupName, resolvedUserName))) {
+                    cleanupSucceeded = false;
+                }
+            }
+
+            if (boundaryChangedByThisAttempt) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "restore prior permissions boundary on user " + resolvedUserName, () -> {
+                            if (boundaryToRestore == null) {
+                                iamService.deleteUserPermissionsBoundary(resolvedUserName, userIdToRestore);
+                            } else {
+                                iamService.putUserPermissionsBoundary(resolvedUserName, boundaryToRestore, userIdToRestore);
+                            }
+                        })) {
                     cleanupSucceeded = false;
                 }
             }

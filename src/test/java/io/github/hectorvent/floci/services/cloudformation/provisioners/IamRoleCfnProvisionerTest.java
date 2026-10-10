@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -90,7 +91,7 @@ class IamRoleCfnProvisionerTest {
     private IamRole stubCreate(String roleName) {
         IamRole role = new IamRole("AROA" + roleName, roleName, "/",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/" + roleName, EMPTY_TRUST);
-        when(iam.createRole(eq(roleName), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+        when(iam.createRole(eq(roleName), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
                 .thenReturn(role);
         return role;
     }
@@ -216,7 +217,7 @@ class IamRoleCfnProvisionerTest {
         existing.getInlinePolicies().put("drop", EMPTY_TRUST);
         existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Keep");
         existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Drop");
-        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
                 .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getRole("app-role")).thenReturn(existing);
 
@@ -251,7 +252,7 @@ class IamRoleCfnProvisionerTest {
         // the policy not being on the role, already holds.
         IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
-        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
                 .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getRole("app-role")).thenReturn(existing);
 
@@ -277,7 +278,7 @@ class IamRoleCfnProvisionerTest {
         IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
         existing.getInlinePolicies().put("added-out-of-band", EMPTY_TRUST);
-        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
                 .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getRole("app-role")).thenReturn(existing);
 
@@ -322,7 +323,7 @@ class IamRoleCfnProvisionerTest {
         IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
         existing.getInlinePolicies().put("first", priorDocument);
-        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of())))
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
                 .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getRole("app-role")).thenReturn(existing);
         doThrow(new AwsException("MalformedPolicyDocument", "bad policy", 400))
@@ -347,6 +348,130 @@ class IamRoleCfnProvisionerTest {
         order.verify(iam).deleteRolePolicy("app-role", "first");
         order.verify(iam).putRolePolicy("app-role", "first", priorDocument);
         verify(iam, never()).deleteRole(anyString());
+    }
+
+    private static final String BOUNDARY_OLD = "arn:aws:iam::" + ACCOUNT_ID + ":policy/boundary-old";
+    private static final String BOUNDARY_NEW = "arn:aws:iam::" + ACCOUNT_ID + ":policy/boundary-new";
+
+    /** A role this stack already owns, so provision() takes the adoption (update) path. */
+    private StackResource adoptExistingRole(String currentBoundary) {
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.setPermissionsBoundaryArn(currentBoundary);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+        return r;
+    }
+
+    @Test
+    void createPassesThePermissionsBoundaryToTheRole() {
+        StackResource r = resource();
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()),
+                eq(BOUNDARY_NEW))).thenReturn(new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST));
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s"}
+                """.formatted(BOUNDARY_NEW)), ctx());
+
+        assertEquals("arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void updateAppliesAChangedPermissionsBoundary() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s"}
+                """.formatted(BOUNDARY_NEW)), ctx());
+
+        verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_NEW, "AROAapp-role");
+        verify(iam, never()).deleteRolePermissionsBoundary(anyString(), any());
+    }
+
+    @Test
+    void updateRemovesAPermissionsBoundaryTheTemplateDropped() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role"}
+                """), ctx());
+
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
+    }
+
+    @Test
+    void updateLeavesAnUnchangedOrAbsentPermissionsBoundaryAlone() {
+        // deleteRolePermissionsBoundary raises NoSuchEntity on a role without one.
+        StackResource r = adoptExistingRole(null);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role"}
+                """), ctx());
+
+        verify(iam, never()).deleteRolePermissionsBoundary(anyString(), any());
+        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString(), any());
+    }
+
+    // {"Fn::If": [cond, arn, {"Ref": "AWS::NoValue"}]} resolves to "" (CDK bootstrap's
+    // CloudFormationExecutionRole), which must mean "no boundary", not a policy named "".
+    @Test
+    void createTreatsABlankPermissionsBoundaryAsAbsent() {
+        stubCreate("app-role");
+
+        provisioner.provision(resource(), props("""
+                {"RoleName": "app-role", "PermissionsBoundary": ""}
+                """), ctx());
+
+        verify(iam).createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), isNull());
+    }
+
+    @Test
+    void updateTreatsABlankPermissionsBoundaryAsDropped() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": ""}
+                """), ctx());
+
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
+        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString(), any());
+    }
+
+    @Test
+    void failedUpdateRestoresThePriorPermissionsBoundary() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s",
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """.formatted(BOUNDARY_NEW)), ctx()));
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_NEW, "AROAapp-role");
+        order.verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_OLD, "AROAapp-role");
+        verify(iam, never()).deleteRole(anyString());
+    }
+
+    @Test
+    void failedUpdateRemovesTheBoundaryItAddedOnlyFromTheAdoptedRole() {
+        StackResource r = adoptExistingRole(null);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s",
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """.formatted(BOUNDARY_NEW)), ctx()));
+
+        // The ID makes IamService refuse the delete if the name now belongs to a replacement role.
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
     }
 
     @Test
@@ -469,7 +594,8 @@ void assumeRolePolicyIntrinsicsAreResolved() {
             docCaptor.capture(),
             any(),
             eq(3600),
-            eq(Map.of())
+            eq(Map.of()),
+            any()
     );
 
     String storedDoc = docCaptor.getValue();
