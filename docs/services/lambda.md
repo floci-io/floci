@@ -23,7 +23,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `UpdateEventSourceMapping` | Update a mapping |
 | `DeleteEventSourceMapping` | Remove a mapping |
 | `PublishVersion` | Publish an immutable version |
-| `ListVersionsByFunction` | List all published versions of a function |
+| `ListVersionsByFunction` | List all published versions of a function, `$LATEST` first and then published versions in ascending numeric order |
 | `CreateAlias` | Create a named alias pointing to a version |
 | `GetAlias` | Get alias details |
 | `ListAliases` | List all aliases for a function |

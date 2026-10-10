@@ -122,7 +122,7 @@ class LambdaVersionIntegrationTest {
             .get(BASE_PATH + "/functions/" + FUNCTION_NAME)
         .then()
             .statusCode(404);
-            
+
         // Verify versions are gone (actually listVersionsByFunction should return 404 if function doesn't exist)
         given()
         .when()
@@ -256,6 +256,44 @@ class LambdaVersionIntegrationTest {
         } finally {
             given().delete(BASE_PATH + "/functions/" + fnName);
         }
+    }
+
+    @Test
+    @Order(10)
+    void listVersionsByFunctionReturnsLatestFirstThenNumericOrder() {
+        String fnName = "ordered-versions-function";
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler"
+                }
+                """.formatted(fnName))
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201);
+
+        for (int i = 1; i <= 11; i++) {
+            given()
+                .contentType("application/json")
+                .body("{\"Description\": \"v" + i + "\"}")
+            .when()
+                .post(BASE_PATH + "/functions/" + fnName + "/versions")
+            .then()
+                .statusCode(201)
+                .body("Version", equalTo(String.valueOf(i)));
+        }
+
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/" + fnName + "/versions")
+        .then()
+            .statusCode(200)
+            .body("Versions.Version", contains("$LATEST", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"));
     }
 
     private void createInvocableFunction(String fnName) throws Exception {
