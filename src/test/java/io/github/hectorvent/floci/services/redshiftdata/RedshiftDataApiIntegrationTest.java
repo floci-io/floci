@@ -18,6 +18,7 @@ import java.util.List;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -73,16 +74,22 @@ class RedshiftDataApiIntegrationTest {
     private void awaitFinished(String id) {
         Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
                 .pollInterval(Duration.ofMillis(250)).until(() -> {
-            String status = RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
-                    "{\"Id\":\"" + id + "\"}").then().statusCode(200).extract().path("Status");
+            ExtractableResponse<Response> described = RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
+                    "{\"Id\":\"" + id + "\"}").then().statusCode(200).extract();
+            String status = described.path("Status");
             assertTrue(!"FAILED".equals(status) && !"ABORTED".equals(status),
-                    () -> "statement " + id + " ended " + status);
+                    () -> "statement " + id + " ended " + status + ": " + described.path("Error"));
             return "FINISHED".equals(status);
         });
     }
 
     private static int asInt(Object value) {
         return ((Number) value).intValue();
+    }
+
+    @Test
+    void vacuumPreservesAutoCommitExecution() {
+        executeAndWait("VACUUM");
     }
 
     @Test
@@ -189,5 +196,45 @@ class RedshiftDataApiIntegrationTest {
                 .pollInterval(Duration.ofMillis(250)).until(() ->
                 "FAILED".equals(RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
                         "{\"Id\":\"" + id + "\"}").then().statusCode(200).extract().path("Status")));
+    }
+
+    @Test
+    void slowSqlReturnsEarlyAndCanBeCancelled() {
+        long started = System.nanoTime();
+        String id = RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
+                {"Sql":"SELECT pg_sleep(20)","ClusterIdentifier":"%s","DbUser":"admin","Database":"dev"}
+                """.formatted(clusterId)).then().statusCode(200).extract().path("Id");
+        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(10)) < 0);
+        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> "STARTED".equals(
+                RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement", "{\"Id\":\"" + id + "\"}")
+                        .then().statusCode(200).extract().path("Status")));
+        RestAssuredJsonUtils.awsAction("RedshiftData", "CancelStatement", "{\"Id\":\"" + id + "\"}")
+                .then().statusCode(200).body("Status", is(true));
+        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> "ABORTED".equals(
+                RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement", "{\"Id\":\"" + id + "\"}")
+                        .then().statusCode(200).extract().path("Status")));
+    }
+
+    @Test
+    void cancellingBatchRollsBackEarlierWrites() {
+        executeAndWait("CREATE TABLE cancel_batch (id int)");
+        String id = RestAssuredJsonUtils.awsAction("RedshiftData", "BatchExecuteStatement", """
+                {"Sqls":["INSERT INTO cancel_batch VALUES (1)","SELECT pg_sleep(20)",
+                "INSERT INTO cancel_batch VALUES (2)"],"ClusterIdentifier":"%s","DbUser":"admin","Database":"dev"}
+                """.formatted(clusterId)).then().statusCode(200).extract().path("Id");
+        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> {
+            List<?> children = RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement", "{\"Id\":\"" + id + "\"}")
+                    .then().statusCode(200).extract().path("SubStatements");
+            return children != null && !children.isEmpty();
+        });
+        RestAssuredJsonUtils.awsAction("RedshiftData", "CancelStatement", "{\"Id\":\"" + id + "\"}")
+                .then().statusCode(200).body("Status", is(true));
+        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> "ABORTED".equals(
+                RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement", "{\"Id\":\"" + id + "\"}")
+                        .then().statusCode(200).extract().path("Status")));
+        String countId = executeAndWait("SELECT count(*) FROM cancel_batch");
+        Object count = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult", "{\"Id\":\"" + countId + "\"}")
+                .then().statusCode(200).extract().path("Records[0][0].longValue");
+        assertEquals(0, asInt(count));
     }
 }

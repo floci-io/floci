@@ -4,9 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
@@ -21,6 +24,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -28,59 +32,143 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class RedshiftDataService implements Resettable {
 
     private static final int PAGE_SIZE = 1000;
+    private static final Pattern AUTO_COMMIT_SQL = Pattern.compile(
+            "(?is)\\A(?:\\s+|--[^\\r\\n]*(?:\\r?\\n|$)|/\\*.*?\\*/)*"
+                    + "(?:VACUUM\\b|(?:CREATE|DROP)\\s+DATABASE\\b)");
 
     private final RedshiftDataResourceResolver resolver;
     private final RedshiftDataConnectionFactory connectionFactory;
     private final RedshiftDataStatementStore store;
     private final ObjectMapper objectMapper;
     private final SpectrumQueryPreparation preparation;
+    private final RedshiftDataExecutor executor;
+    private final RedshiftDataEventPublisher publisher;
+    private final RequestContext requestContext;
+    private final IamService iamService;
 
-    public RedshiftDataService(RedshiftDataResourceResolver resolver,
-                               RedshiftDataConnectionFactory connectionFactory,
-                               RedshiftDataStatementStore store,
-                               ObjectMapper objectMapper) {
-        this(resolver, connectionFactory, store, objectMapper, null);
+    RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
+                        RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
+                        RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher) {
+        this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher, null, null);
     }
 
     @Inject
-    public RedshiftDataService(RedshiftDataResourceResolver resolver,
-                               RedshiftDataConnectionFactory connectionFactory,
-                               RedshiftDataStatementStore store, ObjectMapper objectMapper,
-                               SpectrumQueryPreparation preparation) {
+    public RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
+                               RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
+                               RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher,
+                               RequestContext requestContext, IamService iamService) {
         this.resolver = resolver;
         this.connectionFactory = connectionFactory;
         this.store = store;
         this.objectMapper = objectMapper;
         this.preparation = preparation;
+        this.executor = executor;
+        this.publisher = publisher;
+        this.requestContext = requestContext;
+        this.iamService = iamService;
     }
 
     @Override
     public void clear() {
-        store.clear();
+        executor.clear(store::clear);
     }
 
     // ── ExecuteStatement ────────────────────────────────────────────────────
 
     public ObjectNode executeStatement(JsonNode request, String region) {
-        PendingStatement pending = prepareStatement(request, region);
-        pending.run().run();
-        return executeResponse(pending.statement());
+        return executeStatement(request, region, null);
     }
 
-    /**
-     * Validates and resolves the request on the calling thread, so a rejected request throws here,
-     * and returns the SQL run for the caller to schedule. The statement is stored as {@code STARTED}
-     * first, as AWS does, so DescribeStatement can see it while the run is in flight.
-     */
-    public Runnable submitStatement(JsonNode request, String region) {
-        PendingStatement pending = prepareStatement(request, region);
-        store.put(pending.statement());
-        return pending.run();
+    public ObjectNode executeStatement(JsonNode request, String region, String principal) {
+        int waitSeconds = waitSeconds(request);
+        return submit(prepareStatement(request, region), waitSeconds, principal);
+    }
+
+    private ObjectNode submit(PendingStatement pending, int waitSeconds, String principal) {
+        RedshiftDataStatementStore.StoredStatement stored = pending.statement();
+        if (principal != null) {
+            stored.principal = principal;
+        }
+        ObjectNode response = executeResponse(stored.snapshot());
+        RedshiftDataExecution handle;
+        synchronized (executor) {
+            store.putForAccount(stored.accountId, stored);
+            try {
+                handle = executor.submit(stored.accountId, stored.region, stored.id, execution -> {
+                    try {
+                        execution.checkCancellation();
+                        stored.status = RedshiftDataStatementStore.Status.STARTED;
+                        executor.publish(execution, () -> store.putForAccount(stored.accountId, stored));
+                        pending.run().accept(execution);
+                    } catch (Exception failure) {
+                        stored.status = RedshiftDataStatementStore.Status.FAILED;
+                        stored.error = failure.getMessage();
+                    }
+                    execution.terminal();
+                    if (execution.isCancellationRequested()) {
+                        stored.status = RedshiftDataStatementStore.Status.ABORTED;
+                        stored.error = "Statement cancelled";
+                    }
+                    if (stored.status != RedshiftDataStatementStore.Status.FINISHED) {
+                        stored.hasResultSet = false;
+                        stored.rows = null;
+                        stored.resultRows = 0;
+                        stored.resultSize = 0;
+                    }
+                    stored.updatedAt = Instant.now();
+                    executor.publish(execution, () -> {
+                        store.putForAccount(stored.accountId, stored);
+                        if (stored.withEvent && publisher != null) {
+                            RedshiftDataStatementStore.StoredStatement terminal = stored.snapshot();
+                            executor.deliver(execution, stored.accountId, stored.region, stored.id,
+                                    () -> publisher.publish(terminal));
+                        }
+                    });
+                });
+            } catch (AwsException failure) {
+                store.deleteForAccount(stored.accountId, stored.id);
+                throw failure;
+            }
+        }
+        if (waitSeconds > 0) {
+            handle.await(Duration.ofSeconds(waitSeconds));
+            RedshiftDataStatementStore.StoredStatement current = store.getForAccount(stored.accountId, stored.id);
+            if (current != null) {
+                return executeResponse(current);
+            }
+        }
+        return response;
+    }
+
+    private static int waitSeconds(JsonNode request) {
+        if (!request.has("WaitTimeSeconds")) {
+            return 0;
+        }
+        JsonNode wait = request.get("WaitTimeSeconds");
+        if (!wait.isIntegralNumber() || !wait.canConvertToInt() || wait.asInt() < 1 || wait.asInt() > 30) {
+            throw new AwsException("ValidationException", "WaitTimeSeconds must be an integer between 1 and 30", 400);
+        }
+        return wait.asInt();
+    }
+
+    private void capture(RedshiftDataStatementStore.StoredStatement stored,
+                         RedshiftDataResourceResolver.DatabaseTarget target, String region, JsonNode request) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(target.arn());
+        stored.accountId = arn.accountId();
+        stored.region = region;
+        stored.resourceArn = target.arn();
+        stored.withEvent = request.path("WithEvent").asBoolean(false);
+        stored.expiresAt = store.expiresAt(stored.createdAt);
+        if (stored.withEvent && requestContext != null && requestContext.getAccessKeyId() != null) {
+            stored.principal = iamService.resolveCallerArn(requestContext.getAccessKeyId()).orElse(null);
+        }
     }
 
     private PendingStatement prepareStatement(JsonNode request, String region) {
@@ -98,20 +186,40 @@ public class RedshiftDataService implements Resettable {
         stored.dbUser = target.user();
         stored.database = target.database();
         stored.resultFormat = request.path("ResultFormat").asText("JSON");
+        capture(stored, target, region, request);
 
-        return new PendingStatement(stored, () -> {
-            runStatement(stored, target, sql, parameters);
-            store.put(stored);
-        });
+        return new PendingStatement(stored, execution -> runStatement(stored, target, sql, parameters, execution));
     }
 
-    private record PendingStatement(RedshiftDataStatementStore.StoredStatement statement, Runnable run) { }
+    private record PendingStatement(RedshiftDataStatementStore.StoredStatement statement,
+                                    Consumer<RedshiftDataExecution> run) { }
 
     private void runStatement(RedshiftDataStatementStore.StoredStatement stored,
                               RedshiftDataResourceResolver.DatabaseTarget target,
-                              String sql, Map<String, String> parameters) {
+                              String sql, Map<String, String> parameters, RedshiftDataExecution execution) {
         try (Connection connection = connectionFactory.open(target)) {
-            runOnConnection(stored, connection, sql, parameters, target.spectrum());
+            execution.track(connection);
+            try {
+                boolean autoCommit = AUTO_COMMIT_SQL.matcher(sql).find()
+                        || preparation != null && target.spectrum() != null
+                        && preparation.handlesDdl(sql, target.spectrum());
+                if (autoCommit) {
+                    execution.commit(() -> runOnConnection(stored, connection, sql, parameters,
+                            target.spectrum(), execution, true));
+                } else {
+                    runOnConnection(stored, connection, sql, parameters, target.spectrum(), execution, false);
+                    execution.commit(() -> {
+                        if (!connection.getAutoCommit()) {
+                            connection.commit();
+                        }
+                    });
+                }
+            } catch (SQLException failure) {
+                if (!connection.getAutoCommit()) {
+                    connection.rollback();
+                }
+                throw failure;
+            }
         } catch (SQLException e) {
             stored.status = RedshiftDataStatementStore.Status.FAILED;
             stored.error = e.getMessage();
@@ -138,13 +246,14 @@ public class RedshiftDataService implements Resettable {
     }
 
     private void runOnConnection(RedshiftDataStatementStore.StoredStatement stored,
-                                 Connection connection, String sql, Map<String, String> parameters, SpectrumSession context)
+                                 Connection connection, String sql, Map<String, String> parameters, SpectrumSession context,
+                                 RedshiftDataExecution execution, boolean autoCommit)
             throws SQLException {
         if (preparation != null && context != null) {
             SpectrumSession session = new SpectrumSession(context.accountId(), context.clusterKey(), context.databaseName(),
                     context.iamRoleArns(), !connection.getAutoCommit());
             try {
-                if (preparation.prepare(sql, session, new RedshiftDataBackendSql(connection))) {
+                if (preparation.prepare(sql, session, new RedshiftDataBackendSql(connection, execution))) {
                     stored.status = RedshiftDataStatementStore.Status.FINISHED;
                     return;
                 }
@@ -158,22 +267,32 @@ public class RedshiftDataService implements Resettable {
             }
         }
         ParsedSql parsed = RedshiftDataSqlParameters.parse(sql);
+        execution.checkCancellation();
+        if (!autoCommit) {
+            connection.setAutoCommit(false);
+        }
         long t0 = System.nanoTime();
         try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
-            RedshiftDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
-            boolean hasResultSet = statement.execute();
-            if (hasResultSet) {
-                try (ResultSet rs = statement.getResultSet()) {
-                    rejectResultTypesRedshiftLacks(rs.getMetaData());
-                    stored.columnMetadata = RedshiftDataColumnMetadata.toColumnMetadata(objectMapper, rs.getMetaData());
-                    stored.rows = RedshiftDataFieldMapper.rows(objectMapper, rs);
-                    stored.hasResultSet = true;
-                    stored.resultRows = stored.rows.size();
-                    stored.resultSize = RedshiftDataFieldMapper.serializedSize(stored.rows);
+            execution.track(statement);
+            try {
+                RedshiftDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
+                execution.checkCancellation();
+                boolean hasResultSet = statement.execute();
+                if (hasResultSet) {
+                    try (ResultSet rs = statement.getResultSet()) {
+                        rejectResultTypesRedshiftLacks(rs.getMetaData());
+                        stored.columnMetadata = RedshiftDataColumnMetadata.toColumnMetadata(objectMapper, rs.getMetaData());
+                        stored.rows = RedshiftDataFieldMapper.rows(objectMapper, rs);
+                        stored.hasResultSet = true;
+                        stored.resultRows = stored.rows.size();
+                        stored.resultSize = RedshiftDataFieldMapper.serializedSize(stored.rows);
+                    }
+                } else {
+                    stored.hasResultSet = false;
+                    stored.resultRows = Math.max(statement.getUpdateCount(), 0);
                 }
-            } else {
-                stored.hasResultSet = false;
-                stored.resultRows = Math.max(statement.getUpdateCount(), 0);
+            } finally {
+                execution.untrack(statement);
             }
         }
         stored.durationNanos = System.nanoTime() - t0;
@@ -336,16 +455,12 @@ public class RedshiftDataService implements Resettable {
     // ── BatchExecuteStatement ──────────────────────────────────────────────
 
     public ObjectNode batchExecuteStatement(JsonNode request, String region) {
-        PendingStatement pending = prepareBatch(request, region);
-        pending.run().run();
-        return executeResponse(pending.statement());
+        return batchExecuteStatement(request, region, null);
     }
 
-    /** Batch counterpart of {@link #submitStatement}. */
-    public Runnable submitBatch(JsonNode request, String region) {
-        PendingStatement pending = prepareBatch(request, region);
-        store.put(pending.statement());
-        return pending.run();
+    public ObjectNode batchExecuteStatement(JsonNode request, String region, String principal) {
+        int waitSeconds = waitSeconds(request);
+        return submit(prepareBatch(request, region), waitSeconds, principal);
     }
 
     private PendingStatement prepareBatch(JsonNode request, String region) {
@@ -370,15 +485,17 @@ public class RedshiftDataService implements Resettable {
         parent.database = target.database();
         parent.resultFormat = request.path("ResultFormat").asText("JSON");
         parent.subStatements = new ArrayList<>();
+        capture(parent, target, region, request);
 
-        return new PendingStatement(parent, () -> runBatch(parent, sqls, target));
+        return new PendingStatement(parent, execution -> runBatch(parent, sqls, target, execution));
     }
 
     private void runBatch(RedshiftDataStatementStore.StoredStatement parent, List<String> sqls,
-                          RedshiftDataResourceResolver.DatabaseTarget target) {
+                          RedshiftDataResourceResolver.DatabaseTarget target, RedshiftDataExecution execution) {
         long totalDuration = 0;
         try (Connection connection = connectionFactory.open(target)) {
-            BackendSql batchBackend = new RedshiftDataBackendSql(connection);
+            execution.track(connection);
+            BackendSql batchBackend = new RedshiftDataBackendSql(connection, execution);
             boolean committed = false;
             try {
                 connection.setAutoCommit(false);
@@ -397,13 +514,14 @@ public class RedshiftDataService implements Resettable {
                     sub.createdAt = now;
                     sub.updatedAt = now;
                     try {
-                        runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum());
+                        execution.checkCancellation();
+                        runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum(), execution, false);
                     } catch (SQLException e) {
                         sub.status = RedshiftDataStatementStore.Status.FAILED;
                         sub.error = e.getMessage();
                         sub.updatedAt = Instant.now();
                         parent.subStatements.add(sub);
-                        store.put(sub);
+                        executor.publish(execution, () -> store.putForAccount(parent.accountId, sub));
                         totalDuration += sub.durationNanos;
                         parent.status = RedshiftDataStatementStore.Status.FAILED;
                         parent.error = e.getMessage();
@@ -413,11 +531,14 @@ public class RedshiftDataService implements Resettable {
                     }
                     sub.updatedAt = Instant.now();
                     parent.subStatements.add(sub);
-                    store.put(sub);
+                    executor.publish(execution, () -> {
+                        store.putForAccount(parent.accountId, sub);
+                        store.putForAccount(parent.accountId, parent);
+                    });
                     totalDuration += sub.durationNanos;
                 }
                 if (!failed) {
-                    connection.commit();
+                    execution.commit(connection::commit);
                     committed = true;
                     parent.status = RedshiftDataStatementStore.Status.FINISHED;
                 }
@@ -448,7 +569,6 @@ public class RedshiftDataService implements Resettable {
         }
         parent.durationNanos = totalDuration;
         parent.updatedAt = Instant.now();
-        store.put(parent);
     }
 
     // ── ListStatements ─────────────────────────────────────────────────────
@@ -506,13 +626,8 @@ public class RedshiftDataService implements Resettable {
 
     public ObjectNode cancelStatement(JsonNode request) {
         RedshiftDataStatementStore.StoredStatement stored = require(request);
-        if (stored.status != RedshiftDataStatementStore.Status.FINISHED
-                && stored.status != RedshiftDataStatementStore.Status.FAILED) {
-            stored.status = RedshiftDataStatementStore.Status.ABORTED;
-            stored.updatedAt = Instant.now();
-        }
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("Status", true);
+        response.put("Status", !stored.status.isTerminal() && executor.cancel(stored.accountId, stored.id));
         return response;
     }
 
@@ -700,7 +815,7 @@ public class RedshiftDataService implements Resettable {
         Instant now = Instant.now();
         stored.createdAt = now;
         stored.updatedAt = now;
-        stored.status = RedshiftDataStatementStore.Status.STARTED;
+        stored.status = RedshiftDataStatementStore.Status.SUBMITTED;
         return stored;
     }
 
@@ -715,7 +830,14 @@ public class RedshiftDataService implements Resettable {
 
     private RedshiftDataStatementStore.StoredStatement resultBearing(JsonNode request) {
         RedshiftDataStatementStore.StoredStatement stored = require(request);
-        if (!stored.hasResultSet || stored.rows == null) {
+        int childSuffix = stored.id.indexOf(':');
+        if (childSuffix >= 0) {
+            RedshiftDataStatementStore.StoredStatement parent = store.get(stored.id.substring(0, childSuffix));
+            if (parent == null || parent.status != RedshiftDataStatementStore.Status.FINISHED) {
+                throw new AwsException("ValidationException", "Statement has no result set", 400);
+            }
+        }
+        if (stored.status != RedshiftDataStatementStore.Status.FINISHED || !stored.hasResultSet || stored.rows == null) {
             throw new AwsException("ValidationException", "Statement has no result set", 400);
         }
         return stored;

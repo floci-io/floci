@@ -12,15 +12,30 @@ import java.sql.Statement;
 
 final class RedshiftDataBackendSql implements BackendSql {
     private final Connection connection;
+    private final RedshiftDataExecution execution;
 
     RedshiftDataBackendSql(Connection connection) {
+        this(connection, null);
+    }
+
+    RedshiftDataBackendSql(Connection connection, RedshiftDataExecution execution) {
         this.connection = connection;
+        this.execution = execution;
     }
 
     @Override
     public void execute(String sql) {
         try (Statement statement = connection.createStatement()) {
-            statement.execute(sql);
+            if (execution != null) {
+                execution.track(statement);
+            }
+            try {
+                statement.execute(sql);
+            } finally {
+                if (execution != null) {
+                    execution.untrack(statement);
+                }
+            }
         } catch (SQLException exception) {
             throw failure(exception);
         }
@@ -29,6 +44,9 @@ final class RedshiftDataBackendSql implements BackendSql {
     @Override
     public long copyIn(String copySql, InputStream data) {
         try {
+            if (execution != null) {
+                execution.checkCancellation();
+            }
             return connection.unwrap(PGConnection.class).getCopyAPI().copyIn(copySql, data);
         } catch (SQLException exception) {
             throw failure(exception);

@@ -81,7 +81,7 @@ class RedshiftServerlessTest {
     }
 
     @Test
-    void workgroupLifecycleUsesAwsSdk() {
+    void workgroupLifecycleUsesAwsSdk() throws InterruptedException {
         assumeFalse(TestFixtures.isRealAws(), "Creates a workgroup and asserts emulator-local defaults");
 
         try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient();
@@ -143,7 +143,13 @@ class RedshiftServerlessTest {
                         .sql("select 1"));
                 assertThat(executed.workgroupName()).isEqualTo(workgroupName);
                 assertThat(executed.clusterIdentifier()).isNull();
+                Instant deadline = Instant.now().plusSeconds(30);
                 DescribeStatementResponse described = dataClient.describeStatement(request -> request.id(executed.id()));
+                while (Instant.now().isBefore(deadline) && (described.status() == StatusString.SUBMITTED
+                        || described.status() == StatusString.PICKED || described.status() == StatusString.STARTED)) {
+                    Thread.sleep(200);
+                    described = dataClient.describeStatement(request -> request.id(executed.id()));
+                }
                 assertThat(described.status()).isEqualTo(StatusString.FINISHED);
 
                 String arn = created.workgroupArn();

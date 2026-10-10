@@ -8,7 +8,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
+import org.awaitility.Awaitility;
 import org.h2.Driver;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -16,8 +18,11 @@ import java.sql.DriverManager;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -43,6 +48,7 @@ class RedshiftDataServiceTest {
     private String jdbcUrl;
     private RedshiftDataService service;
     private SpectrumQueryPreparation preparation;
+    private RedshiftDataExecutor executor;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -57,12 +63,18 @@ class RedshiftDataServiceTest {
         when(factory.open(any())).thenAnswer(inv -> DriverManager.getConnection(jdbcUrl, "sa", ""));
 
         preparation = mock(SpectrumQueryPreparation.class);
+        executor = new RedshiftDataExecutor(2, 100, 1);
         service = new RedshiftDataService(resolver, factory,
-                new RedshiftDataStatementStore(24, Clock.systemUTC()), om, preparation);
+                new RedshiftDataStatementStore(24, Clock.systemUTC()), om, preparation, executor, null);
+    }
+
+    @AfterEach
+    void stopExecutor() {
+        executor.close();
     }
 
     private ObjectNode req(String sql) {
-        ObjectNode r = om.createObjectNode();
+        ObjectNode r = om.createObjectNode().put("WaitTimeSeconds", 5);
         r.put("Sql", sql);
         r.put("ClusterIdentifier", "wh");
         r.put("DbUser", "admin");
@@ -72,6 +84,40 @@ class RedshiftDataServiceTest {
 
     private ObjectNode idOf(String id) {
         return om.createObjectNode().put("Id", id);
+    }
+
+    @Test
+    void rolledBackBatchDoesNotExposeChildResults() {
+        ObjectNode request = req("unused");
+        request.putArray("Sqls").add("SELECT 1").add("SELECT * FROM nonexistent_batch_table");
+        String id = service.batchExecuteStatement(request, REGION).path("Id").asText();
+        assertEquals("FAILED", service.describeStatement(idOf(id)).path("Status").asText());
+        assertThrows(AwsException.class, () -> service.getStatementResult(idOf(id + ":1")));
+    }
+
+    @Test
+    void spectrumDdlOwnsCompletionBeforeAutoCommittedWrites() throws Exception {
+        String sql = "CREATE EXTERNAL SCHEMA lake";
+        when(preparation.handlesDdl(eq(sql), any())).thenReturn(true);
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(preparation.prepare(eq(sql), any(), any())).thenAnswer(invocation -> {
+            writing.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return true;
+        });
+        ObjectNode request = req(sql);
+        request.remove("WaitTimeSeconds");
+        String id = service.executeStatement(request, REGION).path("Id").asText();
+        assertTrue(writing.await(5, TimeUnit.SECONDS));
+        try {
+            assertFalse(service.cancelStatement(idOf(id)).path("Status").asBoolean(),
+                    "auto-committed external writes must not be reported as aborted");
+        } finally {
+            release.countDown();
+        }
+        Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertEquals("FINISHED", service.describeStatement(idOf(id)).path("Status").asText()));
     }
 
     @Test
@@ -94,7 +140,7 @@ class RedshiftDataServiceTest {
 
     @Test
     void aWorkgroupStatementNamesItsWorkgroupAndOmitsTheClusterIdentifier() {
-        ObjectNode request = om.createObjectNode();
+        ObjectNode request = om.createObjectNode().put("WaitTimeSeconds", 5);
         request.put("Sql", "select 1");
         request.put("WorkgroupName", "wg-1");
         request.put("Database", "dev");
@@ -122,7 +168,7 @@ class RedshiftDataServiceTest {
 
     @Test
     void aWorkgroupBatchPassesItsWorkgroupToEverySubStatement() {
-        ObjectNode request = om.createObjectNode();
+        ObjectNode request = om.createObjectNode().put("WaitTimeSeconds", 5);
         request.putArray("Sqls").add("select 1").add("select 2");
         request.put("WorkgroupName", "wg-1");
         request.put("Database", "dev");
@@ -226,7 +272,7 @@ class RedshiftDataServiceTest {
     }
 
     private ObjectNode batchReq(String... sqls) {
-        ObjectNode r = om.createObjectNode();
+        ObjectNode r = om.createObjectNode().put("WaitTimeSeconds", 5);
         r.put("ClusterIdentifier", "wh");
         r.put("DbUser", "admin");
         r.put("Database", "dev");
@@ -283,10 +329,10 @@ class RedshiftDataServiceTest {
     }
 
     @Test
-    void cancelOnFinishedStatementReturnsTrueWithoutChangingIt() {
+    void cancelOnFinishedStatementReturnsFalseWithoutChangingIt() {
         service.executeStatement(req("create table cf (id int)"), REGION);
         String id = service.executeStatement(req("select id from cf"), REGION).get("Id").asText();
-        assertTrue(service.cancelStatement(idOf(id)).get("Status").asBoolean());
+        assertFalse(service.cancelStatement(idOf(id)).get("Status").asBoolean());
         assertEquals("FINISHED", service.describeStatement(idOf(id)).get("Status").asText());
     }
 
@@ -297,7 +343,7 @@ class RedshiftDataServiceTest {
     }
 
     private ObjectNode targetReq() {
-        ObjectNode r = om.createObjectNode();
+        ObjectNode r = om.createObjectNode().put("WaitTimeSeconds", 5);
         r.put("ClusterIdentifier", "wh");
         r.put("DbUser", "admin");
         r.put("Database", "dev");
@@ -378,7 +424,7 @@ class RedshiftDataServiceTest {
     void cancelOnFailedStatementLeavesItFailed() {
         String id = service.executeStatement(req("select * from missing_table"), REGION).get("Id").asText();
         assertEquals("FAILED", service.describeStatement(idOf(id)).get("Status").asText());
-        assertTrue(service.cancelStatement(idOf(id)).get("Status").asBoolean());
+        assertFalse(service.cancelStatement(idOf(id)).get("Status").asBoolean());
         assertEquals("FAILED", service.describeStatement(idOf(id)).get("Status").asText());
     }
 

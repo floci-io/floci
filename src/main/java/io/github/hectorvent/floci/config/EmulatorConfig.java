@@ -1692,6 +1692,15 @@ public interface EmulatorConfig {
 
         @WithDefault("24")
         int resultTtlHours();
+
+        @WithDefault("10")
+        int maxConcurrentStatements();
+
+        @WithDefault("100")
+        int queueCapacity();
+
+        @WithDefault("10")
+        int shutdownTimeoutSeconds();
     }
 
     interface RedshiftServerlessServiceConfig {
