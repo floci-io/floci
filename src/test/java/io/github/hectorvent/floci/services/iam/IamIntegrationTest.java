@@ -9,6 +9,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -1559,5 +1561,64 @@ class IamIntegrationTest {
             .header("Authorization", IAM_AUTH)
         .when().post("/").then()
             .statusCode(404);
+    }
+
+    @Test
+    @Order(86)
+    void createRoleRejectsANameOutsideTheRoleNamePattern() {
+        String pattern = "Member must satisfy regular expression pattern: [\\w+=,.@-]+";
+        Map<String, String> constraints = Map.of(
+                "aws:ec2-instance", pattern,
+                "bad/name", pattern,
+                "x".repeat(65), "Member must have length less than or equal to 64");
+        for (Map.Entry<String, String> entry : constraints.entrySet()) {
+            String name = entry.getKey();
+            given()
+                .formParam("Action", "CreateRole")
+                .formParam("RoleName", name)
+                .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+                .header("Authorization", IAM_AUTH)
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '" + name
+                        + "' at 'roleName' failed to satisfy constraint: " + entry.getValue()));
+
+            given()
+                .formParam("Action", "GetRole")
+                .formParam("RoleName", name)
+                .header("Authorization", IAM_AUTH)
+            .when().post("/").then()
+                .statusCode(404);
+        }
+
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value null"
+                    + " at 'roleName' failed to satisfy constraint: Member must not be null"));
+
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value ''"
+                    + " at 'roleName' failed to satisfy constraint: Member must have length greater than or equal to 1"));
+
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "Ok_+=,.@-" + "x".repeat(55))
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200);
     }
 }
