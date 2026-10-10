@@ -7,11 +7,14 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
+import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
+import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -30,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -47,6 +51,10 @@ class CloudFrontCfnProvisionerTest {
     private static final String ORIGIN_REQUEST_POLICY = "AWS::CloudFront::OriginRequestPolicy";
     private static final String ORIGIN_ACCESS_CONTROL = "AWS::CloudFront::OriginAccessControl";
     private static final String DISTRIBUTION = "AWS::CloudFront::Distribution";
+    private static final String PUBLIC_KEY = "AWS::CloudFront::PublicKey";
+    private static final String KEY_GROUP = "AWS::CloudFront::KeyGroup";
+    private static final String FUNCTION = "AWS::CloudFront::Function";
+    private static final String FUNCTION_ARN = "arn:aws:cloudfront::000000000000:function/my-function";
     private static final String REGION = "us-east-1";
     private static final String ID = "5cc3b908-e619-4b99-88e5-2cf7f45965bd";
     private static final String ETAG = "E2QWRUHAPOMQZL";
@@ -100,9 +108,9 @@ class CloudFrontCfnProvisionerTest {
     }
 
     @Test
-    void servesTheDistributionAndItsFourConfigTypes() {
+    void servesTheDistributionAndTheTypesItReferences() {
         assertEquals(Set.of(DISTRIBUTION, RESPONSE_HEADERS_POLICY, CACHE_POLICY, ORIGIN_REQUEST_POLICY,
-                ORIGIN_ACCESS_CONTROL), provisioner.resourceTypes());
+                ORIGIN_ACCESS_CONTROL, PUBLIC_KEY, KEY_GROUP, FUNCTION), provisioner.resourceTypes());
     }
 
     /**
@@ -589,5 +597,338 @@ class CloudFrontCfnProvisionerTest {
                 List.of(Map.of("Header", "X-A", "Value", "1", "Override", "false"))),
                 captor.getValue().getConfig());
         assertEquals(Map.of("Id", ID, "LastModifiedTime", ""), r.getAttributes());
+    }
+
+    private static PublicKey publicKey(String id, String etag) {
+        PublicKey key = new PublicKey();
+        key.setId(id);
+        key.setEtag(etag);
+        key.setCreatedTime(MODIFIED);
+        return key;
+    }
+
+    private static KeyGroup keyGroup(String id, String etag) {
+        KeyGroup group = new KeyGroup();
+        group.setId(id);
+        group.setEtag(etag);
+        group.setLastModifiedTime(MODIFIED);
+        return group;
+    }
+
+    private static CloudFrontFunction function(String name, String etag) {
+        CloudFrontFunction fn = new CloudFrontFunction();
+        fn.setName(name);
+        fn.setEtag(etag);
+        fn.setStage("DEVELOPMENT");
+        return fn;
+    }
+
+    private void stubFunctionArns() {
+        when(cloudFront.arn(any())).thenAnswer(inv -> "arn:aws:cloudfront::000000000000:" + inv.getArgument(0));
+    }
+
+    @Test
+    void createsPublicKeyAndExposesIdAndCreatedTime() throws Exception {
+        when(cloudFront.createPublicKey(any()))
+                .thenAnswer(inv -> withIdentity(inv.<PublicKey>getArgument(0), k -> {
+                    k.setId("K36X4X2EO997HM");
+                    k.setEtag(ETAG);
+                    k.setCreatedTime(MODIFIED);
+                }));
+        StackResource r = resource(PUBLIC_KEY);
+
+        provisioner.provision(r, json("""
+                {"PublicKeyConfig": {"Name": "example-key", "CallerReference": "example-key-1",
+                  "EncodedKey": "-----BEGIN PUBLIC KEY-----", "Comment": "first"}}
+                """), ctx());
+
+        ArgumentCaptor<PublicKey> captor = ArgumentCaptor.forClass(PublicKey.class);
+        verify(cloudFront).createPublicKey(captor.capture());
+        assertEquals("example-key", captor.getValue().getName());
+        assertEquals("example-key-1", captor.getValue().getCallerReference());
+        assertEquals("-----BEGIN PUBLIC KEY-----", captor.getValue().getEncodedKey());
+        assertEquals("first", captor.getValue().getComment());
+        assertEquals("K36X4X2EO997HM", r.getPhysicalId());
+        assertEquals(Map.of("Id", "K36X4X2EO997HM", "CreatedTime", MODIFIED.toString()), r.getAttributes());
+    }
+
+    @Test
+    void updatesPublicKeyInPlaceWithTheCurrentEtag() throws Exception {
+        when(cloudFront.getPublicKey("K36X4X2EO997HM")).thenReturn(publicKey("K36X4X2EO997HM", ETAG));
+        when(cloudFront.updatePublicKey(eq("K36X4X2EO997HM"), eq(ETAG), any()))
+                .thenAnswer(inv -> withIdentity(inv.<PublicKey>getArgument(2), k -> {
+                    k.setId("K36X4X2EO997HM");
+                    k.setCreatedTime(MODIFIED);
+                }));
+        StackResource r = resource(PUBLIC_KEY, "K36X4X2EO997HM", Map.of("Id", "K36X4X2EO997HM"));
+
+        provisioner.provision(r, json("""
+                {"PublicKeyConfig": {"Name": "example-key", "CallerReference": "example-key-1",
+                  "EncodedKey": "-----BEGIN PUBLIC KEY-----", "Comment": "second"}}
+                """), ctx("K36X4X2EO997HM"));
+
+        ArgumentCaptor<PublicKey> captor = ArgumentCaptor.forClass(PublicKey.class);
+        verify(cloudFront).updatePublicKey(eq("K36X4X2EO997HM"), eq(ETAG), captor.capture());
+        assertEquals("second", captor.getValue().getComment());
+        verify(cloudFront, never()).createPublicKey(any());
+        assertEquals("K36X4X2EO997HM", r.getPhysicalId());
+    }
+
+    @Test
+    void publicKeyFieldTheServiceCannotChangeFailsTheUpdate() throws Exception {
+        when(cloudFront.getPublicKey("K36X4X2EO997HM")).thenReturn(publicKey("K36X4X2EO997HM", ETAG));
+        AwsException immutable = new AwsException("CannotChangeImmutablePublicKeyFields",
+                "The caller reference, name, and encoded public key cannot be changed.", 400);
+        when(cloudFront.updatePublicKey(eq("K36X4X2EO997HM"), eq(ETAG), any())).thenThrow(immutable);
+        StackResource r = resource(PUBLIC_KEY, "K36X4X2EO997HM", Map.of("Id", "K36X4X2EO997HM"));
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, json("""
+                {"PublicKeyConfig": {"Name": "renamed-key", "CallerReference": "example-key-1",
+                  "EncodedKey": "-----BEGIN PUBLIC KEY-----"}}
+                """), ctx("K36X4X2EO997HM")));
+
+        assertSame(immutable, e);
+        verify(cloudFront, never()).createPublicKey(any());
+    }
+
+    @Test
+    void deletesPublicKeyWithItsEtagAndToleratesItBeingGone() {
+        when(cloudFront.getPublicKey("K36X4X2EO997HM")).thenReturn(publicKey("K36X4X2EO997HM", ETAG));
+        when(cloudFront.getPublicKey("gone")).thenThrow(
+                new AwsException("NoSuchPublicKey", "The specified public key does not exist.", 404));
+
+        provisioner.delete(PUBLIC_KEY, "K36X4X2EO997HM", REGION);
+        provisioner.delete(PUBLIC_KEY, "gone", REGION);
+
+        verify(cloudFront).deletePublicKey("K36X4X2EO997HM", ETAG);
+        verify(cloudFront, never()).deletePublicKey(eq("gone"), any());
+    }
+
+    @Test
+    void createsKeyGroupWithItsPublicKeyIdsAndExposesIdAndLastModifiedTime() throws Exception {
+        when(cloudFront.createKeyGroup(any()))
+                .thenAnswer(inv -> withIdentity(inv.<KeyGroup>getArgument(0), g -> {
+                    g.setId(ID);
+                    g.setEtag(ETAG);
+                    g.setLastModifiedTime(MODIFIED);
+                }));
+        StackResource r = resource(KEY_GROUP);
+
+        provisioner.provision(r, json("""
+                {"KeyGroupConfig": {"Name": "example-key-group", "Comment": "group",
+                  "Items": ["K36X4X2EO997HM", "K2JCJMDEHXQW5F"]}}
+                """), ctx());
+
+        ArgumentCaptor<KeyGroup> captor = ArgumentCaptor.forClass(KeyGroup.class);
+        verify(cloudFront).createKeyGroup(captor.capture());
+        assertEquals("example-key-group", captor.getValue().getName());
+        assertEquals("group", captor.getValue().getComment());
+        assertEquals(List.of("K36X4X2EO997HM", "K2JCJMDEHXQW5F"), captor.getValue().getItems());
+        assertEquals(ID, r.getPhysicalId());
+        assertEquals(Map.of("Id", ID, "LastModifiedTime", MODIFIED.toString()), r.getAttributes());
+    }
+
+    @Test
+    void updatesAndDeletesKeyGroupThroughTheEtag() throws Exception {
+        when(cloudFront.getKeyGroup(ID)).thenReturn(keyGroup(ID, ETAG));
+        when(cloudFront.updateKeyGroup(eq(ID), eq(ETAG), any()))
+                .thenAnswer(inv -> withIdentity(inv.<KeyGroup>getArgument(2), g -> {
+                    g.setId(ID);
+                    g.setLastModifiedTime(MODIFIED.plusSeconds(60));
+                }));
+        StackResource r = resource(KEY_GROUP, ID, Map.of("Id", ID));
+
+        provisioner.provision(r, json("""
+                {"KeyGroupConfig": {"Name": "example-key-group", "Items": ["K2JCJMDEHXQW5F"]}}
+                """), ctx(ID));
+        provisioner.delete(KEY_GROUP, ID, REGION);
+
+        ArgumentCaptor<KeyGroup> captor = ArgumentCaptor.forClass(KeyGroup.class);
+        verify(cloudFront).updateKeyGroup(eq(ID), eq(ETAG), captor.capture());
+        assertEquals(List.of("K2JCJMDEHXQW5F"), captor.getValue().getItems());
+        verify(cloudFront, never()).createKeyGroup(any());
+        verify(cloudFront).deleteKeyGroup(ID, ETAG);
+        assertEquals(Map.of("Id", ID, "LastModifiedTime", "2026-09-07T10:16:30Z"), r.getAttributes());
+    }
+
+    @Test
+    void deleteOfAKeyGroupStillInUseFailsTheStack() {
+        when(cloudFront.getKeyGroup(ID)).thenReturn(keyGroup(ID, ETAG));
+        AwsException inUse = new AwsException("ResourceInUse",
+                "Cannot delete this resource because it is in use.", 409);
+        doThrow(inUse).when(cloudFront).deleteKeyGroup(ID, ETAG);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.delete(KEY_GROUP, ID, REGION));
+
+        assertSame(inUse, e);
+    }
+
+    @Test
+    void createsFunctionPublishesItAndTagsItsArn() throws Exception {
+        stubFunctionArns();
+        when(cloudFront.createFunction(any()))
+                .thenAnswer(inv -> withIdentity(inv.<CloudFrontFunction>getArgument(0), f -> f.setEtag(ETAG)));
+        StackResource r = resource(FUNCTION);
+
+        provisioner.provision(r, json("""
+                {"Name": "my-function", "AutoPublish": true,
+                 "FunctionCode": "function handler(event) { return event.request; }",
+                 "FunctionConfig": {"Comment": "example", "Runtime": "cloudfront-js-2.0"},
+                 "Tags": [{"Key": "Env", "Value": "test"}]}
+                """), distributionCtx(null));
+
+        ArgumentCaptor<CloudFrontFunction> captor = ArgumentCaptor.forClass(CloudFrontFunction.class);
+        verify(cloudFront).createFunction(captor.capture());
+        assertEquals("my-function", captor.getValue().getName());
+        assertEquals("function handler(event) { return event.request; }", captor.getValue().getFunctionCode());
+        assertEquals("example", captor.getValue().getComment());
+        assertEquals("cloudfront-js-2.0", captor.getValue().getRuntime());
+        verify(cloudFront).publishFunction("my-function", ETAG);
+        verify(cloudFront).tagResource(FUNCTION_ARN, Map.of("Env", "test"));
+        assertEquals(FUNCTION_ARN, r.getPhysicalId());
+        assertEquals(Map.of("FunctionARN", FUNCTION_ARN, "FunctionMetadata.FunctionARN", FUNCTION_ARN,
+                "Stage", "LIVE"), r.getAttributes());
+    }
+
+    @Test
+    void functionWithoutAutoPublishStaysInDevelopment() throws Exception {
+        stubFunctionArns();
+        when(cloudFront.createFunction(any()))
+                .thenAnswer(inv -> withIdentity(inv.<CloudFrontFunction>getArgument(0), f -> f.setEtag(ETAG)));
+        StackResource r = resource(FUNCTION);
+
+        provisioner.provision(r, json("""
+                {"Name": "my-function", "FunctionCode": "code",
+                 "FunctionConfig": {"Comment": "example", "Runtime": "cloudfront-js-2.0"}}
+                """), distributionCtx(null));
+
+        verify(cloudFront, never()).publishFunction(any(), any());
+        verify(cloudFront, never()).tagResource(any(), any());
+        assertEquals("DEVELOPMENT", r.getAttributes().get("Stage"));
+    }
+
+    @Test
+    void updatesFunctionInPlaceWithTheDevelopmentEtagAndDropsStaleTags() throws Exception {
+        stubFunctionArns();
+        when(cloudFront.describeFunction("my-function", null)).thenReturn(function("my-function", ETAG));
+        when(cloudFront.updateFunction(eq("my-function"), eq(ETAG), any()))
+                .thenAnswer(inv -> withIdentity(inv.<CloudFrontFunction>getArgument(2), f -> f.setEtag(NEW_ETAG)));
+        when(cloudFront.listTagsForResource(FUNCTION_ARN)).thenReturn(Map.of("Env", "test", "Old", "x"));
+        StackResource r = resource(FUNCTION, FUNCTION_ARN, Map.of("FunctionARN", FUNCTION_ARN));
+
+        provisioner.provision(r, json("""
+                {"Name": "my-function", "AutoPublish": true, "FunctionCode": "new code",
+                 "FunctionConfig": {"Comment": "second", "Runtime": "cloudfront-js-2.0"},
+                 "Tags": [{"Key": "Env", "Value": "test"}]}
+                """), distributionCtx(FUNCTION_ARN));
+
+        ArgumentCaptor<CloudFrontFunction> captor = ArgumentCaptor.forClass(CloudFrontFunction.class);
+        verify(cloudFront).updateFunction(eq("my-function"), eq(ETAG), captor.capture());
+        assertEquals("new code", captor.getValue().getFunctionCode());
+        verify(cloudFront, never()).createFunction(any());
+        verify(cloudFront).publishFunction("my-function", NEW_ETAG);
+        verify(cloudFront).untagResource(FUNCTION_ARN, List.of("Old"));
+        assertEquals(FUNCTION_ARN, r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void functionNameChangeCreatesANewFunctionAndDeletesTheOldOneAfterTheUpdate() throws Exception {
+        stubFunctionArns();
+        when(cloudFront.createFunction(any()))
+                .thenAnswer(inv -> withIdentity(inv.<CloudFrontFunction>getArgument(0), f -> f.setEtag(NEW_ETAG)));
+        when(cloudFront.describeFunction("my-function", null)).thenReturn(function("my-function", ETAG));
+        StackResource r = resource(FUNCTION, FUNCTION_ARN, Map.of("FunctionARN", FUNCTION_ARN));
+
+        provisioner.provision(r, json("""
+                {"Name": "renamed-function", "FunctionCode": "code",
+                 "FunctionConfig": {"Comment": "example", "Runtime": "cloudfront-js-2.0"}}
+                """), distributionCtx(FUNCTION_ARN));
+
+        verify(cloudFront, never()).updateFunction(any(), any(), any());
+        String newArn = "arn:aws:cloudfront::000000000000:function/renamed-function";
+        assertEquals(newArn, r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r), "the old function is owed a cleanup");
+        assertEquals(FUNCTION_ARN, provisioner.updateCleanupPhysicalId(r));
+        provisioner.completeUpdate(r);
+        verify(cloudFront).deleteFunction("my-function", ETAG);
+    }
+
+    @Test
+    void functionCreatedByARenameIsDeletedWhenPublishingFails() throws Exception {
+        stubFunctionArns();
+        CloudFrontFunction created = function("renamed-function", NEW_ETAG);
+        when(cloudFront.createFunction(any())).thenReturn(created);
+        when(cloudFront.describeFunction("renamed-function", null)).thenReturn(created);
+        AwsException publishFailure = new AwsException("InvalidIfMatchVersion",
+                "The If-Match version is missing or not valid for the resource.", 400);
+        when(cloudFront.publishFunction("renamed-function", NEW_ETAG)).thenThrow(publishFailure);
+        StackResource r = resource(FUNCTION, FUNCTION_ARN, Map.of("FunctionARN", FUNCTION_ARN));
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, json("""
+                {"Name": "renamed-function", "AutoPublish": true, "FunctionCode": "code",
+                 "FunctionConfig": {"Comment": "example", "Runtime": "cloudfront-js-2.0"}}
+                """), distributionCtx(FUNCTION_ARN)));
+
+        assertSame(publishFailure, e);
+        verify(cloudFront).deleteFunction("renamed-function", NEW_ETAG);
+        verify(cloudFront, never()).deleteFunction(eq("my-function"), any());
+        assertEquals(FUNCTION_ARN, r.getPhysicalId(), "the resource still names the old function");
+    }
+
+    @Test
+    void functionWhoseNameIsTakenFailsWithoutTouchingTheOtherFunction() throws Exception {
+        stubFunctionArns();
+        AwsException taken = new AwsException("FunctionAlreadyExists",
+                "A function with the same name already exists in this AWS account.", 409);
+        when(cloudFront.createFunction(any())).thenThrow(taken);
+        StackResource r = resource(FUNCTION);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, json("""
+                {"Name": "my-function", "AutoPublish": true, "FunctionCode": "code",
+                 "FunctionConfig": {"Comment": "example", "Runtime": "cloudfront-js-2.0"}}
+                """), distributionCtx(null)));
+
+        assertSame(taken, e);
+        assertNull(r.getPhysicalId(), "a failed create names nothing the rollback would delete");
+        verify(cloudFront, never()).deleteFunction(any(), any());
+        verify(cloudFront, never()).publishFunction(any(), any());
+    }
+
+    @Test
+    void deletesFunctionWithItsEtagAndRemovesItsTags() {
+        when(cloudFront.describeFunction("my-function", null)).thenReturn(function("my-function", ETAG));
+        when(cloudFront.listTagsForResource(FUNCTION_ARN)).thenReturn(Map.of("Env", "test"));
+        when(cloudFront.describeFunction("gone", null)).thenThrow(
+                new AwsException("NoSuchFunctionExists", "The specified function does not exist.", 404));
+
+        provisioner.delete(FUNCTION, FUNCTION_ARN, REGION);
+        provisioner.delete(FUNCTION, "arn:aws:cloudfront::000000000000:function/gone", REGION);
+
+        verify(cloudFront).deleteFunction("my-function", ETAG);
+        verify(cloudFront).untagResource(FUNCTION_ARN, List.of("Env"));
+        verify(cloudFront, never()).deleteFunction(eq("gone"), any());
+    }
+
+    @Test
+    void functionWithoutNameOrCodeIsAValidationError() throws Exception {
+        for (String[] missing : new String[][] {
+                {"Name", """
+                        {"FunctionCode": "code", "FunctionConfig": {"Comment": "c", "Runtime": "cloudfront-js-2.0"}}
+                        """},
+                {"FunctionCode", """
+                        {"Name": "my-function", "FunctionConfig": {"Comment": "c", "Runtime": "cloudfront-js-2.0"}}
+                        """},
+                {"FunctionConfig", """
+                        {"Name": "my-function", "FunctionCode": "code"}
+                        """}}) {
+            StackResource r = resource(FUNCTION);
+            AwsException e = assertThrows(AwsException.class,
+                    () -> provisioner.provision(r, json(missing[1]), distributionCtx(null)));
+            assertEquals("ValidationError", e.getErrorCode());
+            assertEquals(FUNCTION + " requires " + missing[0], e.getMessage());
+            assertNull(r.getPhysicalId());
+        }
+        verify(cloudFront, never()).createFunction(any());
     }
 }

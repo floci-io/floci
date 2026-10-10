@@ -8,12 +8,15 @@ import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.ResponseHeadersPolicyConfigCodec;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
+import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
+import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
@@ -30,7 +33,8 @@ import java.util.function.Function;
 
 /**
  * Provisions the CloudFront configuration types a distribution references by id: response headers
- * policies, cache policies, origin request policies and origin access controls.
+ * policies, cache policies, origin request policies and origin access controls. It also provisions
+ * public keys, key groups and functions, described on their own provision methods.
  *
  * <p>Each type has a single required {@code <Type>Config} property and no create-only property, so
  * the physical id is the id the service assigns and every update is applied in place through the
@@ -58,11 +62,17 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     static final String CACHE_POLICY = "AWS::CloudFront::CachePolicy";
     static final String ORIGIN_REQUEST_POLICY = "AWS::CloudFront::OriginRequestPolicy";
     static final String ORIGIN_ACCESS_CONTROL = "AWS::CloudFront::OriginAccessControl";
+    static final String PUBLIC_KEY = "AWS::CloudFront::PublicKey";
+    static final String KEY_GROUP = "AWS::CloudFront::KeyGroup";
+    static final String FUNCTION = "AWS::CloudFront::Function";
 
     static final String NO_SUCH_RESPONSE_HEADERS_POLICY = "NoSuchResponseHeadersPolicy";
     static final String NO_SUCH_CACHE_POLICY = "NoSuchCachePolicy";
     static final String NO_SUCH_ORIGIN_REQUEST_POLICY = "NoSuchOriginRequestPolicy";
     static final String NO_SUCH_ORIGIN_ACCESS_CONTROL = "NoSuchOriginAccessControl";
+    static final String NO_SUCH_PUBLIC_KEY = "NoSuchPublicKey";
+    static final String NO_SUCH_KEY_GROUP = "NoSuchResource";
+    static final String NO_SUCH_FUNCTION = "NoSuchFunctionExists";
 
     private static final Set<String> MODEL_FIELDS = Set.of("Name", "Comment");
 
@@ -75,7 +85,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public Set<String> resourceTypes() {
         return Set.of(DISTRIBUTION, RESPONSE_HEADERS_POLICY, CACHE_POLICY, ORIGIN_REQUEST_POLICY,
-                ORIGIN_ACCESS_CONTROL);
+                ORIGIN_ACCESS_CONTROL, PUBLIC_KEY, KEY_GROUP, FUNCTION);
     }
 
     @Override
@@ -87,18 +97,22 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             case CACHE_POLICY -> provisionCachePolicy(r, props, ctx);
             case ORIGIN_REQUEST_POLICY -> provisionOriginRequestPolicy(r, props, ctx);
             case ORIGIN_ACCESS_CONTROL -> provisionOriginAccessControl(r, props, ctx);
+            case PUBLIC_KEY -> provisionPublicKey(r, props, ctx);
+            case KEY_GROUP -> provisionKeyGroup(r, props, ctx);
+            case FUNCTION -> provisionFunction(r, props, ctx);
             default -> throw new IllegalArgumentException("Unsupported resource type: " + r.getResourceType());
         }
         ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     /**
-     * The physical id only changes here when the prior object was already gone: {@code prior}
-     * returns the entity whenever the service still knows it, so an update either mutates that
-     * entity in place under the same id or recreates a missing one under a new id. The entity
-     * {@link ReplacementCleanup} records as displaced is therefore always one that no longer
-     * exists, and the delete these hooks run for it is a no-op tolerated by its not-found code.
-     * They are still needed: without them a recorded entity would never leave the cleanup list.
+     * For the policy types, public keys and key groups, the physical id only changes here when the
+     * prior object was already gone: {@code prior} returns the entity whenever the service still
+     * knows it, so an update either mutates that entity in place under the same id or recreates a
+     * missing one under a new id. The delete these hooks run for it is then a no-op tolerated by its
+     * not-found code, but they are still needed: without them a recorded entity would never leave
+     * the cleanup list. A function also gets a new id when its create-only {@code Name} changes, and
+     * these hooks then delete the old function after the update.
      */
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
@@ -160,6 +174,15 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             case ORIGIN_ACCESS_CONTROL -> deleteWithEtag("origin access control", physicalId,
                     id -> cloudFrontService.getOriginAccessControl(id).getEtag(),
                     cloudFrontService::deleteOriginAccessControl, NO_SUCH_ORIGIN_ACCESS_CONTROL);
+            // A public key still in a key group, or a key group still trusted by a distribution,
+            // is refused with PublicKeyInUse or ResourceInUse, which must fail the stack delete.
+            case PUBLIC_KEY -> deleteWithEtag("public key", physicalId,
+                    id -> cloudFrontService.getPublicKey(id).getEtag(),
+                    cloudFrontService::deletePublicKey, NO_SUCH_PUBLIC_KEY);
+            case KEY_GROUP -> deleteWithEtag("key group", physicalId,
+                    id -> cloudFrontService.getKeyGroup(id).getEtag(),
+                    cloudFrontService::deleteKeyGroup, NO_SUCH_KEY_GROUP);
+            case FUNCTION -> deleteFunction(physicalId);
             default -> { }
         }
     }
@@ -222,6 +245,122 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Id", provisioned.getId());
     }
 
+    /**
+     * UpdatePublicKey can only change the comment, as in the AWS API. A change of the caller
+     * reference, name or encoded key fails the stack update with the service's
+     * CannotChangeImmutablePublicKeyFields; it does not replace the key.
+     */
+    private void provisionPublicKey(StackResource r, JsonNode props, ProvisionContext ctx) {
+        JsonNode config = requireConfig(PUBLIC_KEY, "PublicKeyConfig", props, ctx);
+        PublicKey key = new PublicKey();
+        key.setCallerReference(text(config, "CallerReference"));
+        key.setName(text(config, "Name"));
+        key.setEncodedKey(text(config, "EncodedKey"));
+        key.setComment(text(config, "Comment"));
+        PublicKey prior = prior(ctx, "public key", cloudFrontService::getPublicKey, NO_SUCH_PUBLIC_KEY);
+        PublicKey provisioned = prior == null
+                ? cloudFrontService.createPublicKey(key)
+                : cloudFrontService.updatePublicKey(prior.getId(), prior.getEtag(), key);
+        r.setPhysicalId(provisioned.getId());
+        r.getAttributes().put("Id", provisioned.getId());
+        r.getAttributes().put("CreatedTime",
+                provisioned.getCreatedTime() == null ? "" : provisioned.getCreatedTime().toString());
+    }
+
+    private void provisionKeyGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        JsonNode config = requireConfig(KEY_GROUP, "KeyGroupConfig", props, ctx);
+        KeyGroup group = new KeyGroup();
+        group.setName(text(config, "Name"));
+        group.setComment(text(config, "Comment"));
+        group.setItems(textList(config, "Items"));
+        KeyGroup prior = prior(ctx, "key group", cloudFrontService::getKeyGroup, NO_SUCH_KEY_GROUP);
+        KeyGroup provisioned = prior == null
+                ? cloudFrontService.createKeyGroup(group)
+                : cloudFrontService.updateKeyGroup(prior.getId(), prior.getEtag(), group);
+        expose(r, provisioned.getId(), provisioned.getLastModifiedTime());
+    }
+
+    /**
+     * The physical id is the function ARN, the registry schema's primary identifier. {@code Name} is
+     * create-only: a new name creates a new function, and {@link ReplacementCleanup} deletes the old
+     * one after the update. Any other change updates the DEVELOPMENT stage in place, and
+     * {@code AutoPublish: true} then publishes it to LIVE, which {@code Fn::GetAtt Stage} reports.
+     * Floci has no Key Value Store, so {@code FunctionConfig.KeyValueStoreAssociations} is ignored.
+     *
+     * <p>When publishing or tagging fails, a function this call created is deleted again. An
+     * in-place update is not reverted, the same limit as the policy types above.
+     */
+    private void provisionFunction(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String name = requireText(FUNCTION, "Name", props, ctx);
+        String code = requireText(FUNCTION, "FunctionCode", props, ctx);
+        JsonNode config = requireConfig(FUNCTION, "FunctionConfig", props, ctx);
+        boolean autoPublish = "true".equalsIgnoreCase(resolvedText("AutoPublish", props, ctx));
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        CloudFrontFunction fn = new CloudFrontFunction();
+        fn.setName(name);
+        fn.setFunctionCode(code);
+        fn.setComment(text(config, "Comment"));
+        fn.setRuntime(text(config, "Runtime"));
+
+        String arn = cloudFrontService.arn("function/" + name);
+        CloudFrontFunction prior = arn.equals(ctx.priorPhysicalId())
+                ? prior(ctx, "function", this::developmentFunction, NO_SUCH_FUNCTION)
+                : null;
+        CloudFrontFunction provisioned = prior == null
+                ? cloudFrontService.createFunction(fn)
+                : cloudFrontService.updateFunction(name, prior.getEtag(), fn);
+        try {
+            if (autoPublish) {
+                cloudFrontService.publishFunction(name, provisioned.getEtag());
+            }
+            reconcileFunctionTags(arn, tags);
+        } catch (RuntimeException failure) {
+            if (prior == null) {
+                // The stack keeps its prior id when this resource fails, so nothing else would
+                // ever delete the function created here.
+                try {
+                    deleteFunction(arn);
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            throw failure;
+        }
+        r.setPhysicalId(arn);
+        r.getAttributes().put("FunctionARN", arn);
+        r.getAttributes().put("FunctionMetadata.FunctionARN", arn);
+        r.getAttributes().put("Stage", autoPublish ? "LIVE" : "DEVELOPMENT");
+    }
+
+    private CloudFrontFunction developmentFunction(String arn) {
+        return cloudFrontService.describeFunction(functionName(arn), null);
+    }
+
+    private static String functionName(String arn) {
+        return arn.substring(arn.lastIndexOf('/') + 1);
+    }
+
+    private void reconcileFunctionTags(String arn, Map<String, String> desired) {
+        List<String> stale = ProvisionContext.staleTagKeys(cloudFrontService.listTagsForResource(arn), desired);
+        if (!stale.isEmpty()) {
+            cloudFrontService.untagResource(arn, stale);
+        }
+        if (!desired.isEmpty()) {
+            cloudFrontService.tagResource(arn, desired);
+        }
+    }
+
+    /** Deletes the function and the tags kept under its ARN, which the service delete leaves. */
+    private void deleteFunction(String arn) {
+        CfnDeletes.safeDelete("function", arn, () -> {
+            cloudFrontService.deleteFunction(functionName(arn), developmentFunction(arn).getEtag());
+            List<String> tagKeys = List.copyOf(cloudFrontService.listTagsForResource(arn).keySet());
+            if (!tagKeys.isEmpty()) {
+                cloudFrontService.untagResource(arn, tagKeys);
+            }
+        }, NO_SUCH_FUNCTION);
+    }
+
     private static void expose(StackResource r, String id, Instant lastModifiedTime) {
         r.setPhysicalId(id);
         r.getAttributes().put("Id", id);
@@ -266,6 +405,32 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     private static String text(JsonNode node, String name) {
         JsonNode value = node.get(name);
         return value == null || value.isNull() ? null : value.asText();
+    }
+
+    private static List<String> textList(JsonNode node, String name) {
+        JsonNode value = node.get(name);
+        if (value == null || !value.isArray()) {
+            return null;
+        }
+        List<String> list = new ArrayList<>();
+        for (JsonNode element : value) {
+            list.add(element.asText());
+        }
+        return list;
+    }
+
+    private static String resolvedText(String name, JsonNode props, ProvisionContext ctx) {
+        JsonNode raw = props == null ? null : props.get(name);
+        JsonNode resolved = raw == null || raw.isNull() ? null : ctx.engine().resolveNode(raw);
+        return resolved == null || resolved.isNull() || resolved.isContainerNode() ? null : resolved.asText();
+    }
+
+    private static String requireText(String type, String name, JsonNode props, ProvisionContext ctx) {
+        String value = resolvedText(name, props, ctx);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("ValidationError", type + " requires " + name, 400);
+        }
+        return value;
     }
 
     /**
