@@ -177,6 +177,9 @@ public class NativeDynamoDbStreamsJsonHandler {
         node.put("eventVersion", record.getEventVersion());
         node.put("eventSource", record.getEventSource());
         node.put("awsRegion", record.getAwsRegion());
+        if (record.isTtlDeletion()) {
+            DynamoDbTtlIdentity.putOn(node, DynamoDbTtlIdentity.Shape.STREAMS_API);
+        }
 
         ObjectNode dynamodb = objectMapper.createObjectNode();
         dynamodb.put("ApproximateCreationDateTime", record.getApproximateCreationDateTime());

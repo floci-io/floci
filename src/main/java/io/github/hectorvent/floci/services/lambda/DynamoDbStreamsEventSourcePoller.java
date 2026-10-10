@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbTtlIdentity;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -737,13 +738,15 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     /**
      * Builds the single-record node: a copy of the AWS stream record, whose top-level {@code eventName}
      * and metadata and {@code dynamodb} map with AttributeValue-wrapped images Lambda delivers as they
-     * are, plus {@code eventSourceARN}. {@code ApproximateCreationDateTime} is written as a double, as
-     * Floci has always delivered it. This is both the delivery record shape and the exact structure a
-     * DynamoDB filter pattern matches against, so it serves the matcher unchanged. (Numeric operators
-     * naturally never match here because AttributeValue numbers are JSON strings, AWS parity for free.)
+     * are, plus {@code eventSourceARN}, with a {@code userIdentity} renamed from the Streams API's
+     * capitalised members to the event record's. {@code ApproximateCreationDateTime} is written as a
+     * double, as Floci has always delivered it. This is both the delivery record shape and the exact
+     * structure a DynamoDB filter pattern matches against, so it serves the matcher unchanged. (Numeric
+     * operators naturally never match here because AttributeValue numbers are JSON strings, AWS parity
+     * for free.)
      */
     private ObjectNode buildDynamoDbRecordNode(DynamoDbStreamReader.Record rec, EventSourceMapping esm) {
-        ObjectNode item = rec.awsRecord().deepCopy();
+        ObjectNode item = DynamoDbTtlIdentity.toEventRecord(rec.awsRecord());
         item.put("eventSourceARN", esm.getEventSourceArn());
         JsonNode created = item.path("dynamodb").path("ApproximateCreationDateTime");
         if (created.isNumber()) {

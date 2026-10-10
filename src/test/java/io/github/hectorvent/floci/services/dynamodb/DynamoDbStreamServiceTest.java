@@ -398,4 +398,35 @@ class DynamoDbStreamServiceTest {
         assertEquals(1, service.listStreams("ViewTypeTable", "000000000000", "us-east-1").size());
     }
 
+    @Test
+    void captureEvent_ttlRemoval_isMarkedAsATtlDeletion() throws Exception {
+        TableDefinition table = sharedNameTable(ACCOUNT_A);
+        StreamDescription stream = service.enableStream(SHARED_TABLE, table.getTableArn(), "OLD_IMAGE", "us-east-1");
+
+        service.captureEvent("REMOVE", mapper.readTree("{\"userId\":{\"S\":\"a\"}}"), null, table, "us-east-1", true);
+
+        DynamoDbStreamRecord record = onlyRecordIn(stream.getStreamArn());
+        assertEquals("REMOVE", record.getEventName());
+        assertTrue(record.isTtlDeletion());
+    }
+
+    @Test
+    void captureEvent_deleteItemRemoval_isNotATtlDeletion() throws Exception {
+        TableDefinition table = sharedNameTable(ACCOUNT_A);
+        StreamDescription stream = service.enableStream(SHARED_TABLE, table.getTableArn(), "OLD_IMAGE", "us-east-1");
+
+        service.captureEvent("REMOVE", mapper.readTree("{\"userId\":{\"S\":\"a\"}}"), null, table, "us-east-1");
+
+        DynamoDbStreamRecord record = onlyRecordIn(stream.getStreamArn());
+        assertEquals("REMOVE", record.getEventName());
+        assertFalse(record.isTtlDeletion());
+    }
+
+    private DynamoDbStreamRecord onlyRecordIn(String streamArn) {
+        String iterator = service.getShardIterator(streamArn, DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        List<DynamoDbStreamRecord> records = service.getRecords(iterator, 10).records();
+        assertEquals(1, records.size());
+        return records.get(0);
+    }
+
 }
