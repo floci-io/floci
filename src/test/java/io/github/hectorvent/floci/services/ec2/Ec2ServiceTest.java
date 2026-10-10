@@ -1427,6 +1427,107 @@ class Ec2ServiceTest {
         assertEquals(addresses, endpointAddressesBySubnet(fixture.service()));
     }
 
+    @Test
+    void endpointIpv4AddressesStayInsideTheirOwnHalfOfASplitSlash24() {
+        EndpointAddressFixture fixture = endpointAddressFixture("10.0.1.0/25", "10.0.1.128/25");
+
+        Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+        assertUsableEndpointAddress("10.0.1.0/25", addresses.get("subnet-00000000"));
+        assertUsableEndpointAddress("10.0.1.128/25", addresses.get("subnet-00000088"));
+        assertNotEquals(addresses.get("subnet-00000000"), addresses.get("subnet-00000088"));
+        assertEquals(addresses, endpointAddressesBySubnet(fixture.service()),
+                "a second read must answer with the same addresses");
+
+        fixture.endpoint().setSubnetIds(List.of("subnet-00000088", "subnet-00000000"));
+        assertEquals(addresses, endpointAddressesBySubnet(fixture.service()),
+                "reordering subnets must not change their addresses");
+    }
+
+    @Test
+    void endpointIpv4AddressesRespectEverySubnetPrefixLength() {
+        for (int prefix = 16; prefix <= 28; prefix++) {
+            String first = "10.20.0.0/" + prefix;
+            String second = "10.30.0.0/" + prefix;
+            EndpointAddressFixture fixture = endpointAddressFixture(first, second);
+
+            Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+            assertUsableEndpointAddress(first, addresses.get("subnet-00000000"));
+            assertUsableEndpointAddress(second, addresses.get("subnet-00000088"));
+            assertEquals(addresses, endpointAddressesBySubnet(fixture.service()), "/" + prefix);
+        }
+    }
+
+    @Test
+    void endpointIpv4AddressesNeverLandOnAwsReservedAddressesInASlash28() {
+        for (int i = 0; i < 40; i++) {
+            EndpointAddressFixture fixture = endpointAddressFixture("10.0.1.0/28", "10.0.1.16/28");
+
+            Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+            assertUsableEndpointAddress("10.0.1.0/28", addresses.get("subnet-00000000"));
+            assertUsableEndpointAddress("10.0.1.16/28", addresses.get("subnet-00000088"));
+        }
+    }
+
+    @Test
+    void endpointIpv4AddressesKeepTheSlash24LayoutForLargerSubnets() {
+        EndpointAddressFixture fixture = endpointAddressFixture("10.40.0.0/20", "10.40.16.0/24");
+        int host = 200 + Math.floorMod(fixture.endpoint().getVpcEndpointId().hashCode(), 50);
+
+        Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+        assertEquals("10.40.0." + host, addresses.get("subnet-00000000"));
+        assertEquals("10.40.16." + host, addresses.get("subnet-00000088"));
+    }
+
+    @Test
+    void endpointIpv4AddressesProbePastAPinnedAddressInTheSameRange() {
+        // Two records over the same /29 leave three usable addresses (.4, .5, .6). Whatever the
+        // endpoint id prefers, the derived interface must step past the pinned one.
+        for (String pinnedAddress : List.of("10.0.1.4", "10.0.1.5", "10.0.1.6")) {
+            EndpointAddressFixture fixture = endpointAddressFixture("10.0.1.0/29", "10.0.1.0/29");
+            fixture.endpoint().setSubnetConfigurations(List.of(
+                    new VpcEndpointSubnetConfiguration("subnet-00000088", pinnedAddress, null)));
+
+            Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+            assertEquals(pinnedAddress, addresses.get("subnet-00000088"));
+            assertUsableEndpointAddress("10.0.1.0/29", addresses.get("subnet-00000000"));
+            assertNotEquals(pinnedAddress, addresses.get("subnet-00000000"));
+            assertEquals(addresses, endpointAddressesBySubnet(fixture.service()), pinnedAddress);
+        }
+    }
+
+    @Test
+    void interfaceEndpointIsRefusedInASubnetWithNoAssignableAddress() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.64.0.0/16", false).getVpcId();
+        String tiny = service.createSubnet("us-east-1", vpcId, "10.64.1.0/30", "us-east-1a").getSubnetId();
+        String roomy = service.createSubnet("us-east-1", vpcId, "10.64.2.0/28", "us-east-1b").getSubnetId();
+
+        AwsException createError = assertThrows(AwsException.class, () ->
+                service.createVpcEndpoint("us-east-1", vpcId, "com.amazonaws.us-east-1.ecs", "Interface",
+                        List.of(), List.of(tiny), List.of(), null, null, List.of()));
+        assertEquals("InsufficientFreeAddressesInSubnet", createError.getErrorCode());
+        assertTrue(service.describeVpcEndpoints("us-east-1", List.of(), Map.of()).isEmpty(),
+                "a refused endpoint must not be stored");
+
+        VpcEndpoint endpoint = service.createVpcEndpoint("us-east-1", vpcId, "com.amazonaws.us-east-1.ecs",
+                "Interface", List.of(), List.of(roomy), List.of(), null, null, List.of());
+        AwsException modifyError = assertThrows(AwsException.class, () ->
+                service.modifyVpcEndpoint("us-east-1", endpoint.getVpcEndpointId(), List.of(), List.of(),
+                        List.of(tiny), List.of(), List.of(), List.of(), null, null, null));
+        assertEquals("InsufficientFreeAddressesInSubnet", modifyError.getErrorCode());
+        assertEquals(List.of(roomy), endpoint.getSubnetIds(), "a refused modification must not add the subnet");
+        assertUsableEndpointAddress("10.64.2.0/28", endpointAddressesBySubnet(service).get(roomy));
+    }
+
+    private static void assertUsableEndpointAddress(String cidr, String address) {
+        assertNotNull(address, cidr);
+        assertTrue(Ipv4Cidrs.contains(cidr, address + "/32"), address + " must lie inside " + cidr);
+        assertFalse(Ipv4Cidrs.isSubnetReserved(cidr, address + "/32"), address + " is reserved in " + cidr);
+    }
+
     private static EndpointAddressFixture endpointAddressFixture(String firstCidr, String secondCidr) {
         AccountAwareStorageBackend<Subnet> subnetStore = AccountAwareStorageBackend.inMemory("000000000000");
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
