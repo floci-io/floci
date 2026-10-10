@@ -2536,4 +2536,34 @@ class LambdaServiceTest {
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals("original", service.getAlias(REGION, "alias-description-fn", "live").getDescription());
     }
+
+    @Test
+    void addPermission_keepsSourceAccountAlongsideSourceArn() {
+        // Catches: SourceAccount is silently dropped from the statement when SourceArn is also given
+        service.createFunction(REGION, baseRequest("perm-conditions-fn"));
+
+        Map<String, Object> statement = service.addPermission(REGION, "perm-conditions-fn", null, Map.of(
+                "StatementId", "s3-invoke",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "s3.amazonaws.com",
+                "SourceArn", "arn:aws:s3:::test-bucket",
+                "SourceAccount", "111111111111"));
+
+        assertEquals(Map.of(
+                "ArnLike", Map.of("AWS:SourceArn", "arn:aws:s3:::test-bucket"),
+                "StringEquals", Map.of("AWS:SourceAccount", "111111111111")), statement.get("Condition"));
+    }
+
+    @Test
+    void addPermission_storesAnAccountIdPrincipalAsItsRootArn() {
+        // Catches: a bare 12-digit account ID principal is stored raw instead of as an AWS root ARN
+        service.createFunction(REGION, baseRequest("perm-principal-fn"));
+
+        Map<String, Object> statement = service.addPermission(REGION, "perm-principal-fn", null, Map.of(
+                "StatementId", "cross-account",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "111122223333"));
+
+        assertEquals(Map.of("AWS", "arn:aws:iam::111122223333:root"), statement.get("Principal"));
+    }
 }

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -54,6 +55,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -3609,6 +3611,9 @@ public class LambdaService implements ResourceProvider {
             String action = (String) request.get("Action");
             String sourceArn = (String) request.get("SourceArn");
             String sourceAccount = (String) request.get("SourceAccount");
+            String principalOrgId = (String) request.get("PrincipalOrgID");
+            String functionUrlAuthType = (String) request.get("FunctionUrlAuthType");
+            String eventSourceToken = (String) request.get("EventSourceToken");
 
             Map<String, Object> statement = new java.util.LinkedHashMap<>();
             statement.put("Sid", statementId);
@@ -3617,15 +3622,37 @@ public class LambdaService implements ResourceProvider {
                 statement.put("Principal", Map.of("Service", principal));
             } else if (principal != null && principal.startsWith("arn:")) {
                 statement.put("Principal", Map.of("AWS", principal));
+            } else if (principal != null && principal.matches("\\d{12}")) {
+                statement.put("Principal", Map.of("AWS", "arn:" + AwsRegions.partitionFor(region) + ":iam::" + principal + ":root"));
             } else {
                 statement.put("Principal", principal);
             }
             statement.put("Action", action);
             statement.put("Resource", resourceArn);
-            if (sourceArn != null) {
-                statement.put("Condition", Map.of("ArnLike", Map.of("AWS:SourceArn", sourceArn)));
-            } else if (sourceAccount != null) {
-                statement.put("Condition", Map.of("StringEquals", Map.of("AWS:SourceAccount", sourceAccount)));
+
+            LinkedHashMap<String, Object> stringEquals = new LinkedHashMap<>();
+            if (sourceAccount != null) {
+                stringEquals.put("AWS:SourceAccount", sourceAccount);
+            }
+            if (functionUrlAuthType != null) {
+                stringEquals.put("lambda:FunctionUrlAuthType", functionUrlAuthType);
+            }
+            if (principalOrgId != null) {
+                stringEquals.put("aws:PrincipalOrgID", principalOrgId);
+            }
+            if (eventSourceToken != null) {
+                stringEquals.put("lambda:EventSourceToken", eventSourceToken);
+            }
+
+            if (!stringEquals.isEmpty() || sourceArn != null) {
+                LinkedHashMap<String, Object> condition = new LinkedHashMap<>();
+                if (!stringEquals.isEmpty()) {
+                    condition.put("StringEquals", stringEquals);
+                }
+                if (sourceArn != null) {
+                    condition.put("ArnLike", Map.of("AWS:SourceArn", sourceArn));
+                }
+                statement.put("Condition", condition);
             }
 
             fn.getPolicies().add(statement);
