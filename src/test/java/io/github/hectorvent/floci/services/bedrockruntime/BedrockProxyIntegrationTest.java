@@ -11,10 +11,13 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -25,6 +28,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -100,6 +104,148 @@ class BedrockProxyIntegrationTest {
             .body("usage.inputTokens", equalTo(7))
             .body("usage.outputTokens", equalTo(9))
             .body("usage.totalTokens", equalTo(16));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void imagesAndTextReachProxyInOriginalOrder(String operation) throws IOException {
+        nextResponseBody.set(operation.equals("converse")
+                ? """
+                    {"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"two images"}}]}
+                    """
+                : """
+                    data: {"choices":[{"delta":{"content":"two images"},"finish_reason":"stop"}]}
+
+                    data: [DONE]
+                    """);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages":[{"role":"user","content":[
+                    {"text":"First"},
+                    {"image":{"format":"png","source":{"bytes":"AQID"}}},
+                    {"text":"Second"},
+                    {"image":{"format":"jpeg","source":{"bytes":"BAUG"}}},
+                    {"text":"Compare them"}
+                ]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+        .then()
+            .statusCode(200);
+
+        JsonNode sent = objectMapper.readTree(received.get().body());
+        assertEquals(operation.equals("converse-stream"), sent.path("stream").asBoolean());
+        assertEquals(objectMapper.readTree("""
+            [{"type":"text","text":"First"},
+             {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}},
+             {"type":"text","text":"Second"},
+             {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,BAUG"}},
+             {"type":"text","text":"Compare them"}]
+            """), sent.path("messages").get(0).path("content"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"png", "jpeg", "gif", "webp"})
+    void imageOnlyMessagesReachProxy(String format) throws IOException {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"image received"}}]}
+            """);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages":[{"role":"user","content":[
+                    {"image":{"format":"%s","source":{"bytes":"AQID"}}}
+                ]}]}
+                """.formatted(format))
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(200);
+
+        JsonNode messages = objectMapper.readTree(received.get().body()).path("messages");
+        assertEquals(1, messages.size());
+        assertEquals("data:image/" + format + ";base64,AQID",
+                messages.get(0).path("content").get(0).path("image_url").path("url").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {6143, 6144, 6145, 12288})
+    void largerImagesKeepTheirExactEncoding(int byteCount) throws IOException {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"image received"}}]}
+            """);
+        String encoded = Base64.getEncoder().encodeToString(new byte[byteCount]);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages":[{"role":"user","content":[
+                    {"image":{"format":"png","source":{"bytes":"%s"}}}
+                ]}]}
+                """.formatted(encoded))
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(200);
+        assertEquals("data:image/png;base64," + encoded, objectMapper.readTree(received.get().body())
+                .path("messages").get(0).path("content").get(0).path("image_url").path("url").asText());
+    }
+
+    @Test
+    void imagePaddingBeforeTheLastChunkIsRejected() {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"unexpected"}}]}
+            """);
+        String encoded = Base64.getEncoder().encodeToString(new byte[6143]) + "AQID";
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages":[{"role":"user","content":[
+                    {"image":{"format":"png","source":{"bytes":"%s"}}}
+                ]}]}
+                """.formatted(encoded))
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+        assertNull(received.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "null",
+        "{}",
+        "{\"format\":\"bmp\",\"source\":{\"bytes\":\"AQID\"}}",
+        "{\"format\":\"png\",\"source\":{\"s3Location\":{\"uri\":\"s3://bucket/image.png\"}}}",
+        "{\"format\":\"png\",\"source\":{\"bytes\":\"AQID\",\"s3Location\":{\"uri\":\"s3://bucket/image.png\"}}}",
+        "{\"format\":\"png\",\"source\":{\"bytes\":\"\"}}",
+        "{\"format\":\"png\",\"source\":{\"bytes\":123}}",
+        "{\"format\":\"png\",\"source\":{\"bytes\":\"not base64!\"}}"
+    })
+    void invalidImagesFailBeforeCallingProxy(String image) {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"unexpected"}}]}
+            """);
+        for (String operation : new String[]{"converse", "converse-stream"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {"messages":[{"role":"user","content":[{"text":"Describe"},{"image":%s}]}]}
+                    """.formatted(image))
+            .when()
+                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+            assertNull(received.get());
+        }
     }
 
     @Test
