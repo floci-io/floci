@@ -7,6 +7,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.RequestOptions;
 import jakarta.inject.Inject;
@@ -20,6 +21,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -55,6 +57,13 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                             request.response().end(body.toString());
                         });
                     } else {
+                        if ("/multi-headers".equals(request.path())) {
+                            request.response()
+                                    .putHeader("Set-Cookie", List.of("a=1; Path=/", "b=2; Path=/"))
+                                    .putHeader("X-Multi", List.of("one", "two"))
+                                    .end("ok");
+                            return;
+                        }
                         request.response().end(request.getHeader("Host"));
                     }
                 })
@@ -78,6 +87,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
             enableHostHeaderPreservation(loadBalancerArn);
 
             assertForwardedHost(CLIENT_HOST);
+            assertRepeatedResponseHeaders(loadBalancerArn);
         } finally {
             deleteListener(listenerArn);
             deleteTargetGroup(targetGroupArn);
@@ -182,6 +192,26 @@ class ElbV2PreserveHostHeaderIntegrationTest {
         assertEquals(200, response.statusCode());
         assertEquals("11", response.getHeader("X-Received-Content-Length"));
         assertEquals("stream-hello world", bodyFuture.get(2, TimeUnit.SECONDS).toString());
+    }
+
+    private void assertRepeatedResponseHeaders(String loadBalancerArn) throws Exception {
+        HttpClientResponse response = vertx.createHttpClient()
+                .request(new RequestOptions()
+                        .setHost(loadBalancerDnsName(loadBalancerArn))
+                        .setPort(LISTENER_PORT)
+                        .setMethod(HttpMethod.GET)
+                        .setURI("/multi-headers"))
+                .toCompletionStage()
+                .toCompletableFuture()
+                .get(2, TimeUnit.SECONDS)
+                .send()
+                .toCompletionStage()
+                .toCompletableFuture()
+                .get(2, TimeUnit.SECONDS);
+        response.body().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals(List.of("a=1; Path=/", "b=2; Path=/"), response.headers().getAll("Set-Cookie"));
+        assertEquals(List.of("one", "two"), response.headers().getAll("X-Multi"));
     }
 
     private static String createLoadBalancer() {
