@@ -243,6 +243,7 @@ public class SesSendController {
                 throw new AwsException("BadRequestException",
                         "FromEmailAddress is required.", 400);
             }
+            SesAddressSyntax.requireBulkSender(fromEmailAddress);
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
             String feedbackForwardingAddress =
                     request.path("FeedbackForwardingEmailAddress").asText(null);

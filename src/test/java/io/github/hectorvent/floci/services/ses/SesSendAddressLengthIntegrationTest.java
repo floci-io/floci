@@ -117,4 +117,44 @@ class SesSendAddressLengthIntegrationTest {
             .body("__type", equalTo("BadRequestException"))
             .body("message", equalTo(EXPECTED_MESSAGE));
     }
+
+    @Test
+    void v2SendBulkEmail_fromOverLimit_returnsInvalidEmailAddress() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH)
+            .body("""
+                {
+                    "FromEmailAddress": "%s",
+                    "DefaultContent": {"Template": {
+                        "TemplateContent": {"Subject": "s", "Text": "b"},
+                        "TemplateData": "{}"}},
+                    "BulkEmailEntries": [{"Destination": {"ToAddresses": ["success@simulator.amazonses.com"]}}]
+                }
+                """.formatted(TOO_LONG))
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Invalid email address<" + TOO_LONG + ">."));
+    }
+
+    @Test
+    void v1SendBulkTemplatedEmail_sourceOverLimit_returnsInvalidEmailAddress() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParam("Source", TOO_LONG)
+            .formParam("Template", "address-length-missing")
+            .formParam("DefaultTemplateData", "{}")
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "success@simulator.amazonses.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+            .body("ErrorResponse.Error.Message", equalTo("Invalid email address<" + TOO_LONG + ">."));
+    }
 }

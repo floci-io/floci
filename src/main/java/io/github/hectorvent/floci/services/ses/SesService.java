@@ -249,8 +249,11 @@ public class SesService {
         if (request.content() instanceof EmailContent.InlineTemplate inline) {
             requireInlineTemplateContent(inline.subject(), inline.textPart(), inline.htmlPart());
         }
-        // AWS reports an unknown configuration set, then an over-long address, and only then a
-        // missing stored template (probe-confirmed), so the content is resolved after these checks.
+        // After a missing sender, AWS reports a malformed address ahead of the destination and
+        // configuration-set checks, then an over-long address, and only then a missing stored
+        // template (probe-confirmed), so the content is resolved after these checks.
+        requireSource(request);
+        SesAddressSyntax.requireEnvelope(request);
         String effectiveConfigSet = validateEnvelope(request);
         SesAddressLength.requireEnvelope(request);
         EmailContent.Simple content = switch (request.content()) {
@@ -268,11 +271,14 @@ public class SesService {
         return SesTemplateService.render(template);
     }
 
-    private String validateEnvelope(SendEmailRequest request) {
-        String source = request.source();
-        if (source == null || source.isBlank()) {
+    private static void requireSource(SendEmailRequest request) {
+        if (request.source() == null || request.source().isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
+    }
+
+    private String validateEnvelope(SendEmailRequest request) {
+        String source = request.source();
         if (!request.hasRecipients()) {
             throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
         }
@@ -428,6 +434,7 @@ public class SesService {
         // resolved before the message has been read.
         SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(raw.data());
         SmtpRelay.RawMessageHeaders headers = parsed.headers();
+        SesAddressSyntax.requireRaw(request, parsed.message());
         // AWS accepts the configuration set either as a request field or as the
         // X-SES-CONFIGURATION-SET header on the message itself; the request field wins.
         String requestedConfigSet = firstNonBlank(request.configurationSetName(), headers.configurationSet());
@@ -1564,6 +1571,7 @@ public class SesService {
         List<BulkEmailEntryResult> results = new ArrayList<>(request.entries().size());
         for (BulkEmailEntry entry : request.entries()) {
             try {
+                SesAddressSyntax.requireBulkDestination(entry);
                 JsonNode merged = mergeTemplateData(template.templateData(), entry.replacementTemplateData());
                 List<MessageTag> mergedTags = mergeEmailTags(request.defaultEmailTags(), entry.replacementEmailTags());
                 List<MessageHeader> mergedHeaders = mergeHeaders(template.headers(), entry.replacementHeaders());
@@ -1584,9 +1592,9 @@ public class SesService {
                         .region(request.region())
                         .content(rendered)
                         .build();
-                // SesAddressLength is not applied: AWS rejects an over-long bulk sender as "Invalid
-                // email address", and an over-long destination did not fail the length check ahead
-                // of sender verification (probe-confirmed; the verified-sender case is unprobed).
+                // SesAddressLength is not applied to entries: an over-long bulk destination did not
+                // fail the length check ahead of sender verification (probe-confirmed; the
+                // verified-sender case is unprobed). The bulk sender is checked by requireBulkSender.
                 String messageId = sendSimpleEmail(entryRequest, rendered, validateEnvelope(entryRequest));
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {

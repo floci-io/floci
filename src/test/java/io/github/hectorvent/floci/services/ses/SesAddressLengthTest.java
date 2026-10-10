@@ -5,17 +5,17 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The normalization rules of {@link SesAddressLength#require(String)} and the header splitting of
- * {@link SesAddressLength#splitAddressList(String)}. The ASCII, non-ASCII, RFC 822 special,
- * quoted-name, UTF-16, encoded-word and escaped-quote cases are probe-confirmed; the remaining edge
- * cases pin Floci's own handling of inputs that were not probed.
+ * The normalization rules of {@link SesAddressLength#require(String)}. The ASCII, non-ASCII, RFC 822
+ * special, quoted-name, UTF-16, encoded-word and escaped-quote cases are probe-confirmed; the
+ * remaining edge cases pin Floci's own handling of inputs that were not probed.
  */
 class SesAddressLengthTest {
 
@@ -27,6 +27,15 @@ class SesAddressLengthTest {
     void nullAndBlankAreIgnored() {
         assertDoesNotThrow(() -> SesAddressLength.require(null));
         assertDoesNotThrow(() -> SesAddressLength.require("   "));
+    }
+
+    @Test
+    void exceedsLimitUsesTheSameNormalization() {
+        assertFalse(SesAddressLength.exceedsLimit(null));
+        assertFalse(SesAddressLength.exceedsLimit(address(320)));
+        assertTrue(SesAddressLength.exceedsLimit(address(321)));
+        String name = "N".repeat(320 - SUFFIX.length());
+        assertFalse(SesAddressLength.exceedsLimit("\"" + name + "\"" + SUFFIX));
     }
 
     @Test
@@ -134,36 +143,6 @@ class SesAddressLengthTest {
         String name = "a\u0001b" + "N".repeat(320 - SUFFIX.length() - 3);
 
         assertRejects(name + SUFFIX, "\"" + name + "\"" + SUFFIX);
-    }
-
-    @Test
-    void splitAddressListSeparatesAddressesAtTopLevelCommas() {
-        assertEquals(List.of("a@b.com", " \"Doe, John\" <c@d.com>", " \"x \\\"y, z\\\"\" <e@f.com>"),
-                SesAddressLength.splitAddressList("a@b.com, \"Doe, John\" <c@d.com>, \"x \\\"y, z\\\"\" <e@f.com>"));
-    }
-
-    @Test
-    void splitAddressListKeepsCommasInsideAngleBrackets() {
-        assertEquals(List.of("Name <a,b@c.com>"), SesAddressLength.splitAddressList("Name <a,b@c.com>"));
-    }
-
-    @Test
-    void splitAddressListIgnoresQuotesAndCommasInsideComments() {
-        assertEquals(List.of("a@b.com (it\"s, (nested)) ", " c@d.com"),
-                SesAddressLength.splitAddressList("a@b.com (it\"s, (nested)) , c@d.com"));
-    }
-
-    @Test
-    void splitAddressListKeepsParenthesesInsideQuotedNames() {
-        assertEquals(List.of("\"a (b\" <x@y.com>", " z@y.com"),
-                SesAddressLength.splitAddressList("\"a (b\" <x@y.com>, z@y.com"));
-    }
-
-    @Test
-    void splitAddressListDropsGroupSyntax() {
-        assertEquals(List.of(" a@b.com", " c@d.com"),
-                SesAddressLength.splitAddressList("team: a@b.com, c@d.com;"));
-        assertEquals(List.of(), SesAddressLength.splitAddressList("undisclosed-recipients:;"));
     }
 
     private static void assertRejects(String input, String reported) {
