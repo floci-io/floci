@@ -22,9 +22,16 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run: only the latest head matters there.
+# On main a running run is left to finish. Merges land a median 13 minutes apart and a run
+# takes about 18, so cancelling killed 30 of 47 main runs in one day, each partway through
+# and with 546 runner-minutes already spent, and left most main commits with no result.
+# Without cancelling, the concurrency group still holds at most one pending run: a newer
+# merge replaces the waiting one before it starts, so a burst of merges is tested once, at
+# its newest commit, and no run is stopped halfway.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Hardcoded on purpose: strategy.job-total counts EVERY matrix job, so adding an

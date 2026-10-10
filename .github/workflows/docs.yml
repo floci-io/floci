@@ -16,7 +16,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # This workflow never runs on pull requests, so a running deploy is left to finish (see ci.yml).
+  cancel-in-progress: false
 
 jobs:
   deploy:

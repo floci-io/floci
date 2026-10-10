@@ -33,7 +33,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel a superseded run only on pull requests; a run on main is left to finish (see ci.yml).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   action-tables:
