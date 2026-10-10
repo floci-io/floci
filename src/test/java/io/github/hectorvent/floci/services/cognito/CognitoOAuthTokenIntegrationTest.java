@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.SignedInUser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -19,10 +20,18 @@ import java.security.Signature;
 import java.security.spec.RSAPublicKeySpec;
 import java.util.Base64;
 
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.PASSWORD;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.assertInvalidClient;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.assertRevoked;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.basic;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.refresh;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.signIn;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
@@ -30,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class CognitoOAuthTokenIntegrationTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String REVOKE = "/cognito-idp/oauth2/revoke";
 
     private static String poolId;
     private static String clientId;
@@ -479,6 +489,191 @@ class CognitoOAuthTokenIntegrationTest {
                 document.path("token_endpoint").asText());
         assertEquals("client_credentials", document.path("grant_types_supported").get(0).asText());
         assertEquals("client_secret_basic", document.path("token_endpoint_auth_methods_supported").get(0).asText());
+    }
+
+    /**
+     * The sign-out of an app: the refresh token, and every access token minted from it, before or after
+     * a refresh, stop working. Another sign-in of the same user is another family, and keeps working.
+     */
+    @Test
+    @Order(22)
+    void revokeEndsTheSessionOfAPublicClient() throws Exception {
+        SignedInUser user = signIn(poolId);
+        String refreshedAccessToken = refresh(user)
+        .then()
+                .statusCode(200)
+                .extract()
+                .path("AuthenticationResult.AccessToken");
+        getUser(user.accessToken()).then().statusCode(200);
+        getUser(refreshedAccessToken).then().statusCode(200);
+        SignedInUser otherSession = signInAgain(user);
+
+        assertRevoked(revoke(user.refreshToken(), user.clientId()));
+
+        refresh(user)
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Refresh Token has been revoked"));
+        cognitoAction("GetTokensFromRefreshToken", """
+                {"ClientId": "%s", "RefreshToken": "%s"}
+                """.formatted(user.clientId(), user.refreshToken()))
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Refresh Token has been revoked"));
+        for (String revokedAccessToken : new String[] {user.accessToken(), refreshedAccessToken}) {
+            getUser(revokedAccessToken)
+            .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("NotAuthorizedException"))
+                    .body("message", equalTo("Access Token has been revoked"));
+        }
+
+        getUser(otherSession.accessToken()).then().statusCode(200);
+        refresh(otherSession).then().statusCode(200);
+    }
+
+    @Test
+    @Order(23)
+    void revokeAnswersOkForATokenAlreadyRevokedOrNotValid() throws Exception {
+        SignedInUser user = signIn(poolId);
+        revoke(user.refreshToken(), user.clientId()).then().statusCode(200);
+
+        assertRevoked(revoke(user.refreshToken(), user.clientId()));
+        assertRevoked(revoke("not-a-token", user.clientId()));
+    }
+
+    @Test
+    @Order(24)
+    void revokeRefusesAnAccessTokenAndLeavesItsFamilyAlone() throws Exception {
+        SignedInUser user = signIn(poolId);
+
+        revoke(user.accessToken(), user.clientId())
+        .then()
+                .statusCode(400)
+                .contentType(containsString("application/json"))
+                .body(equalTo("{\"error\":\"unsupported_token_type\"}"));
+        refresh(user).then().statusCode(200);
+    }
+
+    @Test
+    @Order(25)
+    void revokeRefusesATokenIssuedToAnotherClient() throws Exception {
+        SignedInUser user = signIn(poolId);
+        String otherClientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId": "%s", "ClientName": "other-public-client"}
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+
+        assertInvalidClient(revoke(user.refreshToken(), otherClientId));
+        refresh(user).then().statusCode(200);
+    }
+
+    /** No client_id, an unknown one, or a Basic header with an empty secret. */
+    @Test
+    @Order(26)
+    void revokeRefusesAPublicClientThatDoesNotAuthenticate() throws Exception {
+        SignedInUser user = signIn(poolId);
+
+        assertInvalidClient(given().formParam("token", user.refreshToken()).when().post(REVOKE));
+        assertInvalidClient(revoke(user.refreshToken(), "no-such-client"));
+        assertInvalidClient(given()
+                .header("Authorization", basic(user.clientId(), ""))
+                .formParam("token", user.refreshToken())
+        .when()
+                .post(REVOKE));
+        refresh(user).then().statusCode(200);
+    }
+
+    /** Unlike the token endpoint, revocation takes a secret only from the Basic header. */
+    @Test
+    @Order(27)
+    void revokeAuthenticatesAConfidentialClientOnlyWithBasicCredentials() {
+        assertInvalidClient(revoke("not-a-token", confidentialClientId));
+        assertInvalidClient(given()
+                .formParam("token", "not-a-token")
+                .formParam("client_id", confidentialClientId)
+                .formParam("client_secret", confidentialClientSecret)
+        .when()
+                .post(REVOKE));
+        assertInvalidClient(given()
+                .header("Authorization", basic(confidentialClientId, "wrong-secret"))
+                .formParam("token", "not-a-token")
+        .when()
+                .post(REVOKE));
+
+        assertRevoked(given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("token", "not-a-token")
+        .when()
+                .post(REVOKE));
+        assertRevoked(given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("token", "not-a-token")
+                .formParam("client_id", confidentialClientId)
+        .when()
+                .post(REVOKE));
+    }
+
+    /** The token is checked first, so a request with no parameters at all is invalid_request too. */
+    @Test
+    @Order(28)
+    void revokeWithoutATokenIsInvalidRequest() {
+        assertInvalidRequest(given().formParam("client_id", clientId).when().post(REVOKE),
+                "Invalid parameter in request");
+        assertInvalidRequest(revoke("", clientId), "Invalid parameter in request");
+        assertInvalidRequest(given().contentType("application/x-www-form-urlencoded").when().post(REVOKE),
+                "Invalid parameter in request");
+        assertInvalidRequest(given().when().post(REVOKE), "Invalid parameter in request");
+    }
+
+    @Test
+    @Order(29)
+    void revokeIsInvalidRequestWhenTheClientDisablesRevocation() throws Exception {
+        String disabledClientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId": "%s", "ClientName": "revocation-disabled-client", "EnableTokenRevocation": false}
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+
+        assertInvalidRequest(revoke("any-token", disabledClientId), "Unsupported operation");
+    }
+
+    /** The same user signed in again through the same client, which starts a new token family. */
+    private static SignedInUser signInAgain(SignedInUser user) throws Exception {
+        String username = cognitoJson("GetUser", """
+                {"AccessToken": "%s"}
+                """.formatted(user.accessToken())).path("Username").asText();
+        JsonNode tokens = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": {"USERNAME": "%s", "PASSWORD": "%s"}
+                }
+                """.formatted(user.clientId(), username, PASSWORD)).path("AuthenticationResult");
+        return new SignedInUser(user.clientId(), tokens.path("AccessToken").asText(),
+                tokens.path("RefreshToken").asText());
+    }
+
+    private static Response revoke(String token, String clientId) {
+        return given()
+                .formParam("token", token)
+                .formParam("client_id", clientId)
+        .when()
+                .post(REVOKE);
+    }
+
+    private static void assertInvalidRequest(Response response, String description) {
+        response.then()
+                .statusCode(400)
+                .contentType(containsString("application/json"))
+                .header("WWW-Authenticate", nullValue())
+                .body("error", equalTo("invalid_request"))
+                .body("error_description", equalTo(description));
+    }
+
+    private static Response getUser(String accessToken) {
+        return cognitoAction("GetUser", """
+                {"AccessToken": "%s"}
+                """.formatted(accessToken));
     }
 
     private static String cognitoDescribeClientSecret(String clientId) {

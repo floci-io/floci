@@ -8,6 +8,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -109,6 +110,14 @@ public class CognitoUserInfoController {
                 .header("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate")
                 .header("Pragma", "no-cache")
                 .build();
+    }
+
+    /** AWS serves the endpoint on POST too, with the same answer. */
+    @POST
+    @Path("/cognito-idp/oauth2/userInfo")
+    public Response userInfoByPost(@HeaderParam("Authorization") String authorization,
+                                   @Context ContainerRequestContext requestContext) {
+        return userInfo(authorization, requestContext);
     }
 
     private static final List<String> OIDC_PROFILE_CLAIMS = List.of(

@@ -11,12 +11,14 @@ import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.net.URI;
@@ -36,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -49,6 +52,8 @@ class CognitoOAuthControllerTest {
     private static final String CALLBACK_URI = "https://application.example.test/callback";
     private static final String RFC_7636_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     private static final String RFC_7636_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    /** Three dot-separated parts, as an access or ID token has. */
+    private static final String ACCESS_TOKEN_SHAPE = "header.payload.signature";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final CognitoService cognitoService = mock(CognitoService.class);
@@ -528,6 +533,151 @@ class CognitoOAuthControllerTest {
         verify(cognitoService, never()).generateAuthResult(any(CognitoUser.class), any(UserPool.class), any(), any());
     }
 
+    @Test
+    void revokeAnswersOkWithAnEmptyBodyForAPublicClient() {
+        Response response = controller.revoke(null, requestContext(null),
+                form("token", "refresh-token", "client_id", CLIENT_ID));
+
+        assertEquals(200, response.getStatus());
+        assertNull(response.getEntity());
+        verify(cognitoService).revokeToken(CLIENT_ID, "refresh-token", null);
+    }
+
+    @Test
+    void revokeAuthenticatesAConfidentialClientWithBasicCredentials() {
+        Response response = controller.revoke(basicAuthorization(CLIENT_ID, "client-secret"), requestContext(null),
+                form("token", "refresh-token"));
+
+        assertEquals(200, response.getStatus());
+        verify(cognitoService).revokeToken(CLIENT_ID, "refresh-token", "client-secret");
+    }
+
+    /** AWS takes a secret only from the Basic header: client_secret_post does not authenticate a revocation. */
+    @Test
+    void revokeIgnoresAClientSecretInTheForm() {
+        Response response = controller.revoke(null, requestContext(null),
+                form("token", "refresh-token", "client_id", CLIENT_ID, "client_secret", "client-secret"));
+
+        assertEquals(200, response.getStatus());
+        verify(cognitoService).revokeToken(CLIENT_ID, "refresh-token", null);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "InvalidParameterException, Invalid parameter in request",
+            "UnsupportedOperationException, Unsupported operation"
+    })
+    void revokeAnswersARequestTheServiceRefusesWithInvalidRequest(String errorCode, String description) {
+        doThrow(new AwsException(errorCode, "reason", 400)).when(cognitoService)
+                .revokeToken(CLIENT_ID, "refresh-token", null);
+
+        Response response = controller.revoke(null, requestContext(null),
+                form("token", "refresh-token", "client_id", CLIENT_ID));
+
+        assertOAuthError(response, "invalid_request", description);
+        assertNull(response.getHeaderString(HttpHeaders.WWW_AUTHENTICATE));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ResourceNotFoundException", "UnauthorizedException"})
+    void revokeAnswersAClientTheServiceRefusesWithInvalidClient(String errorCode) {
+        doThrow(new AwsException(errorCode, "reason", 400)).when(cognitoService)
+                .revokeToken(CLIENT_ID, "refresh-token", null);
+
+        Response response = controller.revoke(null, requestContext(null),
+                form("token", "refresh-token", "client_id", CLIENT_ID));
+
+        assertInvalidClient(response);
+    }
+
+    @Test
+    void revokeAnswersAJwtTheServiceRefusesWithUnsupportedTokenType() {
+        doThrow(new AwsException("UnsupportedTokenTypeException", "Only refresh tokens can be revoked", 400))
+                .when(cognitoService).revokeToken(CLIENT_ID, ACCESS_TOKEN_SHAPE, null);
+
+        Response response = controller.revoke(null, requestContext(null),
+                form("token", ACCESS_TOKEN_SHAPE, "client_id", CLIENT_ID));
+
+        assertEquals(400, response.getStatus());
+        assertEquals("{\"error\":\"unsupported_token_type\"}", response.getEntity().toString());
+    }
+
+    /** AWS answers 200 for a token that is not valid; only a Cognito JWT is an unsupported token type. */
+    @Test
+    void revokeAnswersOkForATokenThatIsNotACognitoToken() {
+        doThrow(new AwsException("UnsupportedTokenTypeException", "Only refresh tokens can be revoked", 400))
+                .when(cognitoService).revokeToken(CLIENT_ID, "not-a-token", null);
+
+        Response response = controller.revoke(null, requestContext(null),
+                form("token", "not-a-token", "client_id", CLIENT_ID));
+
+        assertEquals(200, response.getStatus());
+        assertNull(response.getEntity());
+    }
+
+    /** The token is checked first: a request without one is invalid_request even when it names no client. */
+    @Test
+    void revokeWithoutATokenIsInvalidRequest() {
+        for (MultivaluedHashMap<String, String> form : List.of(form(), form("token", " ", "client_id", CLIENT_ID))) {
+            Response response = controller.revoke(null, requestContext(null), form);
+
+            assertOAuthError(response, "invalid_request", "Invalid parameter in request");
+        }
+        verify(cognitoService, never()).revokeToken(any(), any(), any());
+    }
+
+    @Test
+    void revokeOnACustomDomainRefusesAClientOfAnotherPool() {
+        Response response = controller.revoke(null, requestContext("other-pool"),
+                form("token", "refresh-token", "client_id", CLIENT_ID));
+
+        assertInvalidClient(response);
+        verify(cognitoService, never()).revokeToken(any(), any(), any());
+    }
+
+    @Test
+    void revokeOnACustomDomainRefusesAnUnknownClient() {
+        when(cognitoService.findClientById("missing-client"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Client not found", 400));
+
+        Response response = controller.revoke(null, requestContext(POOL_ID),
+                form("token", "refresh-token", "client_id", "missing-client"));
+
+        assertInvalidClient(response);
+        verify(cognitoService, never()).revokeToken(any(), any(), any());
+    }
+
+    @Test
+    void revokeOnTheCustomDomainOfTheClientsPoolRevokes() {
+        Response response = controller.revoke(null, requestContext(POOL_ID),
+                form("token", "refresh-token", "client_id", CLIENT_ID));
+
+        assertEquals(200, response.getStatus());
+        verify(cognitoService).revokeToken(CLIENT_ID, "refresh-token", null);
+    }
+
+    /**
+     * Credentials that name no client, or that cannot be trusted: no client_id, a Basic header with an
+     * empty secret (as a public client might send), a malformed one, or one that disagrees with client_id.
+     */
+    @Test
+    void revokeRefusesCredentialsThatDoNotAuthenticateAClient() {
+        List<String[]> requests = List.of(
+                new String[] {null, null},
+                new String[] {basicAuthorization(CLIENT_ID, ""), null},
+                new String[] {"Basic !!!", null},
+                new String[] {basicAuthorization(CLIENT_ID, "client-secret"), "other-client"});
+        for (String[] request : requests) {
+            MultivaluedHashMap<String, String> form = request[1] == null
+                    ? form("token", "refresh-token") : form("token", "refresh-token", "client_id", request[1]);
+
+            Response response = controller.revoke(request[0], requestContext(null), form);
+
+            assertInvalidClient(response);
+        }
+        verify(cognitoService, never()).revokeToken(any(), any(), any());
+    }
+
     private String putTransaction(String relyingPartyState) {
         return stateStore.putTransaction(new CognitoAuthorizationTransaction(POOL_ID, CLIENT_ID, CALLBACK_URI,
                 List.of("openid"), "nonce", "ExampleOidc", relyingPartyState, null, CLOCK.instant().plusSeconds(60)));
@@ -635,7 +785,24 @@ class CognitoOAuthControllerTest {
     }
 
     private void assertOAuthError(Response response, String error) {
-        assertEquals(400, response.getStatus());
+        assertOAuthError(response, 400, error);
+    }
+
+    private void assertOAuthError(Response response, String error, String description) {
+        assertOAuthError(response, 400, error);
+        assertEquals(description, ((JsonNode) response.getEntity()).path("error_description").asText());
+    }
+
+    /** AWS's answer to every client the revocation endpoint cannot authenticate. */
+    private void assertInvalidClient(Response response) {
+        assertOAuthError(response, 401, "invalid_client");
+        assertEquals("Invalid client credentials in request",
+                ((JsonNode) response.getEntity()).path("error_description").asText());
+        assertEquals("Basic", response.getHeaderString(HttpHeaders.WWW_AUTHENTICATE));
+    }
+
+    private void assertOAuthError(Response response, int status, String error) {
+        assertEquals(status, response.getStatus());
         assertNotNull(response.getEntity());
         JsonNode body = (JsonNode) response.getEntity();
         assertEquals(error, body.path("error").asText());

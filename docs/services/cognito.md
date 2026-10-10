@@ -159,9 +159,13 @@ A domain created with `CustomDomainConfig` answers the OAuth endpoints on that h
 
 ```
 GET  https://auth.example.localhost.floci.io/oauth2/authorize
+GET  https://auth.example.localhost.floci.io/oauth2/idpresponse
 POST https://auth.example.localhost.floci.io/oauth2/token
+POST https://auth.example.localhost.floci.io/oauth2/revoke
 GET  https://auth.example.localhost.floci.io/oauth2/userInfo
+POST https://auth.example.localhost.floci.io/oauth2/userInfo
 GET  https://auth.example.localhost.floci.io/login
+POST https://auth.example.localhost.floci.io/login
 GET  https://auth.example.localhost.floci.io/logout
 ```
 
@@ -173,6 +177,10 @@ another pool is refused with `invalid_client`, and an access token issued by ano
 URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`) are stored but not
 routed, since that hostname never reaches Floci. `/login` and `/logout` are served at the root only
 on a custom-domain host; on Floci's own host they are `/cognito-idp/login` and `/cognito-idp/logout`.
+On a custom-domain host, any other path under `/oauth2/` is answered with AWS's JSON 404, and a
+served path called with a method it does not serve with an empty 405 whose `Allow` header lists
+the methods it does serve. AWS answers `GET /oauth2/token` with its managed login error page
+instead; Floci answers 405.
 
 With TLS enabled, a custom domain (`CustomDomainConfig` set) is added to Floci's server
 certificate as soon as it is created, so `https://<domain>` verifies without a restart; see
@@ -445,6 +453,8 @@ plain, so branding is stored and returned rather than rendered. Two divergences 
 | `GET`, `POST /cognito-idp/login`                     | Managed login sign-in form                                       |
 | `GET /cognito-idp/logout`                            | Managed login sign-out                                           |
 | `POST /cognito-idp/oauth2/token`                     | OAuth authorization-code and client-credentials token endpoint   |
+| `POST /cognito-idp/oauth2/revoke`                    | OAuth refresh token revocation endpoint                          |
+| `GET`, `POST /cognito-idp/oauth2/userInfo`           | OIDC userInfo endpoint, for a user's access token                |
 
 The OAuth endpoints support browser-style authorization-code sign-in, for the pool's own
 users and through a federated OIDC provider, as well as the emulator-friendly
@@ -458,6 +468,15 @@ client-credentials flow:
 - `POST /cognito-idp/oauth2/token` redeems that authorization code once, checking its PKCE
   `code_verifier` when the authorization request sent a `code_challenge`, or issues a machine
   token for `grant_type=client_credentials`.
+- `POST /cognito-idp/oauth2/revoke` revokes a refresh token (`token`), and with it every access
+  and ID token minted from it, as `RevokeToken` does. A public client sends `client_id`; a client
+  with a secret sends it in a Basic `Authorization` header. Unlike the token endpoint, it ignores a
+  `client_secret` in the form body, as AWS does. Success, and a token that is not valid or already
+  revoked, are 200 with an empty body. A missing token, or a client with
+  `EnableTokenRevocation=false`, is 400 `invalid_request`; an access or ID token is 400
+  `unsupported_token_type`; missing or bad client credentials, a client of another pool on a
+  custom domain, and a token issued to another client are 401 `invalid_client` with
+  `WWW-Authenticate: Basic`.
 
 ### Managed login
 
