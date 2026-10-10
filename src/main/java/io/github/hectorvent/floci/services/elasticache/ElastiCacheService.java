@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
@@ -33,6 +34,8 @@ import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheAuthProx
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
+import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -66,7 +69,7 @@ public class ElastiCacheService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(ElastiCacheService.class);
 
     private final StorageBackend<String, ReplicationGroup> groups;
-    private final StorageBackend<String, CacheCluster> cacheClusters;
+    private final AccountAwareStorageBackend<CacheCluster> cacheClusters;
     /**
      * The Memcached cluster store, the one {@link ElastiCacheMemcachedService} writes.
      * {@link StorageFactory#create} keys backends by file path and hands the second caller the
@@ -74,7 +77,7 @@ public class ElastiCacheService implements ResourceProvider {
      * is one namespace whatever engine claims it, and only a reader of both can say it is free.
      */
     private final StorageBackend<String, CacheCluster> memcachedClusters;
-    private final StorageBackend<String, ElastiCacheUser> users;
+    private final AccountAwareStorageBackend<ElastiCacheUser> users;
     private final AccountAwareStorageBackend<ElastiCacheUserGroup> userGroups;
     private final AccountAwareStorageBackend<CacheParameterGroup> parameterGroups;
     private final StorageBackend<String, CacheSubnetGroup> subnetGroups;
@@ -659,12 +662,12 @@ public class ElastiCacheService implements ResourceProvider {
             }
             groups.put(group.getReplicationGroupId(), group);
         }
-        for (CacheCluster cluster : cacheClusters.scan(k -> true)) {
+        for (CacheCluster cluster : runtimeCacheClusters()) {
             if (cluster.getCacheClusterStatus() == CacheClusterStatus.DELETING) {
                 continue;
             }
             reserveCacheCluster(cluster, cacheClustersToRestore);
-            cacheClusters.put(cluster.getCacheClusterId(), cluster);
+            putRuntimeCluster(cluster);
         }
         if (clusterModeToRestore.isEmpty() && singleNodeToRestore.isEmpty()
                 && cacheClustersToRestore.isEmpty()) {
@@ -774,7 +777,7 @@ public class ElastiCacheService implements ResourceProvider {
         try {
             ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, regionOf(cluster.getArn()));
             synchronized (lockFor("cc:" + clusterId)) {
-                if (cacheClusterRestoreTargetLost(clusterId)) {
+                if (cacheClusterRestoreTargetLost(cluster)) {
                     abandonRestoredCacheClusterContainer(clusterId, handle);
                     return;
                 }
@@ -782,9 +785,7 @@ public class ElastiCacheService implements ResourceProvider {
                     cluster.setContainerId(handle.getContainerId());
                     cluster.setContainerHost(handle.getHost());
                     cluster.setContainerPort(handle.getPort());
-                    proxyManager.startProxy(clusterId, cluster.getAuthMode(),
-                            cluster.getConfigurationEndpoint().port(), handle.getHost(), handle.getPort(),
-                            (username, password) -> validateCacheClusterPassword(clusterId, username, password));
+                    startCacheClusterProxy(cluster, handle);
                 } else {
                     // Cleared rather than left alone: whatever the record carried describes a
                     // container from the previous process, and nothing must read it as live.
@@ -796,7 +797,7 @@ public class ElastiCacheService implements ResourceProvider {
                             + "the cache do not until a daemon appears.", clusterId);
                 }
                 cluster.setCacheClusterStatus(CacheClusterStatus.AVAILABLE);
-                cacheClusters.put(clusterId, cluster);
+                putRuntimeCluster(cluster);
                 LOG.infov("Restored cache cluster {0}, endpoint={1}:{2}", clusterId,
                         cluster.getConfigurationEndpoint().address(),
                         String.valueOf(cluster.getConfigurationEndpoint().port()));
@@ -811,8 +812,8 @@ public class ElastiCacheService implements ResourceProvider {
      * Callers must hold the cluster's monitor, for the reason given on
      * {@link #restoreTargetLost}.
      */
-    private boolean cacheClusterRestoreTargetLost(String clusterId) {
-        return cacheClusters.get(clusterId)
+    private boolean cacheClusterRestoreTargetLost(CacheCluster cluster) {
+        return runtimeCluster(cluster.getCacheClusterId(), cluster.getOwnerAccountId())
                 .map(current -> current.getCacheClusterStatus() == CacheClusterStatus.DELETING)
                 .orElse(true);
     }
@@ -859,7 +860,7 @@ public class ElastiCacheService implements ResourceProvider {
             } catch (RuntimeException e) {
                 LOG.warnv("Error stopping container for cache cluster {0}: {1}", clusterId, e.getMessage());
             }
-            if (cacheClusterRestoreTargetLost(clusterId)) {
+            if (cacheClusterRestoreTargetLost(cluster)) {
                 LOG.warnv(cause, "Failed to restore cache cluster {0}, which was deleted while it "
                         + "was being restored", clusterId);
                 return;
@@ -874,7 +875,7 @@ public class ElastiCacheService implements ResourceProvider {
             cluster.setCacheClusterStatus(CacheClusterStatus.RESTORE_FAILED);
             cluster.setConfigurationEndpoint(null);
             try {
-                cacheClusters.put(clusterId, cluster);
+                putRuntimeCluster(cluster);
             } catch (RuntimeException persistFailure) {
                 cause.addSuppressed(persistFailure);
             }
@@ -1234,6 +1235,62 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     public CacheCluster createCacheCluster(CreateCacheClusterRequest request) {
+        return createCacheCluster(request, null, null, null);
+    }
+
+    CacheCluster createServerlessBacking(CreateCacheClusterRequest request, String cacheName,
+                                        String accountId, String userGroupId) {
+        return createCacheCluster(request, cacheName, accountId, userGroupId);
+    }
+
+    void validateServerlessDependencies(List<String> subnetIds, List<String> securityGroupIds,
+                                       String kmsKeyId, String region) {
+        String vpc = null;
+        if (subnetIds != null && !subnetIds.isEmpty()) {
+            List<Subnet> resolved = ec2Service.describeSubnets(region, subnetIds, Map.of());
+            if (new HashSet<>(subnetIds).size() != subnetIds.size() || resolved.size() != subnetIds.size()) {
+                throw new AwsException("InvalidParameterValue", "SubnetIds contain duplicate or missing subnets.", 400);
+            }
+            vpc = resolved.getFirst().getVpcId();
+            for (Subnet subnet : resolved) {
+                if (!vpc.equals(subnet.getVpcId())) {
+                    throw new AwsException("InvalidParameterValue", "All subnets must belong to the same VPC.", 400);
+                }
+            }
+        }
+        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
+            List<SecurityGroup> resolved = ec2Service.describeSecurityGroups(region, securityGroupIds, List.of(), Map.of());
+            if (new HashSet<>(securityGroupIds).size() != securityGroupIds.size() || resolved.size() != securityGroupIds.size()) {
+                throw new AwsException("InvalidParameterValue", "SecurityGroupIds contain duplicate or missing groups.", 400);
+            }
+            if (vpc == null) {
+                vpc = resolved.getFirst().getVpcId();
+            }
+            for (SecurityGroup group : resolved) {
+                if (!vpc.equals(group.getVpcId())) {
+                    throw new AwsException("InvalidParameterValue", "Security groups and subnets must belong to the same VPC.", 400);
+                }
+            }
+        }
+        if (kmsKeyId != null) {
+            KmsKey key;
+            try {
+                key = kmsService.describeKey(kmsKeyId, region);
+            } catch (AwsException exception) {
+                if ("NotFoundException".equals(exception.getErrorCode())) {
+                    throw new AwsException("InvalidParameterValue", "KmsKeyId does not identify a key in this account and region.", 400);
+                }
+                throw exception;
+            }
+            if (!key.isEnabled() || key.getKeySpec() != KmsKeySpec.SYMMETRIC_DEFAULT
+                    || key.getKeyUsage() != KmsKeyUsage.ENCRYPT_DECRYPT) {
+                throw new AwsException("InvalidParameterValue", "KmsKeyId must identify an enabled symmetric encryption key.", 400);
+            }
+        }
+    }
+
+    private CacheCluster createCacheCluster(CreateCacheClusterRequest request, String cacheName,
+                                           String accountId, String userGroupId) {
         String clusterId = request.cacheClusterId();
         String engine = normalizeEngine(request.engine());
         if (request.numCacheNodes() != null && request.numCacheNodes() != 1) {
@@ -1258,7 +1315,7 @@ public class ElastiCacheService implements ResourceProvider {
                         "Cache cluster " + clusterId + " is already being created.", 400);
             }
             try {
-                return provisionCacheCluster(request, engine);
+                return provisionCacheCluster(request, engine, cacheName, accountId, userGroupId);
             } finally {
                 provisioningIds.release(clusterId);
             }
@@ -1309,7 +1366,8 @@ public class ElastiCacheService implements ResourceProvider {
      * cluster-mode-disabled replication group: the same Valkey container, fronted by the same
      * auth proxy on a port from the same range, so the endpoint a describe reports answers RESP.
      */
-    private CacheCluster provisionCacheCluster(CreateCacheClusterRequest request, String engine) {
+    private CacheCluster provisionCacheCluster(CreateCacheClusterRequest request, String engine,
+                                              String cacheName, String accountId, String userGroupId) {
         String clusterId = request.cacheClusterId();
         AuthMode authMode = request.authMode() != null ? request.authMode() : AuthMode.NO_AUTH;
         int proxyPort = allocateProxyPort(request.port());
@@ -1336,6 +1394,10 @@ public class ElastiCacheService implements ResourceProvider {
                     : "cache.t4g.micro");
             cluster.setAuthMode(authMode);
             cluster.setAuthToken(request.authToken());
+            cluster.setRegion(request.region());
+            cluster.setServerlessCacheName(cacheName);
+            cluster.setOwnerAccountId(accountId);
+            cluster.setUserGroupId(userGroupId);
             cluster.setArn(regionResolver.buildArn("elasticache", request.region(), "cluster:" + clusterId));
             cluster.setCacheParameterGroupName(request.cacheParameterGroupName());
             cluster.setCacheSubnetGroupName(request.cacheSubnetGroupName());
@@ -1352,9 +1414,7 @@ public class ElastiCacheService implements ResourceProvider {
             synchronized (lockFor("cc:" + clusterId)) {
                 cacheClusters.put(clusterId, cluster);
                 if (handle != null) {
-                    proxyManager.startProxy(clusterId, authMode, proxyPort,
-                            handle.getHost(), handle.getPort(),
-                            (username, password) -> validateCacheClusterPassword(clusterId, username, password));
+                    startCacheClusterProxy(cluster, handle);
                 } else {
                     LOG.warnv("Cache cluster {0} created without a backing cache container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
@@ -1434,14 +1494,24 @@ public class ElastiCacheService implements ResourceProvider {
      */
     public List<CacheCluster> findCacheClusters(String filterClusterId) {
         if (filterClusterId != null && !filterClusterId.isBlank()) {
-            return cacheClusters.get(filterClusterId).map(List::of).orElseGet(List::of);
+            return cacheClusters.get(filterClusterId).filter(cluster -> cluster.getServerlessCacheName() == null)
+                    .map(List::of).orElseGet(List::of);
         }
-        return cacheClusters.scan(k -> true);
+        return cacheClusters.scan(k -> true).stream().filter(cluster -> cluster.getServerlessCacheName() == null).toList();
     }
 
     public CacheCluster deleteCacheCluster(String clusterId) {
+        return deleteCacheCluster(clusterId, false);
+    }
+
+    CacheCluster deleteServerlessBacking(String clusterId) {
+        return deleteCacheCluster(clusterId, true);
+    }
+
+    private CacheCluster deleteCacheCluster(String clusterId, boolean internal) {
         synchronized (lockFor("cc:" + clusterId)) {
-            CacheCluster cluster = cacheClusters.get(clusterId).orElseThrow(() ->
+            CacheCluster cluster = cacheClusters.get(clusterId)
+                    .filter(record -> internal || record.getServerlessCacheName() == null).orElseThrow(() ->
                     new AwsException("CacheClusterNotFound",
                             "Cache cluster " + clusterId + " not found.", 404));
 
@@ -1481,6 +1551,93 @@ public class ElastiCacheService implements ResourceProvider {
             return false;
         }
         return (username == null || username.isEmpty()) && cluster.getAuthToken().equals(password);
+    }
+
+    private List<CacheCluster> runtimeCacheClusters() {
+        List<CacheCluster> records = new ArrayList<>(findCacheClusters(null));
+        records.addAll(cacheClusters.scanAllAccounts().stream()
+                .filter(cluster -> cluster.getServerlessCacheName() != null).toList());
+        return records;
+    }
+
+    private Optional<CacheCluster> runtimeCluster(String id, String accountId) {
+        return accountId == null ? cacheClusters.get(id) : cacheClusters.getForAccount(accountId, id);
+    }
+
+    private void putRuntimeCluster(CacheCluster cluster) {
+        if (cluster.getOwnerAccountId() == null) {
+            cacheClusters.put(cluster.getCacheClusterId(), cluster);
+        } else {
+            cacheClusters.putForAccount(cluster.getOwnerAccountId(), cluster.getCacheClusterId(), cluster);
+        }
+    }
+
+    CacheCluster getServerlessBacking(String id, String accountId) {
+        return cacheClusters.getForAccount(accountId, id)
+                .filter(cluster -> cluster.getServerlessCacheName() != null)
+                .orElseThrow(() -> new AwsException("CacheClusterNotFound", "Serverless backing cache not found.", 404));
+    }
+
+    void updateServerlessUserGroup(String id, String accountId, String groupId) {
+        synchronized (lockFor("cc:" + id)) {
+            CacheCluster cluster = getServerlessBacking(id, accountId);
+            cluster.setUserGroupId(groupId);
+            putRuntimeCluster(cluster);
+        }
+    }
+
+    private void startCacheClusterProxy(CacheCluster cluster, ElastiCacheContainerHandle handle) {
+        if (cluster.getServerlessCacheName() == null) {
+            proxyManager.startProxy(cluster.getCacheClusterId(), cluster.getAuthMode(),
+                    cluster.getConfigurationEndpoint().port(), handle.getHost(), handle.getPort(),
+                    (username, password) -> validateCacheClusterPassword(cluster.getCacheClusterId(), username, password));
+        } else {
+            proxyManager.startProxy(cluster.getCacheClusterId(), AuthMode.NO_AUTH,
+                    cluster.getConfigurationEndpoint().port(), handle.getHost(), handle.getPort(),
+                    serverlessAuthenticator(cluster), cluster.getServerlessCacheName());
+        }
+    }
+
+    private ElastiCacheAuthProxy.PasswordValidator serverlessAuthenticator(CacheCluster original) {
+        String id = original.getCacheClusterId();
+        String account = original.getOwnerAccountId();
+        return new ElastiCacheAuthProxy.PasswordValidator() {
+            private ElastiCacheUser member(String username) {
+                String name = username == null || username.isEmpty() ? "default" : username;
+                synchronized (users) {
+                    CacheCluster cluster = cacheClusters.getForAccount(account, id).orElse(null);
+                    if (cluster == null || cluster.getUserGroupId() == null) {
+                        return null;
+                    }
+                    ElastiCacheUserGroup group = userGroups.getForAccount(account, normalizeUserGroupId(cluster.getUserGroupId())).orElse(null);
+                    if (group == null) {
+                        return null;
+                    }
+                    return group.getUserIds().stream().map(userId -> users.getForAccount(account, userId).orElse(null))
+                            .filter(user -> user != null && name.equals(user.getUserName()) && user.isEnabled())
+                            .findFirst().orElse(null);
+                }
+            }
+
+            @Override
+            public boolean validatePassword(String username, String password) {
+                ElastiCacheUser user = member(username);
+                return user != null && (user.getAuthMode() == AuthMode.NO_AUTH
+                        || user.getAuthMode() == AuthMode.PASSWORD && user.getPasswords().contains(password));
+            }
+
+            @Override
+            public boolean hasMembers() {
+                return cacheClusters.getForAccount(account, id).map(cluster -> cluster.getUserGroupId() != null)
+                        .orElse(true);
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                ElastiCacheUser user = member(username);
+                return user == null ? null : user.getAuthMode();
+            }
+        };
     }
 
     /**
@@ -1806,6 +1963,9 @@ public class ElastiCacheService implements ResourceProvider {
                 for (ReplicationGroup group : replicationGroupsUsing(id)) {
                     requireEngineCompatible(newEngine, id, group.getEngine());
                 }
+                for (String cacheEngine : userGroup.getServerlessCacheEngines().values()) {
+                    requireEngineCompatible(newEngine, id, cacheEngine);
+                }
             }
             userGroup.setEngine(newEngine);
             userGroup.setUserIds(members);
@@ -1823,10 +1983,40 @@ public class ElastiCacheService implements ResourceProvider {
                 throw new AwsException("InvalidUserGroupState",
                         "User group " + id + " is in use by a replication group. Disassociate it before deleting it.", 400);
             }
+            if (!userGroup.getServerlessCacheEngines().isEmpty()) {
+                throw new AwsException("InvalidUserGroupState",
+                        "User group " + id + " is in use by a serverless cache. Disassociate it before deleting it.", 400);
+            }
             userGroups.delete(id);
             userGroup.setStatus("deleting");
             LOG.infov("ElastiCache user group {0} deleted", id);
             return userGroup;
+        }
+    }
+
+    /** Checks, under the user group lock, that a serverless cache of this engine may use the group. */
+    void validateServerlessAssociation(String userGroupId, String cacheEngine) {
+        synchronized (userGroupLock) {
+            ElastiCacheUserGroup userGroup = getUserGroup(userGroupId);
+            requireEngineCompatible(userGroup.getEngine(), userGroup.getUserGroupId(), normalizeEngine(cacheEngine));
+        }
+    }
+
+    void attachServerlessCache(String userGroupId, String cacheName, String cacheEngine) {
+        synchronized (userGroupLock) {
+            ElastiCacheUserGroup userGroup = getUserGroup(userGroupId);
+            requireEngineCompatible(userGroup.getEngine(), userGroup.getUserGroupId(), normalizeEngine(cacheEngine));
+            userGroup.getServerlessCacheEngines().put(cacheName, normalizeEngine(cacheEngine));
+            userGroups.put(userGroup.getUserGroupId(), userGroup);
+        }
+    }
+
+    void detachServerlessCache(String userGroupId, String cacheName) {
+        synchronized (userGroupLock) {
+            Optional<ElastiCacheUserGroup> userGroup = userGroups.get(normalizeUserGroupId(userGroupId));
+            if (userGroup.isPresent() && userGroup.get().getServerlessCacheEngines().remove(cacheName) != null) {
+                userGroups.put(userGroup.get().getUserGroupId(), userGroup.get());
+            }
         }
     }
 
@@ -2468,7 +2658,7 @@ public class ElastiCacheService implements ResourceProvider {
                     Map.of()));
         }
         for (CacheCluster cluster : cacheClusters.scan(k -> true)) {
-            if (cluster.getArn() == null) {
+            if (cluster.getArn() == null || cluster.getServerlessCacheName() != null) {
                 continue;
             }
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(cluster.getArn());

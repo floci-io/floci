@@ -28,8 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -41,13 +43,14 @@ class ElastiCacheMemcachedServiceTest {
     private ElastiCacheMemcachedContainerManager containerManager;
     private ElastiCacheProvisioningIds provisioningIds;
     private AccountAwareStorageBackend<CacheSubnetGroup> subnetGroups;
+    private EmulatorConfig config;
 
     @BeforeEach
     void setUp() {
         containerManager = mock(ElastiCacheMemcachedContainerManager.class);
         provisioningIds = new ElastiCacheProvisioningIds();
         StorageFactory storageFactory = mock(StorageFactory.class);
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        config = mock(EmulatorConfig.class);
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.ElastiCacheServiceConfig ecConfig = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
@@ -393,5 +396,28 @@ class ElastiCacheMemcachedServiceTest {
         return new ElastiCacheService.CreateCacheClusterRequest(clusterId, "memcached", null, null,
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null,
                 region, null);
+    }
+
+    @Test
+    void deleteUnknownClusterIncludesClusterIdInErrorMessage() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteCacheCluster("missing-cluster"));
+        assertEquals("CacheClusterNotFound", ex.getErrorCode());
+        assertEquals("Cache cluster missing-cluster not found.", ex.getMessage());
+    }
+
+    @Test
+    void provisioningFailureRollsBackContainerAndStorage() {
+        StorageFactory failingStorageFactory = mock(StorageFactory.class);
+        AccountAwareStorageBackend<CacheCluster> store = spy(AccountAwareStorageBackend.inMemory("000000000000"));
+        doThrow(new RuntimeException("Storage failure")).when(store).put(anyString(), any());
+        when(failingStorageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> store);
+
+        ElastiCacheMemcachedService failingService = new ElastiCacheMemcachedService(
+                containerManager, failingStorageFactory, config, provisioningIds, REGION_RESOLVER);
+
+        assertThrows(RuntimeException.class, () -> failingService.createCacheCluster(request("fail-cluster")));
+
+        verify(containerManager).stop(any(ElastiCacheContainerHandle.class));
+        assertTrue(store.get("fail-cluster").isEmpty());
     }
 }

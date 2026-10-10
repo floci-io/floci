@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.elasticache.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 
 @RegisterForReflection
@@ -16,6 +18,8 @@ public class ElastiCacheUserGroup {
     private Set<String> userIds = new LinkedHashSet<>();
     private Instant createdAt;
     private String arn;
+    // Serverless caches attached to this group, by cache name, with the engine each runs.
+    private Map<String, String> serverlessCacheEngines = new LinkedHashMap<>();
 
     public ElastiCacheUserGroup() {}
 
@@ -47,4 +51,9 @@ public class ElastiCacheUserGroup {
 
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
+
+    public Map<String, String> getServerlessCacheEngines() { return serverlessCacheEngines; }
+    public void setServerlessCacheEngines(Map<String, String> serverlessCacheEngines) {
+        this.serverlessCacheEngines = serverlessCacheEngines != null ? serverlessCacheEngines : new LinkedHashMap<>();
+    }
 }

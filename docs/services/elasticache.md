@@ -21,10 +21,14 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `ModifyUser` | Change a user's passwords and authentication mode, replace its access string with `AccessString` or add to it with `AppendAccessString` |
 | `DeleteUser` | Remove an ElastiCache user |
 | `CreateUserGroup` | Create a user group; a `redis` group must contain a user named `default`, a `valkey` group need not |
-| `DescribeUserGroups` | List user groups with their users and the replication groups using them |
+| `DescribeUserGroups` | List user groups with their users and the replication groups and serverless caches using them |
 | `ModifyUserGroup` | Add or remove users, or change the engine; membership changes apply to authentication at once |
-| `DeleteUserGroup` | Remove a user group that no replication group uses |
+| `DeleteUserGroup` | Remove a user group that no replication group or serverless cache uses |
 | `CreateCacheCluster` | Start a Memcached cluster, or a single-node Redis/Valkey one (`NumCacheNodes` must be 1) |
+| `CreateServerlessCache` | Create a local Valkey, Redis or Memcached runtime with serverless metadata |
+| `DescribeServerlessCaches` | List serverless caches, settings and endpoints |
+| `ModifyServerlessCache` | Update metadata and user-group association while retaining cache data |
+| `DeleteServerlessCache` | Delete serverless metadata and its backing runtime |
 | `DescribeCacheClusters` | List cache clusters: Memcached, single-node Redis/Valkey, and replication group members |
 | `DeleteCacheCluster` | Stop and remove a cache cluster |
 | `CreateCacheSubnetGroup` | Create a cache subnet group |
@@ -36,8 +40,41 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `ModifyCacheParameterGroup` | Set parameters on a group |
 | `DescribeCacheParameters` | List the parameters set on a group |
 | `DeleteCacheParameterGroup` | Delete a cache parameter group |
-| `ListTagsForResource` | Tags on a parameter group ARN |
+| `ListTagsForResource` | Read stored tags for supported ElastiCache resource ARNs |
 <!-- floci:actions:end -->
+
+### Serverless caches and user groups
+
+`CreateServerlessCache`, `DescribeServerlessCaches`, `ModifyServerlessCache` and
+`DeleteServerlessCache` use the native AWS Query protocol. Valkey and Redis caches reuse the
+existing single-node Valkey container and shared proxy port range. Memcached caches reuse the
+existing Memcached container runtime. Their internal backing clusters are hidden from ordinary
+cluster management APIs. `Endpoint` and `ReaderEndpoint` identify the same local runtime.
+
+User groups support create, describe, modify and delete. Redis groups require a `default` user;
+Valkey groups can be empty and accept authenticated Redis or Valkey users. Caches read the current
+group membership and user credentials on each authentication. An attached empty group still
+requires authentication and grants no access. Removing `UserGroupId` through `RemoveUserGroup`
+allows anonymous connections. Attached groups cannot be deleted until their cache association
+is removed. IAM authentication validates tokens against the public serverless cache name.
+
+Descriptions, security groups, usage limits, snapshot schedules and user-group associations can
+be modified without recreating the runtime or dropping cached values. Supplied subnets, security
+groups and KMS keys must exist in the caller's account and region; network resources must belong
+to one VPC. Names, settings, tags, owner account and runtime identity use the existing ElastiCache
+storage mode. Restart recovery reserves proxy ports and restores authentication and endpoints;
+the cache keyspace itself comes back empty, as for the other local cache runtimes.
+
+Tags on a serverless cache are set at creation and are not editable afterwards, because
+`AddTagsToResource` and `RemoveTagsFromResource` are not implemented for ElastiCache.
+
+Local serverless caches have fixed capacity and plaintext TCP endpoints. Usage limits, subnet and
+security-group placement, KMS encryption and snapshot schedules are metadata; they do not enable
+autoscaling, VPC networking, encryption or snapshot storage. Snapshot restore and final snapshots
+are rejected explicitly. Engine/version transitions are rejected; supported major versions are
+Valkey 8, Redis 7 and Memcached 1.6. With Docker unavailable, metadata operations still work and
+connections require a reachable Docker daemon and a runtime restart. Snapshot APIs and serverless
+pagination are not implemented.
 
 ### Single-node Redis/Valkey clusters
 
