@@ -103,6 +103,51 @@ class PartitionRegionGatesIntegrationTest {
         .when().delete("/domainnames/" + regional));
     }
 
+    private Response createRestApi(String region, String type) {
+        Response created = given()
+            .header("Authorization", PartitionMatrix.sigV4Auth(region, "apigateway"))
+            .contentType("application/json")
+            .body("{\"name\":\"edge-gate-" + Long.toString(System.nanoTime(), 36) + "\","
+                    + "\"endpointConfiguration\":{\"types\":[\"" + type + "\"]}}")
+        .when().post("/restapis");
+        String id = created.jsonPath().getString("id");
+        if (created.statusCode() == 201 && id != null) {
+            cleanup.register(() -> given()
+                .header("Authorization", PartitionMatrix.sigV4Auth(region, "apigateway"))
+            .when().delete("/restapis/" + id));
+        }
+        return created;
+    }
+
+    private static Response switchRestApiToEdge(String region, String id) {
+        return given()
+            .header("Authorization", PartitionMatrix.sigV4Auth(region, "apigateway"))
+            .contentType("application/json")
+            .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/endpointConfiguration/types/REGIONAL\","
+                    + "\"value\":\"EDGE\"}]}")
+        .when().patch("/restapis/" + id);
+    }
+
+    /** The domain rule applies to the REST APIs themselves: on create and on an endpoint-type switch. */
+    @Test
+    void edgeRestApisAreRejectedOutsideTheCommercialPartition() {
+        for (String region : List.of("us-gov-west-1", "cn-north-1")) {
+            String partition = AwsRegions.partitionFor(region);
+            createRestApi(region, "EDGE").then().statusCode(400)
+                .body(containsString("not available in partition " + partition));
+
+            String regionalId = createRestApi(region, "REGIONAL").then().statusCode(201)
+                .extract().jsonPath().getString("id");
+            switchRestApiToEdge(region, regionalId).then().statusCode(400)
+                .body(containsString("not available in partition " + partition));
+        }
+
+        createRestApi("us-east-1", "EDGE").then().statusCode(201);
+        String commercialId = createRestApi("us-east-1", "REGIONAL").then().statusCode(201)
+            .extract().jsonPath().getString("id");
+        switchRestApiToEdge("us-east-1", commercialId).then().statusCode(200);
+    }
+
     @Test
     void cloudFrontScopeLivesInThePartitionsImplicitGlobalRegion() {
         String name = "cn-" + Long.toString(System.nanoTime(), 36);

@@ -300,6 +300,7 @@ public class ApiGatewayService implements ResourceProvider {
             throw new AwsException("BadRequestException",
                     "Endpoint configuration types must contain exactly one value.", 400);
         }
+        requireEndpointTypeAvailable(endpointConfiguration.getTypes().getFirst().name(), region);
 
         api.setEndpointConfiguration(endpointConfigurationOf(endpointConfiguration.getTypes().getFirst(),
                 endpointConfiguration.getVpcEndpointIds()));
@@ -2463,7 +2464,7 @@ public class ApiGatewayService implements ResourceProvider {
         if (patchOperations != null) {
             // Worked out before anything is set: the store hands back the live API, and a rejected
             // endpoint change must leave it as it was.
-            EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations);
+            EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations, region);
             for (Map<String, String> op : patchOperations) {
                 if (!"replace" .equals(op.get("op"))) continue;
                 String path = op.getOrDefault("path", "");
@@ -2490,11 +2491,13 @@ public class ApiGatewayService implements ResourceProvider {
      * and disassociate a VPC endpoint.
      */
     private static EndpointConfiguration patchEndpointConfiguration(RestApi api,
-                                                                    List<Map<String, String>> patchOperations) {
+                                                                    List<Map<String, String>> patchOperations,
+                                                                    String region) {
         EndpointConfiguration current = api.getEndpointConfiguration();
         // An API stored without one is REGIONAL, which is also what GetRestApi reports for it.
-        EndpointType type = current == null || current.getTypes().isEmpty()
+        EndpointType currentType = current == null || current.getTypes().isEmpty()
                 ? EndpointType.REGIONAL : current.getTypes().getFirst();
+        EndpointType type = currentType;
         List<String> vpcEndpointIds = new ArrayList<>(current == null ? List.of() : current.getVpcEndpointIds());
         boolean patched = false;
         for (Map<String, String> op : patchOperations) {
@@ -2522,6 +2525,9 @@ public class ApiGatewayService implements ResourceProvider {
                     patched = true;
                 }
             }
+        }
+        if (type != currentType) {
+            requireEndpointTypeAvailable(type.name(), region);
         }
         return patched ? endpointConfigurationOf(type, vpcEndpointIds) : null;
     }
