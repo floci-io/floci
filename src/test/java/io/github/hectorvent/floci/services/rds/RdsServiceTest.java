@@ -70,7 +70,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
@@ -1276,7 +1275,7 @@ class RdsServiceTest {
     @ParameterizedTest
     @CsvSource({"false,false,false", "false,true,false", "true,false,false", "true,true,false",
             "false,false,true", "false,true,true", "true,false,true", "true,true,true"})
-    void readsRecoverLegacyManagedKeyMetadata(boolean cluster, boolean list, boolean customKey) {
+    void startupRecoversLegacyManagedKeyMetadata(boolean cluster, boolean list, boolean customKey) {
         regionResolver = new RegionResolver("cn-north-1", "222222222222");
         when(config.services().rds().mock()).thenReturn(true);
         SecretsManagerService secretsManager = mock(SecretsManagerService.class);
@@ -1287,7 +1286,7 @@ class RdsServiceTest {
         secret.setKmsKeyId(customKey ? expectedKey : null);
         KmsKey key = new KmsKey();
         key.setArn(expectedKey);
-        doReturn(key).when(kmsService).describeKey("alias/aws/secretsmanager", "cn-north-1");
+        doReturn(key).when(kmsService).describeKeyForAccount("alias/aws/secretsmanager", "cn-north-1", "222222222222");
         when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("stored-key"), any(), eq("rds"), any()))
                 .thenReturn(secret);
         RdsService service = newService(containerManager, proxyManager,
@@ -1304,6 +1303,8 @@ class RdsServiceTest {
                     "dbname", "db.t3.micro", 20, true, null, null, null, true, "stored-key");
         }
         clearInvocations(secretsManager, kmsService);
+        service.backfillManagedSecretOwnership();
+        clearInvocations(secretsManager);
         assertEquals("stored-key", readManagedSecretKey(service, cluster, list));
         verifyNoInteractions(secretsManager, kmsService);
         if (cluster) {
@@ -1313,11 +1314,13 @@ class RdsServiceTest {
         }
         doThrow(new AwsException("ResourceNotFoundException", "Temporarily unavailable", 400))
                 .when(secretsManager).describeSecret(secret.getArn(), "cn-north-1");
+        service.backfillManagedSecretOwnership();
         assertNull(readManagedSecretKey(service, cluster, list));
         assertNull(cluster ? databaseCluster.getMasterUserSecretKmsKeyId() : instance.getMasterUserSecretKmsKeyId());
         doReturn(secret).when(secretsManager).describeSecret(secret.getArn(), "cn-north-1");
         clearInvocations(secretsManager, kmsService);
 
+        service.backfillManagedSecretOwnership();
         assertEquals(expectedKey, readManagedSecretKey(service, cluster, list));
         assertEquals(expectedKey, readManagedSecretKey(service, cluster, !list));
         assertEquals(secret.getArn(), cluster ? databaseCluster.getMasterUserSecretArn() : instance.getMasterUserSecretArn());
@@ -1325,15 +1328,13 @@ class RdsServiceTest {
         if (customKey) {
             verifyNoInteractions(kmsService);
         } else {
-            verify(kmsService).describeKey("alias/aws/secretsmanager", "cn-north-1");
+            verify(kmsService).describeKeyForAccount("alias/aws/secretsmanager", "cn-north-1", "222222222222");
         }
     }
 
     @ParameterizedTest
-    @CsvSource({"false,false,false", "false,true,false", "true,false,false", "true,true,false",
-            "true,false,true", "true,true,true"})
-    void legacyKeyRecoveryDoesNotOverwriteConcurrentChanges(boolean cluster, boolean list, boolean rekey)
-            throws Exception {
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void managedSecretReadsDoNotWaitForProvisioning(boolean cluster, boolean list) throws Exception {
         when(config.services().rds().mock()).thenReturn(true);
         SecretsManagerService secretsManager = mock(SecretsManagerService.class);
         Secret secret = new Secret();
@@ -1341,7 +1342,8 @@ class RdsServiceTest {
         when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("stored-key"), any(), eq("rds"), any()))
                 .thenReturn(secret);
         RdsService service = newService(containerManager, proxyManager,
-                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                AccountAwareStorageBackend.inMemory("123456789012"),
+                AccountAwareStorageBackend.inMemory("123456789012"),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), secretsManager);
         if (cluster) {
             service.createDbCluster("legacy", "aurora-postgresql", "16.3",
@@ -1352,47 +1354,14 @@ class RdsServiceTest {
                     "dbname", "db.t3.micro", 20, true, null, null, null, true, "stored-key")
                     .setMasterUserSecretKmsKeyId(null);
         }
-        CountDownLatch recovering = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        CountDownLatch changing = new CountDownLatch(1);
-        AtomicBoolean firstRead = new AtomicBoolean(true);
-        doAnswer(invocation -> {
-            if (firstRead.compareAndSet(true, false)) {
-                recovering.countDown();
-                assertTrue(release.await(5, TimeUnit.SECONDS));
-            }
-            return secret;
-        }).when(secretsManager).describeSecret(secret.getArn(), "us-east-1");
-        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
-            Future<String> read = executor.submit(() -> readManagedSecretKey(service, cluster, list));
-            try {
-                assertTrue(recovering.await(5, TimeUnit.SECONDS));
-                Future<?> mutation = executor.submit(() -> {
-                    changing.countDown();
-                    if (rekey) {
-                        service.modifyDbCluster("legacy", null, null,
-                                null, null, null, null, "new-key", "us-east-1");
-                    } else if (cluster) {
-                        service.deleteDbCluster("legacy");
-                    } else {
-                        service.deleteDbInstance("legacy");
-                    }
-                });
-                assertTrue(changing.await(5, TimeUnit.SECONDS));
-                assertThrows(TimeoutException.class, () -> mutation.get(100, TimeUnit.MILLISECONDS));
-                release.countDown();
-                assertNotNull(read.get(5, TimeUnit.SECONDS));
-                mutation.get(5, TimeUnit.SECONDS);
-                if (rekey) {
-                    assertEquals("new-key", readManagedSecretKey(service, true, list));
-                } else {
-                    assertTrue(service.listDbInstances(null).isEmpty());
-                    assertTrue(service.listDbClusters(null).isEmpty());
-                }
-            } finally {
-                release.countDown();
+        clearInvocations(secretsManager, kmsService);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            synchronized (service) {
+                Future<String> read = executor.submit(() -> readManagedSecretKey(service, cluster, list));
+                assertNull(read.get(5, TimeUnit.SECONDS));
             }
         }
+        verifyNoInteractions(secretsManager, kmsService);
     }
 
     private String readManagedSecretKey(RdsService service, boolean cluster, boolean list) {
@@ -1601,11 +1570,20 @@ class RdsServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 secretsManager);
 
-        service.createDbInstance("mydb", "postgres", "13",
+        DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
                 "admin", null, "dbname", "db.t3.micro",
                 20, true, null, null, null, true, null);
 
+        instance.setMasterUserSecretKmsKeyId(null);
+        KmsKey key = new KmsKey();
+        key.setArn("arn:aws:kms:us-east-1:123456789012:key/restored-default");
+        when(secretsManager.describeSecret(restoredArn, "us-east-1")).thenReturn(restored);
+        when(kmsService.describeKeyForAccount("alias/aws/secretsmanager", "us-east-1", "123456789012"))
+                .thenReturn(key);
+
         service.restorePersistedRuntime();
+
+        assertEquals(key.getArn(), service.getDbInstance("mydb").getMasterUserSecretKmsKeyId());
 
         verify(secretsManager).markOwnedByService(restoredArn, "rds");
     }

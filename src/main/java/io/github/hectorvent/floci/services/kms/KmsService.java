@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -21,6 +22,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.control.ActivateRequestContext;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -68,15 +70,21 @@ public class KmsService implements ResourceProvider {
     // a region's alias namespace cannot each mint a key for the same alias/aws/* name.
     private final Object awsManagedKeyLock = new Object();
 
-    @Inject
+    private final RequestContext requestContext;
+
     public KmsService(StorageFactory storageFactory, RegionResolver regionResolver) {
+        this(storageFactory, regionResolver, null);
+    }
+
+    @Inject
+    public KmsService(StorageFactory storageFactory, RegionResolver regionResolver, RequestContext requestContext) {
         this(storageFactory.create("kms", "kms-keys.json",
                         new TypeReference<>() {}),
                 storageFactory.create("kms", "kms-aliases.json",
                         new TypeReference<>() {}),
                 storageFactory.create("kms", "kms-grants.json",
                         new TypeReference<>() {}),
-                regionResolver);
+                regionResolver, new SecureRandom(), requestContext);
     }
 
     KmsService(StorageBackend<String, KmsKey> keyStore,
@@ -91,6 +99,14 @@ public class KmsService implements ResourceProvider {
                StorageBackend<String, KmsGrant> grantStore,
                RegionResolver regionResolver,
                SecureRandom secureRandom) {
+        this(keyStore, aliasStore, grantStore, regionResolver, secureRandom, null);
+    }
+
+    private KmsService(StorageBackend<String, KmsKey> keyStore,
+                       StorageBackend<String, KmsAlias> aliasStore,
+                       StorageBackend<String, KmsGrant> grantStore,
+                       RegionResolver regionResolver, SecureRandom secureRandom, RequestContext requestContext) {
+        this.requestContext = requestContext;
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.grantStore = grantStore;
@@ -299,6 +315,24 @@ public class KmsService implements ResourceProvider {
         if (!spec.allowedKeyUsages().contains(keyUsage)) {
             throw new AwsException("ValidationException",
                     "KeyUsage " + keyUsage + " is not compatible with KeySpec " + spec + ".", 400);
+        }
+    }
+
+    /** Resolves a key for a persisted resource's owner during background restoration. */
+    @ActivateRequestContext
+    public KmsKey describeKeyForAccount(String keyId, String region, String accountId) {
+        String previousAccount = requestContext.getAccountId();
+        String previousRegion = requestContext.getRegion();
+        String previousPartition = requestContext.getPartition();
+        try {
+            requestContext.setAccountId(accountId);
+            requestContext.setRegion(region);
+            requestContext.setPartition(regionResolver.partitionForRegion(region));
+            return describeKey(keyId, region);
+        } finally {
+            requestContext.setAccountId(previousAccount);
+            requestContext.setRegion(previousRegion);
+            requestContext.setPartition(previousPartition);
         }
     }
 

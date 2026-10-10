@@ -2469,6 +2469,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     // The secret's ARN names its own account and region, neither of which a
                     // startup backfill has a request context to infer.
                     secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
+                    backfillManagedSecretKey(instance, regionFromArn(instance.getDbInstanceArn()));
                 } catch (RuntimeException e) {
                     LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
                 }
@@ -2480,6 +2481,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
                 try {
                     secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
+                    backfillManagedSecretKey(cluster, regionFromArn(cluster.getDbClusterArn()));
                 } catch (RuntimeException e) {
                     LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
                 }
@@ -2530,7 +2532,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private DbInstance backfillManagedSecretKey(DbInstance instance, String region) {
+    private void backfillManagedSecretKey(DbInstance instance, String region) {
         if (instance.getMasterUserSecretArn() != null && instance.getMasterUserSecretKmsKeyId() == null) {
             String keyId = recoverManagedSecretKey(instance.getMasterUserSecretArn(), region);
             if (keyId != null) {
@@ -2539,10 +2541,9 @@ public class RdsService implements Resettable, ResourceProvider {
                         instance.getDbInstanceIdentifier(), instance);
             }
         }
-        return instance;
     }
 
-    private DbCluster backfillManagedSecretKey(DbCluster cluster, String region) {
+    private void backfillManagedSecretKey(DbCluster cluster, String region) {
         if (cluster.getMasterUserSecretArn() != null && cluster.getMasterUserSecretKmsKeyId() == null) {
             String keyId = recoverManagedSecretKey(cluster.getMasterUserSecretArn(), region);
             if (keyId != null) {
@@ -2551,7 +2552,6 @@ public class RdsService implements Resettable, ResourceProvider {
                         cluster.getDbClusterIdentifier(), cluster);
             }
         }
-        return cluster;
     }
 
     private String recoverManagedSecretKey(String secretArn, String region) {
@@ -2561,7 +2561,8 @@ public class RdsService implements Resettable, ResourceProvider {
         try {
             Secret secret = secretsManagerService.describeSecret(secretArn, region);
             String keyId = secret.getKmsKeyId();
-            return keyId != null ? keyId : kmsService.describeKey("alias/aws/secretsmanager", region).getArn();
+            return keyId != null ? keyId : kmsService.describeKeyForAccount("alias/aws/secretsmanager",
+                    region, accountIdFromArn(secretArn)).getArn();
         } catch (RuntimeException e) {
             // Old metadata remains readable if its secret or key is temporarily unavailable.
             LOG.debugv(e, "Could not recover the managed key for secret {0}", secretArn);
@@ -2712,11 +2713,11 @@ public class RdsService implements Resettable, ResourceProvider {
         return getDbInstance(id, regionResolver.getDefaultRegion());
     }
 
-    public synchronized DbInstance getDbInstance(String id, String region) {
+    public DbInstance getDbInstance(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         return Optional.ofNullable(findInstanceForScope(
                 currentAccountId(), effectiveRegion, id))
-                .map(resource -> backfillManagedSecretKey(resource, effectiveRegion)).orElseThrow(() ->
+                .orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "DB instance " + id + " not found.", 404));
     }
@@ -2725,7 +2726,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return listDbInstances(filterId, regionResolver.getDefaultRegion());
     }
 
-    public synchronized Collection<DbInstance> listDbInstances(String filterId, String region) {
+    public Collection<DbInstance> listDbInstances(String filterId, String region) {
         String accountId = currentAccountId();
         String effectiveRegion = effectiveRegion(region);
         Map<String, DbInstance> unique = new LinkedHashMap<>();
@@ -2741,7 +2742,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 DbInstance canonical = findInstanceForScope(
                         accountId, effectiveRegion, instance.getDbInstanceIdentifier());
                 if (canonical != null) {
-                    unique.put(canonical.getDbInstanceArn(), backfillManagedSecretKey(canonical, effectiveRegion));
+                    unique.put(canonical.getDbInstanceArn(), canonical);
                 }
             }
         }
@@ -4373,11 +4374,11 @@ public class RdsService implements Resettable, ResourceProvider {
         return getDbCluster(id, regionResolver.getDefaultRegion());
     }
 
-    public synchronized DbCluster getDbCluster(String id, String region) {
+    public DbCluster getDbCluster(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         return Optional.ofNullable(findClusterForScope(
                 currentAccountId(), effectiveRegion, id))
-                .map(resource -> backfillManagedSecretKey(resource, effectiveRegion)).orElseThrow(() ->
+                .orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "DB cluster " + id + " not found.", 404));
     }
@@ -4386,7 +4387,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return listDbClusters(filterId, regionResolver.getDefaultRegion());
     }
 
-    public synchronized Collection<DbCluster> listDbClusters(String filterId, String region) {
+    public Collection<DbCluster> listDbClusters(String filterId, String region) {
         String accountId = currentAccountId();
         String effectiveRegion = effectiveRegion(region);
         Map<String, DbCluster> unique = new LinkedHashMap<>();
@@ -4402,7 +4403,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 DbCluster canonical = findClusterForScope(
                         accountId, effectiveRegion, cluster.getDbClusterIdentifier());
                 if (canonical != null) {
-                    unique.put(canonical.getDbClusterArn(), backfillManagedSecretKey(canonical, effectiveRegion));
+                    unique.put(canonical.getDbClusterArn(), canonical);
                 }
             }
         }
