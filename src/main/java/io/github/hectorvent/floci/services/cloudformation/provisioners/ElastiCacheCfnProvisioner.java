@@ -40,6 +40,8 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     private static final String USER = "AWS::ElastiCache::User";
     private static final String USER_GROUP = "AWS::ElastiCache::UserGroup";
     private static final String SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR = "__FlociCacheSubnetGroupUpdateSnapshot";
+    private static final String USER_UPDATE_SNAPSHOT_ATTR = "__FlociUserUpdateSnapshot";
+    private static final String USER_GROUP_UPDATE_SNAPSHOT_ATTR = "__FlociUserGroupUpdateSnapshot";
     private static final List<String> UNSUPPORTED_CLUSTER_PROPERTIES = List.of("CacheSecurityGroupNames",
             "NotificationTopicArn", "AZMode", "PreferredAvailabilityZones", "LogDeliveryConfigurations",
             "SnapshotArns", "SnapshotName");
@@ -65,6 +67,8 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         r.getAttributes().remove(SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR);
+        r.getAttributes().remove(USER_UPDATE_SNAPSHOT_ATTR);
+        r.getAttributes().remove(USER_GROUP_UPDATE_SNAPSHOT_ATTR);
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
             case CACHE_CLUSTER -> provisionCacheCluster(r, props, ctx);
@@ -91,6 +95,8 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         if ("UPDATE_COMPLETE".equals(resource.getStatus())) {
             resource.getAttributes().remove(SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR);
+            resource.getAttributes().remove(USER_UPDATE_SNAPSHOT_ATTR);
+            resource.getAttributes().remove(USER_GROUP_UPDATE_SNAPSHOT_ATTR);
         }
         return ReplacementCleanup.complete(resource, this::delete);
     }
@@ -98,6 +104,8 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(SUBNET_GROUP_UPDATE_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(USER_UPDATE_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(USER_GROUP_UPDATE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
@@ -113,6 +121,33 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
                     return true;
                 } catch (Exception e) {
                     LOG.errorv("Could not restore subnet group {0} after failed update: {1}",
+                            resource.getPhysicalId(), e.getMessage());
+                }
+            }
+        }
+        if (USER.equals(resource.getResourceType())) {
+            String rawSnapshot = resource.getAttributes().remove(USER_UPDATE_SNAPSHOT_ATTR);
+            if (rawSnapshot != null) {
+                try {
+                    UserSnapshot snapshot = MAPPER.readValue(rawSnapshot, UserSnapshot.class);
+                    elastiCacheService.modifyUser(snapshot.userId(), snapshot.authMode(),
+                            snapshot.passwords(), snapshot.accessString(), null, snapshot.engine());
+                    return true;
+                } catch (Exception e) {
+                    LOG.errorv("Could not restore user {0} after failed update: {1}",
+                            resource.getPhysicalId(), e.getMessage());
+                }
+            }
+        }
+        if (USER_GROUP.equals(resource.getResourceType())) {
+            String rawSnapshot = resource.getAttributes().remove(USER_GROUP_UPDATE_SNAPSHOT_ATTR);
+            if (rawSnapshot != null) {
+                try {
+                    UserGroupSnapshot snapshot = MAPPER.readValue(rawSnapshot, UserGroupSnapshot.class);
+                    elastiCacheService.setUserGroupMembers(snapshot.userGroupId(), snapshot.userIds(), snapshot.engine());
+                    return true;
+                } catch (Exception e) {
+                    LOG.errorv("Could not restore user group {0} after failed update: {1}",
                             resource.getPhysicalId(), e.getMessage());
                 }
             }
@@ -309,8 +344,9 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         String userId = ctx.resolveOptional(props, "UserId");
         String userName = ctx.resolveOptional(props, "UserName");
         String engine = ctx.resolveOptional(props, "Engine");
-        if (userId == null || userId.isBlank() || userName == null || userName.isBlank()) {
-            throw new AwsException("ValidationException", "UserId and UserName are required", 400);
+        if (userId == null || userId.isBlank() || userName == null || userName.isBlank()
+                || engine == null || engine.isBlank()) {
+            throw new AwsException("ValidationException", "UserId, UserName and Engine are required", 400);
         }
         String accessString = ctx.resolveOptional(props, "AccessString");
         UserAuthentication auth = resolveAuthentication(props, ctx);
@@ -320,10 +356,21 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
         ElastiCacheUser user;
         if (ctx.reusesPriorEntity(userId)) {
-            String currentName = elastiCacheService.getUser(userId).getUserName();
-            if (!userName.equals(currentName)) {
+            ElastiCacheUser existing = elastiCacheService.getUser(userId);
+            if (!userName.equals(existing.getUserName())) {
                 throw new AwsException("InvalidParameterValue",
                         "UserName of user " + userId + " is create-only; use a new UserId to change it", 400);
+            }
+            UserSnapshot snapshot = new UserSnapshot(
+                    existing.getUserId(),
+                    existing.getAuthMode(),
+                    existing.getPasswords(),
+                    existing.getAccessString(),
+                    existing.getEngine());
+            try {
+                r.getAttributes().put(USER_UPDATE_SNAPSHOT_ATTR, MAPPER.writeValueAsString(snapshot));
+            } catch (JsonProcessingException e) {
+                LOG.errorv("Could not snapshot user {0} before update: {1}", userId, e.getMessage());
             }
             user = elastiCacheService.modifyUser(userId,
                     auth != null ? auth.mode() : null,
@@ -345,6 +392,9 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         if (groupId == null || groupId.isBlank() || engine == null || engine.isBlank()) {
             throw new AwsException("ValidationException", "UserGroupId and Engine are required", 400);
         }
+        if (!props.hasNonNull("UserIds")) {
+            throw new AwsException("ValidationException", "UserIds is required", 400);
+        }
         // The service stores the id in lowercase, so the prior physical id only matches in that form.
         groupId = groupId.toLowerCase(Locale.ROOT);
         List<String> userIds = ctx.resolveStringList(props, "UserIds");
@@ -355,14 +405,16 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         ElastiCacheUserGroup group;
         if (ctx.reusesPriorEntity(groupId)) {
             ElastiCacheUserGroup existing = elastiCacheService.getUserGroup(groupId);
-            boolean engineChanged = !engine.equalsIgnoreCase(existing.getEngine());
-            List<String> toAdd = new ArrayList<>(userIds);
-            toAdd.removeAll(existing.getUserIds());
-            List<String> toRemove = new ArrayList<>(existing.getUserIds());
-            toRemove.removeAll(userIds);
-            group = toAdd.isEmpty() && toRemove.isEmpty() && !engineChanged
-                    ? existing
-                    : elastiCacheService.modifyUserGroup(groupId, toAdd, toRemove, engineChanged ? engine : null);
+            UserGroupSnapshot snapshot = new UserGroupSnapshot(
+                    existing.getUserGroupId(),
+                    existing.getEngine(),
+                    new ArrayList<>(existing.getUserIds()));
+            try {
+                r.getAttributes().put(USER_GROUP_UPDATE_SNAPSHOT_ATTR, MAPPER.writeValueAsString(snapshot));
+            } catch (JsonProcessingException e) {
+                LOG.errorv("Could not snapshot user group {0} before update: {1}", groupId, e.getMessage());
+            }
+            group = elastiCacheService.setUserGroupMembers(groupId, userIds, engine);
         } else {
             group = elastiCacheService.createUserGroup(groupId, engine, userIds, ctx.region());
         }
@@ -389,17 +441,38 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         boolean noPasswordRequired = Boolean.parseBoolean(ctx.resolveOptional(props, "NoPasswordRequired"));
 
         if (type == null || type.isBlank()) {
+            if (noPasswordRequired && !passwords.isEmpty()) {
+                throw new AwsException("InvalidParameterCombination",
+                        "NoPasswordRequired cannot be true when Passwords are provided.", 400);
+            }
             if (!passwords.isEmpty()) {
                 return new UserAuthentication(AuthMode.PASSWORD, passwords);
             }
             return noPasswordRequired ? new UserAuthentication(AuthMode.NO_AUTH, List.of()) : null;
         }
-        return switch (type.toLowerCase(Locale.ROOT)) {
-            case "password" -> new UserAuthentication(AuthMode.PASSWORD, passwords);
-            case "iam" -> new UserAuthentication(AuthMode.IAM, List.of());
-            case "no-password-required" -> new UserAuthentication(AuthMode.NO_AUTH, List.of());
-            default -> throw new AwsException("ValidationException",
-                    "Invalid AuthenticationMode.Type " + type, 400);
+
+        String normalizedType = type.toLowerCase(Locale.ROOT);
+        if (noPasswordRequired && !"no-password-required".equals(normalizedType)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "NoPasswordRequired cannot be true when AuthenticationMode.Type is " + type + ".", 400);
+        }
+        return switch (normalizedType) {
+            case "password" -> {
+                if (passwords.isEmpty()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Passwords are required when AuthenticationMode.Type is password.", 400);
+                }
+                yield new UserAuthentication(AuthMode.PASSWORD, passwords);
+            }
+            case "iam", "no-password-required" -> {
+                if (!passwords.isEmpty()) {
+                    throw new AwsException("InvalidParameterCombination",
+                            "Passwords cannot be provided when AuthenticationMode.Type is " + type + ".", 400);
+                }
+                yield new UserAuthentication("iam".equals(normalizedType) ? AuthMode.IAM : AuthMode.NO_AUTH, List.of());
+            }
+            default -> throw new AwsException("InvalidParameterValue",
+                    "Invalid AuthenticationMode.Type " + type + ". Valid values are password, no-password-required and iam.", 400);
         };
     }
 
@@ -433,4 +506,9 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     private record SubnetGroupSnapshot(String name, String description, List<String> subnetIds,
                                        Map<String, String> tags) {}
+
+    private record UserSnapshot(String userId, AuthMode authMode, List<String> passwords,
+                                String accessString, String engine) {}
+
+    private record UserGroupSnapshot(String userGroupId, String engine, List<String> userIds) {}
 }

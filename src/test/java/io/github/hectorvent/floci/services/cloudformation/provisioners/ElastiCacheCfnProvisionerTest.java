@@ -292,10 +292,87 @@ class ElastiCacheCfnProvisionerTest {
     }
 
     @Test
-    void userRequiresUserIdAndUserName() throws Exception {
+    void userRequiresUserIdUserNameAndEngine() throws Exception {
         StackResource r = resource("AWS::ElastiCache::User", "Bad");
 
         assertThrows(AwsException.class, () -> provisioner.provision(r, props("{\"Engine\":\"redis\"}"), ctx(null)));
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("{\"UserId\":\"u\",\"UserName\":\"u\"}"), ctx(null)));
+        verify(cache, never()).createUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userRejectsPasswordModeWithoutPasswords() {
+        StackResource r = resource("AWS::ElastiCache::User", "Bad");
+        AwsException ex = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserId":"u","UserName":"u","Engine":"redis",
+                 "AuthenticationMode":{"Type":"password"}}
+                """), ctx(null)));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        verify(cache, never()).createUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userRejectsPasswordsWithNoPasswordRequiredMode() {
+        StackResource r = resource("AWS::ElastiCache::User", "Bad");
+        AwsException ex = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserId":"u","UserName":"u","Engine":"redis",
+                 "AuthenticationMode":{"Type":"no-password-required","Passwords":["pw"]}}
+                """), ctx(null)));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        verify(cache, never()).createUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userRejectsPasswordsWithIamAuthenticationMode() {
+        StackResource r = resource("AWS::ElastiCache::User", "Bad");
+        AwsException ex = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserId":"u","UserName":"u","Engine":"redis",
+                 "AuthenticationMode":{"Type":"iam","Passwords":["pw"]}}
+                """), ctx(null)));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        verify(cache, never()).createUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userRejectsConflictingNoPasswordRequiredAndPasswords() {
+        StackResource r = resource("AWS::ElastiCache::User", "Bad");
+        AwsException ex = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserId":"u","UserName":"u","Engine":"redis","NoPasswordRequired":true,"Passwords":["pw"]}
+                """), ctx(null)));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        verify(cache, never()).createUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userRejectsConflictingNoPasswordRequiredAndAuthenticationModeType() {
+        StackResource r = resource("AWS::ElastiCache::User", "Bad");
+        AwsException ex = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserId":"u","UserName":"u","Engine":"redis","NoPasswordRequired":true,
+                 "AuthenticationMode":{"Type":"password","Passwords":["pw"]}}
+                """), ctx(null)));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        verify(cache, never()).createUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userRejectsInvalidAuthenticationModeType() {
+        StackResource r = resource("AWS::ElastiCache::User", "Bad");
+        AwsException ex = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserId":"u","UserName":"u","Engine":"redis",
+                 "AuthenticationMode":{"Type":"bogus"}}
+                """), ctx(null)));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        verify(cache, never()).createUser(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userGroupRequiresUserIdsProperty() {
+        StackResource r = resource("AWS::ElastiCache::UserGroup", "Bad");
+        AwsException ex = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserGroupId":"team","Engine":"valkey"}
+                """), ctx(null)));
+        assertEquals("ValidationException", ex.getErrorCode());
+        verify(cache, never()).createUserGroup(any(), any(), any(), any());
     }
 
     @Test
@@ -324,7 +401,7 @@ class ElastiCacheCfnProvisionerTest {
         existing.setArn("arn");
         existing.setStatus("active");
         when(cache.getUserGroup("team")).thenReturn(existing);
-        when(cache.modifyUserGroup(eq("team"), eq(List.of("new")), eq(List.of("old")), any())).thenReturn(existing);
+        when(cache.setUserGroupMembers(eq("team"), eq(List.of("d", "new")), eq("redis"))).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
 
         provisioner.provision(r, props("""
@@ -332,7 +409,7 @@ class ElastiCacheCfnProvisionerTest {
                 """), ctx("team"));
 
         verify(cache, never()).createUserGroup(any(), any(), any(), any());
-        verify(cache).modifyUserGroup(eq("team"), eq(List.of("new")), eq(List.of("old")), any());
+        verify(cache).setUserGroupMembers(eq("team"), eq(List.of("d", "new")), eq("redis"));
     }
 
     @Test
@@ -355,12 +432,12 @@ class ElastiCacheCfnProvisionerTest {
         existing.setArn("arn");
         existing.setStatus("active");
         when(cache.getUserGroup("team")).thenReturn(existing);
-        when(cache.modifyUserGroup(eq("team"), eq(List.of()), eq(List.of()), eq("valkey"))).thenReturn(existing);
+        when(cache.setUserGroupMembers(eq("team"), eq(List.of()), eq("valkey"))).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
 
         provisioner.provision(r, props("{\"UserGroupId\":\"team\",\"Engine\":\"valkey\",\"UserIds\":[]}"), ctx("team"));
 
-        verify(cache).modifyUserGroup("team", List.of(), List.of(), "valkey");
+        verify(cache).setUserGroupMembers("team", List.of(), "valkey");
         verify(cache, never()).createUserGroup(any(), any(), any(), any());
     }
 
@@ -372,12 +449,14 @@ class ElastiCacheCfnProvisionerTest {
         existing.setArn("arn");
         existing.setStatus("active");
         when(cache.getUserGroup("myusers")).thenReturn(existing);
+        when(cache.setUserGroupMembers("myusers", List.of(), "redis")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
 
         provisioner.provision(r, props("{\"UserGroupId\":\"MyUsers\",\"Engine\":\"redis\",\"UserIds\":[]}"),
                 ctx("myusers"));
 
         verify(cache, never()).createUserGroup(any(), any(), any(), any());
+        verify(cache).setUserGroupMembers("myusers", List.of(), "redis");
         assertEquals("myusers", r.getPhysicalId());
     }
 
@@ -475,6 +554,81 @@ class ElastiCacheCfnProvisionerTest {
         UpdateCleanupResult result = provisioner.completeUpdate(r);
         assertFalse(result.applicable());
         assertNull(r.getAttributes().get("__FlociCacheSubnetGroupUpdateSnapshot"));
+    }
+
+    @Test
+    void inPlaceUserUpdateCanBeRolledBackFromSnapshot() throws Exception {
+        ElastiCacheUser existing = new ElastiCacheUser("app", "app", AuthMode.PASSWORD, List.of("pw-old"),
+                "on ~* +@all", "redis", "active", Instant.now());
+        when(cache.getUser("app")).thenReturn(existing);
+        ElastiCacheUser modified = new ElastiCacheUser("app", "app", AuthMode.PASSWORD, List.of("pw-new"),
+                "off -@all", "redis", "active", Instant.now());
+        when(cache.modifyUser(eq("app"), eq(AuthMode.PASSWORD), eq(List.of("pw-new")), eq("off -@all"), any(), eq("redis")))
+                .thenReturn(modified);
+
+        StackResource r = resource("AWS::ElastiCache::User", "AppUser");
+        provisioner.provision(r, props("""
+                {"UserId":"app","UserName":"app","Engine":"redis","AccessString":"off -@all",
+                 "AuthenticationMode":{"Type":"password","Passwords":["pw-new"]}}
+                """), ctx("app"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(cache).modifyUser("app", AuthMode.PASSWORD, List.of("pw-old"), "on ~* +@all", null, "redis");
+    }
+
+    @Test
+    void inPlaceUserGroupUpdateCanBeRolledBackFromSnapshot() throws Exception {
+        ElastiCacheUserGroup existing = new ElastiCacheUserGroup();
+        existing.setUserGroupId("team");
+        existing.setEngine("redis");
+        existing.setUserIds(new LinkedHashSet<>(List.of("u1", "u2")));
+        existing.setArn("arn");
+        existing.setStatus("active");
+        when(cache.getUserGroup("team")).thenReturn(existing);
+
+        ElastiCacheUserGroup modified = new ElastiCacheUserGroup();
+        modified.setUserGroupId("team");
+        modified.setEngine("redis");
+        modified.setUserIds(new LinkedHashSet<>(List.of("u1", "u3")));
+        modified.setArn("arn");
+        modified.setStatus("active");
+        when(cache.setUserGroupMembers(eq("team"), eq(List.of("u1", "u3")), eq("redis"))).thenReturn(modified);
+
+        StackResource r = resource("AWS::ElastiCache::UserGroup", "Group");
+        provisioner.provision(r, props("""
+                {"UserGroupId":"team","Engine":"redis","UserIds":["u1","u3"]}
+                """), ctx("team"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(cache).setUserGroupMembers("team", List.of("u1", "u2"), "redis");
+    }
+
+    @Test
+    void committedUserAndUserGroupUpdateClearsRollbackSnapshots() {
+        StackResource rUser = resource("AWS::ElastiCache::User", "User");
+        rUser.getAttributes().put("__FlociUserUpdateSnapshot", "snapshot-data");
+        rUser.setStatus("UPDATE_COMPLETE");
+        provisioner.completeUpdate(rUser);
+        assertNull(rUser.getAttributes().get("__FlociUserUpdateSnapshot"));
+
+        StackResource rGroup = resource("AWS::ElastiCache::UserGroup", "Group");
+        rGroup.getAttributes().put("__FlociUserGroupUpdateSnapshot", "snapshot-data");
+        rGroup.setStatus("UPDATE_COMPLETE");
+        provisioner.completeUpdate(rGroup);
+        assertNull(rGroup.getAttributes().get("__FlociUserGroupUpdateSnapshot"));
+    }
+
+    @Test
+    void clearUpdateClearsUserAndUserGroupSnapshots() {
+        StackResource rUser = resource("AWS::ElastiCache::User", "User");
+        rUser.getAttributes().put("__FlociUserUpdateSnapshot", "snapshot-data");
+        provisioner.clearUpdate(rUser);
+        assertNull(rUser.getAttributes().get("__FlociUserUpdateSnapshot"));
+
+        StackResource rGroup = resource("AWS::ElastiCache::UserGroup", "Group");
+        rGroup.getAttributes().put("__FlociUserGroupUpdateSnapshot", "snapshot-data");
+        provisioner.clearUpdate(rGroup);
+        assertNull(rGroup.getAttributes().get("__FlociUserGroupUpdateSnapshot"));
     }
 
     @Test

@@ -179,7 +179,7 @@ class ElastiCacheCfnIntegrationTest {
         try (ElastiCacheClient client = client()) {
             assertEquals(2, client.describeUserGroups(r -> r.userGroupId("cfn-it-upd-users"))
                     .userGroups().getFirst().userIds().size());
-            assertThrows(ElastiCacheException.class,
+            assertThrows(CacheSubnetGroupNotFoundException.class,
                     () -> client.describeCacheSubnetGroups(r -> r.cacheSubnetGroupName("cfn-it-upd-sng-a")));
             assertEquals(1, client.describeCacheSubnetGroups(r -> r.cacheSubnetGroupName("cfn-it-upd-sng-b"))
                     .cacheSubnetGroups().size());
