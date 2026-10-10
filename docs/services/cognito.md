@@ -359,6 +359,39 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
 
+## Custom Email Sender Trigger
+
+A pool whose `LambdaConfig` names a `CustomEmailSender` function (`{"LambdaArn": ..., "LambdaVersion": "V1_0"}`)
+and a `KMSKeyID` hands its email codes to that function instead of sending them through SES, as AWS
+does. Floci invokes the function asynchronously (`InvocationType=Event`), as Cognito invokes custom
+sender triggers, with the documented event: the common trigger parameters and a `request` with
+`type` `customEmailSenderRequestV1`, `code`, `clientMetadata` and `userAttributes`. The CustomMessage
+trigger does not fire for these messages, since Cognito sends no message for it to shape.
+
+`code` is encrypted the way Cognito encrypts it: a base64 AWS Encryption SDK message (algorithm suite
+`0x0378`, signed with ECDSA P-384) whose data key comes from Floci KMS `GenerateDataKey` under the
+pool's `KMSKeyID`, with the encryption context `userpool-id` set to the pool ID. A function decrypts
+it with the AWS Encryption SDK and a KMS keyring pointed at Floci (`AWS_ENDPOINT_URL` reaches it from a
+Floci Lambda container), with a commitment policy that allows decrypting it, `REQUIRE_ENCRYPT_ALLOW_DECRYPT`,
+as in the [AWS example](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-custom-email-sender.html#custom-email-sender-code-examples).
+
+| Trigger source | Sent by |
+|---|---|
+| `CustomEmailSender_SignUp` | `SignUp` |
+| `CustomEmailSender_ResendCode` | `ResendConfirmationCode` |
+| `CustomEmailSender_ForgotPassword` | `ForgotPassword` |
+| `CustomEmailSender_UpdateUserAttribute` | `UpdateUserAttributes` changing `email` |
+| `CustomEmailSender_VerifyUserAttribute` | `GetUserAttributeVerificationCode` for `email` |
+| `CustomEmailSender_Authentication` | the `EMAIL_OTP` sign-in code of `USER_AUTH` and managed login |
+
+`userAttributes` includes `cognito:user_status`, and `clientMetadata` carries the `ClientMetadata`
+of the request that sends a sign-in code; it is `null` otherwise, as in the events Cognito sends. A pool without a `KMSKeyID`, a key Floci KMS cannot use, or a function that
+cannot be invoked fails the request with `CodeDeliveryFailureException` (`InternalErrorException`
+for a sign-in code); what the function does once invoked does not reach the caller.
+`CustomEmailSender_AdminCreateUser` and `CustomEmailSender_AccountTakeOverNotification` are not
+emulated, since Floci sends no invitations and has no threat protection, and neither is the
+`CustomSMSSender` trigger: SMS codes still go through SNS.
+
 ## User Attribute Update Verification
 
 `CreateUserPool`, `UpdateUserPool`, and `DescribeUserPool` support
