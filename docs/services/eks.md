@@ -654,8 +654,9 @@ on HTTPS for anything it doesn't recognize as loopback: so, out of the box, k3s 
 pull from the registry even though `docker push` from the host works.
 
 Floci solves this at cluster creation: each new k3s container gets a generated
-`/etc/rancher/k3s/registries.yaml` that mirrors every repository hostname the emulator
-can mint: the default account across the full region catalog, plus the path-style
+`/etc/rancher/k3s/registries.yaml` that mirrors every repository hostname the cluster
+can pull: the cluster's own account and the default account, across every region of the
+cluster's partition, plus the path-style
 `localhost:<port>` form used by `FLOCI_SERVICES_ECR_URI_STYLE=path`, to Floci's
 in-network data plane. The same image
 reference then works for the host-side push and the in-cluster pull, with no retagging

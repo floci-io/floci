@@ -724,7 +724,7 @@ public class EksClusterManager
         if (auditPolicyLocalFile != null) {
             copyAuditPolicyIntoContainer(containerId, auditPolicyLocalFile, cluster.getName());
         }
-        injectEcrRegistryMirror(containerId, cluster.getName());
+        injectEcrRegistryMirror(containerId, cluster);
         linkContainerdCertsDir(containerId, cluster.getName());
         registerPodIdentityWebhook(containerId, cluster);
         if (signingKeyFiles != null) {
@@ -1954,13 +1954,15 @@ public class EksClusterManager
     /**
      * Generates and injects {@code /etc/rancher/k3s/registries.yaml} into the (created,
      * not-yet-started) k3s container so its containerd can pull images pushed to the Floci ECR
-     * registry. Mirrors every repository hostname the emulator can mint: the default account across
-     * the full region catalog and the path-style {@code localhost:<port>} form, including
-     * {@code localhost.floci.io} aliases when TLS registry URIs are enabled, to Floci's
-     * in-network data plane. Public registries are never matched. A failure disables the
-     * mirror for this cluster but does not abort its startup, matching the webhook contract.
+     * registry. Mirrors every repository hostname the cluster can pull from Floci: its own account
+     * and the default account, across every region of the cluster's partition, plus the path-style
+     * {@code localhost:<port>} form, including {@code localhost.floci.io} aliases when TLS registry
+     * URIs are enabled, to Floci's in-network data plane. Public registries are never matched. A
+     * failure disables the mirror for this cluster but does not abort its startup, matching the
+     * webhook contract.
      */
-    void injectEcrRegistryMirror(String containerId, String clusterName) {
+    void injectEcrRegistryMirror(String containerId, Cluster cluster) {
+        String clusterName = cluster.getName();
         if (!config.services().eks().ecrRegistryMirror() || !config.services().ecr().enabled()) {
             return;
         }
@@ -1971,14 +1973,11 @@ public class EksClusterManager
                     clusterName, e.getMessage());
             return;
         }
-        List<String> regions = new ArrayList<>(AwsRegions.advertised(AwsRegions.partitionFor(config.defaultRegion())));
-        if (!regions.contains(config.defaultRegion())) {
-            regions.add(config.defaultRegion());
-        }
+        String region = AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion());
         String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
         boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
-        String content = buildRegistriesYaml(config.defaultAccountId(), regions,
-                ecrRegistryManager.advertisedPort(), endpoint, tlsUri);
+        String content = buildRegistriesYaml(mirrorAccounts(resolveClusterAccountId(cluster), config.defaultAccountId()),
+                mirrorRegions(region), ecrRegistryManager.advertisedPort(), endpoint, tlsUri);
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
@@ -2158,6 +2157,25 @@ public class EksClusterManager
         }
     }
 
+    /** Every region of the cluster region's partition, and the cluster region itself if it is unpublished. */
+    static List<String> mirrorRegions(String clusterRegion) {
+        List<String> regions = new ArrayList<>(AwsRegions.advertised(AwsRegions.partitionFor(clusterRegion)));
+        if (!regions.contains(clusterRegion)) {
+            regions.add(clusterRegion);
+        }
+        return regions;
+    }
+
+    /** The cluster's account first, then the default account when it differs. */
+    static List<String> mirrorAccounts(String clusterAccountId, String defaultAccountId) {
+        Set<String> accounts = new LinkedHashSet<>();
+        accounts.add(clusterAccountId);
+        if (defaultAccountId != null && !defaultAccountId.isBlank()) {
+            accounts.add(defaultAccountId);
+        }
+        return List.copyOf(accounts);
+    }
+
     /**
      * Builds the k3s registries.yaml content. One mirror entry per hostname-style repository URI
      * ({@code <account>.dkr.ecr.<region>.localhost:<port>}) plus one for the path-style form
@@ -2173,11 +2191,19 @@ public class EksClusterManager
 
     static String buildRegistriesYaml(String accountId, List<String> regions, int advertisedPort,
                                      String endpoint, boolean tlsUri) {
+        return buildRegistriesYaml(List.of(accountId), regions, advertisedPort, endpoint, tlsUri);
+    }
+
+    static String buildRegistriesYaml(List<String> accountIds, List<String> regions, int advertisedPort,
+                                     String endpoint, boolean tlsUri) {
         StringBuilder yaml = new StringBuilder("mirrors:\n");
-        for (String region : regions) {
-            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + advertisedPort, endpoint);
-            if (tlsUri) {
-                appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + advertisedPort, endpoint);
+        for (String accountId : accountIds) {
+            for (String region : regions) {
+                appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + advertisedPort, endpoint);
+                if (tlsUri) {
+                    appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + advertisedPort,
+                            endpoint);
+                }
             }
         }
         appendMirror(yaml, "localhost:" + advertisedPort, endpoint);
