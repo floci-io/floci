@@ -22,8 +22,6 @@ import org.bouncycastle.crypto.signers.PSSSigner;
 import org.jboss.logging.Logger;
 
 import javax.crypto.Cipher;
-import javax.crypto.spec.OAEPParameterSpec;
-import javax.crypto.spec.PSource;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.KeyPairGenerator;
@@ -32,7 +30,6 @@ import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.security.interfaces.RSAPublicKey;
-import java.security.spec.MGF1ParameterSpec;
 import java.util.Base64;
 
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
@@ -152,19 +149,13 @@ final class RsaKeyType implements KmsKeyType {
         }
     }
 
-    // The JDK OAEP transformations default MGF1 to SHA-1. KMS RSAES_OAEP_SHA_256 uses MGF1 over SHA-256.
     private static byte[] oaep(int mode, KmsKey key, KmsKeySpec.Algorithm algorithm, byte[] input) {
         try {
             String digest = algorithm == KmsKeySpec.Algorithm.RSAES_OAEP_SHA_1 ? "SHA-1" : "SHA-256";
-            Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
-            OAEPParameterSpec params = new OAEPParameterSpec(digest, "MGF1", new MGF1ParameterSpec(digest),
-                    PSource.PSpecified.DEFAULT);
             if (mode == Cipher.ENCRYPT_MODE) {
-                cipher.init(mode, AsymmetricKeys.publicKey(key, "RSA"), params);
-            } else {
-                cipher.init(mode, AsymmetricKeys.privateKey(key, "RSA"), params);
+                return CipherUtils.encryptRsaOaep(AsymmetricKeys.publicKey(key, "RSA"), digest, input);
             }
-            return cipher.doFinal(input);
+            return CipherUtils.decryptRsaOaep(AsymmetricKeys.privateKey(key, "RSA"), digest, input);
         } catch (Exception e) {
             if (mode == Cipher.DECRYPT_MODE) {
                 LOG.debugv(e, "RSA OAEP decrypt failed for key {0}", key.getKeyId());

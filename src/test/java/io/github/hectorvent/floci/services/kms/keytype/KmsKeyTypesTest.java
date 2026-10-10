@@ -9,12 +9,19 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import javax.crypto.Cipher;
 import javax.crypto.Mac;
+import javax.crypto.spec.OAEPParameterSpec;
+import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.KeyFactory;
 import java.security.MessageDigest;
+import java.security.PrivateKey;
 import java.security.SecureRandom;
+import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.EnumMap;
@@ -198,6 +205,22 @@ class KmsKeyTypesTest {
 
         assertEquals(256, ciphertext.length);
         assertArrayEquals(MESSAGE, keyType.decrypt(key, algorithm, ciphertext));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"RSAES_OAEP_SHA_1, SHA-1", "RSAES_OAEP_SHA_256, SHA-256"})
+    void rsaCiphertextDecryptsWithAPlainJdkOaepCipher(String algorithmName, String digest)
+            throws GeneralSecurityException {
+        KmsKey key = generatedKey(KmsKeySpec.RSA_2048, REGION);
+        byte[] ciphertext = keyTypes.of(KmsKeySpec.RSA_2048)
+                .encrypt(key, KmsKeySpec.Algorithm.valueOf(algorithmName), MESSAGE);
+        PrivateKey privateKey = KeyFactory.getInstance("RSA").generatePrivate(
+                new PKCS8EncodedKeySpec(Base64.getDecoder().decode(key.getPrivateKeyEncoded())));
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
+        cipher.init(Cipher.DECRYPT_MODE, privateKey,
+                new OAEPParameterSpec(digest, "MGF1", new MGF1ParameterSpec(digest), PSource.PSpecified.DEFAULT));
+
+        assertArrayEquals(MESSAGE, cipher.doFinal(ciphertext));
     }
 
     @Test

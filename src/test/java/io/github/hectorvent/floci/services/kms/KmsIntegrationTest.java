@@ -36,6 +36,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -3128,6 +3129,43 @@ class KmsIntegrationTest {
         describeKey(keyId)
                 .body("KeyMetadata.KeyState", equalTo("Enabled"))
                 .body("KeyMetadata.Enabled", equalTo(true));
+    }
+
+    /**
+     * Encrypt returns plain RSAES-OAEP ciphertext: whoever holds the imported private key decrypts it
+     * with a standard JDK cipher, outside Floci.
+     */
+    @ParameterizedTest
+    @CsvSource({"RSAES_OAEP_SHA_1, SHA-1", "RSAES_OAEP_SHA_256, SHA-256"})
+    void rsaEncryptOutputDecryptsWithTheImportedPrivateKey(String algorithm, String digest) throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        KeyPair importedKeyPair = generator.generateKeyPair();
+        String keyId = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\",\"KeyUsage\":\"ENCRYPT_DECRYPT\",\"KeySpec\":\"RSA_2048\"}")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+        JsonPath parameters = callKms("GetParametersForImport", ("{\"KeyId\":\"%s\","
+                        + "\"WrappingAlgorithm\":\"RSA_AES_KEY_WRAP_SHA_256\",\"WrappingKeySpec\":\"RSA_2048\"}")
+                        .formatted(keyId))
+                .then().statusCode(200)
+                .extract().jsonPath();
+        String wrapped = Base64.getEncoder().encodeToString(wrapWithRsaAesSha256(
+                parameters.getString("PublicKey"), importedKeyPair.getPrivate().getEncoded()));
+        callKms("ImportKeyMaterial", ("{\"KeyId\":\"%s\",\"ImportToken\":\"%s\",\"EncryptedKeyMaterial\":\"%s\","
+                        + "\"ExpirationModel\":\"KEY_MATERIAL_DOES_NOT_EXPIRE\"}")
+                        .formatted(keyId, parameters.getString("ImportToken"), wrapped))
+                .then().statusCode(200);
+        byte[] plaintext = "message".getBytes(StandardCharsets.UTF_8);
+
+        String ciphertext = callKms("Encrypt", "{\"KeyId\":\"%s\",\"Plaintext\":\"%s\",\"EncryptionAlgorithm\":\"%s\"}"
+                        .formatted(keyId, Base64.getEncoder().encodeToString(plaintext), algorithm))
+                .then().statusCode(200)
+                .extract().path("CiphertextBlob");
+
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
+        cipher.init(Cipher.DECRYPT_MODE, importedKeyPair.getPrivate(),
+                new OAEPParameterSpec(digest, "MGF1", new MGF1ParameterSpec(digest), PSource.PSpecified.DEFAULT));
+        assertArrayEquals(plaintext, cipher.doFinal(Base64.getDecoder().decode(ciphertext)));
     }
 
     @Test

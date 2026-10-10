@@ -4,6 +4,7 @@ import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
+import javax.crypto.spec.SecretKeySpec;
 import java.security.GeneralSecurityException;
 import java.security.InvalidKeyException;
 import java.security.Key;
@@ -33,14 +34,17 @@ public final class CipherUtils {
                 .generatePublic(publicKeySpec);
     }
 
+    // RSA-OAEP encryption runs as a key wrap, which gives the same ciphertext as ENCRYPT_MODE; some
+    // providers, such as BC-FIPS, offer RSA-OAEP encryption only that way. Decryption unwraps to match.
     public static byte[] encryptRsaOaep(PublicKey key, String digest, byte[] plaintext) throws GeneralSecurityException {
-        return rsaOaepCipher(Cipher.ENCRYPT_MODE, key, digest)
-                .doFinal(plaintext);
+        return rsaOaepCipher(Cipher.WRAP_MODE, key, digest)
+                .wrap(new SecretKeySpec(plaintext, "GENERIC"));
     }
 
     public static byte[] decryptRsaOaep(PrivateKey key, String digest, byte[] ciphertext) throws GeneralSecurityException {
-        return rsaOaepCipher(Cipher.DECRYPT_MODE, key, digest)
-                .doFinal(ciphertext);
+        return rsaOaepCipher(Cipher.UNWRAP_MODE, key, digest)
+                .unwrap(ciphertext, "GENERIC", Cipher.SECRET_KEY)
+                .getEncoded();
     }
 
     /**
@@ -84,6 +88,7 @@ public final class CipherUtils {
         return aesKwpCipher(Cipher.DECRYPT_MODE, aesKey).doFinal(wrappedMaterial);
     }
 
+    // The JDK OAEP transformations default MGF1 to SHA-1. KMS RSAES_OAEP_SHA_256 uses MGF1 over SHA-256.
     private static Cipher rsaOaepCipher(int mode, Key key, String digest) throws GeneralSecurityException {
         Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
         OAEPParameterSpec parameterSpec = new OAEPParameterSpec(digest, "MGF1",
