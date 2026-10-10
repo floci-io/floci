@@ -1,13 +1,16 @@
 package io.github.hectorvent.floci.services.scheduler;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.EventBridgeParameters;
@@ -21,24 +24,30 @@ import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -56,6 +65,8 @@ class ScheduleInvokerTest {
     private EventBridgeService eventBridgeService;
     private EcsService ecsService;
     private StepFunctionsService stepFunctionsService;
+    private RedshiftDataService redshiftDataService;
+    private final List<Runnable> submittedStatements = new ArrayList<>();
     private ScheduleInvoker invoker;
 
     @BeforeEach
@@ -66,10 +77,19 @@ class ScheduleInvokerTest {
         eventBridgeService = mock(EventBridgeService.class);
         ecsService = mock(EcsService.class);
         stepFunctionsService = mock(StepFunctionsService.class);
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        redshiftDataService = mock(RedshiftDataService.class);
+        invoker = invokerWithRedshiftEnabled(true, true);
+    }
+
+    private ScheduleInvoker invokerWithRedshiftEnabled(boolean redshiftEnabled, boolean redshiftDataEnabled) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.baseUrl()).thenReturn("http://localhost:4566");
-        invoker = new ScheduleInvoker(sqsService, lambdaService, snsService,
-                eventBridgeService, ecsService, stepFunctionsService, new ObjectMapper(), config);
+        ServiceRegistry serviceRegistry = mock(ServiceRegistry.class);
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(redshiftEnabled && redshiftDataEnabled);
+        // Queue instead of run, so a test can see that the invoker returns before the SQL runs.
+        return new ScheduleInvoker(sqsService, lambdaService, snsService,
+                eventBridgeService, ecsService, stepFunctionsService, redshiftDataService,
+                new ObjectMapper(), config, serviceRegistry, submittedStatements::add);
     }
 
     /** Delivers one occurrence of a schedule in {@code region} whose target is {@code target}. */
@@ -316,8 +336,9 @@ class ScheduleInvokerTest {
     }
 
     @Test
-    void universalSqsSendMessageForwardsStringAndBase64BinaryMessageAttributes() {
+    void universalSqsSendMessageForwardsStringAndBinaryMessageAttributesWithoutBase64Decoding() {
         String queueUrl = "http://localhost:4566/000000000000/q.fifo";
+        // AWS delivers a base64-looking BinaryValue as its own text, it does not decode it
         String binaryValueBase64 = "aGVsbG8=";
         Target target = new Target();
         target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");
@@ -349,8 +370,162 @@ class ScheduleInvokerTest {
         MessageAttributeValue binaryAttribute = attributes.get("BinaryAttr");
         assertNotNull(binaryAttribute);
         assertEquals("Binary.Custom", binaryAttribute.getDataType());
-        assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), binaryAttribute.getBinaryValue());
+        assertArrayEquals(binaryValueBase64.getBytes(StandardCharsets.UTF_8), binaryAttribute.getBinaryValue());
         assertNull(binaryAttribute.getStringValue());
+    }
+
+    @Test
+    void universalRedshiftDataExecuteStatementForwardsClusterRequestAndRegion() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\","
+                + "\"DbUser\":\"admin\",\"Sql\":\"select 1\"}");
+
+        invoke(target, "eu-west-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(redshiftDataService).submitStatement(request.capture(), eq("eu-west-1"));
+        assertEquals("select 1", request.getValue().path("Sql").asText());
+        assertEquals("analytics", request.getValue().path("ClusterIdentifier").asText());
+    }
+
+    @Test
+    void universalRedshiftDataExecuteStatementForwardsWorkgroupName() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"WorkgroupName\":\"wg-1\",\"Database\":\"dev\",\"Sql\":\"select 1\"}");
+
+        invoke(target, "us-east-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(redshiftDataService).submitStatement(request.capture(), eq("us-east-1"));
+        assertEquals("wg-1", request.getValue().path("WorkgroupName").asText());
+        assertTrue(request.getValue().path("ClusterIdentifier").isMissingNode());
+    }
+
+    @Test
+    void universalRedshiftDataBatchExecuteStatementForwardsSqls() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:batchExecuteStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\","
+                + "\"DbUser\":\"admin\",\"Sqls\":[\"select 1\",\"select 2\"]}");
+
+        invoke(target, "us-east-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(redshiftDataService).submitBatch(request.capture(), eq("us-east-1"));
+        assertEquals(2, request.getValue().path("Sqls").size());
+    }
+
+    @Test
+    void universalRedshiftDataRejectionPropagatesForRetryAndDeadLetterHandling() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"Sql\":\"select 1\"}");
+        when(redshiftDataService.submitStatement(any(JsonNode.class), anyString()))
+                .thenThrow(new AwsException("ValidationException", "no cluster", 400));
+
+        assertThrows(AwsException.class, () -> invoke(target, "us-east-1"));
+        assertTrue(submittedStatements.isEmpty());
+    }
+
+    @Test
+    void universalRedshiftDataRunsTheStatementOffTheCallingThread() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\",\"Sql\":\"select 1\"}");
+        Runnable statement = mock(Runnable.class);
+        when(redshiftDataService.submitStatement(any(JsonNode.class), anyString())).thenReturn(statement);
+
+        invoke(target, "us-east-1");
+
+        verifyNoInteractions(statement);
+        assertEquals(1, submittedStatements.size());
+        submittedStatements.get(0).run();
+        verify(statement).run();
+    }
+
+    @Test
+    void universalRedshiftDataFailedStatementDoesNotEscapeTheExecutor() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Database\":\"dev\",\"Sql\":\"select 1\"}");
+        when(redshiftDataService.submitStatement(any(JsonNode.class), anyString()))
+                .thenReturn(() -> { throw new IllegalStateException("boom"); });
+
+        invoke(target, "us-east-1");
+
+        submittedStatements.get(0).run();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,true", "true,false"})
+    void universalRedshiftDataFailsWithoutCallingTheServiceWhenItIsDisabled(
+            boolean redshiftEnabled, boolean redshiftDataEnabled) {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"ClusterIdentifier\":\"analytics\",\"Sql\":\"select 1\"}");
+        ScheduleInvoker disabledInvoker = invokerWithRedshiftEnabled(redshiftEnabled, redshiftDataEnabled);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> disabledInvoker.invoke(scheduleIn("us-east-1", target), SCHEDULED_AT));
+
+        assertEquals("ServiceNotAvailableException", failure.getErrorCode());
+        verifyNoInteractions(redshiftDataService);
+    }
+
+    @Test
+    void universalRedshiftDataNonJsonInputFailsWithInvalidParameterValue() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:executeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("not json");
+
+        AwsException failure = assertThrows(AwsException.class, () -> invoke(target, "us-east-1"));
+
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        verifyNoInteractions(redshiftDataService);
+    }
+
+    @Test
+    void universalRedshiftDataOtherActionsStayUnsupported() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:redshiftdata:describeStatement");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"Id\":\"stmt-1\"}");
+
+        assertThrows(UnsupportedOperationException.class, () -> invoke(target, "us-east-1"));
+        verifyNoInteractions(redshiftDataService);
+    }
+
+    @Test
+    void universalSqsSendMessageUsesUtf8BytesOfRawBinaryValue() {
+        String queueUrl = "http://localhost:4566/000000000000/q";
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        // Protobuf-like payload with control characters plus U+0080 and U+00FF, as JSON escapes
+        target.setInput("{\"QueueUrl\":\"" + queueUrl + "\","
+                + "\"MessageBody\":\"hi\","
+                + "\"MessageAttributes\":{"
+                + "\"BinaryAttr\":{\"DataType\":\"Binary\",\"BinaryValue\":\"\\nA\\u0080\\u0001\\u00ff\\u0000B\"}}}");
+
+        invoke(target, "us-east-1");
+
+        ArgumentCaptor<Map<String, MessageAttributeValue>> attributesCaptor = ArgumentCaptor.captor();
+        verify(sqsService).sendMessage(eq(queueUrl), eq("hi"), eq(0), isNull(), isNull(),
+                attributesCaptor.capture(), eq("us-east-1"));
+
+        // Same bytes real AWS delivers for this Input: the UTF-8 encoding of the decoded JSON string
+        byte[] expected = {0x0a, 0x41, (byte) 0xc2, (byte) 0x80, 0x01, (byte) 0xc3, (byte) 0xbf, 0x00, 0x42};
+        assertArrayEquals(expected, attributesCaptor.getValue().get("BinaryAttr").getBinaryValue());
     }
 
     @Test
@@ -600,5 +775,82 @@ class ScheduleInvokerTest {
         assertThrows(UnsupportedOperationException.class, () -> invoke(target, "us-east-1"));
 
         verifyNoInteractions(sqsService, lambdaService, snsService, eventBridgeService, ecsService);
+    }
+
+    private static final String CONTEXT_INPUT = "{\"arn\":\"<aws.scheduler.schedule-arn>\","
+            + "\"time\":\"<aws.scheduler.scheduled-time>\",\"id\":\"<aws.scheduler.execution-id>\","
+            + "\"attempt\":<aws.scheduler.attempt-number>}";
+    private static final String SCHEDULE_ARN =
+            "arn:aws:scheduler:us-east-1:000000000000:schedule/default/test-schedule";
+
+    @Test
+    void templatedTargetInputHasContextAttributesReplaced() {
+        Target target = new Target();
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:test-queue");
+        target.setInput(CONTEXT_INPUT);
+
+        String request = invoker.invoke(scheduleIn("us-east-1", target),
+                Instant.parse("2026-04-21T09:17:54.678Z"), "d32c5kddcf5bb8c3", 3);
+
+        String expected = "{\"arn\":\"" + SCHEDULE_ARN + "\",\"time\":\"2026-04-21T09:17:54Z\","
+                + "\"id\":\"d32c5kddcf5bb8c3\",\"attempt\":3}";
+        verify(sqsService).sendMessage(anyString(), eq(expected), eq(0), isNull(), isNull(), eq("us-east-1"));
+        assertTrue(request.contains("2026-04-21T09:17:54Z"), request);
+    }
+
+    @Test
+    void materializedRequestUsesTheSameContextAttributes() {
+        Target target = new Target();
+        target.setArn("arn:aws:lambda:us-east-1:000000000000:function:fn");
+        target.setInput(CONTEXT_INPUT);
+
+        String request = invoker.materializeRequest(scheduleIn("us-east-1", target), SCHEDULED_AT,
+                "abcdef0123456789", 1);
+
+        assertTrue(request.contains("abcdef0123456789"), request);
+        assertTrue(request.contains("2026-04-21T09:17:54Z"), request);
+        assertTrue(request.contains("\\\"attempt\\\":1"), request);
+        assertFalse(request.contains("<aws.scheduler."), request);
+    }
+
+    @Test
+    void universalTargetInputHasContextAttributesReplacedBeforeTheCall() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"QueueUrl\":\"http://localhost:4566/000000000000/q\","
+                + "\"MessageBody\":\"<aws.scheduler.schedule-arn>|<aws.scheduler.scheduled-time>|"
+                + "<aws.scheduler.execution-id>|<aws.scheduler.attempt-number>\"}");
+
+        invoker.invoke(scheduleIn("us-east-1", target), SCHEDULED_AT, "0123456789abcdef", 2);
+
+        verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/q"),
+                eq(SCHEDULE_ARN + "|2026-04-21T09:17:54Z|0123456789abcdef|2"), eq(0), isNull(), isNull(),
+                argThat(attrs -> attrs == null || attrs.isEmpty()), eq("us-east-1"));
+    }
+
+    @Test
+    void inputWithoutContextAttributesIsDeliveredUnchanged() {
+        Target target = new Target();
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:test-queue");
+        target.setInput("{\"plain\":\"<b>not a keyword</b>\"}");
+
+        invoker.invoke(scheduleIn("us-east-1", target), SCHEDULED_AT, "0123456789abcdef", 4);
+
+        verify(sqsService).sendMessage(anyString(), eq("{\"plain\":\"<b>not a keyword</b>\"}"), eq(0),
+                isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
+    void twoArgumentInvokeIsTheFirstAttemptUnderAFreshExecutionId() {
+        Target target = new Target();
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:test-queue");
+        target.setInput("<aws.scheduler.execution-id>/<aws.scheduler.attempt-number>");
+
+        invoke(target, "us-east-1");
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqsService).sendMessage(anyString(), body.capture(), eq(0), isNull(), isNull(), eq("us-east-1"));
+        assertTrue(body.getValue().matches("[0-9a-f]{16}/1"), body.getValue());
     }
 }

@@ -319,6 +319,26 @@ class IotDomainConfigurationIntegrationTest {
     }
 
     @Test
+    void createWithTrailingContentAfterTheBodyIsASerializationError() {
+        given()
+            .contentType("application/json")
+            .body(createBody("trailing.it.example.com", "DATA") + " trailing")
+        .when()
+            .post("/domainConfigurations/it-domain-trailing")
+        .then()
+            .statusCode(400)
+            .header("x-amzn-ErrorType", equalTo("SerializationException"))
+            .body("__type", equalTo("SerializationException"));
+
+        given()
+        .when()
+            .get("/domainConfigurations/it-domain-trailing")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
     void describeEndpointAcceptsTheCredentialProviderEndpointType() {
         given()
             .queryParam("endpointType", "iot:CredentialProvider")

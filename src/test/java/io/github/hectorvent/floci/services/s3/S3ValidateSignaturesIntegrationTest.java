@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
+import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
+import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -27,11 +29,11 @@ import static org.hamcrest.Matchers.equalTo;
  * {@code floci.auth.validate-signatures} authenticates every signed S3 request, whichever
  * placement carries the signature, without authorizing it: a forged or unknown credential is
  * refused, while bucket policies are not evaluated and unsigned requests pass, as they do with
- * {@code enforce-auth} off. Shares {@link PreSignedUrlIntegrationTest}'s profile, which covers the
- * presigned query-string placement.
+ * {@code enforce-auth} off. Shares {@link ValidateSignaturesProfile} with
+ * {@link PreSignedUrlIntegrationTest}, which covers the presigned query-string placement.
  */
 @QuarkusTest
-@TestProfile(PreSignedUrlIntegrationTest.PresignValidationProfile.class)
+@TestProfile(ValidateSignaturesProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class S3ValidateSignaturesIntegrationTest {
 
@@ -295,21 +297,21 @@ class S3ValidateSignaturesIntegrationTest {
     }
 
     private static void createIamUser(String userName) {
-        String authorization = "AWS4-HMAC-SHA256 Credential=test/" + CREDENTIAL_DATE
-                + "/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=unused";
+        // validate-signatures verifies IAM's signatures too, so these calls carry real ones.
+        AwsRequestSigner iam = AwsRequestSigner.signedAs("test", "test", "iam");
         given()
-            .formParam("Action", "CreateUser")
-            .formParam("UserName", userName)
-            .header("Authorization", authorization)
+            .filter(iam)
+            .contentType("application/x-www-form-urlencoded")
+            .body("Action=CreateUser&UserName=" + userName + "&Version=2010-05-08")
         .when()
             .post("/")
         .then()
             .statusCode(200);
 
         XmlPath key = given()
-            .formParam("Action", "CreateAccessKey")
-            .formParam("UserName", userName)
-            .header("Authorization", authorization)
+            .filter(iam)
+            .contentType("application/x-www-form-urlencoded")
+            .body("Action=CreateAccessKey&UserName=" + userName + "&Version=2010-05-08")
         .when()
             .post("/")
         .then()

@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.iot.IotAuthorizerController;
 import io.github.hectorvent.floci.services.iot.IotController;
 import io.github.hectorvent.floci.services.iot.IotDataController;
 import io.github.hectorvent.floci.services.iot.IotDomainConfigurationController;
+import io.github.hectorvent.floci.services.iot.IotFleetIndexingController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionController;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsController;
@@ -650,7 +651,7 @@ public class ResolvedServiceCatalog {
                         // signs under its own name while IotController serves its /things/*/jobs routes
                         Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
                         Set.of(IotController.class, IotDomainConfigurationController.class,
-                                IotAuthorizerController.class)),
+                                IotAuthorizerController.class, IotFleetIndexingController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),

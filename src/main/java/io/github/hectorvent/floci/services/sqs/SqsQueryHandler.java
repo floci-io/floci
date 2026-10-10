@@ -17,6 +17,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -331,6 +332,8 @@ public class SqsQueryHandler {
 
     private Response handleDeleteMessageBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount("DeleteMessageBatchRequestEntry",
+                countBatchEntries(params, "DeleteMessageBatchRequestEntry"));
         XmlBuilder xml = new XmlBuilder();
 
         for (int i = 1; ; i++) {
@@ -355,6 +358,8 @@ public class SqsQueryHandler {
 
     private Response handleSendMessageBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount("SendMessageBatchRequestEntry",
+                countBatchEntries(params, "SendMessageBatchRequestEntry"));
         XmlBuilder xml = new XmlBuilder();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
@@ -504,6 +509,8 @@ public class SqsQueryHandler {
 
     private Response handleChangeMessageVisibilityBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount("ChangeMessageVisibilityBatchRequestEntry",
+                countBatchEntries(params, "ChangeMessageVisibilityBatchRequestEntry"));
         List<SqsService.ChangeVisibilityBatchEntry> entries = new ArrayList<>();
         for (int i = 1; ; i++) {
             String id = getParam(params, "ChangeMessageVisibilityBatchRequestEntry." + i + ".Id");
@@ -572,6 +579,24 @@ public class SqsQueryHandler {
     }
 
     // --- Helpers ---
+
+    private int countBatchEntries(MultivaluedMap<String, String> params, String entryPrefix) {
+        if (params == null) {
+            return 0;
+        }
+        String prefix = entryPrefix + ".";
+        Set<String> indices = new HashSet<>();
+        for (String key : params.keySet()) {
+            if (key != null && key.startsWith(prefix)) {
+                int dotIndex = key.indexOf('.', prefix.length());
+                String index = dotIndex > 0 ? key.substring(prefix.length(), dotIndex) : key.substring(prefix.length());
+                if (!index.isEmpty()) {
+                    indices.add(index);
+                }
+            }
+        }
+        return indices.size();
+    }
 
     private String getParam(MultivaluedMap<String, String> params, String name) {
         return params.getFirst(name);

@@ -1367,6 +1367,93 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void endpointFallbackAddressesResolveSubnetHashCollisions() {
+        EndpointAddressFixture fixture = endpointAddressFixture("2001:db8:1::/64", "2001:db8:2::/64");
+        String firstSubnet = "subnet-00000000";
+        String secondSubnet = "subnet-00000088";
+        assertEquals(Math.floorMod(firstSubnet.hashCode(), 256), Math.floorMod(secondSubnet.hashCode(), 256));
+
+        Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+        assertEquals(2, addresses.size());
+        assertNotEquals(addresses.get(firstSubnet), addresses.get(secondSubnet));
+        assertEquals(addresses, endpointAddressesBySubnet(fixture.service()));
+
+        fixture.endpoint().setSubnetIds(List.of(secondSubnet, firstSubnet));
+        assertEquals(addresses, endpointAddressesBySubnet(fixture.service()),
+                "reordering subnets must not change their fallback addresses");
+    }
+
+    @Test
+    void endpointFallbackAddressesAreDistinctForSubnetsWithNoIpv4Cidr() {
+        EndpointAddressFixture fixture = endpointAddressFixture(null, null);
+
+        Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+        assertEquals(2, addresses.size());
+        assertNotEquals(addresses.get("subnet-00000000"), addresses.get("subnet-00000088"));
+        assertEquals(addresses, endpointAddressesBySubnet(fixture.service()));
+    }
+
+    @Test
+    void endpointFallbackAddressesDoNotReusePinnedOrIpv4DerivedAddresses() {
+        for (boolean pinned : new boolean[]{false, true}) {
+            EndpointAddressFixture fixture = endpointAddressFixture("2001:db8:1::/64", "172.31.112.0/24");
+            int host = 200 + Math.floorMod(fixture.endpoint().getVpcEndpointId().hashCode(), 50);
+            String fixedAddress = "172.31.112." + host;
+            if (pinned) {
+                fixture.endpoint().setSubnetConfigurations(List.of(
+                        new VpcEndpointSubnetConfiguration("subnet-00000088", fixedAddress, null)));
+            }
+
+            Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+            assertEquals(fixedAddress, addresses.get("subnet-00000088"));
+            assertNotEquals(fixedAddress, addresses.get("subnet-00000000"));
+            assertEquals(addresses, endpointAddressesBySubnet(fixture.service()));
+        }
+    }
+
+    @Test
+    void endpointFallbackAddressesDoNotReusePinnedAddressesWithLeadingZeros() {
+        EndpointAddressFixture fixture = endpointAddressFixture("2001:db8:1::/64", "172.31.112.0/24");
+        int host = 200 + Math.floorMod(fixture.endpoint().getVpcEndpointId().hashCode(), 50);
+        String pinnedAddress = "172.31.112.0" + host;
+        fixture.service().modifyVpcEndpoint("us-east-1", fixture.endpoint().getVpcEndpointId(),
+                List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), null, null, null,
+                List.of(new VpcEndpointSubnetConfiguration("subnet-00000088", pinnedAddress, null)));
+
+        Map<String, String> addresses = endpointAddressesBySubnet(fixture.service());
+        assertEquals(pinnedAddress, addresses.get("subnet-00000088"));
+        assertNotEquals("172.31.112." + host, addresses.get("subnet-00000000"));
+        assertEquals(addresses, endpointAddressesBySubnet(fixture.service()));
+    }
+
+    private static EndpointAddressFixture endpointAddressFixture(String firstCidr, String secondCidr) {
+        AccountAwareStorageBackend<Subnet> subnetStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-subnets.json", subnetStore)));
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "172.31.0.0/16", false).getVpcId();
+        String[] subnetIds = {"subnet-00000000", "subnet-00000088"};
+        String[] cidrs = {firstCidr, secondCidr};
+        for (int i = 0; i < subnetIds.length; i++) {
+            Subnet subnet = new Subnet();
+            subnet.setSubnetId(subnetIds[i]);
+            subnet.setVpcId(vpcId);
+            subnet.setRegion(region);
+            subnet.setCidrBlock(cidrs[i]);
+            subnet.setAvailabilityZone(region + (i == 0 ? "a" : "b"));
+            subnetStore.put(region + "::" + subnetIds[i], subnet);
+        }
+        VpcEndpoint endpoint = service.createVpcEndpoint(region, vpcId,
+                "com.amazonaws.us-east-1.ec2", "Interface",
+                List.of(), List.of(subnetIds), List.of(), null, null, List.of());
+        return new EndpointAddressFixture(service, endpoint);
+    }
+
+    private record EndpointAddressFixture(Ec2Service service, VpcEndpoint endpoint) {
+    }
+
+    @Test
     void subnetConfigurationPinsTheEndpointInterfaceAddress() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),

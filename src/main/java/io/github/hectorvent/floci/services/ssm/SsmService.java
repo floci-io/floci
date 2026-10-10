@@ -62,6 +62,12 @@ public class SsmService implements ResourceProvider {
     private static final String TAG_KEY_REGEX = "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$";
     private static final Pattern TAG_KEY_PATTERN = Pattern.compile(TAG_KEY_REGEX);
     private static final int MAX_TAG_KEY_LENGTH = 128;
+    /** The tail AWS appends to every rejected parameter name, whichever prefix the operation reserves. */
+    private static final String PARAMETER_NAME_FORMAT_RULE = "If formed as a path, it can consist of sub-paths "
+            + "divided by slash symbol; each sub-path can be formed as a mix of letters, numbers and the following "
+            + "3 symbols .-_";
+    /** A bare name, or a path of non-empty segments; AWS also lets a colon through here. */
+    private static final Pattern UNLABEL_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_.:-]+|(/[A-Za-z0-9_.:-]+)+");
 
     /**
      * Account-default values for the service settings floci models. AWS rejects
@@ -454,9 +460,7 @@ public class SsmService implements ResourceProvider {
                 || lower.startsWith("aws/") || lower.startsWith("ssm/")) {
             throw new AwsException("ValidationException",
                     "Parameter name: can't be prefixed with \"aws\" or \"ssm\" (case-insensitive). "
-                            + "If formed as a path, it can consist of sub-paths divided by slash symbol; "
-                            + "each sub-path can be formed as a mix of letters, numbers and the following "
-                            + "3 symbols .-_", 400);
+                            + PARAMETER_NAME_FORMAT_RULE, 400);
         }
     }
 
@@ -560,7 +564,7 @@ public class SsmService implements ResourceProvider {
         return !paramName.substring(normalizedPath.length()).contains("/");
     }
 
-    public void deleteParameter(String name, String region) {
+    public synchronized void deleteParameter(String name, String region) {
         String storageKey = regionKey(region, name);
         if (parameterStore.get(storageKey).isEmpty()) {
             throw new AwsException("ParameterNotFound",
@@ -571,7 +575,7 @@ public class SsmService implements ResourceProvider {
         LOG.infov("Deleted parameter: {0}", name);
     }
 
-    public List<String> deleteParameters(List<String> names, String region) {
+    public synchronized List<String> deleteParameters(List<String> names, String region) {
         List<String> deleted = new ArrayList<>();
         for (String name : names) {
             String storageKey = regionKey(region, name);
@@ -686,28 +690,7 @@ public class SsmService implements ResourceProvider {
 
     public synchronized LabelParameterVersionResult labelParameterVersion(String name, Long parameterVersion,
                                                              List<String> labels, String region) {
-        if (labels == null || labels.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
-                    400);
-        }
-        if (labels.size() > 10) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to 10",
-                    400);
-        }
-        for (String label : labels) {
-            if (label == null || label.isEmpty()) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
-                        400);
-            }
-            if (label.length() > 100) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to 100",
-                        400);
-            }
-        }
+        validateLabelList(labels);
 
         String storageKey = regionKey(region, name);
         Parameter current = parameterStore.get(storageKey).orElseThrow(() ->
@@ -789,6 +772,109 @@ public class SsmService implements ResourceProvider {
     public synchronized LabelParameterVersionResult labelParameterVersion(String name, long parameterVersion,
                                                              List<String> labels, String region) {
         return labelParameterVersion(name, Long.valueOf(parameterVersion), labels, region);
+    }
+
+    public record UnlabelParameterVersionResult(List<String> removedLabels, List<String> invalidLabels) {}
+
+    /**
+     * Detaches labels from one version. A label that is not on that version, including one
+     * attached to a different version, is reported in {@code invalidLabels} and left in place.
+     * As on AWS, {@code removedLabels} follows the order the labels are stored on the version,
+     * {@code invalidLabels} the order of the request, and error messages echo the name as sent
+     * although the lookup ignores surrounding whitespace.
+     */
+    public synchronized UnlabelParameterVersionResult unlabelParameterVersion(String name, long parameterVersion,
+                                                                             List<String> labels, String region) {
+        validateLabelList(labels);
+        String trimmed = name.strip();
+        if (AwsArnUtils.isArn(trimmed)) {
+            throw new AwsException("ValidationException", "Parameter ARN is not supported for this operation.", 400);
+        }
+        String bare = trimmed.startsWith("/") ? trimmed.substring(1) : trimmed;
+        String lower = bare.toLowerCase(Locale.ROOT);
+        if (!UNLABEL_NAME_PATTERN.matcher(trimmed).matches() || lower.startsWith("ssm")) {
+            throw new AwsException("ValidationException",
+                    "Parameter name: can't be prefixed with \"ssm\" (case-insensitive). "
+                            + PARAMETER_NAME_FORMAT_RULE, 400);
+        }
+        if (lower.startsWith("aws")) { // partition-literal: reserved parameter name prefix
+            throw new AwsException("AccessDeniedException",
+                    "No access to reserved parameter name: " + bare + ".", 400);
+        }
+
+        String storageKey = regionKey(region, trimmed);
+        if (parameterStore.get(storageKey).isEmpty()) {
+            throw new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400);
+        }
+
+        List<ParameterHistory> existingHistory = historyStore.get(storageKey).orElse(List.of());
+        List<ParameterHistory> updatedHistory = new ArrayList<>(existingHistory.size());
+        ParameterHistory targetCopy = null;
+        for (ParameterHistory h : existingHistory) {
+            ParameterHistory copy = new ParameterHistory(h);
+            if (copy.getVersion() == parameterVersion) {
+                targetCopy = copy;
+            }
+            updatedHistory.add(copy);
+        }
+        if (targetCopy == null) {
+            throw new AwsException("ParameterVersionNotFound",
+                    "Systems Manager could not find version " + parameterVersion + " of " + name
+                            + ". Verify the version and try again.", 400);
+        }
+
+        List<String> targetLabels = targetCopy.getLabels() != null
+                ? new ArrayList<>(targetCopy.getLabels())
+                : new ArrayList<>();
+        Set<String> requested = new LinkedHashSet<>(labels);
+        List<String> removedLabels = targetLabels.stream().filter(requested::contains).toList();
+        List<String> invalidLabels = requested.stream().filter(l -> !targetLabels.contains(l)).toList();
+
+        if (!removedLabels.isEmpty()) {
+            targetLabels.removeAll(requested);
+            targetCopy.setLabels(targetLabels);
+            historyStore.put(storageKey, updatedHistory);
+            LOG.infov("Removed labels {0} from parameter {1} version {2}", removedLabels, trimmed, parameterVersion);
+        }
+        return new UnlabelParameterVersionResult(removedLabels, invalidLabels);
+    }
+
+    private static void validateLabelList(List<String> labels) {
+        String violation = labelListViolation(labels);
+        if (violation != null) {
+            throw validationErrors(List.of(violation));
+        }
+    }
+
+    /**
+     * The constraint a {@code ParameterLabelList} breaks, worded as AWS words it, or null. AWS
+     * renders the list with Java's {@code List.toString}, so {@code [""]} reads {@code '[]'}.
+     */
+    static String labelListViolation(List<String> labels) {
+        if (labels == null) {
+            return "Value null at 'labels' failed to satisfy constraint: Member must not be null";
+        }
+        String prefix = "Value '" + labels + "' at 'labels' failed to satisfy constraint: ";
+        if (labels.isEmpty()) {
+            return prefix + "Member must have length greater than or equal to 1";
+        }
+        if (labels.size() > 10) {
+            return prefix + "Member must have length less than or equal to 10";
+        }
+        boolean memberOutOfRange = labels.stream()
+                .anyMatch(label -> label == null || label.isEmpty() || label.length() > 100);
+        if (memberOutOfRange) {
+            return prefix + "Member must satisfy constraint: [Member must have length less than or equal to 100, "
+                    + "Member must have length greater than or equal to 1]";
+        }
+        return null;
+    }
+
+    static AwsException validationErrors(List<String> violations) {
+        String count = violations.size() == 1
+                ? "1 validation error detected: "
+                : violations.size() + " validation errors detected: ";
+        return new AwsException("ValidationException", count + String.join("; ", violations), 400);
     }
 
     private static boolean isValidLabel(String label) {

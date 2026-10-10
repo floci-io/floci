@@ -238,6 +238,19 @@ public class CfnResourceDispatcher {
                 .orElseGet(UpdateCleanupResult::notApplicable);
     }
 
+    /** Cleanup owed by an unfinished update while deleting the enclosing stack. */
+    public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return registry.forType(resource.getResourceType())
+                .map(owner -> owner.completeDeleteCleanup(resource))
+                .filter(UpdateCleanupResult::applicable)
+                .orElseGet(UpdateCleanupResult::notApplicable);
+    }
+
+    /** Clears completed replacement cleanup without assuming a stack update committed. */
+    public void clearDeleteCleanup(StackResource resource) {
+        registry.forType(resource.getResourceType()).ifPresent(owner -> owner.clearDeleteCleanup(resource));
+    }
+
     /**
      * The physical id this update displaced, announced as DELETE_IN_PROGRESS before the stack
      * update closes. A type whose {@code UpdateReplacePolicy} is {@code Retain} owes no cleanup.
