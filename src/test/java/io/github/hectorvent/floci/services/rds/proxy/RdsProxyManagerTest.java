@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -27,10 +28,10 @@ class RdsProxyManagerTest {
     void replacingProxyStopsPreviousListenerAndKeepsReplacementOwned() throws IOException {
         RdsProxyManager manager = new RdsProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
-        int firstPort = availablePort();
+        int firstPort = FreePorts.anyInterfacePort();
         try {
             start(manager, "proxy", firstPort);
-            int replacementPort = availablePort();
+            int replacementPort = FreePorts.anyInterfacePort();
 
             start(manager, "proxy", replacementPort);
 
@@ -47,7 +48,7 @@ class RdsProxyManagerTest {
     void registrationFailureAfterBindReleasesCandidateListener() throws IOException {
         RdsProxyManager manager = new RdsProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
-        int proxyPort = availablePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         try {
             assertThrows(RuntimeException.class, () -> start(manager, null, proxyPort));
 
@@ -61,7 +62,7 @@ class RdsProxyManagerTest {
     void failedReplacementPreservesOriginalRegistryEntry() throws IOException {
         RdsProxyManager manager = new RdsProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
-        int originalPort = availablePort();
+        int originalPort = FreePorts.anyInterfacePort();
         try {
             start(manager, "proxy", originalPort);
             try (ServerSocket occupied = new ServerSocket(0)) {
@@ -81,7 +82,7 @@ class RdsProxyManagerTest {
     void updateMasterPasswordSwapsTheRunningProxySnapshotWithoutARestart() throws Exception {
         RdsProxyManager manager = new RdsProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
-        int proxyPort = availablePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         try {
             start(manager, "proxy", proxyPort);
 
@@ -106,9 +107,9 @@ class RdsProxyManagerTest {
     void stopAllReleasesEveryListenerAndIsIdempotent() throws IOException {
         RdsProxyManager manager = new RdsProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
-        int firstPort = availablePort();
+        int firstPort = FreePorts.anyInterfacePort();
         start(manager, "first", firstPort);
-        int secondPort = availablePort();
+        int secondPort = FreePorts.anyInterfacePort();
         start(manager, "second", secondPort);
 
         manager.stopAll();
@@ -147,7 +148,7 @@ class RdsProxyManagerTest {
                 .when(previous).stop();
         ConcurrentHashMap<String, RdsAuthProxy> registry = registry(manager);
         registry.put("proxy", previous);
-        int candidatePort = availablePort();
+        int candidatePort = FreePorts.anyInterfacePort();
 
         assertThrows(RuntimeException.class, () -> start(manager, "proxy", candidatePort));
 
@@ -160,7 +161,7 @@ class RdsProxyManagerTest {
     void stopAllContinuesAndRetainsOnlyFailedListenerOwnership() throws Exception {
         RdsProxyManager manager = new RdsProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
-        int successfulPort = availablePort();
+        int successfulPort = FreePorts.anyInterfacePort();
         start(manager, "successful", successfulPort);
         RdsAuthProxy failed = mock(RdsAuthProxy.class);
         doThrow(new IllegalStateException("simulated shutdown stop failure"))
@@ -221,11 +222,6 @@ class RdsProxyManagerTest {
         return (ConcurrentHashMap<String, RdsAuthProxy>) field.get(manager);
     }
 
-    private static int availablePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
-    }
 
     private static void assertPortAvailable(int port) {
         IOException lastFailure = null;

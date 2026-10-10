@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.testing;
 
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.junit.jupiter.api.Assumptions;
@@ -7,7 +8,6 @@ import org.junit.jupiter.api.Assumptions;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetAddress;
-import java.net.ServerSocket;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -92,8 +92,8 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
     }
 
     private static int freePort() {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
+        try {
+            return FreePorts.anyInterfacePort();
         } catch (IOException e) {
             throw new UncheckedIOException("No free port for the sidecar test application", e);
         }

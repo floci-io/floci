@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -71,7 +72,7 @@ class RedshiftAuthProxyTest {
             }
         });
 
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
@@ -114,7 +115,7 @@ class RedshiftAuthProxyTest {
         fakeBackend = new ServerSocket(0);
         fakeBackend.setSoTimeout(500);
 
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
@@ -131,7 +132,7 @@ class RedshiftAuthProxyTest {
     @Test
     void idleClientIsDroppedAfterTheConfiguredHandshakeTimeout() throws Exception {
         fakeBackend = new ServerSocket(0);
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
@@ -150,7 +151,7 @@ class RedshiftAuthProxyTest {
     @Test
     void refusesAConnectionBeyondTheConfiguredLimit() throws Exception {
         fakeBackend = new ServerSocket(0);
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
@@ -175,7 +176,7 @@ class RedshiftAuthProxyTest {
     @Test
     void startRetriesTheBindWhileThePortIsMomentarilyStillInUse() throws Exception {
         fakeBackend = new ServerSocket(0);
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
 
         // Hold the port, mimicking a just-closed predecessor the kernel has not released
         // yet; free it shortly after so the retrying bind can finally take it.
@@ -202,7 +203,7 @@ class RedshiftAuthProxyTest {
     @Test
     void updateMasterPasswordSwapsTheSnapshotUsedForNewConnections() throws Exception {
         fakeBackend = new ServerSocket(0);
-        int proxyPort = freePort();
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "old", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
@@ -225,11 +226,6 @@ class RedshiftAuthProxyTest {
         return new RdsProxyTlsCertificates(config, new CertificateGenerator());
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
-    }
 
     private static boolean portAccepts(int port) {
         for (int attempt = 0; attempt < 50; attempt++) {

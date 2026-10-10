@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.vertx.core.Vertx;
 import io.vertx.core.net.NetServer;
 import org.junit.jupiter.api.AfterEach;
@@ -12,7 +13,6 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
-import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
@@ -97,7 +97,7 @@ class TlsProxyServerTest {
     void bindsTheConfiguredHost_notEveryInterface() throws Exception {
         InetAddress external = nonLoopbackIpv4();
         assumeTrue(external != null, "needs a non-loopback IPv4 interface");
-        int publicPort = freePort();
+        int publicPort = FreePorts.anyInterfacePort();
 
         proxy = new TlsProxyServer(vertx, configWith(true, publicPort, 0), "127.0.0.1", 4510, 4511);
 
@@ -109,7 +109,7 @@ class TlsProxyServerTest {
     @Test
     @Timeout(20)
     void nonLoopbackHostWithoutConsent_refusesToListen() throws Exception {
-        int publicPort = freePort();
+        int publicPort = FreePorts.anyInterfacePort();
 
         IllegalStateException e = assertThrows(IllegalStateException.class,
                 () -> new TlsProxyServer(vertx, configWith(true, publicPort, 0), "0.0.0.0", 4510, 4511));
@@ -121,7 +121,7 @@ class TlsProxyServerTest {
     @Test
     @Timeout(20)
     void nonLoopbackHostWithConsent_listens() throws Exception {
-        int publicPort = freePort();
+        int publicPort = FreePorts.anyInterfacePort();
         EmulatorConfig config = configWith(true, publicPort, 0);
         when(config.security().allowUnsafeNetworkExposure()).thenReturn(true);
 
@@ -133,10 +133,10 @@ class TlsProxyServerTest {
     @Test
     @Timeout(20)
     void bindsBothPorts_andRoutesByFirstByte() throws Exception {
-        int httpBe = freePort();
-        int httpsBe = freePort();
-        int publicPort = freePort();
-        int awsHttpsPort = freePort();
+        int httpBe = FreePorts.anyInterfacePort();
+        int httpsBe = FreePorts.anyInterfacePort();
+        int publicPort = FreePorts.anyInterfacePort();
+        int awsHttpsPort = FreePorts.anyInterfacePort();
         httpBackend = startMarkerBackend(httpBe, "PLAIN");
         httpsBackend = startMarkerBackend(httpsBe, "TLS");
 
@@ -153,7 +153,7 @@ class TlsProxyServerTest {
     @Test
     @Timeout(20)
     void tlsDisabled_bindsNothing() throws Exception {
-        int publicPort = freePort();
+        int publicPort = FreePorts.anyInterfacePort();
         proxy = new TlsProxyServer(vertx, configWith(false, publicPort, 443), "127.0.0.1", 4510, 4511);
         assertFalse(portAccepts(publicPort), "no proxy should listen when TLS is disabled");
     }
@@ -238,9 +238,4 @@ class TlsProxyServerTest {
         }
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
-    }
 }
