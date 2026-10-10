@@ -7,10 +7,11 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 
 /**
- * Deletes what a test created in a non-commercial scope, in reverse order, after each test.
- * The {@code @QuarkusTest} emulator is shared by every test class, and a resource left behind
- * under {@code cn-north-1} shows up in every later cross-region listing (ResourceExplorer scans
- * all resources), so a test that signs a foreign partition registers each create here.
+ * Deletes what a test created, in reverse order, after each test. The {@code @QuarkusTest}
+ * emulator is shared by every test class, so a resource left behind outlives the class that made
+ * it: one under {@code cn-north-1} shows up in every later cross-region listing (ResourceExplorer
+ * scans all resources), and an IAM user or an S3 bucket shows up in the next class to list either
+ * one unscoped. A test that leaves such a resource registers each create here.
  *
  * <pre>{@code
  * @RegisterExtension

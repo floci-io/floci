@@ -1,14 +1,19 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Locale;
@@ -30,6 +35,24 @@ class ExpiredSessionEnforcementIntegrationTest {
 
     @Inject
     IamService iamService;
+
+    /**
+     * The teardown runs after Quarkus has reset the port RestAssured points at, so it has to say
+     * where the application is. The test port is random, which leaves this as the only place to
+     * read it from.
+     */
+    @TestHTTPResource("/")
+    static URI baseUri;
+
+    /**
+     * A QuarkusTest shares one application with every other test class, so the bucket and the
+     * sessions here would otherwise outlive it. The sessions go too: what this class pins is that
+     * a refusal leaves them stored, so nothing takes them out until Floci's own sweep runs. Each
+     * step is registered before it happens and runs independently of the others, so a bucket that
+     * will not delete cannot strand a session.
+     */
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -68,6 +91,8 @@ class ExpiredSessionEnforcementIntegrationTest {
         // A presigned POST carries its credential in the form body, which only S3 reads.
         String accessKeyId = expiredSession();
         String bucket = "expired-session-post-" + UUID.randomUUID().toString().substring(0, 8);
+        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
+                authorization("test", "s3"), bucket));
         given()
                 .header("Authorization", authorization("test", "s3"))
         .when()
@@ -92,6 +117,7 @@ class ExpiredSessionEnforcementIntegrationTest {
     private String expiredSession() {
         String accessKeyId = "ASIAEXPIRED"
                 + UUID.randomUUID().toString().replace("-", "").substring(0, 9).toUpperCase(Locale.ROOT);
+        cleanup.register(() -> iamService.unregisterSession(ACCOUNT_ID, accessKeyId));
         iamService.registerSessionForAccount(ACCOUNT_ID, accessKeyId, "secret",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/expired-session-role", LONG_AGO, null);
         return accessKeyId;

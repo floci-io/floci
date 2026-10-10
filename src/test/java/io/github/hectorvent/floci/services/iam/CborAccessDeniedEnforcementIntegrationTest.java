@@ -1,13 +1,18 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
@@ -22,6 +27,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestProfile(IamEnforcementProfile.class)
 class CborAccessDeniedEnforcementIntegrationTest {
 
+    /**
+     * The teardown runs after Quarkus has reset the port RestAssured points at, so it has to say
+     * where the application is. The test port is random, which leaves this as the only place to
+     * read it from.
+     */
+    @TestHTTPResource("/")
+    static URI baseUri;
+
+    /**
+     * A QuarkusTest shares one application with every other test class, so the user and key this
+     * test needs would otherwise outlive it and be visible to anything that lists users unscoped.
+     * Registered before the create runs, and the registered call reads the key back off the user
+     * rather than being told it, so a failure between the two still takes both away.
+     */
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -30,6 +52,8 @@ class CborAccessDeniedEnforcementIntegrationTest {
     @Test
     void aCborCallTheCallerIsNotAllowedIsRefusedInCbor() {
         String userName = "cbor-denied-" + UUID.randomUUID().toString().substring(0, 8);
+        cleanup.register(() -> EnforcementFixtures.removeUser(baseUri.getPort(),
+                authorization("test", "iam"), userName));
         iam("CreateUser", userName);
         String accessKeyId = iam("CreateAccessKey", userName)
                 .extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");

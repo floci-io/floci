@@ -1,14 +1,19 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
@@ -30,6 +35,24 @@ class InactiveAccessKeyEnforcementIntegrationTest {
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iam:ListUsers","Resource":"*"}]}""";
     private static final String PUT_OBJECT = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}""";
+
+    /**
+     * The teardown runs after Quarkus has reset the port RestAssured points at, so it has to say
+     * where the application is. The test port is random, which leaves this as the only place to
+     * read it from.
+     */
+    @TestHTTPResource("/")
+    static URI baseUri;
+
+    /**
+     * A QuarkusTest shares one application with every other test class, so a user, an access key
+     * or a bucket left here outlives this class and is visible to anything that lists them
+     * unscoped. Each create registers its removal below, before it runs: the registered call
+     * reads back what is actually attached, so a setup that fails part way through still has the
+     * whole fixture taken away, and one that created nothing leaves it with nothing to do.
+     */
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -90,6 +113,8 @@ class InactiveAccessKeyEnforcementIntegrationTest {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String bucket = "inactive-key-post-" + suffix;
         String userName = "inactive-key-post-" + suffix;
+        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
+                authorization("test", "s3"), bucket));
         given()
                 .header("Authorization", authorization("test", "s3"))
         .when()
@@ -111,7 +136,9 @@ class InactiveAccessKeyEnforcementIntegrationTest {
     }
 
     /** Creates a user in {@code account}, with an inline policy when one is given, and returns its access key ID. */
-    private static String userWithKey(String account, String userName, String policy) {
+    private String userWithKey(String account, String userName, String policy) {
+        cleanup.register(() -> EnforcementFixtures.removeUser(baseUri.getPort(),
+                authorization(account, "iam"), userName));
         query(account, "iam", "CreateUser", "UserName", userName).then().statusCode(200);
         if (policy != null) {
             query(account, "iam", "PutUserPolicy", "UserName", userName, "PolicyName", "inline",
