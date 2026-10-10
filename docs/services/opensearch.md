@@ -55,6 +55,21 @@ services:
 | `ListTags` | `GET /2021-01-01/tags/?arn=` | List tags for a domain |
 | `RemoveTags` | `POST /2021-01-01/tags-removal` | Remove tag keys from a domain |
 
+### Legacy Elasticsearch Service API
+
+The `2015-01-01` API used by `aws es` and Terraform's `aws_elasticsearch_domain` is served over the same domains. It differs only in member names: `ElasticsearchVersion` (bare, e.g. `7.10`, stored as `Elasticsearch_7.10`) for `EngineVersion`, and `ElasticsearchClusterConfig` for `ClusterConfig`. A domain created without `ElasticsearchVersion` gets `7.10`.
+
+| Operation | Method + Path |
+|---|---|
+| `CreateElasticsearchDomain` | `POST /2015-01-01/es/domain` |
+| `DescribeElasticsearchDomain` | `GET /2015-01-01/es/domain/{name}` |
+| `DescribeElasticsearchDomains` | `POST /2015-01-01/es/domain-info` |
+| `DescribeElasticsearchDomainConfig` | `GET /2015-01-01/es/domain/{name}/config` |
+| `UpdateElasticsearchDomainConfig` | `POST /2015-01-01/es/domain/{name}/config` |
+| `DeleteElasticsearchDomain` | `DELETE /2015-01-01/es/domain/{name}` |
+| `ListDomainNames` | `GET /2015-01-01/domain` |
+| `AddTags` / `ListTags` / `RemoveTags` | `POST /2015-01-01/tags`, `GET /2015-01-01/tags/?arn=`, `POST /2015-01-01/tags-removal` |
+
 ### Versions & Instance Types
 
 | Operation | Method + Path | Description |
