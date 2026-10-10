@@ -14,6 +14,8 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.CacheCluster;
 import software.amazon.awssdk.services.elasticache.model.CacheSubnetGroupNotFoundException;
+import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
+import software.amazon.awssdk.services.elasticache.model.UserGroupNotFoundException;
 
 import java.io.IOException;
 import java.net.URI;
@@ -24,6 +26,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Provisions the ElastiCache resource types through CloudFormation and checks them against the
@@ -46,10 +49,25 @@ class ElastiCacheCfnIntegrationTest {
                        "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.71.0.0/24"}},
             "SubnetGroup": {"Type": "AWS::ElastiCache::SubnetGroup",
                             "Properties": {"CacheSubnetGroupName": "cfn-it-sng", "Description": "example",
-                                           "SubnetIds": [{"Ref": "Subnet"}]}}
+                                           "SubnetIds": [{"Ref": "Subnet"}]}},
+            "DefaultUser": {"Type": "AWS::ElastiCache::User",
+                            "Properties": {"UserId": "cfn-it-default", "UserName": "default", "Engine": "redis",
+                                           "AccessString": "off -@all", "NoPasswordRequired": true}},
+            "AppUser": {"Type": "AWS::ElastiCache::User",
+                        "Properties": {"UserId": "cfn-it-app", "UserName": "cfn-it-app", "Engine": "redis",
+                                       "AccessString": "on ~* +@all",
+                                       "AuthenticationMode": {"Type": "password",
+                                                              "Passwords": ["example-password-0123456789"]}}},
+            "UserGroup": {"Type": "AWS::ElastiCache::UserGroup",
+                          "Properties": {"UserGroupId": "cfn-it-users", "Engine": "redis",
+                                         "UserIds": [{"Ref": "DefaultUser"}, {"Ref": "AppUser"}]}}
           },
           "Outputs": {
-            "SubnetGroupRef": {"Value": {"Ref": "SubnetGroup"}}
+            "SubnetGroupRef": {"Value": {"Ref": "SubnetGroup"}},
+            "UserRef": {"Value": {"Ref": "AppUser"}},
+            "UserArn": {"Value": {"Fn::GetAtt": ["AppUser", "Arn"]}},
+            "GroupRef": {"Value": {"Ref": "UserGroup"}},
+            "GroupArn": {"Value": {"Fn::GetAtt": ["UserGroup", "Arn"]}}
           }
         }
         """;
@@ -83,7 +101,18 @@ class ElastiCacheCfnIntegrationTest {
                        "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.73.0.0/24"}},
             "SubnetGroup": {"Type": "AWS::ElastiCache::SubnetGroup",
                             "Properties": {"CacheSubnetGroupName": "@@SNG@@", "Description": "example",
-                                           "SubnetIds": [{"Ref": "Subnet"}]}}
+                                           "SubnetIds": [{"Ref": "Subnet"}]}},
+            "DefaultUser": {"Type": "AWS::ElastiCache::User",
+                            "Properties": {"UserId": "cfn-it-upd-default", "UserName": "default", "Engine": "redis",
+                                           "AccessString": "off -@all", "NoPasswordRequired": true}},
+            "AppUser": {"Type": "AWS::ElastiCache::User",
+                        "Properties": {"UserId": "cfn-it-upd-app", "UserName": "cfn-it-upd-app", "Engine": "redis",
+                                       "AccessString": "on ~* +@all",
+                                       "AuthenticationMode": {"Type": "password",
+                                                              "Passwords": ["example-password-0123456789"]}}},
+            "UserGroup": {"Type": "AWS::ElastiCache::UserGroup",
+                          "Properties": {"UserGroupId": "cfn-it-upd-users", "Engine": "redis",
+                                         "UserIds": @@MEMBERS@@}}
           },
           "Outputs": {
             "SubnetGroupRef": {"Value": {"Ref": "SubnetGroup"}}
@@ -106,35 +135,50 @@ class ElastiCacheCfnIntegrationTest {
     }
 
     @Test
-    void subnetGroupIsCreatedAndRemovedWithTheStack() {
+    void subnetGroupUsersAndUserGroupAreCreatedAndRemovedWithTheStack() {
         cloudFormation(METADATA_STACK, "CreateStack", METADATA_TEMPLATE);
         String stacks = describeStacks(METADATA_STACK, "CREATE_COMPLETE");
 
         assertEquals("cfn-it-sng", outputValue(stacks, "SubnetGroupRef"));
+        assertEquals("cfn-it-app", outputValue(stacks, "UserRef"));
+        assertEquals("cfn-it-users", outputValue(stacks, "GroupRef"));
+        assertTrue(outputValue(stacks, "UserArn").endsWith(":user:cfn-it-app"));
+        assertTrue(outputValue(stacks, "GroupArn").endsWith(":usergroup:cfn-it-users"));
 
         try (ElastiCacheClient client = client()) {
             assertEquals(1, client.describeCacheSubnetGroups(r -> r.cacheSubnetGroupName("cfn-it-sng"))
                     .cacheSubnetGroups().size());
+            assertEquals(2, client.describeUserGroups(r -> r.userGroupId("cfn-it-users"))
+                    .userGroups().getFirst().userIds().size());
 
             cloudFormation(METADATA_STACK, "DeleteStack", null);
             CfnStackWaits.awaitStackDeleted(METADATA_STACK);
 
+            assertThrows(UserGroupNotFoundException.class,
+                    () -> client.describeUserGroups(r -> r.userGroupId("cfn-it-users")));
+            assertThrows(ElastiCacheException.class, () -> client.describeUsers(r -> r.userId("cfn-it-app")));
             assertThrows(CacheSubnetGroupNotFoundException.class,
                     () -> client.describeCacheSubnetGroups(r -> r.cacheSubnetGroupName("cfn-it-sng")));
         }
     }
 
     @Test
-    void renamedSubnetGroupIsReplaced() {
+    void updateChangesGroupMembershipInPlaceAndRenamedSubnetGroupIsReplaced() {
         String stack = "elasticache-cfn-update-it";
-        cloudFormation(stack, "CreateStack", UPDATE_TEMPLATE.replace("@@SNG@@", "cfn-it-upd-sng-a"));
+        String create = UPDATE_TEMPLATE.replace("@@SNG@@", "cfn-it-upd-sng-a").replace("@@MEMBERS@@",
+                "[{\"Ref\": \"DefaultUser\"}]");
+        cloudFormation(stack, "CreateStack", create);
         describeStacks(stack, "CREATE_COMPLETE");
 
-        cloudFormation(stack, "UpdateStack", UPDATE_TEMPLATE.replace("@@SNG@@", "cfn-it-upd-sng-b"));
+        String update = UPDATE_TEMPLATE.replace("@@SNG@@", "cfn-it-upd-sng-b").replace("@@MEMBERS@@",
+                "[{\"Ref\": \"DefaultUser\"}, {\"Ref\": \"AppUser\"}]");
+        cloudFormation(stack, "UpdateStack", update);
         String stacks = describeStacks(stack, "UPDATE_COMPLETE");
 
         assertEquals("cfn-it-upd-sng-b", outputValue(stacks, "SubnetGroupRef"));
         try (ElastiCacheClient client = client()) {
+            assertEquals(2, client.describeUserGroups(r -> r.userGroupId("cfn-it-upd-users"))
+                    .userGroups().getFirst().userIds().size());
             assertThrows(CacheSubnetGroupNotFoundException.class,
                     () -> client.describeCacheSubnetGroups(r -> r.cacheSubnetGroupName("cfn-it-upd-sng-a")));
             assertEquals(1, client.describeCacheSubnetGroups(r -> r.cacheSubnetGroupName("cfn-it-upd-sng-b"))

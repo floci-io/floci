@@ -40,6 +40,9 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -216,6 +219,88 @@ class ElastiCacheServiceTest {
         service.deleteUserGroup("app-group");
         assertEquals("UserGroupNotFound",
                 assertThrows(AwsException.class, () -> service.getUserGroup("app-group")).getErrorCode());
+    }
+
+    @Test
+    void setUserGroupMembersReplacesCompleteMembershipAndEngineUnderLock() {
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD,
+                List.of("default-pass"), "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD,
+                List.of("app-pass"), "on ~* +@all", null);
+        service.createUser("extra-user-id", "extra", AuthMode.PASSWORD,
+                List.of("extra-pass"), "on ~* +@all", null);
+        service.createUserGroup("set-grp", "redis", List.of("default-user-id", "app-user-id"), "us-east-1");
+
+        ElastiCacheUserGroup updated = service.setUserGroupMembers("set-grp",
+                List.of("default-user-id", "extra-user-id"), "redis");
+        assertEquals(Set.of("default-user-id", "extra-user-id"), updated.getUserIds());
+        assertEquals("redis", updated.getEngine());
+
+        ElastiCacheUserGroup fetched = service.getUserGroup("set-grp");
+        assertEquals(Set.of("default-user-id", "extra-user-id"), fetched.getUserIds());
+    }
+
+    @Test
+    void setUserGroupMembersRejectsInvalidEngineOrMissingDefaultUserForRedis() {
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD,
+                List.of("default-pass"), "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD,
+                List.of("app-pass"), "on ~* +@all", null);
+        service.createUserGroup("val-grp", "redis", List.of("default-user-id"), "us-east-1");
+
+        AwsException exMissing = assertThrows(AwsException.class,
+                () -> service.setUserGroupMembers("val-grp", List.of("app-user-id"), "redis"));
+        assertEquals("DefaultUserRequired", exMissing.getErrorCode());
+
+        AwsException exEngine = assertThrows(AwsException.class,
+                () -> service.setUserGroupMembers("val-grp", List.of("default-user-id"), "unknown"));
+        assertEquals("InvalidParameterValue", exEngine.getErrorCode());
+    }
+
+    @Test
+    void setUserGroupMembersConcurrentModificationsRemainConsistent() throws Exception {
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD,
+                List.of("default-pass"), "on ~* +@all", null);
+        service.createUser("app-1", "app1", AuthMode.PASSWORD, List.of("pass1"), "on ~* +@all", null);
+        service.createUser("app-2", "app2", AuthMode.PASSWORD, List.of("pass2"), "on ~* +@all", null);
+        service.createUserGroup("concurrent-grp", "redis", List.of("default-user-id"), "us-east-1");
+
+        int iterations = 20;
+        CountDownLatch latch = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> f1 = executor.submit(() -> {
+                try {
+                    latch.await();
+                    for (int i = 0; i < iterations; i++) {
+                        service.setUserGroupMembers("concurrent-grp",
+                                List.of("default-user-id", "app-1"), "redis");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            Future<?> f2 = executor.submit(() -> {
+                try {
+                    latch.await();
+                    for (int i = 0; i < iterations; i++) {
+                        service.setUserGroupMembers("concurrent-grp",
+                                List.of("default-user-id", "app-2"), "redis");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            latch.countDown();
+            f1.get(5, TimeUnit.SECONDS);
+            f2.get(5, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        ElastiCacheUserGroup finalGroup = service.getUserGroup("concurrent-grp");
+        assertTrue(finalGroup.getUserIds().equals(Set.of("default-user-id", "app-1"))
+                || finalGroup.getUserIds().equals(Set.of("default-user-id", "app-2")));
     }
 
     @Test

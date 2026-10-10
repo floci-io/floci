@@ -1814,6 +1814,25 @@ public class ElastiCacheService implements ResourceProvider {
         }
     }
 
+    public ElastiCacheUserGroup setUserGroupMembers(String userGroupId, List<String> userIds, String engine) {
+        String id = normalizeUserGroupId(userGroupId);
+        synchronized (userGroupLock) {
+            ElastiCacheUserGroup userGroup = getUserGroup(id);
+            String newEngine = (engine == null || engine.isBlank()) ? userGroup.getEngine() : normalizeEngine(engine);
+            Set<String> members = userIds == null ? new LinkedHashSet<>() : new LinkedHashSet<>(userIds);
+            validateUserGroupMembers(newEngine, members);
+            if (!newEngine.equals(userGroup.getEngine())) {
+                for (ReplicationGroup group : replicationGroupsUsing(id)) {
+                    requireEngineCompatible(newEngine, id, group.getEngine());
+                }
+            }
+            userGroup.setEngine(newEngine);
+            userGroup.setUserIds(members);
+            userGroups.put(id, userGroup);
+            return userGroup;
+        }
+    }
+
     public ElastiCacheUserGroup deleteUserGroup(String userGroupId) {
         String id = normalizeUserGroupId(userGroupId);
         synchronized (userGroupLock) {

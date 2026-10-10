@@ -86,7 +86,7 @@ type_order:
   AWS::RDS:
     [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
   AWS::ElastiCache:
-    [CacheCluster, SubnetGroup]
+    [CacheCluster, SubnetGroup, User, UserGroup]
   AWS::Redshift:
     [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup]
   AWS::RedshiftServerless:
@@ -170,6 +170,8 @@ notes:
   AWS::RDS::DBInstance: starts a real container
   AWS::RDS::DBCluster: starts a real container
   AWS::ElastiCache::CacheCluster: 'starts a real container; modifying an existing cluster in place is not supported'
+  AWS::ElastiCache::User: Tags are ignored
+  AWS::ElastiCache::UserGroup: Tags are ignored
   AWS::Redshift::ClusterSecurityGroup: accepted; no EC2-Classic security group model
   AWS::Redshift::Cluster: single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported
   AWS::RedshiftServerless::Namespace: 'ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form'
