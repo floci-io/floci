@@ -140,6 +140,8 @@ floci:
     s3:
       enabled: true
       default-presign-expiry-seconds: 3600
+      lifecycle-sweep-enabled: true            # Apply bucket lifecycle expiration rules in the background
+      lifecycle-sweep-interval-seconds: 60     # Seconds between lifecycle sweeps
 
     dynamodb:
       enabled: true

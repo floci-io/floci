@@ -138,6 +138,8 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      lifecycle-sweep-enabled: true
+      lifecycle-sweep-interval-seconds: 1
     dynamodb:
       enabled: true
       vector-index-allocation-seconds: 0

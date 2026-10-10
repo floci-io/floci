@@ -1379,6 +1379,23 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean globalBucketNamespace();
+
+        /**
+         * Run the background sweep that applies bucket lifecycle expiration rules: Expiration,
+         * NoncurrentVersionExpiration and AbortIncompleteMultipartUpload. When off, rules are
+         * stored and reported in {@code x-amz-expiration} but nothing expires.
+         * Env: FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED
+         */
+        @WithDefault("true")
+        boolean lifecycleSweepEnabled();
+
+        /**
+         * How often the lifecycle sweep runs. S3 itself applies lifecycle about once a day, to
+         * expiry times rounded to midnight UTC, so the interval only bounds how late Floci is.
+         * Env: FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
+         */
+        @WithDefault("60")
+        long lifecycleSweepIntervalSeconds();
     }
 
     interface DynamoDbServiceConfig {
