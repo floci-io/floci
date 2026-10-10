@@ -151,6 +151,29 @@ class AmazonMqControllerIntegrationTest {
     }
 
     @Test
+    void describeSharedResourcesReturnsEmptyList() {
+        String brokerId = createRabbitBroker("it-shared");
+
+        given()
+        .when()
+            .get("/v1/brokers/{id}/shared-resources", brokerId)
+        .then()
+            .statusCode(200)
+            .body("sharedResources", equalTo(List.of()))
+            .body("$", not(hasKey("nextToken")));
+    }
+
+    @Test
+    void describeSharedResourcesUnknownBrokerIsNotFound() {
+        given()
+        .when()
+            .get("/v1/brokers/{id}/shared-resources", "b-does-not-exist")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"));
+    }
+
+    @Test
     void rejectsBrokerWithoutUser() {
         given()
             .contentType("application/json")

@@ -184,6 +184,14 @@ public class AmazonMqController {
         return Response.ok(body).build();
     }
 
+    @GET
+    @Path("/v1/brokers/{broker-id}/shared-resources")
+    public Response describeSharedResources(@PathParam("broker-id") String brokerId) {
+        // Floci has no resource sharing, so an existing broker never has shared resources.
+        service.describeBroker(brokerId);
+        return Response.ok(Map.of("sharedResources", List.of())).build();
+    }
+
     @DELETE
     @Path("/v1/brokers/{broker-id}/users/{username}")
     public Response deleteUser(@PathParam("broker-id") String brokerId,

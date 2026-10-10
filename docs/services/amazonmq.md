@@ -19,6 +19,7 @@ Only the **RabbitMQ** engine and the `SINGLE_INSTANCE` deployment mode are suppo
 | `ListBrokers` | List all emulated brokers |
 | `DeleteBroker` | Stops and removes the RabbitMQ container |
 | `RebootBroker` | Reboots the broker |
+| `DescribeSharedResources` | Returns an empty `sharedResources` list for an existing broker (Floci has no resource shares) |
 
 ### User management
 
