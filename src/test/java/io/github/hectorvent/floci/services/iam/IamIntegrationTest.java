@@ -9,6 +9,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -1589,7 +1590,15 @@ class IamIntegrationTest {
                 .formParam("RoleName", name)
                 .header("Authorization", IAM_AUTH)
             .when().post("/").then()
-                .statusCode(404);
+                .statusCode(400);
+
+            given()
+                .formParam("Action", "ListRoles")
+                .header("Authorization", IAM_AUTH)
+            .when().post("/").then()
+                .statusCode(200)
+                .body("ListRolesResponse.ListRolesResult.Roles.member.RoleName.flatten()",
+                        not(hasItem(name)));
         }
 
         given()
@@ -1620,5 +1629,47 @@ class IamIntegrationTest {
             .header("Authorization", IAM_AUTH)
         .when().post("/").then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(87)
+    void roleActionsRejectANameOutsideTheRoleNamePattern() {
+        String name = "aws:ec2-instance";
+        String message = "1 validation error detected: Value '" + name + "' at 'roleName' failed to satisfy"
+                + " constraint: Member must satisfy regular expression pattern: [\\w+=,.@-]+";
+        Map<String, Map<String, String>> actions = new LinkedHashMap<>();
+        actions.put("GetRole", Map.of());
+        actions.put("DeleteRole", Map.of());
+        actions.put("UpdateRole", Map.of());
+        actions.put("UpdateAssumeRolePolicy", Map.of("PolicyDocument", TRUST_POLICY));
+        actions.put("TagRole", Map.of("Tags.member.1.Key", "k", "Tags.member.1.Value", "v"));
+        actions.put("UntagRole", Map.of("TagKeys.member.1", "k"));
+        actions.put("ListRoleTags", Map.of());
+        actions.put("AttachRolePolicy", Map.of("PolicyArn", "arn:aws:iam::aws:policy/ReadOnlyAccess"));
+        actions.put("DetachRolePolicy", Map.of("PolicyArn", "arn:aws:iam::aws:policy/ReadOnlyAccess"));
+        actions.put("ListAttachedRolePolicies", Map.of());
+        actions.put("PutRolePolicy", Map.of("PolicyName", "p", "PolicyDocument", TRUST_POLICY));
+        actions.put("GetRolePolicy", Map.of("PolicyName", "p"));
+        actions.put("DeleteRolePolicy", Map.of("PolicyName", "p"));
+        actions.put("ListRolePolicies", Map.of());
+        actions.put("ListInstanceProfilesForRole", Map.of());
+        actions.put("PutRolePermissionsBoundary",
+                Map.of("PermissionsBoundary", "arn:aws:iam::aws:policy/ReadOnlyAccess"));
+        actions.put("DeleteRolePermissionsBoundary", Map.of());
+        actions.put("AddRoleToInstanceProfile", Map.of("InstanceProfileName", "ip"));
+        actions.put("RemoveRoleFromInstanceProfile", Map.of("InstanceProfileName", "ip"));
+        actions.put("DeleteServiceLinkedRole", Map.of());
+
+        for (Map.Entry<String, Map<String, String>> action : actions.entrySet()) {
+            given()
+                .formParam("Action", action.getKey())
+                .formParam("RoleName", name)
+                .formParams(action.getValue())
+                .header("Authorization", IAM_AUTH)
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo(message));
+        }
     }
 }
