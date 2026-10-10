@@ -2622,9 +2622,11 @@ public class ApiGatewayExecuteController {
         }
 
         String requestId = UUID.randomUUID().toString();
+        Map<String, String> stageVariables = apiGatewayV2Service
+                .getStage(region, apiId, stageName).getStageVariables();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
                 apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims, jwtScopes,
-                lambdaAuthorizerContext, iamIdentity);
+                lambdaAuthorizerContext, iamIdentity, stageVariables);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -3439,6 +3441,18 @@ public class ApiGatewayExecuteController {
                                      byte[] body, String requestId, Map<String, String> jwtClaims,
                                      List<String> jwtScopes, ObjectNode lambdaAuthorizerContext,
                                      ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
+        return buildV2ProxyEvent(httpMethod, path, routeKey, apiId, region, stageName,
+                headers, uriInfo, body, requestId, jwtClaims, jwtScopes, lambdaAuthorizerContext,
+                iamIdentity, null);
+    }
+
+    String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
+                                     String apiId, String region, String stageName,
+                                     HttpHeaders headers, UriInfo uriInfo,
+                                     byte[] body, String requestId, Map<String, String> jwtClaims,
+                                     List<String> jwtScopes, ObjectNode lambdaAuthorizerContext,
+                                     ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity,
+                                     Map<String, String> stageVariables) {
         // The JAX-RS {proxy} binding strips a trailing slash, but rawPath is by contract the
         // raw path and routers treat /x and /x/ as distinct routes. Recover it from the raw
         // request URI for the event path fields. Route matching in dispatchV2 and the
@@ -3461,6 +3475,13 @@ public class ApiGatewayExecuteController {
         if (!pathParams.isEmpty()) {
             ObjectNode pp = event.putObject("pathParameters");
             pathParams.forEach(pp::put);
+        }
+
+        if (stageVariables == null || stageVariables.isEmpty()) {
+            event.putNull("stageVariables");
+        } else {
+            ObjectNode variables = event.putObject("stageVariables");
+            stageVariables.forEach(variables::put);
         }
 
         ObjectNode ctx = event.putObject("requestContext");

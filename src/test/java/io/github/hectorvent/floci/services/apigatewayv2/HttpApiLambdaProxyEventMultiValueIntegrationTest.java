@@ -59,7 +59,7 @@ class HttpApiLambdaProxyEventMultiValueIntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"stageName":"test"}
+                        {"stageName":"test","stageVariables":{"mode":"production","region":"local"}}
                         """)
                 .when().post("/v2/apis/" + apiId + "/stages")
                 .then().statusCode(201);
@@ -128,6 +128,17 @@ class HttpApiLambdaProxyEventMultiValueIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("cookies", nullValue());
+    }
+
+    @Test
+    @Order(14)
+    void stageVariablesReachTheLambdaEvent() {
+        given()
+                .when().get("/execute-api/" + apiId + "/test/echo")
+                .then()
+                .statusCode(200)
+                .body("stageVariables.mode", equalTo("production"))
+                .body("stageVariables.region", equalTo("local"));
     }
 
     @Test
