@@ -70,7 +70,7 @@ public class ApplicationAutoScalingCfnProvisioner implements CfnResourceProvisio
                     + "the target itself is registered", r.getLogicalId());
         }
         service.registerScalableTarget(triple.serviceNamespace(), triple.resourceId(), triple.scalableDimension(),
-                min, max, roleArn, suspendedState(props), Map.of(), ctx.region());
+                min, max, roleArn, suspendedState(props, ctx), ctx.resolveTags(props, "Tags"), ctx.region());
         r.setPhysicalId(triple.composite());
         r.getAttributes().put("Id", triple.composite());
         // The id is the triple, so changing any part of it replaces the target rather than
@@ -88,9 +88,12 @@ public class ApplicationAutoScalingCfnProvisioner implements CfnResourceProvisio
         Triple triple = Triple.forPolicy(props, ctx);
         ScalingPolicy policy = service.putScalingPolicy(policyName, policyType,
                 triple.serviceNamespace(), triple.resourceId(), triple.scalableDimension(),
+                // Through the engine first: these blocks are nested objects, so an intrinsic inside
+                // one is still a non-null node and would read as 0, "" or false rather than failing.
                 ScalingConfigurationParser.parseTargetTracking(
-                        props.path("TargetTrackingScalingPolicyConfiguration"), objectMapper),
-                ScalingConfigurationParser.parseStepScaling(props.path("StepScalingPolicyConfiguration")),
+                        ctx.engine().resolveNode(props.path("TargetTrackingScalingPolicyConfiguration")), objectMapper),
+                ScalingConfigurationParser.parseStepScaling(
+                        ctx.engine().resolveNode(props.path("StepScalingPolicyConfiguration"))),
                 ctx.region());
         // Ref on a scaling policy is its ARN, so the ARN is the physical id rather than the name.
         r.setPhysicalId(policy.getPolicyArn());
@@ -98,9 +101,9 @@ public class ApplicationAutoScalingCfnProvisioner implements CfnResourceProvisio
         ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
-    private SuspendedState suspendedState(JsonNode props) {
-        JsonNode node = props.path("SuspendedState");
-        if (!node.isObject()) {
+    private SuspendedState suspendedState(JsonNode props, ProvisionContext ctx) {
+        JsonNode node = ctx.engine().resolveNode(props.path("SuspendedState"));
+        if (node == null || !node.isObject()) {
             return null;
         }
         SuspendedState state = new SuspendedState();
