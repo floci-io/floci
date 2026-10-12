@@ -8,7 +8,9 @@ import java.util.List;
  * when the code was issued, which redemption narrows to the client's current AllowedOAuthScopes but
  * never widens. {@code nonce} and {@code codeChallenge} are the authorization request's values, or
  * null when it sent none; the token endpoint puts the nonce in the ID token and requires a matching
- * {@code code_verifier} when there is a challenge.
+ * {@code code_verifier} when there is a challenge. {@code authTime} is when the user signed in, which
+ * can be well before the code was issued when a managed login session skipped the sign-in form; the
+ * tokens the code redeems for carry it as {@code auth_time}.
  */
 public record CognitoAuthorizationCode(
         String userPoolId,
@@ -18,6 +20,7 @@ public record CognitoAuthorizationCode(
         List<String> scopes,
         String nonce,
         String codeChallenge,
+        Instant authTime,
         Instant expiresAt) {
 
     public CognitoAuthorizationCode {

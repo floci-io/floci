@@ -240,7 +240,7 @@ class CognitoOAuthControllerTest {
     void authorizeWithASessionBindsTheCodeToTheScopesGrantedThen() {
         when(cognitoService.adminGetUser(POOL_ID, "session-user")).thenReturn(user("session-user"));
         String sessionId = stateStore.putSession(new CognitoManagedLoginSession(POOL_ID, "session-user",
-                CLOCK.instant().plusSeconds(60)));
+                CLOCK.instant(), CLOCK.instant().plusSeconds(60)));
 
         String withoutScope = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
                 null, null, null, null, null, sessionId).getHeaderString("Location");
@@ -255,7 +255,7 @@ class CognitoOAuthControllerTest {
     void authorizeWithASessionOfThePoolRedirectsWithACodeCarryingTheNonceAndChallenge() {
         when(cognitoService.adminGetUser(POOL_ID, "session-user")).thenReturn(user("session-user"));
         String sessionId = stateStore.putSession(new CognitoManagedLoginSession(POOL_ID, "session-user",
-                CLOCK.instant().plusSeconds(60)));
+                CLOCK.instant(), CLOCK.instant().plusSeconds(60)));
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", "nonce",
                 null, "relying-party-state", RFC_7636_CHALLENGE, "S256", null, sessionId);
@@ -271,10 +271,24 @@ class CognitoOAuthControllerTest {
         assertEquals(RFC_7636_CHALLENGE, storedCode.codeChallenge());
     }
 
+    /** The code of an authorize that the session lets skip the form keeps when the user signed in. */
+    @Test
+    void authorizeWithASessionGivesTheCodeTheTimeTheUserSignedIn() {
+        when(cognitoService.adminGetUser(POOL_ID, "session-user")).thenReturn(user("session-user"));
+        Instant signedIn = CLOCK.instant().minusSeconds(600);
+        String sessionId = stateStore.putSession(new CognitoManagedLoginSession(POOL_ID, "session-user",
+                signedIn, signedIn.plusSeconds(3600)));
+
+        String location = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
+                null, null, null, null, null, sessionId).getHeaderString("Location");
+
+        assertEquals(signedIn, storedCode(location).authTime());
+    }
+
     @Test
     void authorizeIgnoresASessionOfAnotherPool() {
         String sessionId = stateStore.putSession(new CognitoManagedLoginSession("us-east-1_other", "session-user",
-                CLOCK.instant().plusSeconds(60)));
+                CLOCK.instant(), CLOCK.instant().plusSeconds(60)));
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
                 null, null, null, null, null, sessionId);
@@ -290,7 +304,7 @@ class CognitoOAuthControllerTest {
         disabled.setEnabled(false);
         when(cognitoService.adminGetUser(POOL_ID, "session-user")).thenReturn(disabled);
         String sessionId = stateStore.putSession(new CognitoManagedLoginSession(POOL_ID, "session-user",
-                CLOCK.instant().plusSeconds(60)));
+                CLOCK.instant(), CLOCK.instant().plusSeconds(60)));
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
                 null, null, null, null, null, sessionId);
@@ -333,10 +347,10 @@ class CognitoOAuthControllerTest {
     void tokenRedeemsAuthorizationCodeOnce() throws Exception {
         String code = stateStore.putAuthorizationCode(new CognitoAuthorizationCode(
                 POOL_ID, CLIENT_ID, "federated-user", CALLBACK_URI, List.of("openid"), null, null,
-                CLOCK.instant().plusSeconds(60)));
+                CLOCK.instant(), CLOCK.instant().plusSeconds(60)));
         when(cognitoService.describeUserPool(POOL_ID)).thenReturn(pool());
         when(cognitoService.adminGetUser(POOL_ID, "federated-user")).thenReturn(user());
-        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null), any()))
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null), any(), any()))
                 .thenReturn(Map.of("AccessToken", "access-token", "IdToken", "id-token", "RefreshToken", "refresh-token",
                         "ExpiresIn", 3600, "TokenType", "Bearer"));
 
@@ -354,11 +368,30 @@ class CognitoOAuthControllerTest {
         assertOAuthError(replay, "invalid_grant");
     }
 
+    @Test
+    void tokenMintsTheTokensWithTheTimeTheCodesUserSignedIn() {
+        Instant signedIn = CLOCK.instant().minusSeconds(600);
+        String code = stateStore.putAuthorizationCode(new CognitoAuthorizationCode(
+                POOL_ID, CLIENT_ID, "federated-user", CALLBACK_URI, List.of("openid"), null, null,
+                signedIn, CLOCK.instant().plusSeconds(60)));
+        when(cognitoService.describeUserPool(POOL_ID)).thenReturn(pool());
+        when(cognitoService.adminGetUser(POOL_ID, "federated-user")).thenReturn(user());
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null), any(), any()))
+                .thenReturn(Map.of("AccessToken", "access-token", "RefreshToken", "refresh-token",
+                        "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response response = controller.token(null, requestContext(null), validAuthorizationCodeForm(code));
+
+        assertEquals(200, response.getStatus());
+        verify(cognitoService).generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client),
+                eq(null), eq(List.of("openid")), eq(signedIn));
+    }
+
     /** AWS leaves {@code id_token} out of the response, rather than sending it as null, without openid. */
     @Test
     void tokenLeavesTheIdTokenOutWhenNoneWasMinted() {
         String code = putAuthorizationCode();
-        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null), any()))
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null), any(), any()))
                 .thenReturn(Map.of("AccessToken", "access-token", "RefreshToken", "refresh-token",
                         "ExpiresIn", 3600, "TokenType", "Bearer"));
 
@@ -373,7 +406,7 @@ class CognitoOAuthControllerTest {
     void tokenRejectsAuthorizationCodeForAnotherClient() {
         String code = stateStore.putAuthorizationCode(new CognitoAuthorizationCode(
                 POOL_ID, "other-client", "federated-user", CALLBACK_URI, List.of("openid"), null, null,
-                CLOCK.instant().plusSeconds(60)));
+                CLOCK.instant(), CLOCK.instant().plusSeconds(60)));
 
         Response response = controller.token(null, requestContext(null), form("grant_type", "authorization_code",
                 "client_id", CLIENT_ID, "code", code, "redirect_uri", CALLBACK_URI));
@@ -503,7 +536,7 @@ class CognitoOAuthControllerTest {
     void tokenPutsTheNonceInTheIdTokenOnly() {
         String code = putAuthorizationCode("request-nonce", null);
         ArgumentCaptor<CognitoService.ClaimsOverride> override = ArgumentCaptor.forClass(CognitoService.ClaimsOverride.class);
-        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), override.capture(), any()))
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), override.capture(), any(), any()))
                 .thenReturn(Map.of("AccessToken", "access-token", "IdToken", "id-token", "RefreshToken", "refresh-token",
                         "ExpiresIn", 3600, "TokenType", "Bearer"));
 
@@ -530,7 +563,7 @@ class CognitoOAuthControllerTest {
 
         assertEquals(200, response.getStatus());
         verify(cognitoService).generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client),
-                any(), scopes.capture());
+                any(), scopes.capture(), any());
         assertEquals(List.of("openid"), scopes.getValue(), "the code's granted scopes reach the trigger");
         verify(cognitoService, never()).generateAuthResult(any(CognitoUser.class), any(UserPool.class), any(), any());
     }
@@ -696,10 +729,10 @@ class CognitoOAuthControllerTest {
     private String putAuthorizationCode(String nonce, String codeChallenge) {
         String code = stateStore.putAuthorizationCode(new CognitoAuthorizationCode(
                 POOL_ID, CLIENT_ID, "federated-user", CALLBACK_URI, List.of("openid"), nonce, codeChallenge,
-                CLOCK.instant().plusSeconds(60)));
+                CLOCK.instant(), CLOCK.instant().plusSeconds(60)));
         when(cognitoService.describeUserPool(POOL_ID)).thenReturn(pool());
         when(cognitoService.adminGetUser(POOL_ID, "federated-user")).thenReturn(user());
-        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null), any()))
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null), any(), any()))
                 .thenReturn(Map.of("AccessToken", "access-token", "IdToken", "id-token", "RefreshToken", "refresh-token",
                         "ExpiresIn", 3600, "TokenType", "Bearer"));
         return code;

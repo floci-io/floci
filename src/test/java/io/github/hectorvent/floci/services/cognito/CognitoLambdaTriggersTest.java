@@ -36,6 +36,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -1321,7 +1322,7 @@ class CognitoLambdaTriggersTest {
                         "groupOverrideDetails", Map.of("groupsToOverride", List.of("admins"))))));
 
         Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null,
-                List.of("openid", "email"));
+                List.of("openid", "email"), Instant.now());
 
         Map<String, Object> event;
         Map<String, Object> idClaims;
@@ -1360,7 +1361,7 @@ class CognitoLambdaTriggersTest {
                 .thenReturn(ok(Map.of()));
 
         service.generateAuthResultForHostedAuth(user, pool, client, null,
-                List.of("openid", "admin/superuser", "email"));
+                List.of("openid", "admin/superuser", "email"), Instant.now());
 
         Map<String, Object> event;
         try {
@@ -1382,7 +1383,7 @@ class CognitoLambdaTriggersTest {
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
                 .thenReturn(ok(Map.of()));
 
-        service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("openid"));
+        service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("openid"), Instant.now());
 
         Map<String, Object> event;
         try {
@@ -1413,7 +1414,7 @@ class CognitoLambdaTriggersTest {
 
         Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
                 new CognitoService.ClaimsOverride(Map.of("nonce", "request-nonce"), null, null, null,
-                        null, null, null, null, null), List.of("openid"));
+                        null, null, null, null, null), List.of("openid"), Instant.now());
 
         Map<String, Object> idClaims;
         try {
@@ -1435,7 +1436,7 @@ class CognitoLambdaTriggersTest {
 
         Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
                 new CognitoService.ClaimsOverride(Map.of("nonce", "request-nonce"), null, null, null,
-                        null, null, null, null, null), List.of("openid"));
+                        null, null, null, null, null), List.of("openid"), Instant.now());
 
         assertNotNull(auth.get("IdToken"));
         assertNotNull(auth.get("AccessToken"));
@@ -1466,7 +1467,8 @@ class CognitoLambdaTriggersTest {
                 .thenReturn(ok(Map.of()));
 
         List<String> granted = CognitoService.grantedScopes(client, List.of());
-        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, granted);
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, granted,
+                Instant.now());
 
         assertEquals(List.of("openid", "email", "aws.cognito.signin.user.admin"), granted);
         Map<String, Object> event;
@@ -1490,7 +1492,8 @@ class CognitoLambdaTriggersTest {
         UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
-        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of());
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of(),
+                Instant.now());
 
         Map<String, Object> accessClaims;
         try {
@@ -1513,7 +1516,8 @@ class CognitoLambdaTriggersTest {
                 .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
                         "accessTokenGeneration", Map.of("scopesToSuppress", List.of("email"))))));
 
-        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("email"));
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("email"),
+                Instant.now());
 
         Map<String, Object> accessClaims;
         try {
@@ -1532,7 +1536,8 @@ class CognitoLambdaTriggersTest {
         UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
-        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("email"));
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("email"),
+                Instant.now());
 
         Map<String, Object> accessClaims;
         try {
@@ -1559,7 +1564,7 @@ class CognitoLambdaTriggersTest {
                                 "scopesToAdd", List.of("aws.cognito.signin.user.admin"))))));
 
         Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null,
-                List.of("openid", "email"));
+                List.of("openid", "email"), Instant.now());
 
         Map<String, Object> accessClaims;
         try {

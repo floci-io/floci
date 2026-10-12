@@ -545,6 +545,37 @@ class CognitoManagedLoginIntegrationTest {
         assertEquals(pool.username(), idToken.path("cognito:username").asText());
     }
 
+    /**
+     * {@code auth_time} is when the user signed in, not when the tokens were issued: an authorize that
+     * the session lets skip the form gets new tokens with the sign-in's {@code auth_time}, and so does
+     * refreshing them, as on AWS.
+     */
+    @Test
+    void tokensFromTheSessionAndTheirRefreshKeepTheAuthTimeOfTheSignIn() throws Exception {
+        Pool pool = newPool();
+        Response signedIn = signIn(null, pool, authorizeRequest(pool.clientId()));
+        JsonNode signInIdToken = jwtPayload(redeem(null, pool.clientId(), code(signedIn), VERIFIER)
+                .then().statusCode(200).extract().path("id_token"));
+        long authTime = signInIdToken.path("auth_time").asLong();
+        // auth_time and iat are whole seconds, so the next tokens are issued in a later second.
+        Thread.sleep(1100);
+
+        Response again = browserGet(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId()),
+                signedIn.getCookie("cognito"));
+        Response tokens = redeem(null, pool.clientId(), code(again), VERIFIER);
+
+        tokens.then().statusCode(200);
+        JsonNode idToken = jwtPayload(tokens.path("id_token"));
+        assertTrue(idToken.path("iat").asLong() > signInIdToken.path("iat").asLong(), "new tokens were issued");
+        assertEquals(authTime, idToken.path("auth_time").asLong());
+        assertEquals(authTime, jwtPayload(tokens.path("access_token")).path("auth_time").asLong());
+        JsonNode refreshed = cognitoJson("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"REFRESH_TOKEN_AUTH","AuthParameters":{"REFRESH_TOKEN":"%s"}}
+                """.formatted(pool.clientId(), tokens.path("refresh_token"))).path("AuthenticationResult");
+        assertEquals(authTime, jwtPayload(refreshed.path("IdToken").asText()).path("auth_time").asLong());
+        assertEquals(authTime, jwtPayload(refreshed.path("AccessToken").asText()).path("auth_time").asLong());
+    }
+
     @Test
     void sessionCookieOfAnotherPoolNeitherSignsInNorSignsOutThere() throws Exception {
         Pool poolA = newPool();
