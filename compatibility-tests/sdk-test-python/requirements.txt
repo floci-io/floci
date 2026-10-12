@@ -1,6 +1,7 @@
 boto3==1.43.108
 botocore==1.43.108
 cryptography>=42.0.0
+aws-encryption-sdk==4.0.7
 pytest>=8.0.0
 pytest-timeout>=2.3.0
 cramjam==2.12.1
