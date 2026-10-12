@@ -115,6 +115,7 @@ A message older than the queue's `MessageRetentionPeriod` is no longer returned 
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message size in bytes (1 MiB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` also clears the FIFO deduplication cache for the queue and any SNS FIFO topics subscribed to it |
 | `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
+| `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `path` | Shape of the returned `QueueUrl`, see [Queue URL Format](#queue-url-format) |
 
 ## Examples
 
@@ -168,3 +169,15 @@ aws sqs set-queue-attributes \
 ```
 http://localhost:4566/000000000000/<queue-name>
 ```
+
+`CreateQueue`, `GetQueueUrl`, `ListQueues` and `ListDeadLetterSourceQueues` return the queue URL under Floci's own endpoint by default, `<FLOCI_BASE_URL>/<account>/<queue-name>`.
+
+Set `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY=standard` to get the form AWS returns instead.
+
+```
+https://sqs.<region>.amazonaws.com/000000000000/<queue-name>
+```
+
+The region is the one the request was signed for, and the host carries that region's partition DNS suffix, so a queue in `cn-north-1` is reported as `https://sqs.cn-north-1.amazonaws.com.cn/...`. Use it for tooling that parses or compares queue URLs against the AWS form. Most SDKs send requests to the endpoint you configured and take only the path from the URL. Clients that send requests to the host in the returned URL, such as the AWS SDK for Java 1.x, need the default `path` setting or DNS that points the `sqs.<region>` host at Floci.
+
+Under either setting every form is accepted as input. That covers the AWS URL, the Floci URL, any other host with the same `/<account>/<queue-name>` path, and the bare queue name. Existing queues, persisted ones included, are reported in the form the current setting and base URL give.
