@@ -987,13 +987,37 @@ class EksServiceTest {
         request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
         Cluster cluster = service.createCluster(request);
         cluster.setContainerId("existing-container");
+        cluster.setStatus(ClusterStatus.ACTIVE);
 
         service.createNodeGroup("capacity-cluster", nodeGroupRequest("first"));
         assertEquals("t3.medium", cluster.getNodeInstanceType());
+        assertEquals(ClusterStatus.ACTIVE, cluster.getStatus());
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("capacity-cluster").getStatus());
         verify(clusterManager).restartForNodeCapacity(cluster, "m5.large");
 
         service.createNodeGroup("capacity-cluster", nodeGroupRequest("second"));
+        assertEquals(ClusterStatus.ACTIVE, cluster.getStatus());
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("capacity-cluster").getStatus());
         verify(clusterManager).restartForNodeCapacity(cluster, "m5.large");
+    }
+
+    @Test
+    void firstNodeGroupDoesNotSetClusterBackToCreating() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(true);
+        when(clusterManager.selectNodeInstanceType("t3.medium")).thenReturn("t3.medium");
+        when(clusterManager.restartForNodeCapacity(any(), anyString())).thenReturn(true);
+        EksService service = newService(clusterManager, false);
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("active-cluster");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        Cluster cluster = service.createCluster(request);
+        cluster.setContainerId("existing-container");
+        cluster.setStatus(ClusterStatus.ACTIVE);
+
+        service.createNodeGroup("active-cluster", nodeGroupRequest("first-ng"));
+
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("active-cluster").getStatus());
     }
 
     @Test
