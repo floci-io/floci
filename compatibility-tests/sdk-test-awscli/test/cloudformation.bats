@@ -5,9 +5,15 @@ setup() {
     load 'test_helper/common-setup'
     STACK_NAME="bats-cfn-stack-$(unique_name)"
     TEMPLATE_FILE=$(mktemp /tmp/cfn-bats-XXXXXX.yaml)
+    LB_ARN=""
 }
 
 teardown() {
+    # A load balancer a test put on the stack's subnets goes first: EC2 refuses to delete a subnet
+    # a load balancer still uses, so delete-stack could not remove the subnets.
+    if [ -n "$LB_ARN" ]; then
+        aws_cmd elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" >/dev/null 2>&1 || true
+    fi
     aws_cmd cloudformation delete-stack --stack-name "$STACK_NAME" >/dev/null 2>&1 || true
     [ -n "$TEMPLATE_FILE" ] && rm -f "$TEMPLATE_FILE"
 }
@@ -197,6 +203,7 @@ EOF
     assert_success
     local lb_arn
     lb_arn=$(json_get "$output" '.LoadBalancers[0].LoadBalancerArn')
+    LB_ARN="$lb_arn"
     [ -n "$lb_arn" ]
     [[ "$lb_arn" == *":loadbalancer/"* ]]
 }

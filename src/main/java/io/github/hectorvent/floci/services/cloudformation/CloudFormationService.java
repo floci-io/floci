@@ -2175,7 +2175,11 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, StackResource> previousResources,
             Set<String> attemptedResourceIds,
             String region) {
-        List<StackResource> resources = new ArrayList<>(stack.resourcesSnapshot().values());
+        // Dependents first, in the template's order rather than the map's, as the update cleanup
+        // walks it: a resource the update added sits after the resources that depend on it, so
+        // reversing the map would delete a subnet the update moved a load balancer onto before the
+        // load balancer is moved back, and EC2 refuses that delete.
+        List<StackResource> resources = resourcesInCreationOrder(stack, region);
         Collections.reverse(resources);
         List<String> failures = new ArrayList<>();
         List<String> removedResources = new ArrayList<>();
@@ -2501,13 +2505,14 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The stack's resources in the order the current template creates them, for a delete that walks
-     * them backwards. The resource map keeps insertion order, and a resource added by a later
-     * update sits after the resources that depend on it, so reversing the map would delete it
-     * first: a certificate still used by a user pool domain, for one. Resources the template no
-     * longer names, left behind by a failed cleanup, sort first here so they are deleted last,
-     * after anything that might still use them. Insertion order is the fallback when the template
-     * cannot be read.
+     * The stack's resources in the order the current template creates them, for a delete, an update
+     * cleanup or an update rollback that walks them backwards. The resource map keeps insertion
+     * order, and a resource added by a later update sits after the resources that depend on it, so
+     * reversing the map would delete it first: a certificate still used by a user pool domain, for
+     * one. Resources the template no longer names, left behind by a failed cleanup, sort first here
+     * so they are deleted last, after anything that might still use them. Conditions are evaluated
+     * with the SSM-resolved parameter values the stack operation itself used, when there are any.
+     * Insertion order is the fallback when the template cannot be read.
      */
     private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
         List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
@@ -2517,8 +2522,10 @@ public class CloudFormationService implements ResourceProvider {
             if (!resources.isObject()) {
                 return ordered;
             }
-            Map<String, Boolean> conditions = resolveConditions(
-                    template, stack.parametersSnapshot(), stack, region, regionResolver.getAccountId());
+            Map<String, String> resolvedParameters = stack.resolvedParametersSnapshot();
+            Map<String, Boolean> conditions = resolveConditions(template,
+                    resolvedParameters.isEmpty() ? stack.parametersSnapshot() : resolvedParameters,
+                    stack, region, regionResolver.getAccountId());
             // A stack saved before circular templates were rejected may still have one; order it
             // by its dependencies anyway rather than giving up.
             List<String> creationOrder = creationOrder(resources, conditions).sorted();
@@ -2528,7 +2535,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             ordered.sort(Comparator.comparingInt(r -> rank.getOrDefault(r.getLogicalId(), -1)));
         } catch (Exception e) {
-            LOG.debugv("Deleting stack {0} in insertion order, its template could not be ordered: {1}",
+            LOG.debugv("Walking stack {0} in insertion order, its template could not be ordered: {1}",
                     stack.getStackName(), e.getMessage());
         }
         return ordered;

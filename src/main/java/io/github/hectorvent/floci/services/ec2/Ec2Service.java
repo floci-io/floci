@@ -133,6 +133,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -307,6 +308,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private final List<VpcRouteTableListener> routeTableListeners = new CopyOnWriteArrayList<>();
     private jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance;
     private final List<Ec2InstanceLaunchListener> instanceLaunchListeners = new CopyOnWriteArrayList<>();
+    // Fully qualified to tell the CDI Instance from the EC2 model Instance. Only the CDI constructor
+    // receives it; null on the hand-built constructors, which reads as "nothing else uses a subnet".
+    private jakarta.enterprise.inject.Instance<VpcDependencyProvider> vpcDependencyProviders;
 
     public void addRouteTableListener(VpcRouteTableListener listener) {
         if (listener != null && !this.routeTableListeners.contains(listener)) {
@@ -438,7 +442,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                       Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
                       jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance,
                       jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance,
-                      Ec2EbsEncryptionService ebsEncryptionService) {
+                      Ec2EbsEncryptionService ebsEncryptionService,
+                      jakarta.enterprise.inject.Instance<VpcDependencyProvider> vpcDependencyProviders) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
         this.vpcNetworkManager = vpcNetworkManager;
@@ -446,6 +451,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this.routeTableListenersInstance = routeTableListenersInstance;
         this.instanceLaunchListenersInstance = instanceLaunchListenersInstance;
         this.ebsEncryptionService = ebsEncryptionService;
+        this.vpcDependencyProviders = vpcDependencyProviders;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -2215,6 +2221,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     private Object attachmentTopologyLock(String region) {
         return lockFor(key(region, "transit-gateway-attachments"));
+    }
+
+    /**
+     * Runs an action that checks subnets and then records a reference to them, holding the lock
+     * {@link #deleteSubnet} and {@link #deleteVpc} take while they ask each
+     * {@link VpcDependencyProvider} whether anything still uses what they delete. Without it the
+     * check and the write straddle the delete: the delete sees no reference because the referring
+     * resource is not saved yet, removes the subnet, and the resource is then saved pointing at a
+     * subnet that is gone.
+     *
+     * <p>Safe to call from inside a provider's own monitor, because the ordering only ever runs one
+     * way. The deletes hold this lock while calling the providers, and their dependency checks are
+     * plain reads over the provider's own store that take no provider monitor, so EC2 never waits on
+     * a provider while a provider waits on EC2.
+     */
+    public <T> T supplyWithSubnetReferencesHeld(String region, Supplier<T> action) {
+        synchronized (attachmentTopologyLock(region)) {
+            return action.get();
+        }
+    }
+
+    /** {@link #supplyWithSubnetReferencesHeld} for an action with no result. */
+    public void runWithSubnetReferencesHeld(String region, Runnable action) {
+        synchronized (attachmentTopologyLock(region)) {
+            action.run();
+        }
     }
 
     private TransitGatewayVpcAttachmentOptions resolveAttachmentOptions(
@@ -4731,6 +4763,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             requireNoTransitGatewayAttachment(region,
                     attachment -> vpcId.equals(attachment.getVpcId()),
                     "The vpc '" + vpcId + "' has dependencies and cannot be deleted.");
+            requireNoProviderDependency(provider -> provider.hasVpcDependency(region, vpcId),
+                    "The vpc '" + vpcId + "' has dependencies and cannot be deleted.");
             requireNoVpcDependents(region, vpcId);
             deleteVpcDefaultResources(region, vpcId);
             vpcs.delete(key(region, vpcId));
@@ -5878,6 +5912,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             requireNoTransitGatewayAttachment(region,
                     attachment -> attachment.getSubnetIds().contains(subnetId),
                     "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
+            requireNoProviderDependency(provider -> provider.hasSubnetDependency(region, subnetId),
+                    "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
             subnets.delete(key(region, subnetId));
         }
         if (vpcNetworkManager != null) {
@@ -5896,6 +5932,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(attachment -> region.equals(attachment.getRegion()))
                 .anyMatch(dependsOnIt);
         if (attached) {
+            throw new AwsException("DependencyViolation", message, 400);
+        }
+    }
+
+    /**
+     * Refuses to delete a subnet or VPC that another service still uses, such as a load balancer.
+     * Called under {@link #attachmentTopologyLock}, which those services hold through
+     * {@link #supplyWithSubnetReferencesHeld} while they record a reference, so no reference can
+     * appear between this check and the delete.
+     */
+    private void requireNoProviderDependency(Predicate<VpcDependencyProvider> dependsOnIt, String message) {
+        if (vpcDependencyProviders != null && vpcDependencyProviders.stream().anyMatch(dependsOnIt)) {
             throw new AwsException("DependencyViolation", message, 400);
         }
     }
