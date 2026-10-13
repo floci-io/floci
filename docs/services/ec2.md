@@ -284,6 +284,14 @@ described without a public key.
 
 ### AMIs
 
+`DescribeImages` reports immediate creation provenance separately from Floci's
+runtime image ancestry. Captured images identify the source instance and its launch
+image; copied images identify the source image, by its AMI ID even when the request
+named a catalog alias, and its region, without inheriting the source instance ID.
+Registered and catalog images do not invent creation provenance. The
+`source-image-id`, `source-image-region` and `source-instance-id` filters match these
+fields, which are persisted with the image.
+
 | Action | Description |
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |

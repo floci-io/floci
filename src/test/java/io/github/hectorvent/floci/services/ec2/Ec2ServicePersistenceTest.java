@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -133,6 +134,34 @@ class Ec2ServicePersistenceTest {
         List<Snapshot> snapshots = restarted.describeSnapshots(REGION, List.of("snap-persisted"), List.of(), Map.of());
         assertEquals(1, snapshots.size(), "linked snapshot must survive restart");
         assertEquals(12, snapshots.getFirst().getVolumeSize());
+    }
+
+    /**
+     * Creation provenance is stored beside the runtime ancestor rather than derived from it, so a
+     * restart reads both back from the image files and a copy still names its immediate source.
+     */
+    @Test
+    void imageCreationProvenanceSurvivesRestartApartFromTheRuntimeAncestor(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        String instanceId = first.runInstances(REGION, "ami-0abcdef1234567890", "t3.micro", 1, 1, null,
+                List.of(), null, null, List.of(), null, null).getInstances().getFirst().getInstanceId();
+        Image captured = first.createImage(REGION, instanceId, "provenance-capture", null, true);
+        Image copied = first.copyImage("us-west-2", REGION, captured.getImageId(), "provenance-copy", null);
+
+        Ec2Service restarted = newService(dir);
+
+        Image restoredCapture = restarted.describeImages(REGION, List.of(captured.getImageId()), List.of(), Map.of())
+                .getFirst();
+        assertEquals("ami-0abcdef1234567890", restoredCapture.getCreationSourceImageId());
+        assertEquals(REGION, restoredCapture.getCreationSourceImageRegion());
+        assertEquals(instanceId, restoredCapture.getCreationSourceInstanceId());
+        Image restoredCopy = restarted.describeImages("us-west-2", List.of(copied.getImageId()), List.of(), Map.of())
+                .getFirst();
+        assertEquals(captured.getImageId(), restoredCopy.getCreationSourceImageId());
+        assertEquals(REGION, restoredCopy.getCreationSourceImageRegion());
+        assertNull(restoredCopy.getCreationSourceInstanceId());
+        assertEquals(copied.getSourceImageId(), restoredCopy.getSourceImageId());
+        assertNotEquals(restoredCopy.getCreationSourceImageId(), restoredCopy.getSourceImageId());
     }
 
     @Test

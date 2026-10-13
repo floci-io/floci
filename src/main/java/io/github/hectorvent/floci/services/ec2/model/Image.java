@@ -33,6 +33,14 @@ public class Image {
     private String sourceImageId;
 
     /**
+     * Immediate creation provenance exposed by DescribeImages. These are separate from
+     * the flattened runtime ancestor above, including in persisted image records.
+     */
+    private String creationSourceImageId;
+    private String creationSourceImageRegion;
+    private String creationSourceInstanceId;
+
+    /**
      * For images produced by CreateImage: the Docker image the source container was committed
      * to, which is what actually captures the instance's file system. Not an EC2 field. Null
      * when no capture could be made (mock mode, or an instance with no container), in which
@@ -92,6 +100,15 @@ public class Image {
 
     public String getSourceImageId() { return sourceImageId; }
     public void setSourceImageId(String sourceImageId) { this.sourceImageId = sourceImageId; }
+
+    public String getCreationSourceImageId() { return creationSourceImageId; }
+    public void setCreationSourceImageId(String creationSourceImageId) { this.creationSourceImageId = creationSourceImageId; }
+
+    public String getCreationSourceImageRegion() { return creationSourceImageRegion; }
+    public void setCreationSourceImageRegion(String creationSourceImageRegion) { this.creationSourceImageRegion = creationSourceImageRegion; }
+
+    public String getCreationSourceInstanceId() { return creationSourceInstanceId; }
+    public void setCreationSourceInstanceId(String creationSourceInstanceId) { this.creationSourceInstanceId = creationSourceInstanceId; }
 
     public String getDockerImage() { return dockerImage; }
     public void setDockerImage(String dockerImage) { this.dockerImage = dockerImage; }
