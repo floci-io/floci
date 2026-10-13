@@ -269,6 +269,12 @@ gateway lifecycles.
 
 ### Key Pairs
 
+`DescribeKeyPairs` omits the public key unless `IncludePublicKey=true`. When requested,
+it returns the OpenSSH public key with the key-pair name as its comment, including
+for imported keys. It never returns private key material. Imported material that is not
+an OpenSSH public key line, such as PEM or RFC 4716 text, is kept as given and is
+described without a public key.
+
 | Action | Description |
 |--------|-------------|
 | CreateKeyPair | Creates and stores a local key pair. |

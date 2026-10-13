@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SshPublicKeyException;
+import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -3347,6 +3349,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeKeyPairs(MultivaluedMap<String, String> p, String region) {
+        boolean includePublicKey = Boolean.parseBoolean(p.getFirst("IncludePublicKey"));
         List<String> keyNames = getList(p, "KeyName");
         List<String> keyPairIds = getList(p, "KeyPairId");
         List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds);
@@ -3358,12 +3361,40 @@ public class Ec2QueryHandler {
             xml.start("item")
                     .elem("keyPairId", kp.getKeyPairId())
                     .elem("keyName", kp.getKeyName())
-                    .elem("keyFingerprint", kp.getKeyFingerprint())
-                    .raw(tagSetXml(kp.getTags()))
-                    .end("item");
+                    .elem("keyFingerprint", kp.getKeyFingerprint());
+            if (includePublicKey) {
+                xml.elem("publicKey", openSshPublicKeyNamedFor(kp));
+            }
+            xml.raw(tagSetXml(kp.getTags())).end("item");
         }
         xml.end("keySet").end("DescribeKeyPairsResponse");
         return xmlResponse(xml.build());
+    }
+
+    /**
+     * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
+     * DescribeKeyPairs reports for created and imported keys alike. Null when the stored material is
+     * not an OpenSSH public key line: ImportKeyPair keeps what it was given, and rewriting the fields
+     * of a PEM or RFC 4716 body, or of text in another encoding, would report a key that does not
+     * exist and could put characters XML cannot carry into the response.
+     */
+    private static String openSshPublicKeyNamedFor(KeyPair kp) {
+        String material = kp.getPublicKey();
+        byte[] blob = SshPublicKeys.decodeBlob(material);
+        if (blob == null) {
+            return null;
+        }
+        String type;
+        try {
+            type = SshPublicKeys.keyType(blob);
+        } catch (SshPublicKeyException ignored) {
+            // A second field that is base64 but not a key blob: not an OpenSSH line either.
+            return null;
+        }
+        if (!type.matches("[!-~]+") || !type.equals(material.strip().split("\\s+", 2)[0])) {
+            return null;
+        }
+        return type + " " + Base64.getEncoder().encodeToString(blob) + " " + kp.getKeyName();
     }
 
     private Response handleDeleteKeyPair(MultivaluedMap<String, String> p, String region) {
