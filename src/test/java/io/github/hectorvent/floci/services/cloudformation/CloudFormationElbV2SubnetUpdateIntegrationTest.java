@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -10,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
@@ -17,6 +21,11 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.reset;
 
 /**
  * Stack updates that move an ELBv2 load balancer between subnets, through the whole engine. EC2
@@ -36,6 +45,9 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
     private static final String CIDR_A = "10.93.1.0/24";
     private static final String CIDR_B = "10.93.2.0/24";
     private static final String CIDR_C = "10.93.3.0/24";
+
+    @InjectSpy
+    ElbV2Service elbService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -122,6 +134,96 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
         } finally {
             deleteStack(stack);
         }
+    }
+
+    /**
+     * The first rollback's move back fails, which leaves the load balancer on the subnet the update
+     * added, so that subnet cannot be deleted either and the stack ends UPDATE_ROLLBACK_FAILED with
+     * both owed. ContinueUpdateRollback walks them again in dependency order: the load balancer moves
+     * back first, from the subnets it kept for the retry, and then the subnet goes.
+     */
+    @Test
+    void continueUpdateRollbackMovesTheLoadBalancerBackBeforeDeletingTheSubnetItAdded() {
+        String stack = "alb-continue-rollback-" + Long.toString(System.nanoTime(), 36);
+        try {
+            Map<String, String> created = createStack(stack,
+                    template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""));
+            Set<String> before = Set.of(created.get("SubnetA"), created.get("SubnetB"));
+            failTheFirstMoveBack();
+
+            failUpdateOntoAnAddedSubnet(stack);
+
+            continueUpdateRollback(stack);
+            CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(before, Set.copyOf(loadBalancerSubnets(created.get("Alb"))));
+            assertEquals(before, Set.copyOf(vpcSubnets(created.get("Vpc"))));
+        } finally {
+            reset(elbService);
+            deleteStack(stack);
+        }
+    }
+
+    /**
+     * ResourcesToSkip leaves a skipped resource as the failed update left it. Skipping only the load
+     * balancer keeps it on the added subnet, so that subnet still cannot be deleted. Skipping the
+     * subnet as well completes the rollback with both left in place, and the stack still deletes
+     * cleanly, load balancer first.
+     */
+    @Test
+    void continueUpdateRollbackWithResourcesToSkipLeavesTheSkippedLoadBalancerOnTheAddedSubnet() {
+        String stack = "alb-continue-skip-" + Long.toString(System.nanoTime(), 36);
+        try {
+            Map<String, String> created = createStack(stack,
+                    template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""));
+            failTheFirstMoveBack();
+            failUpdateOntoAnAddedSubnet(stack);
+            Set<String> addedSubnet = new HashSet<>(vpcSubnets(created.get("Vpc")));
+            addedSubnet.removeAll(Set.of(created.get("SubnetA"), created.get("SubnetB")));
+            assertEquals(1, addedSubnet.size());
+
+            continueUpdateRollback(stack, "Alb");
+            CfnStackWaits.StackState stillFailed = CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_FAILED");
+            assertTrue(stillFailed.reason().contains("SubnetC"), stillFailed.reason());
+
+            continueUpdateRollback(stack, "SubnetC");
+            CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(Set.of(created.get("SubnetA"), addedSubnet.iterator().next()),
+                    Set.copyOf(loadBalancerSubnets(created.get("Alb"))));
+            assertEquals(3, vpcSubnets(created.get("Vpc")).size());
+        } finally {
+            reset(elbService);
+            deleteStack(stack);
+        }
+    }
+
+    /**
+     * The update's own move onto the new subnets goes through, the first move back fails as if its
+     * subnet had been deleted meanwhile, and any later call goes through again.
+     */
+    private void failTheFirstMoveBack() {
+        doCallRealMethod()
+                .doThrow(new AwsException("SubnetNotFound", "The subnet ID was not found", 400))
+                .doCallRealMethod()
+                .when(elbService).setSubnets(anyString(), anyString(), anyList());
+    }
+
+    /** Moves the load balancer onto SubnetA and an added SubnetC in an update a later resource fails. */
+    private static void failUpdateOntoAnAddedSubnet(String stack) {
+        updateStack(stack, template(CIDR_B, true, List.of("SubnetA", "SubnetC"), failingSecret(stack, "Alb")),
+                "UPDATE_ROLLBACK_FAILED");
+        String reason = CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_FAILED").reason();
+        assertTrue(reason.contains("Alb") && reason.contains("SubnetC"), reason);
+    }
+
+    private static void continueUpdateRollback(String stack, String... resourcesToSkip) {
+        String[] values = new String[2 + resourcesToSkip.length * 2];
+        values[0] = "StackName";
+        values[1] = stack;
+        for (int i = 0; i < resourcesToSkip.length; i++) {
+            values[2 + i * 2] = "ResourcesToSkip.member." + (i + 1);
+            values[3 + i * 2] = resourcesToSkip[i];
+        }
+        request(CFN_AUTH, "ContinueUpdateRollback", values).statusCode(200);
     }
 
     /**
